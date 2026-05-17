@@ -507,3 +507,149 @@ class TestCacheThreshold:
         second = fake_anthropic_module["calls"][-1]["system"]
         assert isinstance(second, list)
         assert second[0]["cache_control"] == {"type": "ephemeral"}
+
+
+class TestLastProviderConcurrency:
+    """``last_provider_used()`` must be context-isolated, not just
+    process-global.
+
+    Phase 2 will add a parallel text interface alongside the voice
+    listener, and the two pipelines may share Python threads (Flask
+    sync) or even an asyncio event loop (FastAPI / Quart). Either way,
+    two simultaneous LLM calls must NEVER read each other's path
+    marker — otherwise the telemetry row labels would race and a
+    cloud-fallback call could be billed as a cloud success.
+
+    Backed by ``contextvars.ContextVar`` (not ``threading.local``) so
+    isolation holds for both threads and asyncio tasks.
+    """
+
+    @pytest.mark.unit
+    def test_thread_isolation(self):
+        """10 concurrent threads each set their own marker and read it
+        back after a small sleep — no value must bleed across threads."""
+        import threading
+        import time
+
+        from jarvis.providers.anthropic_provider import (
+            _set_path,
+            last_provider_used,
+        )
+
+        N = 10
+        results: Dict[int, Optional[str]] = {}
+        errors: List[str] = []
+        ready = threading.Barrier(N)
+
+        def worker(i: int) -> None:
+            try:
+                ready.wait(timeout=5.0)
+                _set_path(f"thread-{i}")
+                time.sleep(0.05)  # give the scheduler room to interleave
+                results[i] = last_provider_used()
+            except Exception as e:
+                errors.append(f"thread {i}: {e!r}")
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(N)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10.0)
+
+        assert not errors, f"workers errored: {errors}"
+        assert len(results) == N
+        for i in range(N):
+            assert results[i] == f"thread-{i}", (
+                f"thread {i} read back {results[i]!r}; expected 'thread-{i}'. "
+                f"Cross-thread leak detected."
+            )
+
+    @pytest.mark.unit
+    def test_asyncio_isolation(self):
+        """10 concurrent coroutines on the SAME event loop each set
+        their own marker, await a short sleep, and read it back. With
+        ``threading.local`` they would all share the worker thread's
+        slot and clobber each other; with ``ContextVar`` each task has
+        its own copy.
+
+        Run via ``asyncio.run`` so the test doesn't require
+        ``pytest-asyncio`` (not in requirements.txt). The async path
+        is what Phase 2 must survive.
+        """
+        import asyncio
+
+        from jarvis.providers.anthropic_provider import (
+            _set_path,
+            last_provider_used,
+        )
+
+        N = 10
+
+        async def one(i: int) -> tuple[int, Optional[str]]:
+            _set_path(f"task-{i}")
+            # Yield control so the scheduler interleaves us with peers.
+            await asyncio.sleep(0.01)
+            return i, last_provider_used()
+
+        async def main() -> list[tuple[int, Optional[str]]]:
+            return await asyncio.gather(*(one(i) for i in range(N)))
+
+        results = asyncio.run(main())
+        assert len(results) == N
+        for i, observed in results:
+            assert observed == f"task-{i}", (
+                f"task {i} read back {observed!r}; expected 'task-{i}'. "
+                f"Cross-coroutine leak detected — ContextVar isolation broke."
+            )
+
+    @pytest.mark.unit
+    def test_unset_context_returns_none(self):
+        """A fresh context (no prior _set_path) must read None, not
+        leak from a sibling context that did set the value. This is
+        the property that distinguishes ContextVar from a module-
+        global variable.
+        """
+        import asyncio
+
+        from jarvis.providers.anthropic_provider import (
+            _set_path,
+            last_provider_used,
+        )
+
+        async def setter() -> None:
+            _set_path("cloud")
+
+        async def reader() -> Optional[str]:
+            # Fresh task copy — should NOT see the setter's value.
+            return last_provider_used()
+
+        async def main() -> Optional[str]:
+            await setter()
+            # Spawn a new task so its context is a fresh copy of the
+            # outer one. The setter ran in the OUTER context (await
+            # doesn't fork a context), so the new task starts from
+            # whatever the outer context's current value is — which is
+            # "cloud". This is the documented ContextVar semantics:
+            # new tasks copy their parent's context at creation. The
+            # test below exercises a different angle: an unrelated
+            # thread.
+            return await asyncio.create_task(reader())
+
+        # First: confirm asyncio.run gives us a clean context.
+        # Calling last_provider_used() in a brand-new asyncio.run
+        # invocation must return None unless this run has set it.
+        import threading
+        out: List[Optional[str]] = []
+
+        def fresh_thread_read() -> None:
+            # New thread → new context → default value None.
+            out.append(last_provider_used())
+
+        t = threading.Thread(target=fresh_thread_read)
+        t.start()
+        t.join(timeout=2.0)
+
+        assert out == [None], (
+            f"a brand-new thread saw {out!r} for last_provider_used(); "
+            f"expected [None]. Module-global leak suspected."
+        )

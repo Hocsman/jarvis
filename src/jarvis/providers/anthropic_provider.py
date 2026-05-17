@@ -40,6 +40,7 @@ Prompt caching
 
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import threading
@@ -63,25 +64,35 @@ _DEFAULT_MAX_TOKENS = 4096
 _DEFAULT_CACHE_THRESHOLD_CHARS = 8000
 
 
-# Thread-local that records which path the most recent provider call
+# ContextVar that records which path the most recent provider call
 # actually used: "cloud" if Anthropic answered, "local_fallback" if
 # we degraded to Ollama after a cloud failure. The integration layer
-# reads this when writing telemetry so the local-fallback rows are
+# reads this when writing telemetry so local-fallback rows are
 # distinguishable from native local calls.
-_path_local = threading.local()
+#
+# Why ContextVar (not threading.local): the LLM call path is sync on
+# threads today (VoiceListener → reply.engine → llm.py), so a thread-
+# local would be correct. ContextVar is strictly more general — it
+# isolates per-thread *and* per-asyncio-task, so when Phase 2 adds a
+# parallel text interface (Flask sync, REPL, FastAPI, or async UI),
+# every concurrent caller reads its own value without refactor risk.
+_path_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "anthropic_provider_last_path", default=None,
+)
 
 
 def last_provider_used() -> Optional[str]:
-    """Return the path used by the most recent provider call on this thread.
+    """Return the path used by the most recent provider call in this
+    execution context (thread or asyncio task).
 
     One of: ``"cloud"``, ``"local_fallback"``, or ``None`` if no call
-    has run on this thread yet.
+    has run in this context yet.
     """
-    return getattr(_path_local, "value", None)
+    return _path_var.get()
 
 
 def _set_path(value: str) -> None:
-    _path_local.value = value
+    _path_var.set(value)
 
 
 # ── SDK loader ──────────────────────────────────────────────────────────
