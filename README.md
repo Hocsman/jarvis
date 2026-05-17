@@ -268,6 +268,47 @@ Field logs show `🧩 Memory digest: …` and `🧩 Tool digest: …` lines when
 
 </details>
 
+<details>
+<summary><strong>Hybrid LLM Mode (opt-in cloud fallback)</strong></summary>
+
+Default is fully local. Hybrid mode is an explicit opt-in that lets Jarvis send a small slice of harder queries (code, multi-step reasoning, tool-chain composition) to Anthropic's Claude API while everything else continues to run on your local Ollama install. Designed so you can flip back to 100% local at any time with one config key.
+
+**Privacy contract**
+
+- Default mode is `local_only`. Without this flag set to anything else, no LLM call ever leaves your machine, the cloud SDK is never imported, and no telemetry table is created on disk.
+- When hybrid mode is on, the same automatic redaction that scrubs your diary (emails, AWS / Stripe / GitHub / OpenAI keys, JWTs, password / token / secret keyword pairs) is applied to every prompt before it leaves the machine.
+- Only metrics are stored locally (provider, model, intent label, token counts, estimated cost, latency). Prompt and response text are never persisted to the stats table.
+
+**Switching on hybrid mode**
+
+```json
+{
+  "llm_router": {
+    "mode": "hybrid",
+    "anthropic_api_key_env": "ANTHROPIC_API_KEY",
+    "anthropic_model": "claude-sonnet-4-6",
+    "cloud_intents": ["code_complex", "multi_step_reasoning", "tool_use_chain"],
+    "auto_redact_before_cloud": true,
+    "fallback_to_local_on_error": true,
+    "anthropic_cache_threshold_chars": 8000
+  }
+}
+```
+
+Set the env var named by `anthropic_api_key_env` (default `ANTHROPIC_API_KEY`) to your Anthropic key. If the key is missing or the cloud call fails, hybrid mode silently falls back to the local Ollama path.
+
+**Switching back to local-only (kill switch)**
+
+```json
+{ "llm_router": { "mode": "local_only" } }
+```
+
+Restart Jarvis. The router short-circuits to the original local code path before any classification call, so the overhead is zero again.
+
+See [`docs/HYBRID_LLM.md`](docs/HYBRID_LLM.md) for the full opt-in walkthrough, cost estimates per turn, and how to query or purge the local telemetry table.
+
+</details>
+
 ## Dictation Mode — Free WisprFlow Alternative
 
 Hold a hotkey to record speech, release to paste the transcription into any app. Works everywhere — your editor, browser, chat, terminal. Completely local, completely free.

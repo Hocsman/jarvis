@@ -66,6 +66,38 @@ def _default_db_path() -> str:
     return str(base / "jarvis.db")
 
 
+# Default cloud-eligible intents. Mirrors ``llm_router._DEFAULT_CLOUD_INTENTS``.
+# Duplicated here to avoid importing the router from config (and the
+# resulting circular import). Tests assert both lists stay in sync.
+_DEFAULT_CLOUD_INTENTS: list[str] = [
+    "code_complex",
+    "multi_step_reasoning",
+    "tool_use_chain",
+]
+
+
+@dataclass(frozen=True)
+class LLMRouterSettings:
+    """Configuration for the hybrid LLM router.
+
+    Default mode is ``local_only`` so the privacy contract holds out of
+    the box. Switching to ``hybrid`` is an explicit opt-in via
+    ``~/.config/jarvis/config.json``. See ``docs/HYBRID_LLM.md``.
+    """
+    mode: str  # "local_only" (default), "hybrid", or "cloud_only"
+    anthropic_api_key_env: str  # name of the env var holding the API key
+    anthropic_model: str  # cloud model ID, e.g. "claude-sonnet-4-6"
+    cloud_intents: list[str]  # intents that route to cloud in hybrid mode
+    auto_redact_before_cloud: bool  # apply utils.redact before any cloud call
+    fallback_to_local_on_error: bool  # silently fall back to Ollama on cloud failure
+    # Threshold above which the Anthropic provider applies prompt-cache
+    # markers on long system prompts. Exposed so users can tune for
+    # their workload; the Anthropic SDK requires the prefix to exceed
+    # the model's minimum cacheable length (2048 tokens on Sonnet 4.6)
+    # before any cache_control marker actually engages.
+    anthropic_cache_threshold_chars: int
+
+
 @dataclass(frozen=True)
 class Settings:
     # Database & Storage
@@ -260,6 +292,11 @@ class Settings:
     # (default behaviour). Examples: "français", "English", "日本語".
     # See system_prompt.build_system_prompt for the appended directive.
     response_language: str
+
+    # Hybrid LLM Router (opt-in cloud fallback). Default mode is
+    # ``local_only`` so users who don't configure it get the full
+    # 100%-local behaviour with zero overhead.
+    llm_router: LLMRouterSettings
 
 
 
@@ -552,6 +589,19 @@ def get_default_config() -> Dict[str, Any]:
         # input language. Set to e.g. "français" or "English" to lock
         # the output language across all turns.
         "response_language": "",
+
+        # Hybrid LLM Router. Opt-in cloud fallback. Default is fully local
+        # so the privacy contract holds for users who never touch this key.
+        # See docs/HYBRID_LLM.md for the trade-off and switch-back.
+        "llm_router": {
+            "mode": "local_only",
+            "anthropic_api_key_env": "ANTHROPIC_API_KEY",
+            "anthropic_model": "claude-sonnet-4-6",
+            "cloud_intents": list(_DEFAULT_CLOUD_INTENTS),
+            "auto_redact_before_cloud": True,
+            "fallback_to_local_on_error": True,
+            "anthropic_cache_threshold_chars": 8000,
+        },
     }
 
 
@@ -739,6 +789,35 @@ def load_settings() -> Settings:
     dictation_custom_dictionary = list(raw_dict) if isinstance(raw_dict, list) else []
     mcps = _ensure_dict(merged.get("mcps"))
     response_language = str(merged.get("response_language", "") or "").strip()
+
+    # Parse llm_router subsection. Defaults are local-only so missing or
+    # malformed config is always safe.
+    raw_router = merged.get("llm_router", {})
+    if not isinstance(raw_router, dict):
+        raw_router = {}
+    router_mode = str(raw_router.get("mode", "local_only") or "local_only").lower()
+    if router_mode not in ("local_only", "hybrid", "cloud_only"):
+        router_mode = "local_only"
+    router_intents_raw = raw_router.get("cloud_intents", _DEFAULT_CLOUD_INTENTS)
+    if isinstance(router_intents_raw, list):
+        router_intents = [str(x) for x in router_intents_raw if isinstance(x, str) and x]
+    else:
+        router_intents = list(_DEFAULT_CLOUD_INTENTS)
+    try:
+        cache_threshold = int(raw_router.get("anthropic_cache_threshold_chars", 8000))
+    except (TypeError, ValueError):
+        cache_threshold = 8000
+    if cache_threshold < 0:
+        cache_threshold = 0
+    llm_router = LLMRouterSettings(
+        mode=router_mode,
+        anthropic_api_key_env=str(raw_router.get("anthropic_api_key_env", "ANTHROPIC_API_KEY") or "ANTHROPIC_API_KEY"),
+        anthropic_model=str(raw_router.get("anthropic_model", "claude-sonnet-4-6") or "claude-sonnet-4-6"),
+        cloud_intents=router_intents,
+        auto_redact_before_cloud=bool(raw_router.get("auto_redact_before_cloud", True)),
+        fallback_to_local_on_error=bool(raw_router.get("fallback_to_local_on_error", True)),
+        anthropic_cache_threshold_chars=cache_threshold,
+    )
     whisper_min_confidence = float(merged.get("whisper_min_confidence", 0.4))
     whisper_no_speech_threshold = float(merged.get("whisper_no_speech_threshold", 0.5))
     whisper_min_audio_duration = float(merged.get("whisper_min_audio_duration", 0.3))
@@ -878,4 +957,7 @@ def load_settings() -> Settings:
         # MCP Integration
         mcps=mcps,
         response_language=response_language,
+
+        # Hybrid LLM Router
+        llm_router=llm_router,
     )
