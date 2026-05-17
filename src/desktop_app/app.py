@@ -2650,18 +2650,18 @@ def main() -> int:
                 3000
             )
 
-        # Reactive orb UI (Phase 1, opt-in via --with-orb).
-        # The orb is a frameless, always-on-top window that reads state
-        # from the shared JarvisStateManager and audio from the listener
-        # observer hook. Kept opt-in for now so existing tray-only users
-        # are unaffected.
+        # Reactive orb UI: shown by default. Pass --no-orb to disable
+        # (useful for headless CI or tray-only setups). The orb is a
+        # frameless, always-on-top window that reads state from the
+        # shared JarvisStateManager and audio from the listener
+        # observer hook.
         orb_window = None
-        if "--with-orb" in sys.argv:
+        if "--no-orb" not in sys.argv:
             try:
                 from desktop_app.orb.orb_window import OrbWindow
                 orb_window = OrbWindow()
                 orb_window.show_orb()
-                print("🟠 Reactive orb shown (toggle: cmd+shift+J)", flush=True)
+                print("🟠 Reactive orb shown (toggle: cmd+shift+J, hide: --no-orb)", flush=True)
             except Exception as orb_err:
                 # Non-fatal: orb failures must not crash the tray.
                 debug_log(f"orb init failed: {orb_err}\n{traceback.format_exc()}", "orb")

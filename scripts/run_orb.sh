@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
-# Launch the desktop app with the reactive orb window enabled.
+# Launch the Jarvis desktop app. The reactive orb is shown by
+# default; pass --no-orb to disable it (tray + face widget only).
 #
 # Usage:
-#   bash scripts/run_orb.sh
-#
-# This is a thin wrapper over the standard desktop_app entry point
-# with the --with-orb flag. Use it when you want to demo or develop
-# the orb without remembering the flag.
+#   bash scripts/run_orb.sh          # full Jarvis with orb
+#   bash scripts/run_orb.sh --no-orb # opt out of the orb
 #
 # Requirements:
 #   - .mamba_env/ already bootstrapped (see scripts/run_macos.sh).
@@ -26,4 +24,4 @@ if [ ! -d .mamba_env ]; then
 fi
 
 export PYTHONPATH="$REPO_ROOT/src"
-exec .mamba_env/bin/python -m desktop_app --with-orb "$@"
+exec .mamba_env/bin/python -m desktop_app "$@"
