@@ -26,6 +26,7 @@ the window is hidden.
 from __future__ import annotations
 
 import os
+import platform
 import sys
 import threading
 from typing import Any, Optional
@@ -34,7 +35,7 @@ from typing import Any, Optional
 # expose; tests for this module run in offscreen Qt mode and need the
 # imports to land before fixtures execute.
 from PyQt6.QtCore import QPoint, Qt, pyqtSignal
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 from PyQt6.QtWidgets import QApplication, QLabel, QMainWindow, QVBoxLayout, QWidget
 
 from .orb_widget import OrbWidget
@@ -44,6 +45,27 @@ from .orb_widget import OrbWidget
 # <shift>; lowercase letter is the key.
 _TOGGLE_HOTKEY_MAC = "<cmd>+<shift>+j"
 _TOGGLE_HOTKEY_OTHER = "<ctrl>+<shift>+j"
+
+
+def _pynput_is_safe_on_this_platform() -> bool:
+    """Return False on platforms where pynput's keyboard backend is
+    known to crash the process.
+
+    macOS 26+ (Tahoe): pynput's CGEventTap runs on a background thread
+    that invokes TSM (Text Services Manager) APIs; macOS 26 enforces
+    those APIs are called from the main dispatch queue and aborts the
+    process via SIGTRAP otherwise. Same root cause as dictation issue
+    #172. We disable the global hotkey on that platform and rely on
+    the window-scoped Qt fallback.
+    """
+    if sys.platform != "darwin":
+        return True
+    try:
+        mac_ver = platform.mac_ver()[0]
+        major = int(mac_ver.split(".")[0]) if mac_ver else 0
+    except (ValueError, IndexError):
+        return True
+    return major < 26
 
 
 def _is_dev_mode() -> bool:
@@ -136,6 +158,14 @@ class OrbWindow(QMainWindow):
         self._hotkey_listener_lock = threading.Lock()
         self._hotkey_listener: Optional[Any] = None
         self._toggle_requested.connect(self.toggle_visibility)
+
+        # Window-scoped Qt fallback: works only while the orb has focus
+        # (so it can't *show* a hidden window) but lets the user close
+        # the orb with the same key combo on platforms where the global
+        # pynput hotkey is disabled (macOS 26+).
+        qt_combo = "Meta+Shift+J" if sys.platform == "darwin" else "Ctrl+Shift+J"
+        self._qt_shortcut = QShortcut(QKeySequence(qt_combo), self)
+        self._qt_shortcut.activated.connect(self.toggle_visibility)
 
         # Drag-to-move bookkeeping.
         self._drag_origin: Optional[QPoint] = None
@@ -231,12 +261,26 @@ class OrbWindow(QMainWindow):
 
         Failures are non-fatal: a missing accessibility permission on
         macOS will silently mean "no global hotkey" but the rest of
-        the orb keeps working. Users can still toggle via the tray
-        menu or by closing the window.
+        the orb keeps working. The window-scoped Qt shortcut still
+        toggles the orb while it has focus on every platform.
+
+        Skipped entirely on macOS 26+ where pynput is known to crash
+        the process (TSM main-thread assertion, dictation issue #172).
         """
         with self._hotkey_listener_lock:
             if self._hotkey_listener is not None:
                 return
+
+            if not _pynput_is_safe_on_this_platform():
+                print(
+                    "  ⚠️  Orb global hotkey disabled on macOS 26+ "
+                    "(pynput keyboard listener incompatibility); "
+                    "use the window-focused Cmd+Shift+J inside the orb "
+                    "or close via the tray.",
+                    flush=True,
+                )
+                return
+
             try:
                 from pynput import keyboard
             except Exception:
