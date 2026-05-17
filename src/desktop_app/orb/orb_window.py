@@ -118,7 +118,9 @@ class OrbWindow(QMainWindow):
         super().__init__(parent)
 
         # Frameless, translucent, always-on-top, hidden from dock on
-        # macOS via the Tool flag.
+        # macOS via the Tool flag. Translucent composition on QWidget
+        # (with QPainter) is well-supported on macOS 26 — unlike the
+        # QOpenGLWidget path that motivated the QPainter pivot.
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
