@@ -283,6 +283,47 @@ class TestIntentCacheHits:
         assert classifier_spy.call_count == 2
 
 
+class TestNoInfiniteRecursionInHybrid:
+    """Regression: in hybrid mode, the classifier inside the router
+    MUST go straight to the private local Ollama function. Calling
+    the public wrapper would re-enter the router, which would
+    classify the classifier's own prompt, which would re-enter the
+    router again — an unbounded loop of real Ollama calls.
+
+    The bug shipped silently because every existing test mocks
+    ``_call_classifier_llm`` directly, never letting the real
+    dispatch chain run. This test exercises the real chain with the
+    private local function mocked one layer deeper.
+    """
+
+    @pytest.mark.unit
+    def test_classifier_call_does_not_re_enter_public_wrapper(self):
+        """When the router classifies a prompt, the Ollama call must
+        be issued via ``_call_llm_direct_local`` (private) and never
+        via ``call_llm_direct`` (the public wrapper). We assert this
+        by spying on both: private must fire, public must not."""
+        cfg = _Cfg()
+        cfg.llm_router.mode = MODE_HYBRID
+
+        # Mock the private local call so the classifier resolves
+        # without touching Ollama. Spy on the public wrapper to
+        # confirm it is never invoked from the classifier path.
+        from unittest.mock import patch
+        valid_json = '{"intent": "casual_chat", "confidence": 0.5}'
+        with patch("jarvis.llm._call_llm_direct_local", return_value=valid_json) as private_spy, \
+             patch("jarvis.llm.call_llm_direct") as public_spy:
+            decision = llm_router.classify_intent("hello", None, cfg)
+
+        assert decision.reason == "casual_chat"
+        assert private_spy.call_count == 1, (
+            f"expected exactly one private classifier call, got {private_spy.call_count}"
+        )
+        assert public_spy.call_count == 0, (
+            f"public call_llm_direct must NOT be called from the classifier "
+            f"path (would cause router recursion); got {public_spy.call_count} calls"
+        )
+
+
 class TestRouterDecisionShape:
     """Surface checks on the public dataclass."""
 

@@ -227,8 +227,15 @@ def _call_classifier_llm(
     user_content = "\n\n".join(user_content_parts)
 
     try:
-        from .llm import call_llm_direct
-        raw = call_llm_direct(
+        # IMPORTANT: call the PRIVATE _call_llm_direct_local, not the
+        # public wrapper. Using the wrapper would re-enter the router,
+        # which would try to classify the classifier's own prompt,
+        # which would re-enter the router again... a recursive loop
+        # of Ollama calls that never terminates. The classifier is
+        # itself the local-warm-model call; it must always go
+        # straight to Ollama, bypassing the router.
+        from .llm import _call_llm_direct_local
+        raw = _call_llm_direct_local(
             base_url=base_url,
             chat_model=classifier_model,
             system_prompt=_CLASSIFIER_SYSTEM_PROMPT,
