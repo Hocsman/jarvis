@@ -234,7 +234,7 @@ class TestFallbackOnApiError:
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         cfg = _Cfg()
 
-        with patch("jarvis.llm.call_llm_direct", return_value="local reply") as local_spy:
+        with patch("jarvis.llm._call_llm_direct_local", return_value="local reply") as local_spy:
             from jarvis.providers.anthropic_provider import call_direct, last_provider_used
             out = call_direct(
                 base_url="http://localhost:11434",
