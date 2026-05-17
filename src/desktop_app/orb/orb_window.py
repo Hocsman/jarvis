@@ -157,6 +157,9 @@ class OrbWindow(QMainWindow):
         # automated test only instantiates the window without showing.
         self._hotkey_listener_lock = threading.Lock()
         self._hotkey_listener: Optional[Any] = None
+        # Tracks whether we've already printed the "pynput disabled"
+        # message so showEvent + show_orb don't print it twice.
+        self._hotkey_skip_message_printed = False
         self._toggle_requested.connect(self.toggle_visibility)
 
         # Window-scoped Qt fallback: works only while the orb has focus
@@ -272,13 +275,15 @@ class OrbWindow(QMainWindow):
                 return
 
             if not _pynput_is_safe_on_this_platform():
-                print(
-                    "  ⚠️  Orb global hotkey disabled on macOS 26+ "
-                    "(pynput keyboard listener incompatibility); "
-                    "use the window-focused Cmd+Shift+J inside the orb "
-                    "or close via the tray.",
-                    flush=True,
-                )
+                if not self._hotkey_skip_message_printed:
+                    print(
+                        "  ⚠️  Orb global hotkey disabled on macOS 26+ "
+                        "(pynput keyboard listener incompatibility); "
+                        "use the window-focused Cmd+Shift+J inside the orb "
+                        "or close via the tray.",
+                        flush=True,
+                    )
+                    self._hotkey_skip_message_printed = True
                 return
 
             try:

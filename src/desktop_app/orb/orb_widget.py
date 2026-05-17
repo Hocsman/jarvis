@@ -100,6 +100,7 @@ def _build_real_widget_class():
     """
     import moderngl  # noqa: F401  (used by the closure below)
     from PyQt6.QtCore import QTimer, Qt
+    from PyQt6.QtGui import QSurfaceFormat
     from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 
     class _OrbWidget(QOpenGLWidget):
@@ -118,6 +119,21 @@ def _build_real_widget_class():
         ) -> None:
             super().__init__(parent)
             self.setMinimumSize(320, 320)
+
+            # Request an OpenGL 3.3 Core profile context BEFORE Qt
+            # creates the GL surface. Qt's default on macOS is the
+            # legacy 2.1 profile, which is too old for moderngl's
+            # require=330 check and silently leaves the context
+            # uninitialised (version 0). Setting the format on the
+            # widget asks for a specific profile when the GL surface
+            # is created during show / initializeGL.
+            fmt = QSurfaceFormat()
+            fmt.setVersion(3, 3)
+            fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
+            # Alpha buffer is required for the frameless translucent
+            # composite: without it, the widget clears to opaque black.
+            fmt.setAlphaBufferSize(8)
+            self.setFormat(fmt)
             self._audio_bus = audio_bus or AudioBus()
             self._state_controller = state_controller or StateController()
             self._particles_enabled = particles_enabled
@@ -142,7 +158,12 @@ def _build_real_widget_class():
 
         def initializeGL(self) -> None:
             # Wrap the already-current Qt GL context with ModernGL.
-            self._ctx = moderngl.create_context()
+            # require=None accepts whatever profile Qt actually got us;
+            # the format set in __init__ asked for 3.3 Core which the
+            # shaders need (#version 330 core). If macOS hands us a
+            # 4.1 Core context instead, that's still 3.3-compatible
+            # so the shaders compile.
+            self._ctx = moderngl.create_context(require=None)
             self._ctx.enable(moderngl.BLEND)
             self._ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
 
