@@ -255,6 +255,12 @@ class Settings:
     # MCP Integration
     mcps: Dict[str, Any]
 
+    # Force the assistant's response language regardless of what the
+    # user speaks. Empty string = follow the user's input language
+    # (default behaviour). Examples: "français", "English", "日本語".
+    # See system_prompt.build_system_prompt for the appended directive.
+    response_language: str
+
 
 
 def default_config_path() -> Path:
@@ -541,6 +547,11 @@ def get_default_config() -> Dict[str, Any]:
 
         # MCP Integration (external servers Jarvis can use). No defaults.
         "mcps": {},
+
+        # Force assistant response language. Empty = follow user's
+        # input language. Set to e.g. "français" or "English" to lock
+        # the output language across all turns.
+        "response_language": "",
     }
 
 
@@ -727,6 +738,7 @@ def load_settings() -> Settings:
     raw_dict = merged.get("dictation_custom_dictionary", [])
     dictation_custom_dictionary = list(raw_dict) if isinstance(raw_dict, list) else []
     mcps = _ensure_dict(merged.get("mcps"))
+    response_language = str(merged.get("response_language", "") or "").strip()
     whisper_min_confidence = float(merged.get("whisper_min_confidence", 0.4))
     whisper_no_speech_threshold = float(merged.get("whisper_no_speech_threshold", 0.5))
     whisper_min_audio_duration = float(merged.get("whisper_min_audio_duration", 0.3))
@@ -865,4 +877,5 @@ def load_settings() -> Settings:
 
         # MCP Integration
         mcps=mcps,
+        response_language=response_language,
     )

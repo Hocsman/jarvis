@@ -1899,9 +1899,13 @@ class JarvisSystemTray:
                 2000
             )
 
-            # Show face window when starting
-            self.face_window.show()
-            self.face_window.raise_()
+            # Show face window when starting, unless the reactive orb
+            # is shown (the orb replaces the face — two floating
+            # always-on-top windows would compete for the user's
+            # attention).
+            if "--no-orb" in sys.argv:
+                self.face_window.show()
+                self.face_window.raise_()
 
             debug_log("daemon started from desktop app", "desktop")
 

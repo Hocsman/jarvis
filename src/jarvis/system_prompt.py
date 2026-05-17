@@ -4,7 +4,18 @@ Unified system prompt for the assistant persona.
 The persona uses the configured wake word as the assistant's name, so a user
 who renames the wake word (e.g. "Friday") gets a butler with the matching
 name rather than a persona hardcoded to "Jarvis".
+
+``build_system_prompt`` also accepts an optional ``response_language``: when
+set, an explicit "always respond in <lang>" instruction is appended to the
+persona prompt so the model does not drift back to the user's input language
+on multilingual exchanges. This is a soft preference, not a hard constraint
+(the model may still mirror the user's language when context makes it more
+natural, e.g. quoting a code identifier).
 """
+
+from __future__ import annotations
+
+from typing import Optional
 
 _SYSTEM_PROMPT_TEMPLATE: str = (
     "Persona: you are a British butler named {name} — polite, composed, quietly amused, and "
@@ -79,11 +90,32 @@ _SYSTEM_PROMPT_TEMPLATE: str = (
 )
 
 
-def build_system_prompt(assistant_name: str = "Jarvis") -> str:
+def build_system_prompt(
+    assistant_name: str = "Jarvis",
+    response_language: Optional[str] = None,
+) -> str:
     """Render the persona prompt with the configured assistant name.
 
     The name comes from the user's wake word (capitalised); defaults to
     "Jarvis" when no config is available (tests, eval harnesses).
+
+    If ``response_language`` is set (e.g. "French", "français"), an
+    explicit "always respond in <lang>" line is appended to lock the
+    output language across turns. When unset, the model follows the
+    user's input language naturally (default behaviour preserved).
     """
     name = (assistant_name or "Jarvis").strip() or "Jarvis"
-    return _SYSTEM_PROMPT_TEMPLATE.format(name=name)
+    rendered = _SYSTEM_PROMPT_TEMPLATE.format(name=name)
+    lang = (response_language or "").strip()
+    if lang:
+        # Strong, late instruction so it overrides the earlier
+        # "phrased naturally in the user's language" hint. Phrased
+        # as a directive, not a request, because small models follow
+        # imperative language more reliably.
+        rendered += (
+            f" Language directive: ALWAYS respond in {lang}, regardless of the "
+            f"language the user speaks in. Translate any English-only quotes or "
+            f"references into {lang} where natural. Never apologise for "
+            f"switching to {lang}; just do it."
+        )
+    return rendered
