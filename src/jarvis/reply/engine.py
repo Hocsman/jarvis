@@ -50,6 +50,68 @@ if TYPE_CHECKING:
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
 
+# Piper voice filenames follow the convention ``<locale>-<voice>-<quality>.onnx``
+# (e.g. ``en_US-amy-medium.onnx``, ``fr_FR-siwis-medium.onnx``). The locale
+# prefix is what we sniff to decide whether the loaded voice can pronounce
+# non-English text. Anything we can't classify with confidence falls back
+# to the historical "lock to English" behaviour so we don't regress users
+# who shipped with the EN-only assumption baked in.
+_PIPER_LOCALE_RE = re.compile(r"(?:^|/)([a-z]{2})_[A-Z]{2}-", re.IGNORECASE)
+
+
+def _piper_voice_language(path: str) -> Optional[str]:
+    """Return the 2-letter ISO language code of a Piper voice path, or
+    ``None`` if the path is empty or doesn't match the standard layout."""
+    if not path:
+        return None
+    m = _PIPER_LOCALE_RE.search(path)
+    return m.group(1).lower() if m else None
+
+
+def _tts_language_constraint(cfg) -> Optional[str]:
+    """Return the TTS-locale system-prompt clause, or ``None`` for no clause.
+
+    Replaces the unconditional ``"Always respond in English…"`` line that
+    used to be appended to every reply when Piper or Chatterbox was the
+    TTS engine. The clause was correct in a world where only English
+    Piper voices shipped; with French (and other) Piper voices available
+    it actively poisons multilingual workflows — even Sonnet on the
+    cloud receives it, and only the persona's primacy/recency/native-tail
+    FR directives keep it on track.
+
+    Decision matrix:
+      - ``response_language`` is set in config → return ``None``. The
+        persona prompt already carries the language lock; a second clause
+        would be redundant noise and risks conflicting wording.
+      - TTS engine is ``chatterbox`` → return the English clause. Chatterbox
+        currently ships English voices only.
+      - TTS engine is ``piper`` with a non-English voice loaded → return
+        ``None``. The model is free to match the user's language; Piper
+        will render whatever language its loaded voice supports.
+      - TTS engine is ``piper`` with an English or unknown voice → return
+        the English clause (preserves historical behaviour for anglophone
+        users with default config).
+      - Any other engine → return ``None`` (caller should add no clause).
+    """
+    if (getattr(cfg, "response_language", "") or "").strip():
+        return None
+    tts_engine = (getattr(cfg, "tts_engine", "piper") or "piper").lower()
+    if tts_engine == "chatterbox":
+        return (
+            "The configured TTS voice only renders English correctly. "
+            "Respond in English even if the user speaks another language."
+        )
+    if tts_engine == "piper":
+        voice_lang = _piper_voice_language(getattr(cfg, "tts_piper_model_path", "") or "")
+        if voice_lang and voice_lang != "en":
+            return None
+        return (
+            "The configured TTS voice only renders English correctly. "
+            "Respond in English even if the user speaks another language."
+        )
+    return None
+
+
 def _indent_text(text: str, prefix: str = "  ") -> str:
     return f"\n{prefix}".join(text.splitlines())
 
@@ -1424,14 +1486,14 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         # Add model-size-appropriate prompt components
         guidance.extend(prompts.to_list())
 
-        # Both current TTS engines (Piper, Chatterbox) only support English.
-        # Responding in another language would produce garbled audio.
-        # Remove this constraint when a multilingual TTS engine is added.
-        tts_engine = getattr(cfg, 'tts_engine', 'piper')
-        if tts_engine in ('piper', 'chatterbox'):
-            guidance.append(
-                "Always respond in English regardless of the language the user speaks in."
-            )
+        # TTS-locale constraint. Historically this was an unconditional
+        # English lock because Piper and Chatterbox only shipped English
+        # voices. Piper now supports French (and many other languages),
+        # so the clause is gated by ``_tts_language_constraint`` on the
+        # actual voice locale and the user's ``response_language`` config.
+        tts_clause = _tts_language_constraint(cfg)
+        if tts_clause:
+            guidance.append(tts_clause)
 
         if warm_profile_block:
             # Pre-query, query-agnostic user context. Lives OUTSIDE the
