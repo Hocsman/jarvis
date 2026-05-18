@@ -80,6 +80,15 @@ _path_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "anthropic_provider_last_path", default=None,
 )
 
+# Companion ContextVar that records the usage block from the most recent
+# successful cloud response. The direct/streaming wrappers in llm.py
+# return a bare string (Ollama-shape compat), so telemetry can't recover
+# tokens from the return value. This variable lets the integration layer
+# fetch token counts via ``last_usage()`` after the call returns.
+_usage_var: contextvars.ContextVar[Optional[Dict[str, int]]] = contextvars.ContextVar(
+    "anthropic_provider_last_usage", default=None,
+)
+
 
 def last_provider_used() -> Optional[str]:
     """Return the path used by the most recent provider call in this
@@ -91,8 +100,24 @@ def last_provider_used() -> Optional[str]:
     return _path_var.get()
 
 
+def last_usage() -> Optional[Dict[str, int]]:
+    """Return the usage dict from the most recent successful cloud call
+    in this execution context, or ``None`` if the last call was a local
+    fallback / never ran. Shape matches Anthropic's ``usage`` block:
+    ``{input_tokens, output_tokens, cache_creation_input_tokens,
+    cache_read_input_tokens}``.
+    """
+    return _usage_var.get()
+
+
 def _set_path(value: str) -> None:
     _path_var.set(value)
+    if value != "cloud":
+        _usage_var.set(None)
+
+
+def _set_usage(usage: Any) -> None:
+    _usage_var.set(_usage_to_dict(usage))
 
 
 # ── SDK loader ──────────────────────────────────────────────────────────
@@ -421,6 +446,7 @@ def call_direct(
         return None
 
     _set_path("cloud")
+    _set_usage(getattr(message, "usage", None))
     parts: List[str] = []
     for block in getattr(message, "content", []) or []:
         if getattr(block, "type", None) == "text":
@@ -457,6 +483,7 @@ def call_streaming(
 
     try:
         collected: List[str] = []
+        final_usage: Any = None
         with client.messages.stream(
             model=chat_model,
             max_tokens=_DEFAULT_MAX_TOKENS,
@@ -472,7 +499,13 @@ def call_streaming(
                         on_token(chunk)
                     except Exception as cb_err:
                         debug_log(f"on_token callback raised: {cb_err}", "router")
+            try:
+                final_message = stream.get_final_message()
+                final_usage = getattr(final_message, "usage", None)
+            except Exception as _usage_err:
+                debug_log(f"anthropic.call_streaming: usage fetch failed: {_usage_err}", "router")
         _set_path("cloud")
+        _set_usage(final_usage)
         result = "".join(collected)
         return result if result.strip() else None
     except Exception as e:
@@ -549,6 +582,7 @@ def chat_with_messages(
         return None
 
     _set_path("cloud")
+    _set_usage(getattr(message, "usage", None))
     return _response_to_ollama_shape(message, chat_model)
 
 

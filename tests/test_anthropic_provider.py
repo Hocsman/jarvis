@@ -653,3 +653,143 @@ class TestLastProviderConcurrency:
             f"a brand-new thread saw {out!r} for last_provider_used(); "
             f"expected [None]. Module-global leak suspected."
         )
+
+
+class TestLastUsageCapture:
+    """``last_usage()`` exposes the most recent cloud response's token
+    usage so the telemetry layer can record real token counts for the
+    direct and streaming paths (those wrappers return a bare string, so
+    the integration layer in ``llm.py`` can't recover tokens from the
+    return value).
+
+    Without this hook, cloud rows in ``llm_router_stats`` show ``0`` in
+    both token columns, making cost estimation impossible and creating
+    the false impression that no cloud call happened.
+    """
+
+    @pytest.mark.unit
+    def test_call_direct_captures_usage(self, fake_anthropic_module, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        cfg = _Cfg()
+
+        from jarvis.providers.anthropic_provider import call_direct, last_usage
+
+        call_direct(
+            base_url="ignored",
+            chat_model="claude-sonnet-4-6",
+            system_prompt="sys",
+            user_content="hello",
+            cfg=cfg,
+        )
+
+        usage = last_usage()
+        assert isinstance(usage, dict)
+        assert usage.get("input_tokens") == 100
+        assert usage.get("output_tokens") == 50
+
+    @pytest.mark.unit
+    def test_chat_with_messages_captures_usage(self, fake_anthropic_module, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        cfg = _Cfg()
+
+        from jarvis.providers.anthropic_provider import chat_with_messages, last_usage
+
+        chat_with_messages(
+            base_url="ignored",
+            chat_model="claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "hi"}],
+            cfg=cfg,
+        )
+
+        usage = last_usage()
+        assert isinstance(usage, dict)
+        assert usage.get("input_tokens") == 100
+        assert usage.get("output_tokens") == 50
+
+    @pytest.mark.unit
+    def test_local_fallback_clears_usage(self, monkeypatch):
+        """When the API key is missing and the call falls back to local,
+        ``last_usage()`` must read ``None`` — there was no cloud call to
+        report tokens for, and a stale value from a previous cloud
+        success in the same context would mislead telemetry."""
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        cfg = _Cfg()
+
+        from jarvis.providers.anthropic_provider import _set_usage, last_usage
+
+        _set_usage(types.SimpleNamespace(
+            input_tokens=999,
+            output_tokens=999,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+        ))
+        assert last_usage() is not None  # primed
+
+        with patch("jarvis.llm._call_llm_direct_local", return_value="local"):
+            from jarvis.providers.anthropic_provider import call_direct
+            call_direct(
+                base_url="http://localhost:11434",
+                chat_model="claude-sonnet-4-6",
+                system_prompt="sys",
+                user_content="hello",
+                cfg=cfg,
+            )
+
+        assert last_usage() is None, (
+            "local_fallback must clear last_usage so telemetry doesn't "
+            "credit stale cloud tokens to a local response."
+        )
+
+    @pytest.mark.unit
+    def test_telemetry_records_tokens_for_cloud_direct(
+        self, fake_anthropic_module, monkeypatch, tmp_path
+    ):
+        """End-to-end: a cloud-routed ``call_llm_direct`` must write a
+        telemetry row with non-zero tokens. This is the regression that
+        motivated the ``last_usage()`` hook — before the fix, the direct
+        wrapper passed ``response=None`` to telemetry so every cloud
+        direct call was billed as 0 tokens regardless of actual usage.
+        """
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        db_path = str(tmp_path / "stats.db")
+
+        from jarvis.llm import set_router_cfg_for_tests
+        from jarvis import llm_router_telemetry as _telem
+
+        cfg = _Cfg()
+        cfg.llm_router.cloud_intents = ["code_complex"]
+        cfg.db_path = db_path  # type: ignore[attr-defined]
+
+        # Force the classifier to label this prompt as code_complex so
+        # the router picks the cloud callable deterministically.
+        import jarvis.llm_router as r
+        monkeypatch.setattr(
+            r,
+            "classify_intent",
+            lambda *a, **kw: r.RouterDecision(
+                provider="cloud", model="claude-sonnet-4-6",
+                reason="code_complex 0.95", intent_score=0.95,
+            ),
+        )
+
+        set_router_cfg_for_tests(cfg)
+        try:
+            from jarvis.llm import call_llm_direct
+            out = call_llm_direct(
+                base_url="http://localhost:11434",
+                chat_model="gemma4:e2b",
+                system_prompt="sys",
+                user_content="please refactor this function",
+                timeout_sec=10.0,
+            )
+            assert out == "default cloud reply"
+        finally:
+            set_router_cfg_for_tests(None)
+
+        rows = _telem.fetch_recent(db_path, limit=5)
+        assert rows, "telemetry produced no rows"
+        last = rows[0]
+        assert last["provider"] == "cloud"
+        assert last["model"] == "claude-sonnet-4-6"
+        assert last["tokens_in"] == 100, f"expected 100 in, got row={last}"
+        assert last["tokens_out"] == 50, f"expected 50 out, got row={last}"

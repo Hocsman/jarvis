@@ -398,6 +398,21 @@ def _actual_provider_used(callable_: Any) -> str:
     return "local"
 
 
+def _cloud_usage_payload() -> Optional[Dict[str, Any]]:
+    """Return the Anthropic provider's last usage block wrapped in an
+    Ollama-shaped dict so ``_extract_tokens`` can read it. ``None`` when
+    no cloud usage is available (local call, streaming/direct that
+    fell back, or the call failed before ``_set_usage``)."""
+    try:
+        from .providers.anthropic_provider import last_usage as _last_usage
+    except Exception:
+        return None
+    usage = _last_usage()
+    if not isinstance(usage, dict) or not usage:
+        return None
+    return {"usage": usage}
+
+
 def call_llm_direct(
     base_url: str,
     chat_model: str,
@@ -431,12 +446,14 @@ def call_llm_direct(
             temperature=temperature,
         )
     latency_ms = int((_time.monotonic() - started) * 1000)
+    provider = _actual_provider_used(callable_)
+    telemetry_response = _cloud_usage_payload() if provider == "cloud" else None
     _record_telemetry_safe(
         cfg,
-        provider=_actual_provider_used(callable_),
+        provider=provider,
         model=resolved_model,
         intent=intent,
-        response=None,
+        response=telemetry_response,
         latency_ms=latency_ms,
     )
     return result
@@ -471,12 +488,14 @@ def call_llm_streaming(
             on_token=on_token, timeout_sec=timeout_sec, thinking=thinking,
         )
     latency_ms = int((_time.monotonic() - started) * 1000)
+    provider = _actual_provider_used(callable_)
+    telemetry_response = _cloud_usage_payload() if provider == "cloud" else None
     _record_telemetry_safe(
         cfg,
-        provider=_actual_provider_used(callable_),
+        provider=provider,
         model=resolved_model,
         intent=intent,
-        response=None,
+        response=telemetry_response,
         latency_ms=latency_ms,
     )
     return result
