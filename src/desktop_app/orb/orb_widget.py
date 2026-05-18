@@ -194,23 +194,71 @@ class OrbWidget(QWidget):
 
     # ── Drawing helpers ───────────────────────────────────────────────
 
+    # Multi-halo bloom stack. Each tuple = (radius_multiplier,
+    # inner_alpha_base, outer_alpha_base). The innermost halo is the
+    # brightest and tightest; subsequent halos grow in radius and
+    # fall in opacity. Stacking 4 halos with these ratios produces a
+    # convincing "soft bloom" effect in pure QPainter — no shader,
+    # no offscreen blur, but the eye reads it as light scatter.
+    _BLOOM_HALOS = (
+        # (radius_x, inner_alpha_mult, mid_alpha_mult)
+        (1.0, 0.60, 0.30),  # core halo, follows the orb closely
+        (1.3, 0.35, 0.18),  # primary glow
+        (1.7, 0.20, 0.10),  # outer wash
+        (2.2, 0.10, 0.05),  # far rim, barely visible but adds depth
+    )
+
     def _draw_glow_halo(
         self, painter: QPainter, cx: float, cy: float,
         r: float, color: QColor, intensity: float, rms: float,
     ) -> None:
-        """Soft wide radial gradient behind the orb body."""
-        grad = QRadialGradient(cx, cy, r)
-        inner = QColor(color)
-        inner.setAlphaF(min(1.0, 0.30 * intensity + 0.15 * rms))
-        outer = QColor(color)
-        outer.setAlpha(0)
-        grad.setColorAt(0.0, inner)
-        grad.setColorAt(0.55, QColor(color.red(), color.green(), color.blue(),
-                                      int(80 * intensity)))
-        grad.setColorAt(1.0, outer)
-        painter.setBrush(QBrush(grad))
+        """Soft multi-halo bloom behind the orb body.
+
+        Phase 1 used a single radial gradient (inner + 1 mid stop +
+        outer transparent). Phase 2D stacks four concentric halos at
+        growing radii with decreasing opacities. This is the "fake
+        bloom" technique: cheap, additive in the alpha channel, and
+        looks convincing because the eye can't tell the difference
+        between a true Gaussian blur and 4 stacked radial gradients.
+
+        Color depth: each halo uses 3 stops instead of 2 so the
+        gradient has a perceptible mid-tint (close to the state
+        colour but desaturated) rather than just fading the inner
+        colour straight to transparent. The bass band biases the
+        mid-stop alpha so a bass-heavy moment gives the orb a
+        noticeably warmer rim.
+        """
+        # Audio-modulated alpha boost: louder = brighter halo stack.
+        alpha_boost = min(1.0, 0.30 * intensity + 0.15 * rms)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawEllipse(QPointF(cx, cy), r, r)
+
+        for radius_mult, inner_mult, mid_mult in self._BLOOM_HALOS:
+            halo_r = r * radius_mult
+            grad = QRadialGradient(cx, cy, halo_r)
+
+            inner = QColor(color)
+            inner.setAlphaF(min(1.0, inner_mult * alpha_boost))
+            mid_color = QColor(color)
+            mid_color.setAlphaF(min(1.0, mid_mult * alpha_boost))
+            # Third color stop: very desaturated cousin of the state
+            # colour, sitting at ~75 % radius to give the gradient a
+            # softer roll-off than a straight inner->transparent.
+            tint = QColor(
+                int(color.red() * 0.7 + 80),
+                int(color.green() * 0.7 + 80),
+                int(color.blue() * 0.7 + 80),
+                int(255 * mid_mult * alpha_boost * 0.4),
+            )
+            outer = QColor(color)
+            outer.setAlpha(0)
+
+            grad.setColorAt(0.0, inner)
+            grad.setColorAt(0.45, mid_color)
+            grad.setColorAt(0.75, tint)
+            grad.setColorAt(1.0, outer)
+
+            painter.setBrush(QBrush(grad))
+            painter.drawEllipse(QPointF(cx, cy), halo_r, halo_r)
 
     def _draw_orb_body(
         self, painter: QPainter, cx: float, cy: float,
