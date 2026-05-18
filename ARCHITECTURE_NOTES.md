@@ -225,3 +225,76 @@ flowchart TD
 - **À ajouter** : `moderngl>=5.10` (GL context Python pour shaders custom, indépendant de Qt's OpenGL), `pyrr>=0.10` (matrices 3D si l'orb a une perspective ou rotation — sinon numpy suffit). `scipy.fft` déjà couvert par scipy installé.
 - **Optionnel** : `moderngl-window` si on veut un context standalone, mais l'orb sera dans une `QOpenGLWidget` PyQt6 (déjà fourni) → moderngl pur suffit.
 - **Pas nécessaire** : `glm` (Python glm wrapper) — redondant avec pyrr/numpy. `pyglet`/`glfw` — Qt fournit déjà le context.
+
+---
+
+## Phase 2 Reconnaissance
+
+Phase 0 du sprint Phase 2. Lecture seule, branche `feature/orb-as-primary`
+(merge `feature/hybrid-llm-router` + `feature/reactive-orb-ui` sur `de93d67`).
+Recon ciblée sur 5 points + encart "Mode Hybride". Aucune modif code applicatif.
+
+### 1. Instanciation face actuelle
+
+- `LowPolyFaceWidget` défini à [face_widget.py:153](src/desktop_app/face_widget.py:153), instancié sans condition dans `FaceWindow.__init__` à [face_widget.py:1069](src/desktop_app/face_widget.py:1069). `FaceWindow` = `QWidget` standalone à [face_widget.py:1046](src/desktop_app/face_widget.py:1046), window flag `WindowStaysOnTopHint`.
+- `FaceWindow` importé à [app.py:65](src/desktop_app/app.py:65), instancié toujours à [app.py:1273](src/desktop_app/app.py:1273) (build inconditionnel — seul l'affichage est gaté).
+- **Aucun mécanisme "choix de face" en config**. Décision actuelle 100% CLI flag :
+  - Orb shown by default à [app.py:2663](src/desktop_app/app.py:2663) → `if "--no-orb" not in sys.argv: OrbWindow().show_orb()` ([app.py:2665-2667](src/desktop_app/app.py:2665))
+  - `FaceWindow.show()` gaté inverse à [app.py:1906](src/desktop_app/app.py:1906) → `if "--no-orb" in sys.argv: self.face_window.show()`
+- Tests existants : [tests/test_face_widget.py](tests/test_face_widget.py) (positioning only, pas de choix), [tests/orb/test_orb_window.py](tests/orb/test_orb_window.py) (instanciation + hotkey guard).
+- **Phase 2A**: ajouter `ui.face: "orb"|"lowpoly"` dans config + sélecteur dans `app.py` qui remplace les deux flags-checks par une seule décision basée sur cfg. Préserver `--no-orb` comme override CLI pour CI.
+
+### 2. Pipeline français
+
+- Whisper default `"medium"` ([config.py:478](src/jarvis/config.py:478), parsing [config.py:695](src/jarvis/config.py:695)) — modèle multilingue. Les `.en` sont EN-only mais ne sont pas le default. ✅
+- Auto-detect activé : `language=None` passé à `mlx_whisper.transcribe` ([listener.py:2366](src/jarvis/listening/listener.py:2366)) et `model.transcribe` (faster-whisper, [listener.py:2418, :2423](src/jarvis/listening/listener.py:2418)). Langue détectée stockée dans `_last_detected_language` ([listener.py:2373](src/jarvis/listening/listener.py:2373), :2430), consommée par les tools FR (Wikipedia FR locale).
+- Voix Piper : scalaire `tts_piper_model_path` ([config.py:455](src/jarvis/config.py:455) default `None`, parsing [config.py:675-685](src/jarvis/config.py:675)). **Pas de mécanisme "voix par langue détectée"**. À refacto Phase 2B : `tts_voices: {en: ..., fr: ...}` + sélecteur dans `tts.py` qui lit `_last_detected_language`.
+- System prompt + cloud : `build_system_prompt(_assistant_name, response_language="français")` à [engine.py:1419](src/jarvis/reply/engine.py:1419) → primacy + recency + native French tail à [system_prompt.py:121-156](src/jarvis/system_prompt.py:121). Passé via `messages[0]` à `chat_with_messages` → `anthropic_provider` extrait le system block ([anthropic_provider.py:518-533](src/jarvis/providers/anthropic_provider.py:518)) et l'envoie au cloud via `system=system_blocks`. ✅ La directive FR atteint Sonnet identiquement au local.
+- ⚠️ **Bloquant unique** : [engine.py:1430-1434](src/jarvis/reply/engine.py:1430) ajoute *inconditionnellement* `"Always respond in English regardless of the language the user speaks in."` quand `tts_engine in ('piper', 'chatterbox')`. La contrainte ignore `response_language` et entre en conflit avec la directive FR. Sonnet l'override en pratique (persona prompt FR plus fort), mais gemma4:e2b peut flipper. **Phase 2B fix** : gater par `response_language == "" and _last_detected_language in (None, "en")`.
+- ❌ Non bloquant (vérifié) : `_REWRITE_DEFLECTION_SYSTEM_PROMPT` à [conversation.py:36](src/jarvis/memory/conversation.py:36) est en EN MAIS explicitement multilingue par design (line 56: "This task applies in every language. Do NOT translate the output"). Pas une régression FR.
+
+### 3. Audio bus actuel
+
+- `AudioBus` à [audio_bus.py:217](src/desktop_app/orb/audio_bus.py:217) : ring buffer numpy 1s @ 22050 Hz, FFT 512-pt, EMA α=0.3, bandes bass(0-250) / mid(250-2000) / high(2000+). `push()` et `read_bands()` lock-serialised, ~µs.
+- Observer registry sur le listener : [listener.py:34-58](src/jarvis/listening/listener.py:34) expose `register_audio_observer(fn)` / `unregister_audio_observer(fn)`, hook firing à [listener.py:1463](src/jarvis/listening/listener.py:1463) (try/except per observer, jamais bloquant pour STT).
+- **L'"audio synthétique" Phase 1 = aucune source en réalité** : `register_audio_observer` n'est jamais appelé dans `app.py` ni `run_orb_standalone.py`. `OrbWidget.paintEvent` ([orb_widget.py:147](src/desktop_app/orb/orb_widget.py:147)) lit `audio_bus.read_bands()` qui renvoie `BandReading.zero()`. La motion visible vient du shader temporel `sin(t*1.2 + phase)` à [orb_widget.py:240-242](src/desktop_app/orb/orb_widget.py:240).
+- **Branchement audio réel — options Phase 2C** :
+  - *In-process* (standalone) : une ligne `register_audio_observer(audio_bus.push)`. Coût zéro. Mais le path bundled-mode du desktop_app fork un subprocess pour le daemon — out-of-process.
+  - *Cross-process — `multiprocessing.shared_memory`* : ring buffer 16 KB = 250ms @ 16kHz mono f32 (16000 × 4 = 64 KB/s → 4096 samples). Producer écrit ~30ms chunks (1920 bytes) au callback rate du listener. Consumer lit 512 samples (2 KB) à 60 Hz. Overhead estimé ~1-5 µs/op via numpy memmap + atomic write-counter. Lockless (1 writer / 1 reader).
+  - *Cross-process — `multiprocessing.Queue`* : ~10-50 µs/push (pickle), suffisant à 30 chunks/s mais pas zero-copy.
+  - *UNIX socket / pipe* : trop de boilerplate vs `shared_memory`.
+
+### 4. macOS LaunchAgent
+
+- **Aucun fichier `.plist`** dans le repo (find: 0 hits). Aucune mention auto-start dans `README.md` ni `docs/`.
+- **Aucun bundle identifier** convention dans le code (grep `com.jarvis|org.jarvis|com.isair` → 0 hits).
+- **Aucun LaunchAgent installé** : `~/Library/LaunchAgents/` ne contient rien de jarvis.
+- À créer ex-nihilo Phase 2E. Conventions proposées :
+  - Bundle id : `com.jarvis.daemon` (cf. spec utilisateur).
+  - Chemin : `~/Library/LaunchAgents/com.jarvis.daemon.plist`.
+  - Logs : `~/Library/Logs/jarvis/{stdout,stderr}.log` (un dossier existe déjà à `~/Library/Logs/Jarvis/` avec `.crash_marker` — réutiliser).
+  - **ANTHROPIC_API_KEY** : la clé est sensible → JAMAIS en clair dans le `.plist` (lisible via `launchctl print`). **Option A recommandée** : `security add-generic-password -s jarvis-anthropic -a "$USER"` + wrapper bash dans `<ProgramArguments>` qui fait `security find-generic-password -w -s jarvis-anthropic` et l'exporte avant `python -m jarvis.main`. **Option B fallback** : référencer `~/.config/jarvis/.env` sourcé par le wrapper. Sans cette gestion, le daemon auto-launched passe en `local_fallback` (clé absente de l'env) — pattern déjà observé dans `llm_router_stats` à 19:06 (rows `local_fallback claude-sonnet-4-6 simple_query`).
+
+### 5. Scope Phase 2 — viabilité + risques
+
+- **Pourquoi orb pas default upstream ?** Aucun blocker technique : c'est un choix produit conservateur (`FaceWindow` est l'identité visuelle historique). Phase 1 le proposait via `--with-orb` opt-in ; ta branche perso l'a inversé en `--no-orb` opt-out. Phase 2A consolide via config.
+- **Phase 2B faisable 100% en config ?** **NON**. Trois modifs code minimum :
+  1. [engine.py:1430-1434](src/jarvis/reply/engine.py:1430) — gater la contrainte EN par `response_language` + langue détectée.
+  2. `tts_voices` per-language map dans `config.py` + sélecteur dans `tts.py` lisant `_last_detected_language`.
+  3. Optionnel : per-provider prompt si A/B montre divergence (cf. spec Phase 2B point 3 — STOP avant impl).
+- **Régressions anglophones si Whisper default change ?** **Aucune** : default `medium` est déjà multilingue + auto-detect. Phase 2B point 1 ("default vers `large-v3-turbo`") est en réalité optionnel — gain qualité FR vs coût RAM. À documenter, pas à imposer.
+- **Impact hybride sur qualité FR** : Sonnet 4.6 nettement supérieur à `gemma4:e2b` en FR (constaté tests live 1:01 AM, réponse `multi_step_reasoning` 26/597 tokens cohérente). Avec `cloud_intents` étendu à 4 (incluant `simple_query`), majorité des turns FR utiles partent au cloud. Mesure A/B prévue Phase 2B via `scripts/test_french_quality.py`.
+- **Coût mensuel projeté** : pricing `claude-sonnet-4-6` $3/1M in, $15/1M out ([pricing.py:9](src/jarvis/providers/pricing.py:9)).
+  - Usage typique perso : ~50 turns/j → ~80% partent au cloud (4 intents éligibles).
+  - Moyenne ~800 in + 200 out par turn cloud (persona ~5KB + memory + question + réponse courte).
+  - Daily : 40 turns × (800 in + 200 out) = 32K in + 8K out → $0.10 + $0.12 = **~$0.22/j**.
+  - Mensuel : **~$7/mois** sans cache. Avec prompt cache 90% hit sur le persona system prompt (8KB stable, cache threshold = 8000 chars activé dans la config) → input divisé par ~5 → **~$3-4/mois**. Largement sous le seuil $2 de "tests Phase 2" (la spec parle de la phase, pas du mois).
+
+### Mode Hybride — implications observées
+
+- **Phase 2A** (face widget choice) : aucune interaction avec le router. Sélection orb/lowpoly = widget Qt, jamais touchée par les LLM calls. Implémentable + testable sans risque cloud.
+- **Phase 2B** (qualité FR) : le router *amplifie* la qualité (Sonnet > gemma4:e2b en FR). **Le bloquant [engine.py:1430](src/jarvis/reply/engine.py:1430) affecte les DEUX providers** — la contrainte est dans le system prompt, peu importe où il part. À fixer en priorité : l'inconditionnel "respond in English" pollue même les turns Sonnet (qui l'override seulement parce que le persona FR a primacy + recency + native tail — bricolage). Sur gemma4:e2b cette double directive cause des flips.
+- **Phase 2C** (audio in-process) : aucune interaction avec le router.
+- **Phase 2D** (polish QPainter) : aucune interaction.
+- **Phase 2E** (LaunchAgent) : critique pour préserver le mode hybride au démarrage automatique. Sans keychain integration, l'auto-launch passe silencieusement en `local_fallback` (pattern déjà observé). La gestion de clé proposée (Option A keychain) est *prérequis* d'un auto-launch hybride.
+- **Coût cumulé pendant Phase 2 tests** : à inspecter en fin de phase via `SELECT provider, SUM(cost_estimate_usd), COUNT(*) FROM llm_router_stats WHERE ts_utc > 'phase2_start' GROUP BY provider`. Budget garde-fou spec : $2.
