@@ -2689,18 +2689,43 @@ def main() -> int:
         # always-on-top window that reads state from the shared
         # JarvisStateManager and audio from the listener observer hook.
         orb_window = None
+        orb_audio_adapter = None
         from jarvis.config import load_settings as _ls
         _face_choice = select_face(_ls(), sys.argv)
         if _face_choice == "orb":
             try:
                 from desktop_app.orb.orb_window import OrbWindow
-                orb_window = OrbWindow()
+                # Phase 2C: attach a ShmBackedAudioBus so the orb pulses
+                # on real mic audio published by the daemon subprocess.
+                # When no daemon is running yet (or SHM is unavailable),
+                # the adapter is inactive and the orb falls back to its
+                # shader-only animation — same as Phase 1 behaviour.
+                try:
+                    from jarvis.utils.shm_band_bus import ShmBackedAudioBus
+                    orb_audio_adapter = ShmBackedAudioBus()
+                    if orb_audio_adapter.is_active:
+                        print("🔊 Orb audio: connected to daemon SHM publisher", flush=True)
+                    else:
+                        print("🔇 Orb audio: SHM publisher not running yet (orb on synthetic motion)", flush=True)
+                except Exception as adapter_err:
+                    debug_log(f"shm audio adapter init failed: {adapter_err}", "orb")
+                    orb_audio_adapter = None
+
+                orb_window = OrbWindow(audio_bus=orb_audio_adapter)
                 orb_window.show_orb()
                 print("🟠 Reactive orb shown (toggle: cmd+shift+J, hide: --no-orb)", flush=True)
             except Exception as orb_err:
                 # Non-fatal: orb failures must not crash the tray.
                 debug_log(f"orb init failed: {orb_err}\n{traceback.format_exc()}", "orb")
                 print(f"⚠️ Orb failed to start: {orb_err}", flush=True)
+                # Make sure we don't leak the SHM reader if the orb
+                # window itself failed to construct.
+                if orb_audio_adapter is not None:
+                    try:
+                        orb_audio_adapter.close()
+                    except Exception:
+                        pass
+                    orb_audio_adapter = None
 
         print("Starting event loop...", flush=True)
         return tray_instance.run()

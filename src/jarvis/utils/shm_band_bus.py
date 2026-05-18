@@ -461,3 +461,88 @@ class ShmBandReader:
             self.close()
         except Exception:
             pass
+
+
+# ── Reader → AudioBus adapter ────────────────────────────────────────────
+
+
+class ShmBackedAudioBus:
+    """Adapter exposing the ``AudioBus`` surface backed by a
+    ``ShmBandReader``.
+
+    The orb widget calls ``audio_bus.read_bands() -> BandReading``
+    once per render frame. Phase 1 wired this to an in-process
+    ``AudioBus`` (which was never fed in the cross-process tray
+    scenario, so the bands stayed at zero). Phase 2C swaps in this
+    adapter when a SHM segment is available: the same call now pulls
+    the latest frame written by the daemon publisher.
+
+    Fallback path: when the reader is inactive (no writer yet, or
+    SHM unsupported), ``read_bands`` returns ``BandReading.zero()``
+    — same shape, same observable behaviour as the Phase 1 zero-bus.
+
+    ``push()`` is a no-op on the adapter: the audio source lives in
+    the daemon, not in this process. Keeping the method on the surface
+    means tests that import the orb without the daemon don't blow up
+    when they try to push a synthetic chunk for animation; it just
+    silently drops.
+    """
+
+    def __init__(self, reader: Optional["ShmBandReader"] = None) -> None:
+        # Late import to keep ``audio_bands`` independent of this module.
+        from .audio_bands import BandReading, INTERNAL_SAMPLE_RATE
+        self._BandReading = BandReading
+        self._zero = BandReading.zero()
+        self._sample_rate = INTERNAL_SAMPLE_RATE
+        self._reader = reader if reader is not None else ShmBandReader()
+
+    @property
+    def sample_rate(self) -> int:
+        return self._sample_rate
+
+    @property
+    def is_active(self) -> bool:
+        """``True`` when the underlying reader is attached to a live
+        SHM segment. False when there's no writer / SHM is unavailable
+        — useful for the orb window to decide whether to show the
+        DEV badge."""
+        return self._reader.is_active
+
+    def push(self, *_args, **_kwargs) -> None:  # noqa: D401 — no-op
+        """No-op. The audio source is the daemon's listener, in
+        another process. Provided for API parity with ``AudioBus`` so
+        the orb widget's constructor doesn't need to branch."""
+        return None
+
+    def read_bands(self):
+        """Latest published frame as a ``BandReading``, or zero if no
+        frame is yet available / the reader is inactive."""
+        if not self._reader.is_active:
+            return self._zero
+        frame = self._reader.read_latest()
+        if frame is None:
+            return self._zero
+        return self._BandReading(
+            rms=float(frame.rms),
+            bass=float(frame.bass),
+            mid=float(frame.mid),
+            high=float(frame.high),
+        )
+
+    def reset(self) -> None:
+        """Adapter is stateless w.r.t. smoothing (the publisher already
+        applies EMA on its in-daemon analyser). Reset is a no-op."""
+        return None
+
+    def close(self) -> None:
+        """Detach the underlying reader. Idempotent."""
+        try:
+            self._reader.close()
+        except Exception:
+            pass
+
+    def __enter__(self) -> "ShmBackedAudioBus":
+        return self
+
+    def __exit__(self, *_exc_info) -> None:
+        self.close()
