@@ -30,6 +30,36 @@ if TYPE_CHECKING:
     from ..memory.conversation import DialogueMemory
 
 
+# Audio observer registry. Consumers (e.g. the orb UI) register a
+# callable that receives every mic chunk via ``_on_audio``. Observers
+# run inline on the audio thread and MUST NOT block; their exceptions
+# are caught at the call site so a buggy observer cannot break STT.
+_audio_observers: list = []
+
+
+def register_audio_observer(fn) -> None:
+    """Register ``fn`` to receive every mic audio chunk.
+
+    ``fn`` is invoked with a numpy float32 mono chunk on the listener's
+    audio callback thread. Keep the body short and non-blocking;
+    typical use is to push the chunk into a lock-free queue and process
+    it elsewhere. Exceptions raised by ``fn`` are swallowed at the
+    call site (``_on_audio``) so observers never break STT.
+    """
+    if fn is None or fn in _audio_observers:
+        return
+    _audio_observers.append(fn)
+
+
+def unregister_audio_observer(fn) -> None:
+    """Inverse of ``register_audio_observer``. No-op if ``fn`` is not
+    currently registered."""
+    try:
+        _audio_observers.remove(fn)
+    except ValueError:
+        pass
+
+
 def is_whisper_hallucination(no_speech_prob: float, threshold: float) -> bool:
     """Shared Whisper no-speech gate.
 
@@ -1426,6 +1456,15 @@ class VoiceListener(threading.Thread):
                 return
             self._callback_count += 1
             chunk = (indata.copy() if hasattr(indata, "copy") else indata)
+            # Audio observer fan-out (orb UI reactivity, etc.). Observers
+            # run inline on the audio callback thread; each one is in its
+            # own try/except so a faulty observer can never break STT or
+            # block the queue push below.
+            for _obs in list(_audio_observers):
+                try:
+                    _obs(chunk)
+                except Exception:
+                    pass
             try:
                 self._audio_q.put_nowait(chunk)
             except Exception:

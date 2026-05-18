@@ -1899,9 +1899,13 @@ class JarvisSystemTray:
                 2000
             )
 
-            # Show face window when starting
-            self.face_window.show()
-            self.face_window.raise_()
+            # Show face window when starting, unless the reactive orb
+            # is shown (the orb replaces the face — two floating
+            # always-on-top windows would compete for the user's
+            # attention).
+            if "--no-orb" in sys.argv:
+                self.face_window.show()
+                self.face_window.raise_()
 
             debug_log("daemon started from desktop app", "desktop")
 
@@ -2649,6 +2653,23 @@ def main() -> int:
                 QSystemTrayIcon.MessageIcon.Information,
                 3000
             )
+
+        # Reactive orb UI: shown by default. Pass --no-orb to disable
+        # (useful for headless CI or tray-only setups). The orb is a
+        # frameless, always-on-top window that reads state from the
+        # shared JarvisStateManager and audio from the listener
+        # observer hook.
+        orb_window = None
+        if "--no-orb" not in sys.argv:
+            try:
+                from desktop_app.orb.orb_window import OrbWindow
+                orb_window = OrbWindow()
+                orb_window.show_orb()
+                print("🟠 Reactive orb shown (toggle: cmd+shift+J, hide: --no-orb)", flush=True)
+            except Exception as orb_err:
+                # Non-fatal: orb failures must not crash the tray.
+                debug_log(f"orb init failed: {orb_err}\n{traceback.format_exc()}", "orb")
+                print(f"⚠️ Orb failed to start: {orb_err}", flush=True)
 
         print("Starting event loop...", flush=True)
         return tray_instance.run()

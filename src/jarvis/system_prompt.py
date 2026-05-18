@@ -4,7 +4,18 @@ Unified system prompt for the assistant persona.
 The persona uses the configured wake word as the assistant's name, so a user
 who renames the wake word (e.g. "Friday") gets a butler with the matching
 name rather than a persona hardcoded to "Jarvis".
+
+``build_system_prompt`` also accepts an optional ``response_language``: when
+set, an explicit "always respond in <lang>" instruction is appended to the
+persona prompt so the model does not drift back to the user's input language
+on multilingual exchanges. This is a soft preference, not a hard constraint
+(the model may still mirror the user's language when context makes it more
+natural, e.g. quoting a code identifier).
 """
+
+from __future__ import annotations
+
+from typing import Optional
 
 _SYSTEM_PROMPT_TEMPLATE: str = (
     "Persona: you are a British butler named {name} — polite, composed, quietly amused, and "
@@ -79,11 +90,68 @@ _SYSTEM_PROMPT_TEMPLATE: str = (
 )
 
 
-def build_system_prompt(assistant_name: str = "Jarvis") -> str:
+def build_system_prompt(
+    assistant_name: str = "Jarvis",
+    response_language: Optional[str] = None,
+) -> str:
     """Render the persona prompt with the configured assistant name.
 
     The name comes from the user's wake word (capitalised); defaults to
     "Jarvis" when no config is available (tests, eval harnesses).
+
+    If ``response_language`` is set (e.g. "French", "français"), strong
+    language-locking instructions are layered into the prompt:
+      - A CRITICAL directive at the START (primacy effect — small
+        models weigh early instructions heaviest).
+      - A reinforcement at the END (recency effect).
+      - When the target is French, the tail reminder is itself
+        written in French, so the system prompt's last tokens are
+        already in the target language. This linguistically anchors
+        the model's next-token distribution toward French
+        continuations.
     """
     name = (assistant_name or "Jarvis").strip() or "Jarvis"
-    return _SYSTEM_PROMPT_TEMPLATE.format(name=name)
+    rendered = _SYSTEM_PROMPT_TEMPLATE.format(name=name)
+    lang = (response_language or "").strip()
+    if not lang:
+        return rendered
+
+    # PRIMACY: open with a hard directive so the model sees the
+    # language lock before reading the persona instructions.
+    opening = (
+        f"CRITICAL LANGUAGE DIRECTIVE: every single response you produce "
+        f"MUST be in {lang}. This applies to ALL turns, ALL topics, ALL "
+        f"conversation modes. The user may write or speak in any "
+        f"language they like, but YOUR REPLY is always in {lang}. This "
+        f"is not a preference, it is an absolute non-negotiable rule. "
+        f"If you catch yourself starting a response in another language, "
+        f"STOP mid-sentence and restart in {lang}. Never apologise for "
+        f"using {lang}; it is your working language. "
+    )
+
+    # RECENCY: close in English with a generic enforcement reminder.
+    closing_en = (
+        f" Final reminder: respond in {lang} only. If the user asks a "
+        f"question in English, German, Spanish, or any other language, "
+        f"answer in {lang}. Translate quotes and references into {lang} "
+        f"where natural. Code identifiers and proper nouns stay as-is."
+    )
+
+    rendered = opening + rendered + closing_en
+
+    # LINGUISTIC ANCHORING: when the target is French, the very last
+    # sentence of the system prompt is itself written in French so
+    # the model's next-token distribution is biased toward French
+    # continuations from the start of the assistant turn. Same trick
+    # described in CLAUDE.md as "denial-template mirroring" applied
+    # to language priors instead of memory-denial priors.
+    if lang.lower() in {"français", "francais", "french", "fr"}:
+        rendered += (
+            " Rappel final, en français : tu réponds toujours en "
+            "français, peu importe la langue dans laquelle l'utilisateur "
+            "s'adresse à toi. Si tu commences une phrase dans une autre "
+            "langue, arrête-toi immédiatement et reformule en français. "
+            "Le français est ta langue de travail, point final. Tu ne "
+            "t'excuses jamais d'utiliser le français."
+        )
+    return rendered

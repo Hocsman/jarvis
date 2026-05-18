@@ -287,6 +287,12 @@ class Settings:
     # MCP Integration
     mcps: Dict[str, Any]
 
+    # Force the assistant's response language regardless of what the
+    # user speaks. Empty string = follow the user's input language
+    # (default behaviour). Examples: "français", "English", "日本語".
+    # See system_prompt.build_system_prompt for the appended directive.
+    response_language: str
+
     # Hybrid LLM Router (opt-in cloud fallback). Default mode is
     # ``local_only`` so users who don't configure it get the full
     # 100%-local behaviour with zero overhead.
@@ -579,6 +585,11 @@ def get_default_config() -> Dict[str, Any]:
         # MCP Integration (external servers Jarvis can use). No defaults.
         "mcps": {},
 
+        # Force assistant response language. Empty = follow user's
+        # input language. Set to e.g. "français" or "English" to lock
+        # the output language across all turns.
+        "response_language": "",
+
         # Hybrid LLM Router. Opt-in cloud fallback. Default is fully local
         # so the privacy contract holds for users who never touch this key.
         # See docs/HYBRID_LLM.md for the trade-off and switch-back.
@@ -777,6 +788,7 @@ def load_settings() -> Settings:
     raw_dict = merged.get("dictation_custom_dictionary", [])
     dictation_custom_dictionary = list(raw_dict) if isinstance(raw_dict, list) else []
     mcps = _ensure_dict(merged.get("mcps"))
+    response_language = str(merged.get("response_language", "") or "").strip()
 
     # Parse llm_router subsection. Defaults are local-only so missing or
     # malformed config is always safe.
@@ -944,6 +956,7 @@ def load_settings() -> Settings:
 
         # MCP Integration
         mcps=mcps,
+        response_language=response_language,
 
         # Hybrid LLM Router
         llm_router=llm_router,
