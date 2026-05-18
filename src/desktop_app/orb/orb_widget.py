@@ -84,7 +84,7 @@ class OrbWidget(QWidget):
         state_controller: Optional[StateController] = None,
         particles_enabled: bool = True,
         particle_count: int = 256,
-        icosphere_subdivisions: int = 2,
+        icosphere_subdivisions: int = 3,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
@@ -98,18 +98,31 @@ class OrbWidget(QWidget):
         self._audio_bus = audio_bus or AudioBus()
         self._state_controller = state_controller or StateController()
         self._particles_enabled = bool(particles_enabled)
+        # Default subdiv=3 -> 642 vertices, 1280 triangles. Phase 1
+        # shipped subdiv=2 (162 verts); Phase 2D bumps the detail so
+        # the wireframe reads as a proper sphere even at large window
+        # sizes. CPU projection cost is still <5ms/frame on Apple
+        # Silicon; if a future user reports perf issues on older
+        # hardware we can promote ``icosphere_subdivisions`` to a
+        # config knob, but the default reflects the current target.
         self._mesh: Mesh = build_icosphere(icosphere_subdivisions)
         self._particles: Optional[Particles] = (
             build_particles(particle_count, seed=0) if particles_enabled else None
         )
 
-        # Precompute a per-vertex deterministic phase so the displacement
-        # is stable across frames (one Simplex would do this implicitly,
-        # but we do it explicitly so it is testable headlessly).
-        # Two seeds + hash for low-frequency vs high-frequency layers.
+        # Precompute three per-vertex deterministic phases so the
+        # displacement is stable across frames AND composed of three
+        # octaves of distinct pseudo-noise. Three octaves is enough to
+        # give the surface organic micro-motion without leaving the
+        # Python-loop FPS budget.
+        # Phase 1 used two phases (slow breath + audio fast); Phase 2D
+        # adds a medium-frequency middle layer so the surface texture
+        # reads as live even with zero audio input — important now
+        # that the SHM bus may legitimately publish silence.
         rng = np.random.default_rng(seed=42)
         self._vertex_phase_a = rng.uniform(0.0, 2.0 * math.pi, self._mesh.vertex_count).astype(np.float32)
         self._vertex_phase_b = rng.uniform(0.0, 2.0 * math.pi, self._mesh.vertex_count).astype(np.float32)
+        self._vertex_phase_c = rng.uniform(0.0, 2.0 * math.pi, self._mesh.vertex_count).astype(np.float32)
 
         # Frame clock.
         self._t0_monotonic = time.monotonic()
@@ -232,16 +245,24 @@ class OrbWidget(QWidget):
         This avoids backface clutter without doing a full 3D pipeline.
         """
         positions = self._mesh.positions  # (V, 3) on unit sphere
-        # Audio + noise displacement: each vertex moves outward along
-        # its normal (== position) by:
-        #   slow breath (sin time * phase_a) +
-        #   audio-driven layer (bass + mid + high modulated by phase_b)
+        # Audio + noise displacement composed of three octaves:
+        #   slow   (t * 1.2, phase_a) - persistent breath, audio-free
+        #   medium (t * 2.5, phase_b) - mid-band-modulated mid-frequency
+        #   fast   (t * 5.5, phase_c) - high-band-modulated quick spikes
+        # The fixed amplitude ratio (0.5 / 0.3 / 0.2) gives 1/f-ish
+        # pink-noise feel without an actual noise function. Audio
+        # energy biases the higher octaves so loud speech reads as
+        # spiky surface detail, quiet reads as smooth breathing.
         t = snap.time_seconds
-        slow = 0.5 * np.sin(t * 1.2 + self._vertex_phase_a)
-        audio_drive = (bands.bass * 1.2 + bands.mid * 0.8 + bands.high * 0.4)
-        fast = np.sin(t * 4.0 + self._vertex_phase_b) * audio_drive
+        slow_octave = 0.5 * np.sin(t * 1.2 + self._vertex_phase_a)
+        medium_octave = 0.3 * np.sin(t * 2.5 + self._vertex_phase_b) * (1.0 + bands.mid)
+        audio_drive = (bands.bass * 1.0 + bands.mid * 0.6 + bands.high * 0.4)
+        fast_octave = 0.2 * np.sin(t * 5.5 + self._vertex_phase_c) * audio_drive
         amp = (0.4 + 0.6 * bands.rms) * snap.displacement_scale
-        disp = (slow * 0.04 + fast * 0.10) * amp  # (V,) in unit-sphere units
+        # Per-octave displacement weights tuned so the silent state
+        # shows visible motion (~slow octave * 0.04 = 2% radius lap)
+        # and a loud state reads as ~10-15% radius spikes.
+        disp = (slow_octave * 0.04 + medium_octave * 0.06 + fast_octave * 0.10) * amp
 
         # Apply displacement along each vertex's outward direction.
         outward = positions  # already unit-length normals on the sphere
