@@ -32,7 +32,7 @@ if sys.platform == 'win32' and not getattr(sys, 'frozen', False):
 from typing import Optional
 from faster_whisper import WhisperModel
 
-from .config import load_settings
+from .config import load_settings, select_tts_voice
 from .memory.db import Database
 from .memory.conversation import DialogueMemory, update_diary_from_dialogue_memory
 from .output.tts import create_tts_engine
@@ -450,6 +450,17 @@ def main() -> None:
 
     # Initialize TTS
     print(f"🔊 Initializing TTS engine ({cfg.tts_engine})...", flush=True)
+    # Resolve the Piper voice via the per-language map (with fallback to
+    # the legacy scalar). At daemon startup the listener has not seen
+    # any audio yet, so we pass detected_language=None — the helper
+    # then uses response_language as the cold-start hint, then the
+    # first map entry, then the legacy scalar.
+    resolved_piper_voice = select_tts_voice(cfg, None)
+    if resolved_piper_voice and resolved_piper_voice != cfg.tts_piper_model_path:
+        debug_log(
+            f"piper voice resolved via tts_voices/response_language: {resolved_piper_voice}",
+            "tts",
+        )
     tts = create_tts_engine(
         engine=cfg.tts_engine,
         enabled=cfg.tts_enabled,
@@ -461,7 +472,7 @@ def main() -> None:
         exaggeration=cfg.tts_chatterbox_exaggeration,
         cfg_weight=cfg.tts_chatterbox_cfg_weight,
         # Piper parameters
-        piper_model_path=cfg.tts_piper_model_path,
+        piper_model_path=resolved_piper_voice,
         piper_speaker=cfg.tts_piper_speaker,
         piper_length_scale=cfg.tts_piper_length_scale,
         piper_noise_scale=cfg.tts_piper_noise_scale,
