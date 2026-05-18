@@ -2711,7 +2711,19 @@ def main() -> int:
                     debug_log(f"shm audio adapter init failed: {adapter_err}", "orb")
                     orb_audio_adapter = None
 
-                orb_window = OrbWindow(audio_bus=orb_audio_adapter)
+                # Phase 2D: respect cfg.ui.orb_particles_enabled
+                # for users who want a quieter orb or run on
+                # constrained hardware.
+                _orb_cfg_for_particles = _ls()
+                _orb_particles_on = bool(getattr(
+                    getattr(_orb_cfg_for_particles, "ui", None),
+                    "orb_particles_enabled",
+                    True,
+                ))
+                orb_window = OrbWindow(
+                    audio_bus=orb_audio_adapter,
+                    particles_enabled=_orb_particles_on,
+                )
                 orb_window.show_orb()
                 print("🟠 Reactive orb shown (toggle: cmd+shift+J, hide: --no-orb)", flush=True)
             except Exception as orb_err:

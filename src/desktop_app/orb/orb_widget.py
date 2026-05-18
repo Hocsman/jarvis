@@ -437,23 +437,39 @@ class OrbWidget(QWidget):
         orb_r: float, glow_r: float,
         snap: StateSnapshot, bands: BandReading,
     ) -> None:
-        """Small bright dots orbiting the orb. Their brightness is
-        driven by the high band; their orbits are precomputed in
-        ``geometry.build_particles``."""
+        """Small bright dots orbiting the orb.
+
+        Phase 2D audio coupling (deepened from Phase 1):
+        - Alpha tied to high band (Phase 1 — kept): sibilance reads
+          as flicker.
+        - Size scales with high band (Phase 2D, new): louder
+          high-frequency content -> chunkier particles.
+        - Orbital speed scales with mid band (Phase 2D, new): voice
+          intensity speeds the orbit, idle slows it back to baseline.
+
+        Disabled entirely when the orb was constructed with
+        ``particles_enabled=False`` (driven by ``cfg.ui.orb_particles_enabled``).
+        """
         if self._particles is None:
             return
         orbits = self._particles.orbits
         t = snap.time_seconds
         # Particle radius lives between orb_r and glow_r.
         radius_span = glow_r - orb_r
-        # high-band drives sparkle intensity.
+        # high-band drives sparkle intensity AND size.
         high_boost = bands.high
+        # mid-band drives orbital speed multiplier. Floor at 1.0 so
+        # silent state still has the slow drift the particles were
+        # designed with; loud speech (mid=1) gives 1.5× speed.
+        speed_mult = 1.0 + 0.5 * bands.mid
+        # Size multiplier: silent -> 1.0×, full high band -> 1.6×.
+        size_mult = 1.0 + 0.6 * high_boost
         base_color = _state_color_qcolor(snap.color)
         # Draw lazily — skip particles fully behind.
         painter.setPen(Qt.PenStyle.NoPen)
         for row in orbits:
             radius_t = float(row[0] - 1.25) / 0.5  # normalise to 0..1
-            longitude = float(row[2] + t * row[3])
+            longitude = float(row[2] + t * row[3] * speed_mult)
             # 3D parametric on a "tilted ring":
             x = math.cos(longitude) * math.cos(row[1])
             y = math.sin(row[1])
@@ -463,7 +479,7 @@ class OrbWidget(QWidget):
             r_px = orb_r + radius_span * (0.2 + 0.8 * radius_t)
             px = cx + x * r_px
             py = cy - y * r_px * 0.85  # slight perspective squish
-            size = max(1.4, float(row[4]) * orb_r * 1.5)
+            size = max(1.4, float(row[4]) * orb_r * 1.5) * size_mult
             alpha = int(140 + 90 * high_boost)
             alpha = max(40, min(255, alpha))
             # Tinted core.

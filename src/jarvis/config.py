@@ -121,6 +121,13 @@ class UISettings:
     # with a debug_log warning at parse time.
     face: str
 
+    # Orb ambient particles toggle. Phase 2D ties particle size and
+    # speed to the audio mid/high bands; users on lower-end hardware
+    # who notice frame drops, or who simply prefer the orb without
+    # sparkles, can disable the particle layer via
+    # ``"ui": {"orb_particles_enabled": false}`` in config.json.
+    orb_particles_enabled: bool
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -647,13 +654,17 @@ def get_default_config() -> Dict[str, Any]:
             "anthropic_cache_threshold_chars": 8000,
         },
 
-        # Desktop UI (Phase 2A). Currently the only knob is which face
-        # widget the system tray shows when started: the reactive orb
-        # ("orb", default) or the original low-poly Jarvis face
-        # ("lowpoly"). The legacy ``--no-orb`` CLI flag still wins
-        # over this value when present (see desktop_app.app.select_face).
+        # Desktop UI (Phase 2A+). Knobs:
+        #   face: "orb" (default, reactive icosphere) or "lowpoly"
+        #         (original Jarvis face). Legacy ``--no-orb`` CLI flag
+        #         still overrides this value (see select_face).
+        #   orb_particles_enabled: whether the orb renders its ambient
+        #         particle layer (default True). Set false to skip
+        #         the particle draw entirely (perf or aesthetic
+        #         preference).
         "ui": {
             "face": "orb",
+            "orb_particles_enabled": True,
         },
     }
 
@@ -958,7 +969,18 @@ def load_settings() -> Settings:
             face_value = "orb"
     else:
         face_value = "orb"
-    ui = UISettings(face=face_value)
+    # Particle toggle. Default True for backwards compatibility with
+    # Phase 1 + 2A. Coerced via bool() so common JSON quirks (the
+    # string "false" or the integer 0) still resolve sensibly when
+    # users hand-edit the file.
+    raw_particles = raw_ui.get("orb_particles_enabled", True)
+    if isinstance(raw_particles, str):
+        # JSON literal would already be bool; this catches users who
+        # wrote ``"orb_particles_enabled": "false"`` by mistake.
+        orb_particles_enabled = raw_particles.strip().lower() not in {"false", "0", "no", "off"}
+    else:
+        orb_particles_enabled = bool(raw_particles)
+    ui = UISettings(face=face_value, orb_particles_enabled=orb_particles_enabled)
 
     whisper_min_confidence = float(merged.get("whisper_min_confidence", 0.4))
     whisper_no_speech_threshold = float(merged.get("whisper_no_speech_threshold", 0.5))

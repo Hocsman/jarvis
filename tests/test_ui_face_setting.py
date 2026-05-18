@@ -159,7 +159,7 @@ class TestUiSettingsDataclass:
         from dataclasses import FrozenInstanceError
         from jarvis.config import UISettings
 
-        ui = UISettings(face="orb")
+        ui = UISettings(face="orb", orb_particles_enabled=True)
         with pytest.raises(FrozenInstanceError):
             ui.face = "lowpoly"  # type: ignore[misc]
 
