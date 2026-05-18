@@ -98,6 +98,30 @@ class LLMRouterSettings:
     anthropic_cache_threshold_chars: int
 
 
+# Allowed values for ``UISettings.face``. Kept module-level so tests and
+# the parser share one source of truth — adding a third face later means
+# touching exactly one set.
+_VALID_FACE_VALUES: frozenset = frozenset({"orb", "lowpoly"})
+
+
+@dataclass(frozen=True)
+class UISettings:
+    """Desktop-app UI choices.
+
+    Phase 2A introduces the first config-driven UI knob: which face
+    widget to render. Until now the choice lived in a CLI flag
+    (``--no-orb``); promoting it to config lets users persist the
+    preference without editing launch scripts. The CLI flag is kept
+    as a legacy override for CI / headless paths (see
+    ``desktop_app.app.select_face``).
+    """
+
+    # ``"orb"`` (Phase 1 reactive icosphere) or ``"lowpoly"`` (the
+    # original Jarvis face). Invalid values fall back to ``"orb"``
+    # with a debug_log warning at parse time.
+    face: str
+
+
 @dataclass(frozen=True)
 class Settings:
     # Database & Storage
@@ -305,6 +329,11 @@ class Settings:
     # ``local_only`` so users who don't configure it get the full
     # 100%-local behaviour with zero overhead.
     llm_router: LLMRouterSettings
+
+    # Desktop UI choices (Phase 2A). The default face is the reactive
+    # orb; users can revert to the original low-poly face via
+    # ``"ui": {"face": "lowpoly"}`` in config.json.
+    ui: UISettings
 
 
 
@@ -617,6 +646,15 @@ def get_default_config() -> Dict[str, Any]:
             "fallback_to_local_on_error": True,
             "anthropic_cache_threshold_chars": 8000,
         },
+
+        # Desktop UI (Phase 2A). Currently the only knob is which face
+        # widget the system tray shows when started: the reactive orb
+        # ("orb", default) or the original low-poly Jarvis face
+        # ("lowpoly"). The legacy ``--no-orb`` CLI flag still wins
+        # over this value when present (see desktop_app.app.select_face).
+        "ui": {
+            "face": "orb",
+        },
     }
 
 
@@ -895,6 +933,33 @@ def load_settings() -> Settings:
         fallback_to_local_on_error=bool(raw_router.get("fallback_to_local_on_error", True)),
         anthropic_cache_threshold_chars=cache_threshold,
     )
+
+    # Parse ui subsection. ``ui.face`` accepts only members of
+    # ``_VALID_FACE_VALUES`` (orb/lowpoly). An unknown value emits a
+    # debug_log warning and falls back to ``"orb"`` so a typo in the
+    # config can't bork the desktop app. A missing ``ui`` key falls
+    # back silently (no warning) — that's the fresh-install path.
+    raw_ui = merged.get("ui", {})
+    if not isinstance(raw_ui, dict):
+        raw_ui = {}
+    if "face" in raw_ui:
+        face_value = str(raw_ui.get("face") or "").strip().lower()
+        if face_value not in _VALID_FACE_VALUES:
+            # Lazy-import to avoid the ``debug -> config`` cycle (debug.py
+            # imports ``load_settings``). Falling back silently with a
+            # stderr-visible breadcrumb is safer than failing the whole
+            # config load on a single typo.
+            from .debug import debug_log as _debug_log
+            _debug_log(
+                f"config: ui.face={face_value!r} is not one of "
+                f"{sorted(_VALID_FACE_VALUES)}; falling back to 'orb'",
+                "config",
+            )
+            face_value = "orb"
+    else:
+        face_value = "orb"
+    ui = UISettings(face=face_value)
+
     whisper_min_confidence = float(merged.get("whisper_min_confidence", 0.4))
     whisper_no_speech_threshold = float(merged.get("whisper_no_speech_threshold", 0.5))
     whisper_min_audio_duration = float(merged.get("whisper_min_audio_duration", 0.3))
@@ -1038,4 +1103,7 @@ def load_settings() -> Settings:
 
         # Hybrid LLM Router
         llm_router=llm_router,
+
+        # Desktop UI
+        ui=ui,
     )
