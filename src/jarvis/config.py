@@ -137,12 +137,20 @@ class Settings:
     tts_chatterbox_cfg_weight: float  # CFG weight for quality/speed trade-off
 
     # Piper TTS
-    tts_piper_model_path: str | None  # Path to .onnx voice model
+    tts_piper_model_path: str | None  # Path to .onnx voice model (legacy scalar; superseded by tts_voices when set)
     tts_piper_speaker: int | None  # Speaker ID for multi-speaker models
     tts_piper_length_scale: float  # Speed: <1.0 faster, >1.0 slower
     tts_piper_noise_scale: float  # Audio variation
     tts_piper_noise_w: float  # Phoneme width variation
     tts_piper_sentence_silence: float  # Post-sentence silence in seconds
+
+    # Per-language Piper voice map. Keys are 2-letter ISO codes
+    # (matching Whisper's detected_language output, e.g. "en", "fr",
+    # "de"); values are absolute paths to .onnx voice files. When set,
+    # this takes precedence over ``tts_piper_model_path`` and lets the
+    # TTS engine swap voices live as the user switches languages
+    # between turns. Empty dict = fall back to the scalar path.
+    tts_voices: dict
 
     # Voice Input & Audio
     voice_device: str | None
@@ -459,6 +467,13 @@ def get_default_config() -> Dict[str, Any]:
         "tts_piper_noise_w": 1.0,  # Phoneme width variation (higher = more lively)
         "tts_piper_sentence_silence": 0.2,  # Post-sentence silence in seconds
 
+        # Per-language Piper voice map (optional). Set to e.g.
+        # {"en": "/path/en_US-amy-medium.onnx",
+        #  "fr": "/path/fr_FR-siwis-medium.onnx"} to enable live
+        # voice swap based on Whisper's detected language.
+        # See docs/FRENCH_QUALITY.md for FR-specific guidance.
+        "tts_voices": {},
+
         # Voice Input & Audio
         "voice_device": None,
         "sample_rate": 16000,
@@ -614,6 +629,56 @@ def export_example_config(include_db_path: bool = False) -> Dict[str, Any]:
     return config
 
 
+def select_tts_voice(cfg: Any, detected_language: Optional[str]) -> Optional[str]:
+    """Resolve which Piper voice file to load given the latest detected
+    language from Whisper.
+
+    Precedence (first match wins):
+      1. ``cfg.tts_voices[detected_language]`` when ``detected_language``
+         is non-empty and present in the map. This is the live-switch
+         path triggered after Whisper reports the user's language.
+      2. ``cfg.tts_voices[response_language_code]`` when
+         ``cfg.response_language`` is set. ``response_language_code`` is
+         the first two characters of ``response_language`` lowercased
+         (so ``"français"`` -> ``"fr"``, ``"English"`` -> ``"en"``).
+         Provides a sensible cold-start voice before any user speech
+         has been transcribed.
+      3. ``cfg.tts_voices`` first entry, deterministic by insertion
+         order. Lets a user who set the map but no language lock get a
+         predictable starting voice.
+      4. ``cfg.tts_piper_model_path`` (the legacy scalar field). This
+         is the backwards-compatible fallback so existing single-voice
+         configs keep working without setup wizard changes.
+      5. ``None`` if nothing is configured. Caller decides how to handle
+         (Piper will error at load time; tts.py logs and continues with
+         a system fallback voice or disables TTS for that turn).
+
+    The detected language is the 2-letter ISO code that Whisper returns
+    (e.g. ``"en"``, ``"fr"``). Empty / ``None`` skips step 1 cleanly so
+    the cold-start path 2-4 takes over.
+    """
+    voices = getattr(cfg, "tts_voices", None) or {}
+    if isinstance(voices, dict) and voices:
+        if detected_language:
+            key = str(detected_language).strip().lower()[:2]
+            if key and key in voices:
+                return voices[key]
+        rl = (getattr(cfg, "response_language", "") or "").strip().lower()
+        if rl:
+            rl_code = rl[:2]
+            if rl_code in voices:
+                return voices[rl_code]
+        # Deterministic first entry — dicts preserve insertion order in
+        # Python 3.7+, and our parser already drops malformed keys.
+        first_value = next(iter(voices.values()), None)
+        if first_value:
+            return first_value
+    legacy = getattr(cfg, "tts_piper_model_path", None)
+    if legacy:
+        return str(legacy)
+    return None
+
+
 def load_settings() -> Settings:
     # Load environment for debug toggles and optional config file path only
     load_dotenv(override=False)
@@ -683,6 +748,18 @@ def load_settings() -> Settings:
     tts_piper_noise_scale = float(merged.get("tts_piper_noise_scale", 0.8))
     tts_piper_noise_w = float(merged.get("tts_piper_noise_w", 1.0))
     tts_piper_sentence_silence = float(merged.get("tts_piper_sentence_silence", 0.2))
+
+    # Per-language voice map. Coerce keys to lowercase 2-letter codes
+    # and drop any non-string values so a malformed config can't slip
+    # garbage past select_tts_voice() at call time.
+    raw_voices = merged.get("tts_voices", {})
+    tts_voices: dict = {}
+    if isinstance(raw_voices, dict):
+        for k, v in raw_voices.items():
+            if isinstance(k, str) and isinstance(v, str) and v.strip():
+                key = k.strip().lower()[:2]
+                if key:
+                    tts_voices[key] = v.strip()
 
     voice_device_val = merged.get("voice_device")
     voice_device = None if voice_device_val in (None, "", "default", "system") else str(voice_device_val)
@@ -868,6 +945,7 @@ def load_settings() -> Settings:
         tts_piper_noise_scale=tts_piper_noise_scale,
         tts_piper_noise_w=tts_piper_noise_w,
         tts_piper_sentence_silence=tts_piper_sentence_silence,
+        tts_voices=tts_voices,
 
         # Voice Input & Audio
         voice_device=voice_device,
