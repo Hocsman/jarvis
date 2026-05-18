@@ -52,7 +52,7 @@ from PyQt6.QtWidgets import QWidget
 
 from .audio_bus import AudioBus, BandReading
 from .geometry import Mesh, Particles, build_icosphere, build_particles
-from .state_controller import StateController, StateSnapshot
+from .state_controller import OrbState, StateController, StateSnapshot
 
 
 # Visual constants (tuned for a 320x320 window with the orb filling
@@ -186,6 +186,7 @@ class OrbWidget(QWidget):
             self._draw_glow_halo(painter, cx, cy, glow_r, color, snap.intensity, bands.rms)
             self._draw_orb_body(painter, cx, cy, orb_r, color, snap.intensity)
             self._draw_wireframe(painter, cx, cy, orb_r, snap, bands)
+            self._draw_chromatic_aberration(painter, cx, cy, orb_r, snap, bands)
             if self._particles_enabled and self._particles is not None:
                 self._draw_particles(painter, cx, cy, orb_r, glow_r, snap, bands)
             self._draw_inner_highlight(painter, cx, cy, orb_r, snap, bands)
@@ -356,6 +357,63 @@ class OrbWidget(QWidget):
             if screen_z[i] < -0.05:
                 continue
             painter.drawEllipse(QPointF(screen_x[i], screen_y[i]), 1.5, 1.5)
+
+    # States that warrant the chromatic-aberration rim. The "active"
+    # states — the orb is thinking, speaking, or signalling an error
+    # — get the extra edginess; calm states stay clean.
+    _CHROMATIC_ABERRATION_STATES = frozenset({
+        OrbState.THINKING, OrbState.SPEAKING, OrbState.ERROR,
+    })
+
+    def _draw_chromatic_aberration(
+        self, painter: QPainter, cx: float, cy: float,
+        r: float, snap: StateSnapshot, bands: BandReading,
+    ) -> None:
+        """Fake RGB-shift rim added on top of the wireframe.
+
+        Real chromatic aberration is a per-pixel channel offset on a
+        rendered image; doing it for real in QPainter would require
+        an offscreen QImage + QPainter.drawImage at three offsets,
+        which is doable but unnecessary. The eye reads the same
+        effect from two extra coloured rim outlines drawn at small
+        horizontal offsets relative to the orb body.
+
+        Triggered only for active states (THINKING / SPEAKING /
+        ERROR). Calm states (IDLE / LISTENING) stay clean — the rim
+        would compete with the soft halo bloom otherwise.
+
+        Implementation:
+        - Red rim shifted -2 px on x, alpha 80 (out of 255).
+        - Blue rim shifted +2 px on x, alpha 80.
+        - Composition: ``CompositionMode_Plus`` so the rim adds to
+          the underlying body colour rather than overwriting it.
+        - Audio coupling: high-band energy scales the offset
+          magnitude (more sibilance -> more aberration).
+        """
+        if snap.state not in self._CHROMATIC_ABERRATION_STATES:
+            return
+
+        # High band biases the offset: at silence -> 2 px, at full
+        # high-band saturation -> 4 px. Pinned to a small range so
+        # the orb doesn't disintegrate visually.
+        shift = 2.0 + 2.0 * bands.high
+
+        prev_mode = painter.compositionMode()
+        try:
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+
+            red_pen = QPen(QColor(255, 30, 30, 80), 2.0)
+            red_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(red_pen)
+            painter.drawEllipse(QPointF(cx - shift, cy), r, r)
+
+            blue_pen = QPen(QColor(30, 90, 255, 80), 2.0)
+            blue_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(blue_pen)
+            painter.drawEllipse(QPointF(cx + shift, cy), r, r)
+        finally:
+            painter.setCompositionMode(prev_mode)
 
     def _draw_inner_highlight(
         self, painter: QPainter, cx: float, cy: float,
