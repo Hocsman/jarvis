@@ -33,7 +33,7 @@ import atexit
 import webbrowser
 import urllib.parse
 from pathlib import Path
-from typing import Optional, TYPE_CHECKING
+from typing import Any, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from desktop_app.cuda_recovery import CudaRecoveryAction
@@ -66,6 +66,32 @@ from desktop_app.face_widget import FaceWindow
 
 
 _LOG_SEPARATOR = "─" * 50
+
+
+def select_face(cfg: Any, argv: list[str]) -> str:
+    """Decide which face widget the desktop tray should render.
+
+    Phase 2A promoted the choice to ``cfg.ui.face`` (config-driven). The
+    legacy ``--no-orb`` CLI flag is preserved as an override path so
+    CI / headless launches (and the documented ``scripts/run_orb.sh
+    --no-orb`` invocation) keep working without a config edit.
+
+    Decision order:
+      1. ``--no-orb`` in argv -> ``"lowpoly"``. Legacy override wins,
+         consistent with prior behaviour.
+      2. Otherwise -> ``cfg.ui.face`` (already validated by the
+         config parser to be ``"orb"`` or ``"lowpoly"`` — see
+         ``jarvis.config._VALID_FACE_VALUES``). A defensive fallback
+         to ``"orb"`` covers the case where ``cfg.ui`` is missing
+         (tests passing a partial cfg object).
+    """
+    if "--no-orb" in argv:
+        return "lowpoly"
+    ui = getattr(cfg, "ui", None)
+    face = getattr(ui, "face", None) if ui is not None else None
+    if face in ("orb", "lowpoly"):
+        return face
+    return "orb"
 
 
 def _trim_extension_modules(logs: str) -> str:
@@ -1902,8 +1928,10 @@ class JarvisSystemTray:
             # Show face window when starting, unless the reactive orb
             # is shown (the orb replaces the face — two floating
             # always-on-top windows would compete for the user's
-            # attention).
-            if "--no-orb" in sys.argv:
+            # attention). The choice now lives in ``cfg.ui.face`` with
+            # ``--no-orb`` as a legacy CLI override (see select_face).
+            from jarvis.config import load_settings as _ls
+            if select_face(_ls(), sys.argv) == "lowpoly":
                 self.face_window.show()
                 self.face_window.raise_()
 
@@ -2654,13 +2682,16 @@ def main() -> int:
                 3000
             )
 
-        # Reactive orb UI: shown by default. Pass --no-orb to disable
-        # (useful for headless CI or tray-only setups). The orb is a
-        # frameless, always-on-top window that reads state from the
-        # shared JarvisStateManager and audio from the listener
-        # observer hook.
+        # Face widget choice. ``cfg.ui.face`` drives the default
+        # ("orb" by default since Phase 2A); the legacy ``--no-orb``
+        # CLI flag remains as an override path for CI / headless
+        # launches (preserved via select_face). The orb is a frameless,
+        # always-on-top window that reads state from the shared
+        # JarvisStateManager and audio from the listener observer hook.
         orb_window = None
-        if "--no-orb" not in sys.argv:
+        from jarvis.config import load_settings as _ls
+        _face_choice = select_face(_ls(), sys.argv)
+        if _face_choice == "orb":
             try:
                 from desktop_app.orb.orb_window import OrbWindow
                 orb_window = OrbWindow()
