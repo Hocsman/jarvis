@@ -387,6 +387,24 @@ def _local_callable(name: str) -> Callable[..., Any]:
     return mapping[name]
 
 
+def _local_model_for_fallback(cfg: Any, requested_model: str) -> str:
+    """Resolve the Ollama model name to use when falling back from cloud.
+
+    The router hands the cloud functions ``chat_model="claude-sonnet-4-6"``
+    (or whatever ``cfg.llm_router.anthropic_model`` is set to). When the
+    cloud call fails and we degrade to local, we must NOT keep passing
+    that cloud name to Ollama — Ollama doesn't have it and returns 404
+    with ``"model 'claude-sonnet-4-6' not found"``, defeating the
+    fallback's whole purpose.
+
+    Swap to ``cfg.ollama_chat_model`` whenever it's present; otherwise
+    fall back to the caller's ``requested_model`` so callers that don't
+    pass a usable cfg (older tests) keep their previous behaviour.
+    """
+    local = (getattr(cfg, "ollama_chat_model", "") or "").strip()
+    return local or requested_model
+
+
 # ── Public API ──────────────────────────────────────────────────────────
 
 
@@ -414,8 +432,9 @@ def call_direct(
         if _fallback_enabled(cfg):
             debug_log("anthropic.call_direct: no client, falling back to local", "router")
             _set_path("local_fallback")
+            local_model = _local_model_for_fallback(cfg, chat_model)
             return _local_callable("direct")(
-                base_url, chat_model, system_prompt, user_content,
+                base_url, local_model, system_prompt, user_content,
                 timeout_sec=timeout_sec, thinking=thinking, num_ctx=num_ctx,
                 temperature=temperature,
             )
@@ -437,8 +456,9 @@ def call_direct(
         debug_log(f"anthropic.call_direct failed: {type(e).__name__}: {e}", "router")
         if _fallback_enabled(cfg):
             _set_path("local_fallback")
+            local_model = _local_model_for_fallback(cfg, chat_model)
             return _local_callable("direct")(
-                base_url, chat_model, system_prompt, user_content,
+                base_url, local_model, system_prompt, user_content,
                 timeout_sec=timeout_sec, thinking=thinking, num_ctx=num_ctx,
                 temperature=temperature,
             )
@@ -471,8 +491,9 @@ def call_streaming(
     if client is None:
         if _fallback_enabled(cfg):
             _set_path("local_fallback")
+            local_model = _local_model_for_fallback(cfg, chat_model)
             return _local_callable("streaming")(
-                base_url, chat_model, system_prompt, user_content,
+                base_url, local_model, system_prompt, user_content,
                 on_token=on_token, timeout_sec=timeout_sec, thinking=thinking,
             )
         _set_path("cloud")
@@ -512,8 +533,9 @@ def call_streaming(
         debug_log(f"anthropic.call_streaming failed: {type(e).__name__}: {e}", "router")
         if _fallback_enabled(cfg):
             _set_path("local_fallback")
+            local_model = _local_model_for_fallback(cfg, chat_model)
             return _local_callable("streaming")(
-                base_url, chat_model, system_prompt, user_content,
+                base_url, local_model, system_prompt, user_content,
                 on_token=on_token, timeout_sec=timeout_sec, thinking=thinking,
             )
         _set_path("cloud")
@@ -540,8 +562,9 @@ def chat_with_messages(
     if client is None:
         if _fallback_enabled(cfg):
             _set_path("local_fallback")
+            local_model = _local_model_for_fallback(cfg, chat_model)
             return _local_callable("chat")(
-                base_url, chat_model, messages,
+                base_url, local_model, messages,
                 timeout_sec=timeout_sec, extra_options=extra_options, tools=tools,
                 thinking=thinking,
             )
@@ -573,8 +596,9 @@ def chat_with_messages(
         debug_log(f"anthropic.chat_with_messages failed: {type(e).__name__}: {e}", "router")
         if _fallback_enabled(cfg):
             _set_path("local_fallback")
+            local_model = _local_model_for_fallback(cfg, chat_model)
             return _local_callable("chat")(
-                base_url, chat_model, messages,
+                base_url, local_model, messages,
                 timeout_sec=timeout_sec, extra_options=extra_options, tools=tools,
                 thinking=thinking,
             )
