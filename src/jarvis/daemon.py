@@ -482,6 +482,49 @@ def main() -> None:
     voice_thread.start()
     print("✓ Voice listener thread started (loading Whisper model in background)", flush=True)
 
+    # Phase 2C: publish mic FFT bands to a shared-memory ring so the
+    # orb in the desktop process can pulse on real audio. Best-effort:
+    # any failure (no /dev/shm, restricted seccomp, leftover segment we
+    # can't cleanup) degrades silently and the orb falls back to its
+    # shader-only animation.
+    _shm_publisher_stop: Optional[threading.Event] = None
+    _shm_publisher_thread: Optional[threading.Thread] = None
+    try:
+        from .listening.listener import register_audio_observer
+        from .utils.shm_band_bus import ShmBandWriter
+        from .utils.audio_bands import AudioBus as _DaemonAudioBus
+
+        _daemon_bus = _DaemonAudioBus()
+        _shm_writer = ShmBandWriter()
+        if _shm_writer.is_active:
+            register_audio_observer(_daemon_bus.push)
+            _shm_publisher_stop = threading.Event()
+
+            def _shm_publisher_loop():
+                # 60 Hz tick — matches the orb's render frame budget.
+                period = 1.0 / 60.0
+                while not _shm_publisher_stop.is_set():
+                    try:
+                        bands = _daemon_bus.read_bands()
+                        _shm_writer.publish(bands.rms, bands.bass, bands.mid, bands.high)
+                    except Exception as _e:
+                        debug_log(f"shm publisher tick failed: {_e}", "orb")
+                    _shm_publisher_stop.wait(period)
+                try:
+                    _shm_writer.close()
+                except Exception:
+                    pass
+
+            _shm_publisher_thread = threading.Thread(
+                target=_shm_publisher_loop, name="shm-band-publisher", daemon=True,
+            )
+            _shm_publisher_thread.start()
+            print("🟠 Orb audio publisher started (shm)", flush=True)
+        else:
+            _shm_writer.close()
+    except Exception as _orb_pub_err:
+        debug_log(f"shm orb publisher disabled: {_orb_pub_err}", "orb")
+
     # Initialize dictation engine (hold-to-dictate)
     dictation = None
     if bool(getattr(cfg, "dictation_enabled", True)):

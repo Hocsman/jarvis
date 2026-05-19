@@ -497,6 +497,37 @@ Get API key at [composio.dev](https://composio.dev)
 
 </details>
 
+## Auto-start at login (macOS)
+
+A LaunchAgent ships under `scripts/launchagent/` so Jarvis can boot automatically with your user session. If you also use a cloud LLM API key in a follow-up patch, the key is read at boot from the macOS keychain via the wrapper script (it never lands in the `.plist` file or in environment listings).
+
+```bash
+# Optionally export your key so the install script stores it in keychain.
+# Skip this line to run with whatever provider config your config.json picks.
+export ANTHROPIC_API_KEY=sk-ant-...
+
+# Preview what install will do without changing anything.
+bash scripts/install_launch_agent.sh --dry-run
+
+# Install for real. Re-run any time the repo path / mamba env / key changes.
+bash scripts/install_launch_agent.sh
+```
+
+Logs land in `~/Library/Logs/Jarvis/stdout.log` and `~/Library/Logs/Jarvis/stderr.log`.
+
+```bash
+# Uninstall (keeps the keychain entry by default).
+bash scripts/uninstall_launch_agent.sh
+
+# Full uninstall including the keychain entry.
+bash scripts/uninstall_launch_agent.sh --purge-keychain
+```
+
+Key flow:
+- The plist invokes `scripts/launchagent/jarvis_daemon_wrapper.sh`.
+- The wrapper calls `security find-generic-password -w -s jarvis-anthropic -a "$USER"` to fetch the key, exports `ANTHROPIC_API_KEY`, then `exec`'s `python -m jarvis.main`.
+- Missing keychain entry is non-fatal: the daemon starts and runs with whatever provider its config.json points at.
+
 ## Troubleshooting
 
 <details>
