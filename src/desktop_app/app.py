@@ -33,7 +33,7 @@ import atexit
 import webbrowser
 import urllib.parse
 from pathlib import Path
-from typing import Optional, TYPE_CHECKING
+from typing import Any, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from desktop_app.cuda_recovery import CudaRecoveryAction
@@ -66,6 +66,32 @@ from desktop_app.face_widget import FaceWindow
 
 
 _LOG_SEPARATOR = "─" * 50
+
+
+def select_face(cfg: Any, argv: list[str]) -> str:
+    """Decide which face widget the desktop tray should render.
+
+    Phase 2A promoted the choice to ``cfg.ui.face`` (config-driven). The
+    legacy ``--no-orb`` CLI flag is preserved as an override path so
+    CI / headless launches (and the documented ``scripts/run_orb.sh
+    --no-orb`` invocation) keep working without a config edit.
+
+    Decision order:
+      1. ``--no-orb`` in argv -> ``"lowpoly"``. Legacy override wins,
+         consistent with prior behaviour.
+      2. Otherwise -> ``cfg.ui.face`` (already validated by the
+         config parser to be ``"orb"`` or ``"lowpoly"`` — see
+         ``jarvis.config._VALID_FACE_VALUES``). A defensive fallback
+         to ``"orb"`` covers the case where ``cfg.ui`` is missing
+         (tests passing a partial cfg object).
+    """
+    if "--no-orb" in argv:
+        return "lowpoly"
+    ui = getattr(cfg, "ui", None)
+    face = getattr(ui, "face", None) if ui is not None else None
+    if face in ("orb", "lowpoly"):
+        return face
+    return "orb"
 
 
 def _trim_extension_modules(logs: str) -> str:
@@ -1899,9 +1925,15 @@ class JarvisSystemTray:
                 2000
             )
 
-            # Show face window when starting
-            self.face_window.show()
-            self.face_window.raise_()
+            # Show face window when starting, unless the reactive orb
+            # is shown (the orb replaces the face — two floating
+            # always-on-top windows would compete for the user's
+            # attention). The choice now lives in ``cfg.ui.face`` with
+            # ``--no-orb`` as a legacy CLI override (see select_face).
+            from jarvis.config import load_settings as _ls
+            if select_face(_ls(), sys.argv) == "lowpoly":
+                self.face_window.show()
+                self.face_window.raise_()
 
             debug_log("daemon started from desktop app", "desktop")
 
@@ -2649,6 +2681,63 @@ def main() -> int:
                 QSystemTrayIcon.MessageIcon.Information,
                 3000
             )
+
+        # Face widget choice. ``cfg.ui.face`` drives the default
+        # ("orb" by default since Phase 2A); the legacy ``--no-orb``
+        # CLI flag remains as an override path for CI / headless
+        # launches (preserved via select_face). The orb is a frameless,
+        # always-on-top window that reads state from the shared
+        # JarvisStateManager and audio from the listener observer hook.
+        orb_window = None
+        orb_audio_adapter = None
+        from jarvis.config import load_settings as _ls
+        _face_choice = select_face(_ls(), sys.argv)
+        if _face_choice == "orb":
+            try:
+                from desktop_app.orb.orb_window import OrbWindow
+                # Phase 2C: attach a ShmBackedAudioBus so the orb pulses
+                # on real mic audio published by the daemon subprocess.
+                # When no daemon is running yet (or SHM is unavailable),
+                # the adapter is inactive and the orb falls back to its
+                # shader-only animation — same as Phase 1 behaviour.
+                try:
+                    from jarvis.utils.shm_band_bus import ShmBackedAudioBus
+                    orb_audio_adapter = ShmBackedAudioBus()
+                    if orb_audio_adapter.is_active:
+                        print("🔊 Orb audio: connected to daemon SHM publisher", flush=True)
+                    else:
+                        print("🔇 Orb audio: SHM publisher not running yet (orb on synthetic motion)", flush=True)
+                except Exception as adapter_err:
+                    debug_log(f"shm audio adapter init failed: {adapter_err}", "orb")
+                    orb_audio_adapter = None
+
+                # Phase 2D: respect cfg.ui.orb_particles_enabled
+                # for users who want a quieter orb or run on
+                # constrained hardware.
+                _orb_cfg_for_particles = _ls()
+                _orb_particles_on = bool(getattr(
+                    getattr(_orb_cfg_for_particles, "ui", None),
+                    "orb_particles_enabled",
+                    True,
+                ))
+                orb_window = OrbWindow(
+                    audio_bus=orb_audio_adapter,
+                    particles_enabled=_orb_particles_on,
+                )
+                orb_window.show_orb()
+                print("🟠 Reactive orb shown (toggle: cmd+shift+J, hide: --no-orb)", flush=True)
+            except Exception as orb_err:
+                # Non-fatal: orb failures must not crash the tray.
+                debug_log(f"orb init failed: {orb_err}\n{traceback.format_exc()}", "orb")
+                print(f"⚠️ Orb failed to start: {orb_err}", flush=True)
+                # Make sure we don't leak the SHM reader if the orb
+                # window itself failed to construct.
+                if orb_audio_adapter is not None:
+                    try:
+                        orb_audio_adapter.close()
+                    except Exception:
+                        pass
+                    orb_audio_adapter = None
 
         print("Starting event loop...", flush=True)
         return tray_instance.run()

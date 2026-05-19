@@ -66,6 +66,37 @@ def _default_db_path() -> str:
     return str(base / "jarvis.db")
 
 
+# Allowed values for ``UISettings.face``. Kept module-level so tests and
+# the parser share one source of truth — adding a third face later means
+# touching exactly one set.
+_VALID_FACE_VALUES: frozenset = frozenset({"orb", "lowpoly"})
+
+
+@dataclass(frozen=True)
+class UISettings:
+    """Desktop-app UI choices.
+
+    Phase 2A introduces the first config-driven UI knob: which face
+    widget to render. Until now the choice lived in a CLI flag
+    (``--no-orb``); promoting it to config lets users persist the
+    preference without editing launch scripts. The CLI flag is kept
+    as a legacy override for CI / headless paths (see
+    ``desktop_app.app.select_face``).
+    """
+
+    # ``"orb"`` (Phase 1 reactive icosphere) or ``"lowpoly"`` (the
+    # original Jarvis face). Invalid values fall back to ``"orb"``
+    # with a debug_log warning at parse time.
+    face: str
+
+    # Orb ambient particles toggle. Phase 2D ties particle size and
+    # speed to the audio mid/high bands; users on lower-end hardware
+    # who notice frame drops, or who simply prefer the orb without
+    # sparkles, can disable the particle layer via
+    # ``"ui": {"orb_particles_enabled": false}`` in config.json.
+    orb_particles_enabled: bool
+
+
 @dataclass(frozen=True)
 class Settings:
     # Database & Storage
@@ -269,6 +300,11 @@ class Settings:
 
     # MCP Integration
     mcps: Dict[str, Any]
+
+    # Desktop UI choices (Phase 2A). Default face is the reactive orb;
+    # users can revert to the original low-poly face via
+    # ``"ui": {"face": "lowpoly"}`` in config.json.
+    ui: UISettings
 
 
 
@@ -599,6 +635,19 @@ def get_default_config() -> Dict[str, Any]:
 
         # MCP Integration (external servers Jarvis can use). No defaults.
         "mcps": {},
+
+        # Desktop UI (Phase 2A+). Knobs:
+        #   face: "orb" (default, reactive icosphere) or "lowpoly"
+        #         (original Jarvis face). Legacy ``--no-orb`` CLI flag
+        #         still overrides this value (see select_face).
+        #   orb_particles_enabled: whether the orb renders its ambient
+        #         particle layer (default True). Set false to skip
+        #         the particle draw entirely (perf or aesthetic
+        #         preference).
+        "ui": {
+            "face": "orb",
+            "orb_particles_enabled": True,
+        },
     }
 
 
@@ -803,6 +852,41 @@ def load_settings() -> Settings:
     raw_dict = merged.get("dictation_custom_dictionary", [])
     dictation_custom_dictionary = list(raw_dict) if isinstance(raw_dict, list) else []
     mcps = _ensure_dict(merged.get("mcps"))
+
+    # Parse ui subsection. ``ui.face`` accepts only members of
+    # ``_VALID_FACE_VALUES`` (orb/lowpoly). An unknown value emits a
+    # debug_log warning and falls back to ``"orb"`` so a typo in the
+    # config can't bork the desktop app. A missing ``ui`` key falls
+    # back silently (no warning) — that's the fresh-install path.
+    raw_ui = merged.get("ui", {})
+    if not isinstance(raw_ui, dict):
+        raw_ui = {}
+    if "face" in raw_ui:
+        face_value = str(raw_ui.get("face") or "").strip().lower()
+        if face_value not in _VALID_FACE_VALUES:
+            # Lazy-import to avoid the ``debug -> config`` cycle (debug.py
+            # imports ``load_settings``). Falling back silently with a
+            # stderr-visible breadcrumb is safer than failing the whole
+            # config load on a single typo.
+            from .debug import debug_log as _debug_log
+            _debug_log(
+                f"config: ui.face={face_value!r} is not one of "
+                f"{sorted(_VALID_FACE_VALUES)}; falling back to 'orb'",
+                "config",
+            )
+            face_value = "orb"
+    else:
+        face_value = "orb"
+    # Particle toggle. Default True for backwards compatibility.
+    # Coerced via bool() so common JSON quirks (the string "false" or
+    # the integer 0) still resolve sensibly when users hand-edit.
+    raw_particles = raw_ui.get("orb_particles_enabled", True)
+    if isinstance(raw_particles, str):
+        orb_particles_enabled = raw_particles.strip().lower() not in {"false", "0", "no", "off"}
+    else:
+        orb_particles_enabled = bool(raw_particles)
+    ui = UISettings(face=face_value, orb_particles_enabled=orb_particles_enabled)
+
     whisper_min_confidence = float(merged.get("whisper_min_confidence", 0.4))
     whisper_no_speech_threshold = float(merged.get("whisper_no_speech_threshold", 0.5))
     whisper_min_audio_duration = float(merged.get("whisper_min_audio_duration", 0.3))
@@ -949,4 +1033,7 @@ def load_settings() -> Settings:
 
         # MCP Integration
         mcps=mcps,
+
+        # Desktop UI
+        ui=ui,
     )
