@@ -84,10 +84,10 @@ class Settings:
     embedding_base_url: str
     embedding_api_key: str
     embedding_model: str
-    # Compatibility aliases — populated alongside the provider-aware
-    # fields. Code paths that have not yet been migrated to the factory
-    # read these. `ollama_base_url`/`ollama_chat_model`/`ollama_embed_model`
-    # retain the same meaning they had before PR 2.
+    # Disk-format aliases. Older config files name these fields, so they
+    # stay readable here; the loader promotes their values into the
+    # provider-aware fields above so everything inside the codebase reads
+    # ``llm_*`` / ``embedding_*`` only.
     ollama_base_url: str
     ollama_embed_model: str
     ollama_chat_model: str
@@ -207,10 +207,10 @@ class Settings:
     agentic_max_turns: int
     tool_selection_strategy: str  # "all", "keyword", "embedding", or "llm"
     # When `tool_selection_strategy == "llm"`, this model does the routing.
-    # Empty string means "reuse `ollama_chat_model`" (the default).
+    # Empty string means "reuse ``llm_chat_model``" (the default).
     tool_router_model: str
     # Optional override for the post-turn evaluator LLM. Empty string means
-    # "fall back to intent_judge_model, then ollama_chat_model" (the default).
+    # "fall back to intent_judge_model, then ``llm_chat_model``" (the default).
     evaluator_model: str
     # None = auto (on for SMALL models, off for LARGE). Explicit true/false forces.
     evaluator_enabled: Optional[bool]
@@ -225,7 +225,7 @@ class Settings:
     evaluator_nudge_max: int
     # Optional override for the pre-loop task-list planner model. Empty
     # string means "fall back to tool_router_model → intent_judge_model →
-    # ollama_chat_model" (the default). The planner is a small
+    # ``llm_chat_model``" (the default). The planner is a small
     # classification-shaped pass so it rides the same small-model chain
     # as the router and the evaluator.
     planner_model: str
@@ -334,11 +334,11 @@ def _migrate_config(cfg_path: Path, cfg_json: Dict[str, Any]) -> Dict[str, Any]:
         cfg_json["_config_version"] = 1
         modified = True
 
-    # Migration v2: introduce provider-aware llm_* / embedding_* keys.
-    # Existing installs keep their behaviour: llm_provider defaults to
-    # "ollama" and the llm_* / embedding_* fields are filled from the
-    # ollama_* fields they already have. The old keys remain in place so
-    # any code path that still reads them works unchanged.
+    # Migration v2: promote any ``ollama_*`` keys on disk into the
+    # provider-aware ``llm_*`` / ``embedding_*`` shape. Default
+    # ``llm_provider`` is ``"ollama"`` so existing installs keep their
+    # behaviour. The old keys are left in place on disk so a downgrade
+    # to an older Jarvis build still finds them.
     if migration_version < 2:
         if "llm_provider" not in cfg_json:
             cfg_json["llm_provider"] = "ollama"
@@ -420,10 +420,11 @@ def get_default_config() -> Dict[str, Any]:
         "sqlite_vss_path": None,
 
         # LLM & AI Models
-        # Provider-aware fields (PR 2). Default provider is "ollama" so
-        # existing installs keep working without re-configuration. The
-        # `ollama_*` fields below are kept for backwards compatibility
-        # with code paths that have not yet been migrated to the factory.
+        # Provider-aware fields. Default provider is ``ollama`` so a fresh
+        # install needs no extra configuration. The ``ollama_*`` fields are
+        # disk-format aliases for older config files; the loader promotes
+        # their values into ``llm_*`` / ``embedding_*`` so everything inside
+        # the codebase reads the provider-aware keys only.
         "llm_provider": "ollama",
         "llm_base_url": "",  # falls back to ollama_base_url when empty
         "llm_api_key": "",
@@ -648,23 +649,35 @@ def load_settings() -> Settings:
     ollama_embed_model = str(merged.get("ollama_embed_model"))
     ollama_chat_model = str(merged.get("ollama_chat_model"))
 
-    # Provider-aware fields. Empty string in any of llm_base_url /
-    # llm_chat_model / embedding_model is treated as "use the
-    # corresponding ollama_* field" so existing configs keep working
-    # without a re-save (the v2 migration also fills them in on disk).
+    # Provider-aware fields. The two field sets are per-provider: the
+    # ``ollama_*`` fields are authoritative when the provider is Ollama,
+    # the ``llm_*`` / ``embedding_*`` fields when it is OpenAI-compatible.
+    # Resolving the active model this way (rather than a blanket
+    # ``llm_chat_model or ollama_chat_model``) keeps the Ollama model
+    # picker — which writes ``ollama_chat_model`` — authoritative on the
+    # Ollama path, so a stale ``llm_chat_model`` (e.g. promoted by the v2
+    # migration) can never shadow it.
     llm_provider = str(merged.get("llm_provider", "ollama") or "ollama").strip().lower()
     if llm_provider not in ("ollama", "openai_compatible"):
         llm_provider = "ollama"
     llm_base_url = str(merged.get("llm_base_url", "") or "").strip() or ollama_base_url
     llm_api_key = str(merged.get("llm_api_key", "") or "").strip()
-    llm_chat_model = str(merged.get("llm_chat_model", "") or "").strip() or ollama_chat_model
+    if llm_provider == "openai_compatible":
+        llm_chat_model = str(merged.get("llm_chat_model", "") or "").strip() or ollama_chat_model
+    else:
+        llm_chat_model = ollama_chat_model
     embedding_provider_raw = str(merged.get("embedding_provider", "") or "").strip().lower()
     if embedding_provider_raw not in ("", "ollama", "openai_compatible"):
         embedding_provider_raw = ""
     embedding_provider = embedding_provider_raw
     embedding_base_url = str(merged.get("embedding_base_url", "") or "").strip()
     embedding_api_key = str(merged.get("embedding_api_key", "") or "").strip()
-    embedding_model = str(merged.get("embedding_model", "") or "").strip() or ollama_embed_model
+    # Effective embedding provider inherits the chat provider when unset.
+    _effective_embed_provider = embedding_provider or llm_provider
+    if _effective_embed_provider == "openai_compatible":
+        embedding_model = str(merged.get("embedding_model", "") or "").strip() or ollama_embed_model
+    else:
+        embedding_model = ollama_embed_model
     use_stdin = bool(merged.get("use_stdin", False))
     active_profiles = _ensure_list(merged.get("active_profiles"))
     tts_enabled = bool(merged.get("tts_enabled", True))
