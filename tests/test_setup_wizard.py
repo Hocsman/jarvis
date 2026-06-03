@@ -20,6 +20,8 @@ from desktop_app.setup_wizard import (
     OllamaStatus,
     MCPPage,
     SearchProvidersPage,
+    ProviderChoicePage,
+    OpenAICompatiblePage,
 )
 from desktop_app.mcp_catalogue import get_wizard_entries
 from jarvis.config import DEFAULT_CHAT_MODEL
@@ -138,6 +140,58 @@ class TestGetRequiredModels:
             assert len(models) == 2
             assert "gemma4:e2b" in models
             assert "nomic-embed-text" in models
+
+    def _cfg(self, **over):
+        from types import SimpleNamespace
+        base = dict(
+            llm_provider="ollama",
+            embedding_provider="",
+            ollama_chat_model="gemma4:e2b",
+            ollama_embed_model="nomic-embed-text",
+            intent_judge_model="gemma4:e2b",
+        )
+        base.update(over)
+        return SimpleNamespace(**base)
+
+    def test_pure_ollama_requires_chat_embed_judge(self):
+        """The default local setup needs the chat model, embed model, and
+        (distinct) intent-judge model — all pulled from Ollama."""
+        cfg = self._cfg(llm_provider="ollama", ollama_chat_model="gpt-oss:20b")
+        with patch("desktop_app.setup_wizard.load_settings", return_value=cfg):
+            models = get_required_models()
+        assert models == ["gpt-oss:20b", "nomic-embed-text", "gemma4:e2b"]
+
+    def test_pure_openai_requires_no_ollama_models(self):
+        """Chat, judge, and embeddings all remote: nothing to pull locally."""
+        cfg = self._cfg(llm_provider="openai_compatible", embedding_provider="")
+        with patch("desktop_app.setup_wizard.load_settings", return_value=cfg):
+            models = get_required_models()
+        assert models == []
+
+    def test_openai_chat_with_ollama_embeddings_requires_only_embed_model(self):
+        """The advanced split: chat/judge remote, embeddings on Ollama. Only
+        the embedding model must be present locally — not the remote chat
+        model name, not the intent-judge model."""
+        cfg = self._cfg(
+            llm_provider="openai_compatible",
+            embedding_provider="ollama",
+            ollama_chat_model="some-remote-model",
+        )
+        with patch("desktop_app.setup_wizard.load_settings", return_value=cfg):
+            models = get_required_models()
+        assert models == ["nomic-embed-text"]
+
+    def test_ollama_chat_with_openai_embeddings_skips_embed_model(self):
+        """Chat/judge on Ollama, embeddings remote: pull chat + judge, not
+        the Ollama embed model."""
+        cfg = self._cfg(
+            llm_provider="ollama",
+            embedding_provider="openai_compatible",
+            ollama_chat_model="gpt-oss:20b",
+        )
+        with patch("desktop_app.setup_wizard.load_settings", return_value=cfg):
+            models = get_required_models()
+        assert models == ["gpt-oss:20b", "gemma4:e2b"]
 
 
 class TestCheckInstalledModels:
@@ -317,6 +371,211 @@ class TestShouldShowSetupWizard:
 
         with patch("desktop_app.setup_wizard.check_ollama_status", return_value=mock_status):
             assert should_show_setup_wizard() is True
+
+    def test_returns_false_for_openai_compatible_provider(self):
+        """An OpenAI-compatible user has opted out of the local Ollama
+        stack, so the Ollama-centric wizard must never auto-show even if
+        the Ollama CLI is absent."""
+        from types import SimpleNamespace
+        missing_cli = OllamaStatus(
+            is_cli_installed=False,
+            is_server_running=False,
+            missing_models=["llama2:7b"],
+        )
+        cfg = SimpleNamespace(llm_provider="openai_compatible")
+        with patch("desktop_app.setup_wizard.load_settings", return_value=cfg), \
+             patch("desktop_app.setup_wizard.check_ollama_status", return_value=missing_cli):
+            assert should_show_setup_wizard() is False
+
+
+class TestProviderChoicePage:
+    """The first real wizard decision: which runtime serves the LLM."""
+
+    def test_validate_writes_openai_compatible_provider(self):
+        """Selecting the OpenAI-compatible card persists llm_provider."""
+        import tempfile, json
+        from pathlib import Path
+        page = ProviderChoicePage.__new__(ProviderChoicePage)
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            f.write("{}")
+            cfg_path = Path(f.name)
+        try:
+            with patch("jarvis.config.default_config_path", return_value=cfg_path):
+                page._selected = "openai_compatible"
+                assert page.validatePage() is True
+            saved = json.loads(cfg_path.read_text())
+            assert saved["llm_provider"] == "openai_compatible"
+        finally:
+            cfg_path.unlink(missing_ok=True)
+
+    def test_validate_removes_provider_override_for_ollama(self):
+        """Selecting Ollama clears the openai_compatible overrides so the
+        Ollama settings become authoritative again (no stale base URL /
+        model / key left pointing at a former OpenAI-compatible server)."""
+        import tempfile, json
+        from pathlib import Path
+        page = ProviderChoicePage.__new__(ProviderChoicePage)
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({
+                "llm_provider": "openai_compatible",
+                "llm_base_url": "http://localhost:1234/v1",
+                "llm_api_key": "sk-x",
+                "llm_chat_model": "lmstudio/gemma",
+                "embedding_model": "text-embedding-3-small",
+            }, f)
+            cfg_path = Path(f.name)
+        try:
+            with patch("jarvis.config.default_config_path", return_value=cfg_path):
+                page._selected = "ollama"
+                assert page.validatePage() is True
+            saved = json.loads(cfg_path.read_text())
+            assert saved.get("llm_provider", "ollama") == "ollama"
+            for stale in ("llm_base_url", "llm_api_key", "llm_chat_model",
+                          "embedding_model", "embedding_base_url", "embedding_api_key"):
+                assert stale not in saved, f"{stale} must be cleared on the Ollama path"
+        finally:
+            cfg_path.unlink(missing_ok=True)
+
+    def test_nextid_routes_openai_to_config_page(self):
+        """OpenAI-compatible selection jumps to the connection-config page."""
+        page = ProviderChoicePage.__new__(ProviderChoicePage)
+        page._selected = "openai_compatible"
+        wizard = MagicMock()
+        wizard.openai_compat_page_id = 42
+        page.wizard = MagicMock(return_value=wizard)
+        # isinstance check in nextId: make wizard look like SetupWizard
+        with patch("desktop_app.setup_wizard.SetupWizard", MagicMock):
+            assert page.nextId() == 42
+
+    def test_preselects_openai_from_existing_config(self, qapp):
+        """Re-running the wizard reflects the saved provider: an existing
+        openai_compatible config preselects the OpenAI card."""
+        import tempfile, json
+        from pathlib import Path
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({"llm_provider": "openai_compatible"}, f)
+            cfg_path = Path(f.name)
+        try:
+            with patch("jarvis.config.default_config_path", return_value=cfg_path):
+                page = ProviderChoicePage()  # __init__ calls _preselect_from_config
+            assert page._selected == "openai_compatible"
+            assert page._openai_radio.isChecked() is True
+        finally:
+            cfg_path.unlink(missing_ok=True)
+
+    def test_preselects_ollama_by_default(self, qapp):
+        """A config without llm_provider (the default install) preselects Ollama."""
+        import tempfile, json
+        from pathlib import Path
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            f.write("{}")
+            cfg_path = Path(f.name)
+        try:
+            with patch("jarvis.config.default_config_path", return_value=cfg_path):
+                page = ProviderChoicePage()
+            assert page._selected == "ollama"
+            assert page._ollama_radio.isChecked() is True
+        finally:
+            cfg_path.unlink(missing_ok=True)
+
+
+class TestOpenAICompatiblePage:
+    """Collects the OpenAI-compatible connection details."""
+
+    def test_incomplete_without_base_url_and_model(self):
+        page = OpenAICompatiblePage.__new__(OpenAICompatiblePage)
+        page._base_url = ""
+        page._chat_model = ""
+        assert page._is_ready("", "") is False
+        assert page._is_ready("http://localhost:1234/v1", "") is False
+        assert page._is_ready("", "gemma") is False
+        assert page._is_ready("http://localhost:1234/v1", "gemma") is True
+
+    def test_validate_writes_connection_fields(self):
+        import tempfile, json
+        from pathlib import Path
+        page = OpenAICompatiblePage.__new__(OpenAICompatiblePage)
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({"llm_provider": "openai_compatible"}, f)
+            cfg_path = Path(f.name)
+        try:
+            with patch("jarvis.config.default_config_path", return_value=cfg_path):
+                page._read_inputs = MagicMock(return_value=(
+                    "http://localhost:1234/v1", "sk-secret", "lmstudio/gemma", "text-embed-3",
+                ))
+                assert page.validatePage() is True
+            saved = json.loads(cfg_path.read_text())
+            assert saved["llm_provider"] == "openai_compatible"
+            assert saved["llm_base_url"] == "http://localhost:1234/v1"
+            assert saved["llm_api_key"] == "sk-secret"
+            assert saved["llm_chat_model"] == "lmstudio/gemma"
+            assert saved["embedding_model"] == "text-embed-3"
+        finally:
+            cfg_path.unlink(missing_ok=True)
+
+    def test_validate_omits_empty_optional_fields(self):
+        """API key and embedding model are optional; empty values are not
+        persisted, keeping config.json minimal."""
+        import tempfile, json
+        from pathlib import Path
+        page = OpenAICompatiblePage.__new__(OpenAICompatiblePage)
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            f.write("{}")
+            cfg_path = Path(f.name)
+        try:
+            with patch("jarvis.config.default_config_path", return_value=cfg_path):
+                page._read_inputs = MagicMock(return_value=(
+                    "http://localhost:1234/v1", "", "lmstudio/gemma", "",
+                ))
+                assert page.validatePage() is True
+            saved = json.loads(cfg_path.read_text())
+            assert "llm_api_key" not in saved
+            assert "embedding_model" not in saved
+        finally:
+            cfg_path.unlink(missing_ok=True)
+
+    def test_nextid_skips_ollama_pages(self):
+        """After configuring the remote provider, the wizard jumps straight
+        to Whisper setup — the Ollama install/server/models pages are
+        irrelevant."""
+        page = OpenAICompatiblePage.__new__(OpenAICompatiblePage)
+        wizard = MagicMock()
+        wizard.mlx_whisper_page_id = 7
+        page.wizard = MagicMock(return_value=wizard)
+        with patch("desktop_app.setup_wizard.SetupWizard", MagicMock):
+            assert page.nextId() == 7
+
+    def test_initialize_page_prefills_from_existing_config(self, qapp):
+        """Re-running the wizard restores the user's saved connection
+        details into the form fields so they are not re-typed."""
+        import tempfile, json
+        from pathlib import Path
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({
+                "llm_provider": "openai_compatible",
+                "llm_base_url": "http://lmstudio:1234/v1",
+                "llm_api_key": "sk-saved",
+                "llm_chat_model": "lmstudio/gemma",
+                "embedding_model": "text-embed-3",
+            }, f)
+            cfg_path = Path(f.name)
+        try:
+            page = OpenAICompatiblePage()
+            with patch("jarvis.config.default_config_path", return_value=cfg_path):
+                page.initializePage()
+            assert page._base_url_input.text() == "http://lmstudio:1234/v1"
+            assert page._api_key_input.text() == "sk-saved"
+            assert page._chat_model_input.text() == "lmstudio/gemma"
+            assert page._embed_model_input.text() == "text-embed-3"
+            # The API key field stays masked even when pre-filled.
+            from PyQt6.QtWidgets import QLineEdit
+            assert page._api_key_input.echoMode() == QLineEdit.EchoMode.Password
+        finally:
+            cfg_path.unlink(missing_ok=True)
 
 
 class TestOllamaStatusDataclass:
