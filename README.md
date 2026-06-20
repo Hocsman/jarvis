@@ -539,6 +539,8 @@ Get API key at [composio.dev](https://composio.dev)
 
 **Jarvis doesn't hear me** - Check microphone permissions, speak clearly after "Jarvis"
 
+**Not sure what is running** - Open the tray menu and click **🩺 Runtime Status**. It shows whether Jarvis is listening, whether Ollama is needed/running, which models are configured, and how many MCP servers are enabled.
+
 **Responses are slow** - Ensure you have enough VRAM (8GB+ for default model; see System Requirements for other models)
 
 **Mac is still warm after quitting** - If Jarvis starts Ollama for you, quitting Jarvis also stops that owned Ollama runtime. If Ollama was already running before Jarvis opened, Jarvis leaves it running so it does not interrupt your other local AI tools.
