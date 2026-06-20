@@ -79,6 +79,138 @@ class OllamaRuntimeOwnership:
     stopped: bool = False
 
 
+@dataclass(frozen=True)
+class RuntimeStatusSnapshot:
+    """Current desktop runtime state shown in the tray diagnostics dialog."""
+
+    daemon_state: str
+    daemon_mode: str
+    daemon_pid: Optional[int]
+    ollama_needed: bool
+    ollama_running: bool
+    ollama_version: Optional[str]
+    ollama_owner: str
+    ollama_launch_method: str
+    llm_provider: str
+    chat_model: str
+    embedding_provider: str
+    embedding_model: str
+    mcp_count: int
+
+
+def _collect_runtime_status_snapshot(
+    *,
+    is_listening: bool,
+    is_bundled: bool,
+    daemon_process,
+    daemon_thread,
+    ollama_runtime_ownership: Optional[OllamaRuntimeOwnership],
+    settings_loader=None,
+    ollama_checker=None,
+) -> RuntimeStatusSnapshot:
+    """Collect runtime status without mutating desktop or daemon state."""
+    if settings_loader is None:
+        from jarvis.config import load_settings as settings_loader
+    if ollama_checker is None:
+        from desktop_app.setup_wizard import check_ollama_server as ollama_checker
+
+    cfg = None
+    try:
+        cfg = settings_loader()
+        ollama_needed, _chat_on_ollama = _ollama_runtime_flags(cfg)
+    except Exception as exc:
+        debug_log(f"runtime status config load failed: {exc}", "desktop")
+        ollama_needed = True
+
+    try:
+        ollama_running, ollama_version = ollama_checker()
+    except Exception as exc:
+        debug_log(f"runtime status Ollama check failed: {exc}", "desktop")
+        ollama_running, ollama_version = False, None
+
+    daemon_pid = None
+    if is_listening:
+        if daemon_process is not None:
+            daemon_pid = getattr(daemon_process, "pid", None)
+        elif is_bundled and daemon_thread is not None:
+            daemon_pid = os.getpid()
+
+    ownership = ollama_runtime_ownership or OllamaRuntimeOwnership()
+    if ownership.started_by_jarvis and not ownership.stopped:
+        ollama_owner = "Jarvis"
+    elif ollama_running:
+        ollama_owner = "External"
+    else:
+        ollama_owner = "None"
+
+    llm_provider = "unknown"
+    chat_model = "unknown"
+    embedding_provider = "unknown"
+    embedding_model = "unknown"
+    mcp_count = 0
+    if cfg is not None:
+        llm_provider = str(getattr(cfg, "llm_provider", "") or "unknown")
+        chat_model = str(getattr(cfg, "llm_chat_model", "") or "unknown")
+        embedding_provider = str(
+            getattr(cfg, "embedding_provider", "") or llm_provider or "unknown"
+        )
+        embedding_model = str(getattr(cfg, "embedding_model", "") or "unknown")
+        mcps = getattr(cfg, "mcps", {}) or {}
+        mcp_count = len(mcps) if isinstance(mcps, dict) else 0
+
+    return RuntimeStatusSnapshot(
+        daemon_state="Listening" if is_listening else "Stopped",
+        daemon_mode="bundled" if is_bundled else "subprocess",
+        daemon_pid=daemon_pid,
+        ollama_needed=ollama_needed,
+        ollama_running=ollama_running,
+        ollama_version=ollama_version,
+        ollama_owner=ollama_owner,
+        ollama_launch_method=ownership.launch_method or "n/a",
+        llm_provider=llm_provider,
+        chat_model=chat_model,
+        embedding_provider=embedding_provider,
+        embedding_model=embedding_model,
+        mcp_count=mcp_count,
+    )
+
+
+def _format_runtime_status(snapshot: RuntimeStatusSnapshot) -> str:
+    """Format a runtime status snapshot for the tray diagnostics dialog."""
+    pid = str(snapshot.daemon_pid) if snapshot.daemon_pid is not None else "n/a"
+    ollama_running = (
+        f"Yes ({snapshot.ollama_version})"
+        if snapshot.ollama_running and snapshot.ollama_version
+        else "Yes"
+        if snapshot.ollama_running
+        else "No"
+    )
+    return "\n".join(
+        [
+            "🩺 Runtime Status",
+            "",
+            "🎙️ Assistant",
+            f"  State: {snapshot.daemon_state}",
+            f"  Mode: {snapshot.daemon_mode}",
+            f"  PID: {pid}",
+            "",
+            "🦙 Ollama",
+            f"  Needed: {'Yes' if snapshot.ollama_needed else 'No'}",
+            f"  Running: {ollama_running}",
+            f"  Owner: {snapshot.ollama_owner}",
+            f"  Launch method: {snapshot.ollama_launch_method}",
+            "",
+            "🧠 Models",
+            f"  Provider: {snapshot.llm_provider}",
+            f"  Chat: {snapshot.chat_model}",
+            f"  Embeddings: {snapshot.embedding_provider} / {snapshot.embedding_model}",
+            "",
+            "🔌 MCP",
+            f"  Configured servers: {snapshot.mcp_count}",
+        ]
+    )
+
+
 def _stop_owned_ollama_runtime(
     ownership: Optional[OllamaRuntimeOwnership],
     *,
@@ -1501,6 +1633,11 @@ class JarvisSystemTray:
         self.settings_action.triggered.connect(self.show_settings)
         self.menu.addAction(self.settings_action)
 
+        # Runtime diagnostics action
+        self.runtime_status_action = QAction("🩺 Runtime Status")
+        self.runtime_status_action.triggered.connect(self.show_runtime_status)
+        self.menu.addAction(self.runtime_status_action)
+
         # Check for updates action
         self.check_updates_action = QAction("🔄 Check for Updates")
         self.check_updates_action.triggered.connect(lambda: self.check_for_updates(show_no_update_dialog=True))
@@ -1652,6 +1789,29 @@ class JarvisSystemTray:
             if reply == QMessageBox.StandardButton.Yes:
                 self.stop_daemon()
                 self.start_daemon()
+
+    def collect_runtime_status(self) -> RuntimeStatusSnapshot:
+        """Collect current runtime state for the tray diagnostics dialog."""
+        return _collect_runtime_status_snapshot(
+            is_listening=self.is_listening,
+            is_bundled=self.is_bundled,
+            daemon_process=self.daemon_process,
+            daemon_thread=self.daemon_thread,
+            ollama_runtime_ownership=self._ollama_runtime_ownership,
+        )
+
+    def show_runtime_status(self) -> None:
+        """Show a compact diagnostic summary of Jarvis' active runtime."""
+        from PyQt6.QtWidgets import QMessageBox
+
+        snapshot = self.collect_runtime_status()
+        msg = QMessageBox()
+        msg.setIcon(QMessageBox.Icon.Information)
+        msg.setWindowTitle("Runtime Status")
+        msg.setText("🩺 Runtime Status")
+        msg.setInformativeText(_format_runtime_status(snapshot))
+        msg.setStyleSheet(JARVIS_THEME_STYLESHEET)
+        msg.exec()
 
     def check_for_updates(self, show_no_update_dialog: bool = False) -> None:
         """Check for available updates.

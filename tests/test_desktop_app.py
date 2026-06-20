@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
 
@@ -247,6 +248,101 @@ class TestOllamaRuntimeOwnership:
             tray.cleanup_on_exit()
 
         assert stopped == [tray._ollama_runtime_ownership]
+
+
+class TestRuntimeStatusSnapshot:
+    """The tray runtime status reports Jarvis, Ollama, and config state."""
+
+    def _settings(self, **overrides):
+        values = {
+            "llm_provider": "ollama",
+            "embedding_provider": "",
+            "llm_chat_model": "gemma4:e2b",
+            "embedding_model": "nomic-embed-text",
+            "mcps": {"github": {}, "browser": {}},
+        }
+        values.update(overrides)
+        return SimpleNamespace(**values)
+
+    def test_collect_snapshot_reports_subprocess_and_owned_ollama(self):
+        from desktop_app.app import (
+            OllamaRuntimeOwnership,
+            _collect_runtime_status_snapshot,
+        )
+
+        process = MagicMock()
+        process.pid = 12345
+        process.poll.return_value = None
+
+        snapshot = _collect_runtime_status_snapshot(
+            is_listening=True,
+            is_bundled=False,
+            daemon_process=process,
+            daemon_thread=None,
+            ollama_runtime_ownership=OllamaRuntimeOwnership(
+                started_by_jarvis=True,
+                launch_method="serve",
+            ),
+            settings_loader=lambda: self._settings(),
+            ollama_checker=lambda: (True, "0.9.1"),
+        )
+
+        assert snapshot.daemon_state == "Listening"
+        assert snapshot.daemon_mode == "subprocess"
+        assert snapshot.daemon_pid == 12345
+        assert snapshot.ollama_needed is True
+        assert snapshot.ollama_running is True
+        assert snapshot.ollama_version == "0.9.1"
+        assert snapshot.ollama_owner == "Jarvis"
+        assert snapshot.mcp_count == 2
+
+    def test_collect_snapshot_fails_open_when_checks_error(self):
+        from desktop_app.app import _collect_runtime_status_snapshot
+
+        snapshot = _collect_runtime_status_snapshot(
+            is_listening=False,
+            is_bundled=True,
+            daemon_process=None,
+            daemon_thread=None,
+            ollama_runtime_ownership=None,
+            settings_loader=lambda: (_ for _ in ()).throw(RuntimeError("bad config")),
+            ollama_checker=lambda: (_ for _ in ()).throw(RuntimeError("down")),
+        )
+
+        assert snapshot.daemon_state == "Stopped"
+        assert snapshot.daemon_mode == "bundled"
+        assert snapshot.daemon_pid is None
+        assert snapshot.ollama_needed is True
+        assert snapshot.ollama_running is False
+        assert snapshot.ollama_version is None
+        assert snapshot.chat_model == "unknown"
+        assert snapshot.mcp_count == 0
+
+    def test_format_runtime_status_is_scannable(self):
+        from desktop_app.app import RuntimeStatusSnapshot, _format_runtime_status
+
+        text = _format_runtime_status(
+            RuntimeStatusSnapshot(
+                daemon_state="Listening",
+                daemon_mode="subprocess",
+                daemon_pid=12345,
+                ollama_needed=True,
+                ollama_running=True,
+                ollama_version="0.9.1",
+                ollama_owner="Jarvis",
+                ollama_launch_method="serve",
+                llm_provider="ollama",
+                chat_model="gemma4:e2b",
+                embedding_provider="ollama",
+                embedding_model="nomic-embed-text",
+                mcp_count=2,
+            )
+        )
+
+        assert text.startswith("🩺 Runtime Status")
+        assert "\n🎙️ Assistant\n  State: Listening" in text
+        assert "\n🦙 Ollama\n  Needed: Yes\n  Running: Yes (0.9.1)" in text
+        assert "\n🔌 MCP\n  Configured servers: 2" in text
 
 
 class TestGetCrashPaths:
