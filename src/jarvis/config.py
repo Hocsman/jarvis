@@ -95,6 +95,11 @@ class Settings:
     llm_base_url: str
     llm_api_key: str
     llm_chat_model: str
+    # Scrub secret-shaped tokens (emails, API keys, JWTs, password/
+    # token/secret pairs) from prompts before they leave the machine
+    # for a remote OpenAI-compatible provider. Default True (privacy-
+    # first). No effect when the provider is local Ollama.
+    auto_redact_before_cloud: bool
     embedding_provider: str  # "" (= same as llm_provider) | "ollama" | "openai_compatible"
     embedding_base_url: str
     embedding_api_key: str
@@ -448,6 +453,7 @@ def get_default_config() -> Dict[str, Any]:
         "llm_base_url": "",  # falls back to ollama_base_url when empty
         "llm_api_key": "",
         "llm_chat_model": "",  # falls back to ollama_chat_model when empty
+        "auto_redact_before_cloud": True,  # scrub secrets before remote egress
         "embedding_provider": "",  # "" = same as llm_provider
         "embedding_base_url": "",
         "embedding_api_key": "",
@@ -690,6 +696,7 @@ def load_settings() -> Settings:
         llm_provider = "ollama"
     llm_base_url = str(merged.get("llm_base_url", "") or "").strip() or ollama_base_url
     llm_api_key = str(merged.get("llm_api_key", "") or "").strip()
+    auto_redact_before_cloud = bool(merged.get("auto_redact_before_cloud", True))
     if llm_provider == "openai_compatible":
         llm_chat_model = str(merged.get("llm_chat_model", "") or "").strip() or ollama_chat_model
     else:
@@ -880,6 +887,7 @@ def load_settings() -> Settings:
         llm_base_url=llm_base_url,
         llm_api_key=llm_api_key,
         llm_chat_model=llm_chat_model,
+        auto_redact_before_cloud=auto_redact_before_cloud,
         embedding_provider=embedding_provider,
         embedding_base_url=embedding_base_url,
         embedding_api_key=embedding_api_key,

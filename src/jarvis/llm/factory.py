@@ -18,6 +18,7 @@ from typing import Any, Optional
 from .backend import LLMBackend
 from .ollama import OllamaBackend
 from .openai_compatible import OpenAICompatibleBackend
+from .redacting import RedactingBackend
 
 
 _OLLAMA = "ollama"
@@ -38,9 +39,20 @@ def _str_attr(settings: Any, name: str, default: str = "") -> str:
     return val if isinstance(val, str) and val else default
 
 
-def _build(provider: str, base_url: str, api_key: Optional[str]) -> LLMBackend:
+def _build(
+    provider: str,
+    base_url: str,
+    api_key: Optional[str],
+    redact: bool = False,
+) -> LLMBackend:
     if provider == _OPENAI_COMPATIBLE:
-        return OpenAICompatibleBackend(base_url, api_key=api_key)
+        backend: LLMBackend = OpenAICompatibleBackend(base_url, api_key=api_key)
+        # Scrub secrets before remote egress. Only the OpenAI-compatible
+        # path is wrapped — the Ollama path is local, so its prompts
+        # never leave the machine and redaction would be wasted work.
+        if redact:
+            backend = RedactingBackend(backend)
+        return backend
     return OllamaBackend(base_url)
 
 
@@ -60,7 +72,14 @@ def get_llm_backend(settings: Any) -> LLMBackend:
     else:
         base_url = _str_attr(settings, "ollama_base_url", _DEFAULT_OLLAMA_URL)
     api_key = _str_attr(settings, "llm_api_key") or None
-    return _build(provider, base_url, api_key)
+    # Fallback False (not True) only matters for partial cfg objects
+    # that lack the field — i.e. test mocks. The real ``Settings`` always
+    # carries ``auto_redact_before_cloud`` (required field, default True
+    # in the parser), so production egress is always redaction-wrapped;
+    # this fallback just keeps the factory's type contract intact for the
+    # backend-resolution unit tests that pass bare mocks.
+    redact = bool(getattr(settings, "auto_redact_before_cloud", False))
+    return _build(provider, base_url, api_key, redact=redact)
 
 
 def get_embedding_backend(settings: Any) -> LLMBackend:
@@ -89,4 +108,11 @@ def get_embedding_backend(settings: Any) -> LLMBackend:
     api_key = _str_attr(settings, "embedding_api_key") or _str_attr(
         settings, "llm_api_key"
     ) or None
-    return _build(provider, base_url, api_key)
+    # Fallback False (not True) only matters for partial cfg objects
+    # that lack the field — i.e. test mocks. The real ``Settings`` always
+    # carries ``auto_redact_before_cloud`` (required field, default True
+    # in the parser), so production egress is always redaction-wrapped;
+    # this fallback just keeps the factory's type contract intact for the
+    # backend-resolution unit tests that pass bare mocks.
+    redact = bool(getattr(settings, "auto_redact_before_cloud", False))
+    return _build(provider, base_url, api_key, redact=redact)

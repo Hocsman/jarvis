@@ -213,6 +213,12 @@ class TestConfigRoundTrip:
         assert settings.embedding_model == "stub-embed"
 
         backend = get_llm_backend(settings)
-        assert isinstance(backend, OpenAICompatibleBackend)
+        # auto_redact_before_cloud defaults True, so the cloud backend is
+        # wrapped in a RedactingBackend. Unwrap to assert the underlying
+        # provider, then confirm the call still round-trips through the
+        # decorator.
+        from jarvis.llm.redacting import RedactingBackend
+        inner = backend.inner if isinstance(backend, RedactingBackend) else backend
+        assert isinstance(inner, OpenAICompatibleBackend)
         out = backend.direct(settings.llm_chat_model, "sys", "hi", timeout_sec=5)
         assert out == "Hello from stub"
