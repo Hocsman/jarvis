@@ -137,6 +137,118 @@ class TestOpenAICompatStartupCheck:
         assert "Settings" in msg
 
 
+class TestOllamaRuntimeOwnership:
+    """Jarvis only stops Ollama when this desktop session launched it."""
+
+    class FakeProcess:
+        def __init__(self):
+            self.terminated = False
+            self.killed = False
+            self.waited_timeout = None
+
+        def poll(self):
+            return 0 if self.terminated or self.killed else None
+
+        def terminate(self):
+            self.terminated = True
+
+        def wait(self, timeout=None):
+            self.waited_timeout = timeout
+            return 0
+
+        def kill(self):
+            self.killed = True
+
+    def test_stop_owned_runtime_noops_when_not_started_by_jarvis(self):
+        from desktop_app.app import (
+            OllamaRuntimeOwnership,
+            _stop_owned_ollama_runtime,
+        )
+
+        process = self.FakeProcess()
+        ownership = OllamaRuntimeOwnership(
+            started_by_jarvis=False,
+            launch_method="serve",
+            process=process,
+        )
+
+        stopped = _stop_owned_ollama_runtime(ownership)
+
+        assert stopped is False
+        assert process.terminated is False
+        assert ownership.stopped is False
+
+    def test_stop_owned_runtime_terminates_direct_serve_process(self):
+        from desktop_app.app import (
+            OllamaRuntimeOwnership,
+            _stop_owned_ollama_runtime,
+        )
+
+        process = self.FakeProcess()
+        ownership = OllamaRuntimeOwnership(
+            started_by_jarvis=True,
+            launch_method="serve",
+            process=process,
+        )
+
+        stopped = _stop_owned_ollama_runtime(ownership, timeout_sec=2)
+
+        assert stopped is True
+        assert process.terminated is True
+        assert process.killed is False
+        assert process.waited_timeout == 2
+        assert ownership.stopped is True
+
+    def test_stop_owned_runtime_quits_macos_app_when_owned(self):
+        from desktop_app.app import (
+            OllamaRuntimeOwnership,
+            _stop_owned_ollama_runtime,
+        )
+
+        commands = []
+
+        def runner(command, **_kwargs):
+            commands.append(command)
+            return MagicMock(returncode=0)
+
+        ownership = OllamaRuntimeOwnership(
+            started_by_jarvis=True,
+            launch_method="macos_app",
+            process=None,
+        )
+
+        with patch("sys.platform", "darwin"):
+            stopped = _stop_owned_ollama_runtime(
+                ownership,
+                command_runner=runner,
+            )
+
+        assert stopped is True
+        assert ownership.stopped is True
+        assert commands == [["osascript", "-e", 'tell application "Ollama" to quit']]
+
+    def test_cleanup_on_exit_stops_owned_ollama_runtime(self):
+        from desktop_app.app import JarvisSystemTray, OllamaRuntimeOwnership
+
+        stopped = []
+        tray = JarvisSystemTray.__new__(JarvisSystemTray)
+        tray.is_listening = False
+        tray.daemon_process = None
+        tray._ollama_runtime_ownership = OllamaRuntimeOwnership(
+            started_by_jarvis=True,
+            launch_method="serve",
+        )
+        tray.memory_viewer = MagicMock()
+
+        with patch(
+            "desktop_app.app._stop_owned_ollama_runtime",
+            side_effect=lambda ownership: stopped.append(ownership) or True,
+        ):
+            tray.cleanup_on_exit()
+
+        assert stopped == [tray._ollama_runtime_ownership]
+
+
 class TestGetCrashPaths:
     """Tests for get_crash_paths() function."""
 

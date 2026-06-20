@@ -555,6 +555,8 @@ Get API key at [composio.dev](https://composio.dev)
 
 **Responses are slow** - Ensure you have enough VRAM (8GB+ for default model; see System Requirements for other models)
 
+**Mac is still warm after quitting** - If Jarvis starts Ollama for you, quitting Jarvis also stops that owned Ollama runtime. If Ollama was already running before Jarvis opened, Jarvis leaves it running so it does not interrupt your other local AI tools.
+
 **Windows: App won't start** - Extract full zip first, check Windows Defender
 
 **macOS: "App can't be opened"** - Right-click → Open, or System Settings → Privacy & Security → Allow

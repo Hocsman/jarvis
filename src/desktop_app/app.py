@@ -32,6 +32,7 @@ import traceback
 import atexit
 import webbrowser
 import urllib.parse
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
@@ -66,6 +67,90 @@ from desktop_app.face_widget import FaceWindow
 
 
 _LOG_SEPARATOR = "─" * 50
+
+
+@dataclass
+class OllamaRuntimeOwnership:
+    """Tracks whether this desktop session launched the local Ollama runtime."""
+
+    started_by_jarvis: bool = False
+    launch_method: str = ""
+    process: Optional[subprocess.Popen] = None
+    stopped: bool = False
+
+
+def _stop_owned_ollama_runtime(
+    ownership: Optional[OllamaRuntimeOwnership],
+    *,
+    timeout_sec: float = 5.0,
+    command_runner=subprocess.run,
+) -> bool:
+    """Stop Ollama only when this desktop session launched it.
+
+    Returns True when a stop command was sent, False when there was no owned
+    runtime to stop. This is intentionally conservative: a pre-existing
+    user-managed Ollama process is left alone.
+    """
+    if (
+        ownership is None
+        or not ownership.started_by_jarvis
+        or ownership.stopped
+    ):
+        return False
+
+    stopped = False
+    process = ownership.process
+
+    if ownership.launch_method == "macos_app" and sys.platform == "darwin":
+        try:
+            result = command_runner(
+                ["osascript", "-e", 'tell application "Ollama" to quit'],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=timeout_sec,
+                check=False,
+            )
+            stopped = True
+            if getattr(result, "returncode", 0) != 0:
+                debug_log("Ollama AppleScript quit failed, falling back to TERM", "desktop")
+                command_runner(
+                    ["pkill", "-TERM", "-x", "Ollama"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=timeout_sec,
+                    check=False,
+                )
+                command_runner(
+                    [
+                        "pkill",
+                        "-TERM",
+                        "-f",
+                        "/Applications/Ollama.app/Contents/Resources/ollama serve",
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=timeout_sec,
+                    check=False,
+                )
+        except Exception as exc:
+            debug_log(f"failed to stop owned Ollama.app runtime: {exc}", "desktop")
+    elif process is not None:
+        try:
+            if process.poll() is None:
+                process.terminate()
+                stopped = True
+                try:
+                    process.wait(timeout=timeout_sec)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=timeout_sec)
+        except Exception as exc:
+            debug_log(f"failed to stop owned Ollama serve process: {exc}", "desktop")
+
+    ownership.stopped = stopped
+    if stopped:
+        debug_log("owned Ollama runtime stopped", "desktop")
+    return stopped
 
 
 def _trim_extension_modules(logs: str) -> str:
@@ -1243,7 +1328,11 @@ class MemoryViewerWindow(QMainWindow):
 class JarvisSystemTray:
     """System tray application for Jarvis voice assistant."""
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        ollama_runtime_ownership: Optional[OllamaRuntimeOwnership] = None,
+    ):
         # Use existing QApplication if available, otherwise create one
         self.app = QApplication.instance()
         if self.app is None:
@@ -1255,6 +1344,9 @@ class JarvisSystemTray:
         self.daemon_thread: Optional[QThread] = None
         self.is_listening = False
         self.is_bundled = getattr(sys, 'frozen', False)
+        self._ollama_runtime_ownership = (
+            ollama_runtime_ownership or OllamaRuntimeOwnership()
+        )
 
         # Kill any orphaned Jarvis processes from previous sessions
         self.cleanup_orphaned_processes()
@@ -1361,6 +1453,7 @@ class JarvisSystemTray:
                     self.daemon_process.wait()
             except Exception as e:
                 debug_log(f"error during exit cleanup: {e}", "desktop")
+        _stop_owned_ollama_runtime(self._ollama_runtime_ownership)
 
     def create_menu(self) -> None:
         """Create the system tray context menu."""
@@ -2615,6 +2708,10 @@ def main() -> int:
                 from PyQt6.QtWidgets import QMessageBox
                 QMessageBox.warning(None, "Jarvis", _openai_compat_unreachable_message(_provider_cfg))
 
+        # Default ownership: not started by us. Re-assigned below if Jarvis
+        # launches its own Ollama server process.
+        ollama_runtime_ownership = OllamaRuntimeOwnership()
+
         if _ollama_needed:
             # Even if setup was completed before, verify Ollama server is actually running
             # This handles the case where user reinstalls or Ollama service isn't auto-started
@@ -2668,6 +2765,7 @@ def main() -> int:
 
                 # Try to start Ollama server
                 ollama_process = None
+                ollama_launch_method = ""
                 try:
                     if sys.platform == "darwin":
                         # On macOS, try to open the Ollama app first
@@ -2678,6 +2776,7 @@ def main() -> int:
                                 stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL
                             )
+                            ollama_launch_method = "macos_app"
                         except Exception as e:
                             # Fall back to running serve command
                             print(f"  ⚠️ Ollama.app not found ({e}), trying serve command...", flush=True)
@@ -2687,6 +2786,7 @@ def main() -> int:
                                 stderr=subprocess.DEVNULL,
                                 start_new_session=True
                             )
+                            ollama_launch_method = "serve"
                     elif sys.platform == "win32":
                         # On Windows, hide the console window
                         print(f"  🪟 Starting Ollama server: {ollama_path} serve", flush=True)
@@ -2696,6 +2796,7 @@ def main() -> int:
                             stderr=subprocess.DEVNULL,
                             creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS,
                         )
+                        ollama_launch_method = "serve"
                     else:
                         # On Linux and other platforms
                         print(f"  🐧 Starting Ollama server: {ollama_path} serve", flush=True)
@@ -2705,10 +2806,27 @@ def main() -> int:
                             stderr=subprocess.DEVNULL,
                             start_new_session=True
                         )
+                        ollama_launch_method = "serve"
+
+                    ollama_runtime_ownership = OllamaRuntimeOwnership(
+                        started_by_jarvis=True,
+                        launch_method=ollama_launch_method,
+                        process=ollama_process,
+                    )
+                    debug_log(
+                        f"Ollama runtime launched by desktop app via {ollama_launch_method}",
+                        "desktop",
+                    )
 
                     # Verify the process started
-                    if ollama_process and ollama_process.poll() is not None:
+                    if (
+                        ollama_process
+                        and ollama_launch_method != "macos_app"
+                        and ollama_process.poll() is not None
+                    ):
                         print(f"  ❌ Ollama process exited immediately with code {ollama_process.returncode}", flush=True)
+                    elif ollama_launch_method == "macos_app":
+                        print("  ✅ Ollama.app launch requested", flush=True)
                     else:
                         print(f"  ✅ Ollama process started (PID: {ollama_process.pid if ollama_process else 'unknown'})", flush=True)
 
@@ -2832,7 +2950,9 @@ def main() -> int:
 
         splash.set_status("Loading Jarvis...")
         print("Initializing JarvisSystemTray...", flush=True)
-        tray_instance = JarvisSystemTray()
+        tray_instance = JarvisSystemTray(
+            ollama_runtime_ownership=ollama_runtime_ownership,
+        )
         print("JarvisSystemTray initialized successfully", flush=True)
 
         # Always auto-start listening (logs will be shown via start_daemon)
@@ -2887,4 +3007,3 @@ if __name__ == "__main__":
     import multiprocessing
     multiprocessing.freeze_support()
     sys.exit(main())
-
