@@ -1278,6 +1278,13 @@ class JarvisSystemTray:
         self._dictation_history = DictationHistory()
         self.dictation_history_window = DictationHistoryWindow(history=self._dictation_history)
 
+        # Chat window is created lazily on first open (see show_chat). Kept
+        # alive for the session once created, same lifecycle as the dictation
+        # history window. ``self._chat_submit_fn`` is set when the daemon
+        # starts so the window can route queries in subprocess mode.
+        self.chat_window = None
+        self._chat_submit_fn = None
+
         # Log reader threads
         self.log_reader_threads = []
 
@@ -1372,6 +1379,11 @@ class JarvisSystemTray:
         self.dictation_history_action = QAction("🎙️ Dictation History")
         self.dictation_history_action.triggered.connect(self.show_dictation_history)
         self.menu.addAction(self.dictation_history_action)
+
+        # Chat window action
+        self.chat_action = QAction("💬 Chat…")
+        self.chat_action.triggered.connect(self.show_chat)
+        self.menu.addAction(self.chat_action)
 
         # Face window action
         self.face_action = QAction("👤 Show Face")
@@ -1624,6 +1636,15 @@ class JarvisSystemTray:
         self.dictation_history_window.raise_()
         self.dictation_history_window.activateWindow()
 
+    def show_chat(self) -> None:
+        """Show the text chat window (created lazily on first open)."""
+        if self.chat_window is None:
+            from desktop_app.chat_window import ChatWindow
+            self.chat_window = ChatWindow(submit_fn=self._chat_submit_fn)
+        self.chat_window.show()
+        self.chat_window.raise_()
+        self.chat_window.activateWindow()
+
     def _connect_dictation_history(self, retries_left: int = 3) -> None:
         """Wire dictation engine's result callback to the history window signal.
 
@@ -1873,6 +1894,23 @@ class JarvisSystemTray:
                     creationflags=creationflags,
                 )
 
+                # In subprocess mode the chat window can't call the daemon
+                # directly, so it writes a __CHAT_QUERY__: line to stdin.
+                # The reply comes back as __CHAT__: events on stdout, parsed
+                # in _read_daemon_logs and routed to the chat window's signals.
+                from jarvis.daemon import CHAT_QUERY_IPC_PREFIX
+                _proc = self.daemon_process
+
+                def _submit_chat_subprocess(text: str) -> None:
+                    import json as _json
+                    try:
+                        _proc.stdin.write(f"{CHAT_QUERY_IPC_PREFIX}{_json.dumps({'text': text})}\n")
+                        _proc.stdin.flush()
+                    except Exception as exc:
+                        debug_log(f"chat stdin submit failed: {exc}", "desktop")
+
+                self._chat_submit_fn = _submit_chat_subprocess
+
                 # Start log reader thread
                 log_thread = threading.Thread(
                     target=self._read_daemon_logs,
@@ -1935,6 +1973,8 @@ class JarvisSystemTray:
         if not self.daemon_process or not self.daemon_process.stdout:
             return
 
+        from jarvis.daemon import CHAT_IPC_PREFIX
+
         try:
             while True:
                 line = self.daemon_process.stdout.readline()
@@ -1945,10 +1985,39 @@ class JarvisSystemTray:
                 # Debug: log IPC events specifically
                 if "__DIARY__:" in line:
                     debug_log(f"log reader: IPC event read: {line[:80]}...", "desktop")
+                # Route chat events to the chat window's signal bridge.
+                if line.startswith(CHAT_IPC_PREFIX):
+                    self._dispatch_chat_ipc(line)
                 self.log_signals.new_log.emit(line)
         except Exception as e:
             debug_log(f"log reader error: {e}", "desktop")
             self.log_signals.new_log.emit(f"⚠️ Log reader error: {e}\n")
+
+    def _dispatch_chat_ipc(self, line: str) -> None:
+        """Forward a ``__CHAT__:`` event line to the chat window's signals.
+
+        Creates the window lazily so events that arrive before the user opens
+        chat (rare, but possible) don't get lost silently.
+        """
+        import json as _json
+        from jarvis.daemon import CHAT_IPC_PREFIX
+        try:
+            payload = _json.loads(line[len(CHAT_IPC_PREFIX):])
+        except Exception:
+            debug_log(f"malformed {CHAT_IPC_PREFIX} line ignored", "desktop")
+            return
+        if self.chat_window is None:
+            from desktop_app.chat_window import ChatWindow
+            self.chat_window = ChatWindow(submit_fn=self._chat_submit_fn)
+        signals = self.chat_window._signals
+        kind = payload.get("type")
+        data = payload.get("data")
+        if kind == "start":
+            signals.started.emit(str(data) if data is not None else "")
+        elif kind == "complete":
+            signals.completed.emit(data)
+        elif kind == "busy":
+            signals.busy.emit()
 
     def stop_daemon(self, show_diary_dialog: bool = True) -> None:
         """Stop the Jarvis daemon.

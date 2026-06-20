@@ -47,6 +47,10 @@ _global_stop_requested: bool = False
 _warm_profile_graph_listener = None  # registered callback, kept for shutdown unregister
 _global_tts_engine = None  # TTS engine reference for face animation polling
 _global_dictation_engine = None  # Dictation engine reference for history UI
+# Config + DB booted by main(). Shared by the voice listener and the text-chat
+# submission path so voice and text are one conversation against one store.
+_global_cfg = None
+_global_db = None
 
 # Shutdown timeout for diary update (shorter than normal to allow reasonable quit time)
 # Desktop app's stop_daemon() should wait at least this long + buffer
@@ -60,6 +64,16 @@ _diary_update_callbacks: dict = {
     "on_chunks": None,  # Callable[[List[str]], None] - called with pending chunks
     "on_complete": None,  # Callable[[bool], None] - called when done (success/fail)
 }
+
+# One query at a time: voice and text share this lock so they cannot race the
+# dialogue memory. Held for the duration of a single reply-engine run.
+_chat_query_lock = threading.Lock()
+
+# Chat IPC protocol prefixes - desktop app intercepts lines starting with these.
+# __CHAT__:        daemon -> desktop (event stream, mirrors DIARY_IPC_PREFIX)
+# __CHAT_QUERY__:  desktop -> daemon (query submission, read from stdin)
+CHAT_IPC_PREFIX = "__CHAT__:"
+CHAT_QUERY_IPC_PREFIX = "__CHAT_QUERY__:"
 
 
 def request_stop() -> None:
@@ -131,6 +145,151 @@ def _emit_diary_event(event_type: str, data) -> None:
             debug_log(f"IPC event emitted: {event_type}", "diary_ipc")
     except Exception as e:
         debug_log(f"IPC emit error: {e}", "diary_ipc")
+
+
+def _emit_chat_event(event_type: str, data) -> None:
+    """Emit a chat event to stdout for IPC with the desktop app (subprocess mode).
+
+    Mirrors ``_emit_diary_event``. ``data`` is JSON-serialised; the payload
+    never carries unredacted user text because the caller is responsible for
+    passing the already-redacted query to the ``start`` event.
+    """
+    import json
+    try:
+        event = {"type": event_type, "data": data}
+        line = f"{CHAT_IPC_PREFIX}{json.dumps(event)}"
+        print(line, flush=True)
+        if event_type != "token":  # Don't spam for tokens
+            debug_log(f"chat IPC event emitted: {event_type}", "chat_ipc")
+    except Exception as e:
+        debug_log(f"chat IPC emit error: {e}", "chat_ipc")
+
+
+def _notify_chat(event_type: str, data, *, callbacks: dict, use_ipc: bool) -> None:
+    """Dispatch a chat event to per-call callbacks and/or the IPC stream.
+
+    ``callbacks`` is the dict of caller-supplied callables (``on_start`` etc.),
+    not a module global. ``busy`` takes no argument; all others take ``data``.
+    """
+    callback_map = {
+        "start": "on_start",
+        "token": "on_token",
+        "tool": "on_tool_call",
+        "complete": "on_complete",
+        "busy": "on_busy",
+    }
+    callback_name = callback_map.get(event_type)
+    if callbacks and callback_name:
+        cb = callbacks.get(callback_name)
+        if cb is not None:
+            try:
+                if event_type == "busy":
+                    cb()
+                else:
+                    cb(data)
+            except Exception:
+                pass
+    if use_ipc:
+        _emit_chat_event(event_type, data)
+
+
+def submit_text_query(
+    text: str,
+    *,
+    on_start=None,
+    on_token=None,
+    on_tool_call=None,
+    on_complete=None,
+    on_busy=None,
+    use_ipc: bool = False,
+) -> None:
+    """Submit a text query to the reply engine (fire-and-forget).
+
+    Runs ``run_reply_engine`` on a worker thread with ``tts=None`` and the
+    shared global dialogue memory, so text and voice are one conversation.
+    Results are delivered via the per-call callbacks (bundled mode) and/or
+    ``__CHAT__:`` IPC events (subprocess mode). See ``chat_window.spec.md``.
+
+    A second submission while one is running is rejected with a ``busy``
+    event rather than queued.
+    """
+    if not text or not text.strip():
+        return
+
+    callbacks = {
+        "on_start": on_start,
+        "on_token": on_token,
+        "on_tool_call": on_tool_call,
+        "on_complete": on_complete,
+        "on_busy": on_busy,
+    }
+
+    dm = _global_dialogue_memory
+    cfg = _global_cfg
+    db = _global_db
+    if dm is None or cfg is None or db is None:
+        # Daemon not initialised (e.g. tests that don't boot main()). Fail
+        # open with a None complete so the UI doesn't hang.
+        _notify_chat("complete", None, callbacks=callbacks, use_ipc=use_ipc)
+        return
+
+    # One query at a time: voice and text share the lock.
+    if not _chat_query_lock.acquire(blocking=False):
+        _notify_chat("busy", None, callbacks=callbacks, use_ipc=use_ipc)
+        debug_log("chat query rejected: another query is running", "chat")
+        return
+
+    # Snapshot the redacted query for the start event. ``run_reply_engine``
+    # redacts internally too; we mirror that here so the IPC stream and the
+    # UI never carry raw user text even if the engine hasn't run yet.
+    from .utils.redact import redact
+    display_query = redact(text)
+
+    def _worker() -> None:
+        try:
+            _notify_chat("start", display_query, callbacks=callbacks, use_ipc=use_ipc)
+            from .reply.engine import run_reply_engine
+            reply = run_reply_engine(
+                db=db,
+                cfg=cfg,
+                tts=None,
+                text=text,
+                dialogue_memory=dm,
+                language=None,
+            )
+            _notify_chat("complete", reply, callbacks=callbacks, use_ipc=use_ipc)
+        except Exception as exc:
+            debug_log(f"chat query worker error: {exc}", "chat")
+            try:
+                _notify_chat("complete", None, callbacks=callbacks, use_ipc=use_ipc)
+            except Exception:
+                pass
+        finally:
+            _chat_query_lock.release()
+
+    threading.Thread(target=_worker, name="jarvis-chat-query", daemon=True).start()
+
+
+def handle_chat_query_stdin_line(line: str) -> bool:
+    """Parse a stdin line as a chat-query submission (subprocess mode).
+
+    Returns True if the line was a ``__CHAT_QUERY__:`` line and was handled
+    (whether or not the query was accepted). Returns False for any other
+    line, so the caller can still apply SHUTDOWN / EOF semantics.
+    """
+    line = line.strip()
+    if not line.startswith(CHAT_QUERY_IPC_PREFIX):
+        return False
+    import json
+    try:
+        payload = json.loads(line[len(CHAT_QUERY_IPC_PREFIX):])
+        text = payload.get("text", "")
+    except Exception:
+        debug_log("malformed __CHAT_QUERY__ line ignored", "chat_ipc")
+        return True
+    # In subprocess mode the reply comes back via __CHAT__: events on stdout.
+    submit_text_query(text, use_ipc=True)
+    return True
 
 
 def is_stop_requested() -> bool:
@@ -311,6 +470,11 @@ def main() -> None:
 
     cfg = load_settings()
     db = Database(cfg.db_path, cfg.sqlite_vss_path)
+    # Expose cfg + db so the text-chat submission path shares the same store
+    # and config as the voice listener (one conversation, one config).
+    global _global_cfg, _global_db
+    _global_cfg = cfg
+    _global_db = db
 
     debug_log("daemon started", "jarvis")
     print("✓ Daemon started", flush=True)
@@ -545,9 +709,15 @@ def main() -> None:
     last_diary_check = time.time()
     diary_check_interval = 60.0
 
-    # Start stdin monitor thread for Windows shutdown signal
-    # On Windows, CTRL_BREAK_EVENT doesn't work reliably with CREATE_NO_WINDOW
-    # So we also check for stdin being closed as a shutdown signal
+    # Start stdin monitor thread.
+    # Two jobs:
+    #   1. Windows shutdown signal: CTRL_BREAK_EVENT doesn't work reliably with
+    #      CREATE_NO_WINDOW, so we treat stdin EOF / a bare "SHUTDOWN" line as a
+    #      stop request (unchanged behaviour).
+    #   2. Subprocess chat query-in: the desktop app writes
+    #      ``__CHAT_QUERY__:{"text":"..."}`` lines so the chat window can submit
+    #      text when the daemon runs as a separate process. Non-chat lines are
+    #      ignored so the monitor is a no-op for users who never open the chat.
     def stdin_monitor():
         global _global_stop_requested
         try:
@@ -558,15 +728,27 @@ def main() -> None:
                     debug_log("stdin closed, requesting stop", "jarvis")
                     _global_stop_requested = True
                     break
-                line = line.strip()
-                if line == "SHUTDOWN":
+                stripped = line.strip()
+                if stripped == "SHUTDOWN":
                     debug_log("SHUTDOWN command received, requesting stop", "jarvis")
                     _global_stop_requested = True
                     break
+                # Chat query-in (subprocess mode). Returns False for any other
+                # line, which we silently ignore.
+                if stripped.startswith(CHAT_QUERY_IPC_PREFIX):
+                    handle_chat_query_stdin_line(stripped)
         except Exception:
             pass  # stdin might not be available
 
-    if sys.platform == "win32" and not getattr(sys, 'frozen', False):
+    # Run the monitor on Windows (shutdown signal) and whenever stdin looks
+    # like a pipe the desktop app owns (subprocess mode on any platform). We
+    # can't cheaply tell those apart, so we start it whenever we're not a TTY
+    # and not frozen-bundled (bundled mode uses QThread, not a subprocess).
+    _start_stdin_monitor = (
+        (sys.platform == "win32" and not getattr(sys, 'frozen', False))
+        or (not sys.stdin.isatty() and not getattr(sys, 'frozen', False))
+    )
+    if _start_stdin_monitor:
         stdin_thread = threading.Thread(target=stdin_monitor, daemon=True)
         stdin_thread.start()
 
