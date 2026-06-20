@@ -332,11 +332,16 @@ class OllamaBackend(LLMBackend):
         except Exception:
             return []
 
-    def warm_up(self, model: str, timeout_sec: float = 60.0) -> bool:
+    def warm_up(
+        self,
+        model: str,
+        timeout_sec: float = 60.0,
+        keep_alive: str = "30m",
+    ) -> bool:
         """Probe ``/api/version`` to verify the server is Ollama, then issue a
         minimal ``/api/generate`` request so it loads ``model`` into resident
-        memory with a 30-minute ``keep_alive``.  Best-effort: errors are
-        swallowed so callers never crash on warmup failure."""
+        memory for the requested ``keep_alive`` duration. Best-effort: errors
+        are swallowed so callers never crash on warmup failure."""
         if not self._base_url or not model:
             return False
         try:
@@ -355,7 +360,7 @@ class OllamaBackend(LLMBackend):
                     "model": model,
                     "prompt": "",
                     "stream": False,
-                    "keep_alive": "30m",
+                    "keep_alive": keep_alive,
                     "options": {"num_predict": 1},
                 },
                 timeout=remaining,
