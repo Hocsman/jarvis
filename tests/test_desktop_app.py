@@ -259,6 +259,7 @@ class TestRuntimeStatusSnapshot:
             "embedding_provider": "",
             "llm_chat_model": "gemma4:e2b",
             "embedding_model": "nomic-embed-text",
+            "low_power_mode": False,
             "mcps": {"github": {}, "browser": {}},
         }
         values.update(overrides)
@@ -294,7 +295,23 @@ class TestRuntimeStatusSnapshot:
         assert snapshot.ollama_running is True
         assert snapshot.ollama_version == "0.9.1"
         assert snapshot.ollama_owner == "Jarvis"
+        assert snapshot.low_power_mode is False
         assert snapshot.mcp_count == 2
+
+    def test_collect_snapshot_reports_low_power_mode(self):
+        from desktop_app.app import _collect_runtime_status_snapshot
+
+        snapshot = _collect_runtime_status_snapshot(
+            is_listening=True,
+            is_bundled=True,
+            daemon_process=None,
+            daemon_thread=object(),
+            ollama_runtime_ownership=None,
+            settings_loader=lambda: self._settings(low_power_mode=True),
+            ollama_checker=lambda: (False, None),
+        )
+
+        assert snapshot.low_power_mode is True
 
     def test_collect_snapshot_fails_open_when_checks_error(self):
         from desktop_app.app import _collect_runtime_status_snapshot
@@ -315,6 +332,7 @@ class TestRuntimeStatusSnapshot:
         assert snapshot.ollama_needed is True
         assert snapshot.ollama_running is False
         assert snapshot.ollama_version is None
+        assert snapshot.low_power_mode is False
         assert snapshot.chat_model == "unknown"
         assert snapshot.mcp_count == 0
 
@@ -331,6 +349,7 @@ class TestRuntimeStatusSnapshot:
                 ollama_version="0.9.1",
                 ollama_owner="Jarvis",
                 ollama_launch_method="serve",
+                low_power_mode=True,
                 llm_provider="ollama",
                 chat_model="gemma4:e2b",
                 embedding_provider="ollama",
@@ -341,6 +360,7 @@ class TestRuntimeStatusSnapshot:
 
         assert text.startswith("🩺 Runtime Status")
         assert "\n🎙️ Assistant\n  State: Listening" in text
+        assert "  Low Power Mode: On" in text
         assert "\n🦙 Ollama\n  Needed: Yes\n  Running: Yes (0.9.1)" in text
         assert "\n🔌 MCP\n  Configured servers: 2" in text
 
