@@ -29,6 +29,10 @@ from PyQt6.QtWidgets import (
 from jarvis.debug import debug_log
 from desktop_app.themes import COLORS, JARVIS_THEME_STYLESHEET
 
+# Height of the orb hero band at the top of the chat window. The orb
+# renders centred within this strip (it sizes to min(width, height)).
+_ORB_HERO_HEIGHT = 150
+
 
 # ---------------------------------------------------------------------------
 # Thread-safe signal bridge
@@ -183,6 +187,15 @@ class ChatWindow(QMainWindow):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
 
+        # Orb hero: the reactive orb sits at the top of the chat and is
+        # the window's focal point. It pulses THINKING while a reply is
+        # generating and settles to IDLE otherwise. Built defensively —
+        # if the orb stack is unavailable for any reason, the chat still
+        # works without it.
+        self._orb = self._build_orb()
+        if self._orb is not None:
+            layout.addWidget(self._orb)
+
         # Transcript (read-only)
         self.transcript_widget = QPlainTextEdit()
         self.transcript_widget.setReadOnly(True)
@@ -221,6 +234,62 @@ class ChatWindow(QMainWindow):
 
         self._query_in_flight = False
         self.set_daemon_available(daemon_available)
+
+    # --- Orb hero -------------------------------------------------------
+
+    def _build_orb(self):
+        """Construct the embedded orb widget, or return ``None`` if the
+        orb stack can't be loaded (so the chat degrades gracefully).
+
+        The orb is sized to a fixed-height hero band and honours the
+        ``ui.orb_particles_enabled`` config knob.
+        """
+        try:
+            from desktop_app.orb.orb_widget import OrbWidget
+
+            particles = True
+            try:
+                from jarvis.config import load_settings
+
+                particles = bool(load_settings().ui.orb_particles_enabled)
+            except Exception:
+                pass  # default True if config can't be read
+
+            orb = OrbWidget(particles_enabled=particles)
+            # Relax the orb's own 320x320 minimum so it fits a slim hero
+            # band; it renders centred at min(width, height).
+            orb.setMinimumSize(0, 0)
+            orb.setFixedHeight(_ORB_HERO_HEIGHT)
+            return orb
+        except Exception as exc:
+            debug_log(f"chat orb unavailable, continuing without it: {exc}", "chat")
+            return None
+
+    def _set_orb_state(self, state_name: str) -> None:
+        """Drive the embedded orb's state controller. No-op when the orb
+        failed to load. ``state_name`` is an ``OrbState`` member name
+        ("IDLE", "THINKING", ...)."""
+        if self._orb is None:
+            return
+        try:
+            from desktop_app.orb.state_controller import OrbState
+
+            self._orb.state_controller().set_state(getattr(OrbState, state_name))
+        except Exception as exc:
+            debug_log(f"orb state set failed ({state_name}): {exc}", "chat")
+
+    def showEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        # Resume the orb's render loop only while the window is visible —
+        # no point burning 60 fps on a hidden window (also keeps the
+        # laptop cooler when the chat is closed).
+        if self._orb is not None:
+            self._orb.resume_rendering()
+        super().showEvent(event)
+
+    def hideEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        if self._orb is not None:
+            self._orb.pause_rendering()
+        super().hideEvent(event)
 
     # --- Sending --------------------------------------------------------
 
@@ -278,6 +347,10 @@ class ChatWindow(QMainWindow):
         if not self._daemon_available:
             self._query_in_flight = False
             self.stop_button.setVisible(False)
+            # Daemon down: settle the orb to IDLE (no reply can be in
+            # flight). We avoid an ERROR flare here — a stopped daemon is
+            # an expected user action, not a fault.
+            self._set_orb_state("IDLE")
         self.input_widget.setEnabled(self._daemon_available)
         self.input_widget.setPlaceholderText(
             _DAEMON_STATUS_PLACEHOLDERS.get(
@@ -356,6 +429,9 @@ class ChatWindow(QMainWindow):
     def _set_thinking(self, thinking: bool) -> None:
         self._query_in_flight = thinking and self._daemon_available
         self.stop_button.setVisible(self._query_in_flight)
+        # The orb is the visual heartbeat of the reply: THINKING while a
+        # query is in flight, back to IDLE once it settles.
+        self._set_orb_state("THINKING" if self._query_in_flight else "IDLE")
         self._refresh_status_label()
         self._refresh_send_button()
 

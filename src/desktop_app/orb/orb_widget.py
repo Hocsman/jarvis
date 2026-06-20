@@ -149,6 +149,27 @@ class OrbWidget(QWidget):
         """Route an ERROR pulse through the controller."""
         self._state_controller.trigger_error()
 
+    def pause_rendering(self) -> None:
+        """Stop the 60 Hz repaint loop.
+
+        Call when the orb is off-screen (host window hidden/minimised)
+        so it stops burning a render frame budget — and the GPU/CPU it
+        implies — on pixels nobody can see. Idempotent.
+        """
+        if self._timer.isActive():
+            self._timer.stop()
+
+    def resume_rendering(self) -> None:
+        """Restart the repaint loop after :meth:`pause_rendering`.
+
+        Resets the frame clock so the first frame back doesn't apply a
+        large ``dt`` (which would make the state transition jump).
+        Idempotent.
+        """
+        if not self._timer.isActive():
+            self._last_tick_t = time.monotonic()
+            self._timer.start(self.FRAME_INTERVAL_MS)
+
     # ── Paint pipeline ────────────────────────────────────────────────
 
     def paintEvent(self, event) -> None:  # noqa: N802 (Qt API)
