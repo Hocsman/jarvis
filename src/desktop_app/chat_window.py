@@ -15,9 +15,10 @@ from __future__ import annotations
 from typing import Optional
 
 from PyQt6.QtCore import Qt, pyqtSignal, QObject
-from PyQt6.QtGui import QCloseEvent, QFont, QTextCursor
+from PyQt6.QtGui import QCloseEvent, QTextCursor
 from PyQt6.QtWidgets import (
     QHBoxLayout,
+    QLabel,
     QMainWindow,
     QPlainTextEdit,
     QPushButton,
@@ -25,6 +26,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from jarvis.debug import debug_log
 from desktop_app.themes import COLORS, JARVIS_THEME_STYLESHEET
 
 
@@ -44,6 +46,19 @@ class ChatSignals(QObject):
     started = pyqtSignal(str)
     completed = pyqtSignal(object)  # Optional[str]
     busy = pyqtSignal()
+
+
+class ChatIpcSignals(QObject):
+    """Marshals a raw ``__CHAT__:`` log line from the log-reader worker thread
+    onto the Qt main thread.
+
+    The desktop app's log reader runs on a plain ``threading.Thread`` and must
+    not create widgets or parse IPC into widget mutations directly. It emits
+    ``line_received`` (a queued cross-thread connection) and the main-thread
+    slot calls ``ChatWindow.process_ipc_line``.
+    """
+
+    line_received = pyqtSignal(str)
 
 
 # ---------------------------------------------------------------------------
@@ -139,10 +154,10 @@ class ChatWindow(QMainWindow):
         self._submit_fn = submit_fn
 
         # Signal bridge: daemon worker -> Qt main thread.
-        self._signals = ChatSignals()
-        self._signals.started.connect(self._on_start)
-        self._signals.completed.connect(self._on_complete)
-        self._signals.busy.connect(self._on_busy)
+        self.signals = ChatSignals()
+        self.signals.started.connect(self._on_start)
+        self.signals.completed.connect(self._on_complete)
+        self.signals.busy.connect(self._on_busy)
 
         # --- Layout -----------------------------------------------------
         central = QWidget()
@@ -157,11 +172,9 @@ class ChatWindow(QMainWindow):
         self.transcript_widget.setStyleSheet(_TRANSCRIPT_STYLE)
         layout.addWidget(self.transcript_widget, stretch=1)
 
-        # Status indicator
-        self._status_label = QPushButton("")
+        # Status indicator (display-only label)
+        self._status_label = QLabel("")
         self._status_label.setStyleSheet(_STATUS_STYLE)
-        self._status_label.setFlat(True)
-        self._status_label.setCursor(Qt.CursorShape.ArrowCursor)
         self._status_label.setVisible(False)
         layout.addWidget(self._status_label)
 
@@ -214,15 +227,20 @@ class ChatWindow(QMainWindow):
 
             daemon.submit_text_query(
                 text,
-                on_start=self._signals.started.emit,
-                on_complete=self._signals.completed.emit,
-                on_busy=self._signals.busy.emit,
+                on_start=self.signals.started.emit,
+                on_complete=self.signals.completed.emit,
+                on_busy=self.signals.busy.emit,
             )
 
     def _stop(self) -> None:
         from jarvis import daemon
 
-        daemon.request_stop()
+        # Cancel the in-flight chat query (drop the reply), NOT request_stop
+        # which would tear down the whole voice assistant.
+        daemon.cancel_active_chat_query()
+        # Reset the thinking indicator immediately so the user sees feedback
+        # without waiting for the engine to finish.
+        self._set_thinking(False)
 
     # --- Daemon callback slots (run on the main thread via signals) -----
 
@@ -239,6 +257,36 @@ class ChatWindow(QMainWindow):
     def _on_busy(self) -> None:
         self._set_thinking(False)
         self._append_system("Jarvis is busy with another query already.")
+
+    # --- Subprocess IPC entry point --------------------------------------
+
+    def process_ipc_line(self, line: str) -> bool:
+        """Parse a ``__CHAT__:`` event line and emit the matching signal.
+
+        Mirrors ``DiaryUpdateDialog.process_log_line``: the caller (the log
+        reader thread) forwards the raw line, and this method owns the JSON
+        parse + signal emit. Returns True if the line was a chat event (even
+        if malformed), False otherwise. Must be called on the Qt main thread
+        (the caller marshals via a main-thread-owned signal).
+        """
+        from jarvis.daemon import CHAT_IPC_PREFIX
+        if not line.startswith(CHAT_IPC_PREFIX):
+            return False
+        import json as _json
+        try:
+            payload = _json.loads(line[len(CHAT_IPC_PREFIX):])
+        except Exception:
+            debug_log(f"malformed {CHAT_IPC_PREFIX} line ignored", "chat")
+            return True
+        kind = payload.get("type")
+        data = payload.get("data")
+        if kind == "start":
+            self.signals.started.emit(str(data) if data is not None else "")
+        elif kind == "complete":
+            self.signals.completed.emit(data)
+        elif kind == "busy":
+            self.signals.busy.emit()
+        return True
 
     # --- Rendering helpers ----------------------------------------------
 

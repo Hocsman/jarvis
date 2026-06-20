@@ -10,6 +10,7 @@ import os
 import time
 import signal
 import threading
+import contextlib
 
 # Fix OpenBLAS threading crash in bundled apps (must be before numpy imports)
 os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
@@ -69,6 +70,14 @@ _diary_update_callbacks: dict = {
 # dialogue memory. Held for the duration of a single reply-engine run.
 _chat_query_lock = threading.Lock()
 
+# Per-query cancellation flag for the text-chat path. Set by
+# ``cancel_active_chat_query`` (the chat window's Stop button), checked by the
+# chat worker after ``run_reply_engine`` returns so the reply is dropped
+# instead of displayed. This is distinct from ``request_stop`` (daemon
+# lifecycle shutdown) — cancelling a chat query must not tear down the voice
+# assistant.
+_chat_cancel_event: Optional[threading.Event] = None
+
 # Chat IPC protocol prefixes - desktop app intercepts lines starting with these.
 # __CHAT__:        daemon -> desktop (event stream, mirrors DIARY_IPC_PREFIX)
 # __CHAT_QUERY__:  desktop -> daemon (query submission, read from stdin)
@@ -124,45 +133,45 @@ def get_pending_diary_chunks() -> list:
 DIARY_IPC_PREFIX = "__DIARY__:"
 
 
-def _emit_diary_event(event_type: str, data) -> None:
-    """
-    Emit a diary update event to stdout for IPC with desktop app.
+def _emit_ipc_event(prefix: str, event_type: str, data, debug_tag: str) -> None:
+    """Emit a JSON IPC event line to stdout for the desktop app (subprocess mode).
 
-    Used in subprocess mode where callbacks aren't available.
-    Desktop app intercepts these lines and forwards to diary dialog.
+    Shared by the diary and chat event emitters. Builds ``{"type", "data"}``,
+    prints ``{prefix}{json}`` with flush, skips debug logging for ``token``
+    events to avoid spam, and swallows+logs emit errors so a bad payload never
+    crashes the worker.
+    """
+    import json
+    try:
+        event = {"type": event_type, "data": data}
+        line = f"{prefix}{json.dumps(event)}"
+        print(line, flush=True)
+        if event_type != "token":  # Don't spam for tokens
+            debug_log(f"IPC event emitted: {event_type}", debug_tag)
+    except Exception as e:
+        debug_log(f"IPC emit error: {e}", debug_tag)
+
+
+def _emit_diary_event(event_type: str, data) -> None:
+    """Emit a diary update event to stdout for IPC with the desktop app.
+
+    Used in subprocess mode where callbacks aren't available. The desktop app
+    intercepts these lines and forwards them to the diary dialog.
 
     Args:
         event_type: One of "chunks", "token", "status", "complete"
         data: Event payload (list for chunks, str for token/status, bool for complete)
     """
-    import json
-    try:
-        event = {"type": event_type, "data": data}
-        line = f"{DIARY_IPC_PREFIX}{json.dumps(event)}"
-        print(line, flush=True)
-        # Debug: also print to stderr so we can verify it's being called
-        if event_type != "token":  # Don't spam for tokens
-            debug_log(f"IPC event emitted: {event_type}", "diary_ipc")
-    except Exception as e:
-        debug_log(f"IPC emit error: {e}", "diary_ipc")
+    _emit_ipc_event(DIARY_IPC_PREFIX, event_type, data, "diary_ipc")
 
 
 def _emit_chat_event(event_type: str, data) -> None:
     """Emit a chat event to stdout for IPC with the desktop app (subprocess mode).
 
-    Mirrors ``_emit_diary_event``. ``data`` is JSON-serialised; the payload
-    never carries unredacted user text because the caller is responsible for
-    passing the already-redacted query to the ``start`` event.
+    The payload never carries unredacted user text: the caller passes the
+    already-redacted query to the ``start`` event.
     """
-    import json
-    try:
-        event = {"type": event_type, "data": data}
-        line = f"{CHAT_IPC_PREFIX}{json.dumps(event)}"
-        print(line, flush=True)
-        if event_type != "token":  # Don't spam for tokens
-            debug_log(f"chat IPC event emitted: {event_type}", "chat_ipc")
-    except Exception as e:
-        debug_log(f"chat IPC emit error: {e}", "chat_ipc")
+    _emit_ipc_event(CHAT_IPC_PREFIX, event_type, data, "chat_ipc")
 
 
 def _notify_chat(event_type: str, data, *, callbacks: dict, use_ipc: bool) -> None:
@@ -193,6 +202,37 @@ def _notify_chat(event_type: str, data, *, callbacks: dict, use_ipc: bool) -> No
         _emit_chat_event(event_type, data)
 
 
+@contextlib.contextmanager
+def query_lock():
+    """Context manager that acquires the shared voice+text query lock (blocking).
+
+    Used by the voice path so a voice query waits for any in-flight text query
+    to finish before running ``run_reply_engine`` against the shared dialogue
+    memory. The text path uses a non-blocking acquire (reject-with-busy) in
+    ``submit_text_query``; the voice path blocks because voice queries should
+    not be silently dropped when text is running.
+    """
+    _chat_query_lock.acquire()
+    try:
+        yield
+    finally:
+        _chat_query_lock.release()
+
+
+def cancel_active_chat_query() -> None:
+    """Cancel the in-flight text-chat query, if any.
+
+    Sets the per-query cancellation flag so the chat worker drops the reply
+    when ``run_reply_engine`` returns. Distinct from ``request_stop`` (full
+    daemon shutdown): this does not stop the voice listener, save the diary,
+    or close the database. Used by the chat window's Stop button.
+    """
+    global _chat_cancel_event
+    if _chat_cancel_event is not None:
+        _chat_cancel_event.set()
+        debug_log("chat query cancellation requested", "chat")
+
+
 def submit_text_query(
     text: str,
     *,
@@ -211,7 +251,9 @@ def submit_text_query(
     ``__CHAT__:`` IPC events (subprocess mode). See ``chat_window.spec.md``.
 
     A second submission while one is running is rejected with a ``busy``
-    event rather than queued.
+    event rather than queued. A running query can be cancelled with
+    ``cancel_active_chat_query``; the reply is then dropped (``complete(None)``)
+    rather than displayed.
     """
     if not text or not text.strip():
         return
@@ -233,11 +275,23 @@ def submit_text_query(
         _notify_chat("complete", None, callbacks=callbacks, use_ipc=use_ipc)
         return
 
+    if is_stop_requested():
+        # Daemon is shutting down. Don't spawn a worker that may use db after
+        # close (bundled) or write to a dead pipe (subprocess).
+        _notify_chat("complete", None, callbacks=callbacks, use_ipc=use_ipc)
+        return
+
     # One query at a time: voice and text share the lock.
     if not _chat_query_lock.acquire(blocking=False):
         _notify_chat("busy", None, callbacks=callbacks, use_ipc=use_ipc)
         debug_log("chat query rejected: another query is running", "chat")
         return
+
+    # Per-query cancellation flag. The Stop button sets this so the worker
+    # drops the reply instead of displaying it.
+    global _chat_cancel_event
+    cancel_event = threading.Event()
+    _chat_cancel_event = cancel_event
 
     # Snapshot the redacted query for the start event. ``run_reply_engine``
     # redacts internally too; we mirror that here so the IPC stream and the
@@ -257,6 +311,9 @@ def submit_text_query(
                 dialogue_memory=dm,
                 language=None,
             )
+            if cancel_event.is_set():
+                debug_log("chat query cancelled, dropping reply", "chat")
+                reply = None
             _notify_chat("complete", reply, callbacks=callbacks, use_ipc=use_ipc)
         except Exception as exc:
             debug_log(f"chat query worker error: {exc}", "chat")
@@ -265,9 +322,18 @@ def submit_text_query(
             except Exception:
                 pass
         finally:
+            global _chat_cancel_event
+            if _chat_cancel_event is cancel_event:
+                _chat_cancel_event = None
             _chat_query_lock.release()
 
-    threading.Thread(target=_worker, name="jarvis-chat-query", daemon=True).start()
+    try:
+        threading.Thread(target=_worker, name="jarvis-chat-query", daemon=True).start()
+    except Exception:
+        # If thread spawning fails, release the lock so future queries work.
+        _chat_cancel_event = None
+        _chat_query_lock.release()
+        _notify_chat("complete", None, callbacks=callbacks, use_ipc=use_ipc)
 
 
 def handle_chat_query_stdin_line(line: str) -> bool:
@@ -286,6 +352,11 @@ def handle_chat_query_stdin_line(line: str) -> bool:
         text = payload.get("text", "")
     except Exception:
         debug_log("malformed __CHAT_QUERY__ line ignored", "chat_ipc")
+        return True
+    # Reject non-string payloads (e.g. {"text":[1]}) so a hostile or buggy
+    # writer can't crash the stdin monitor via submit_text_query's str API.
+    if not isinstance(text, str):
+        debug_log("__CHAT_QUERY__ text payload is not a string, ignored", "chat_ipc")
         return True
     # In subprocess mode the reply comes back via __CHAT__: events on stdout.
     submit_text_query(text, use_ipc=True)
@@ -740,13 +811,18 @@ def main() -> None:
         except Exception:
             pass  # stdin might not be available
 
-    # Run the monitor on Windows (shutdown signal) and whenever stdin looks
-    # like a pipe the desktop app owns (subprocess mode on any platform). We
-    # can't cheaply tell those apart, so we start it whenever we're not a TTY
-    # and not frozen-bundled (bundled mode uses QThread, not a subprocess).
+    # Run the monitor on Windows (shutdown signal) and whenever the desktop
+    # app explicitly signals it owns our stdin (subprocess chat query-in on
+    # any platform). The desktop app sets JARVIS_STDIN_IPC=1 when spawning us
+    # so that a bare ``python -m jarvis.main < /dev/null`` (or a systemd unit
+    # with StandardInput=null) does NOT start the monitor and immediately exit
+    # on EOF. Bundled mode uses a QThread, not a subprocess, so it's skipped.
     _start_stdin_monitor = (
         (sys.platform == "win32" and not getattr(sys, 'frozen', False))
-        or (not sys.stdin.isatty() and not getattr(sys, 'frozen', False))
+        or (
+            not getattr(sys, 'frozen', False)
+            and os.environ.get("JARVIS_STDIN_IPC") == "1"
+        )
     )
     if _start_stdin_monitor:
         stdin_thread = threading.Thread(target=stdin_monitor, daemon=True)
