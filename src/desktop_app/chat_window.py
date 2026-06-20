@@ -135,6 +135,21 @@ _STATUS_STYLE = f"""
     }}
 """
 
+_DAEMON_STATUS_MESSAGES = {
+    "starting": "Starting Jarvis...",
+    "stopping": "Stopping Jarvis...",
+    "stopped": "Start Listening from the tray to use chat.",
+    "crashed": "Jarvis stopped unexpectedly. Start Listening to reconnect.",
+}
+
+_DAEMON_STATUS_PLACEHOLDERS = {
+    "starting": "Jarvis is starting",
+    "stopping": "Jarvis is stopping",
+    "stopped": "Start Listening from the tray to use chat",
+    "crashed": "Start Listening from the tray to reconnect chat",
+    "running": "Type a message to Jarvis... (Enter to send, Shift+Enter for newline)",
+}
+
 
 class ChatWindow(QMainWindow):
     """Text chat window. Sends via ``jarvis.daemon.submit_text_query``.
@@ -153,6 +168,7 @@ class ChatWindow(QMainWindow):
         self.setStyleSheet(JARVIS_THEME_STYLESHEET)
         self._submit_fn = submit_fn
         self._daemon_available = daemon_available
+        self._daemon_status = "running" if daemon_available else "stopped"
 
         # Signal bridge: daemon worker -> Qt main thread.
         self.signals = ChatSignals()
@@ -184,7 +200,7 @@ class ChatWindow(QMainWindow):
         row.setSpacing(8)
 
         self.input_widget = QPlainTextEdit()
-        self.input_widget.setPlaceholderText("Type a message to Jarvis… (Enter to send, Shift+Enter for newline)")
+        self.input_widget.setPlaceholderText(_DAEMON_STATUS_PLACEHOLDERS["running"])
         self.input_widget.setFixedHeight(64)
         self.input_widget.setStyleSheet(_INPUT_STYLE)
         self.input_widget.keyPressEvent = self._input_key_press  # type: ignore[method-assign]
@@ -249,16 +265,28 @@ class ChatWindow(QMainWindow):
 
     def set_daemon_available(self, available: bool) -> None:
         """Enable or disable chat submission based on daemon availability."""
-        self._daemon_available = available
-        if not available:
-            self._set_thinking(False)
-        self.input_widget.setEnabled(available)
-        self.send_button.setEnabled(available and not self._query_in_flight)
+        self.set_daemon_status("running" if available else "stopped")
+
+    def set_daemon_status(self, status: str) -> None:
+        """Reflect daemon lifecycle state in chat controls and status text."""
+        if status != "running" and status not in _DAEMON_STATUS_MESSAGES:
+            debug_log(f"unknown chat daemon status ignored: {status}", "chat")
+            status = "stopped"
+
+        self._daemon_status = status
+        self._daemon_available = status == "running"
+        if not self._daemon_available:
+            self._query_in_flight = False
+            self.stop_button.setVisible(False)
+        self.input_widget.setEnabled(self._daemon_available)
         self.input_widget.setPlaceholderText(
-            "Type a message to Jarvis… (Enter to send, Shift+Enter for newline)"
-            if available
-            else "Start Listening from the tray to use chat"
+            _DAEMON_STATUS_PLACEHOLDERS.get(
+                status,
+                _DAEMON_STATUS_PLACEHOLDERS["stopped"],
+            )
         )
+        self._refresh_status_label()
+        self._refresh_send_button()
 
     # --- Daemon callback slots (run on the main thread via signals) -----
 
@@ -326,12 +354,31 @@ class ChatWindow(QMainWindow):
         self.transcript_widget.setTextCursor(cursor)
 
     def _set_thinking(self, thinking: bool) -> None:
-        self._query_in_flight = thinking
-        self.stop_button.setVisible(thinking)
-        self.send_button.setEnabled(self._daemon_available and not thinking)
-        self._status_label.setVisible(thinking)
-        if thinking:
+        self._query_in_flight = thinking and self._daemon_available
+        self.stop_button.setVisible(self._query_in_flight)
+        self._refresh_status_label()
+        self._refresh_send_button()
+
+    def _refresh_send_button(self) -> None:
+        self.send_button.setEnabled(self._daemon_available and not self._query_in_flight)
+
+    def _refresh_status_label(self) -> None:
+        if self._query_in_flight:
             self._status_label.setText("  Jarvis is thinking…")
+            self._status_label.setVisible(True)
+            return
+
+        if self._daemon_status == "running":
+            self._status_label.setText("")
+            self._status_label.setVisible(False)
+            return
+
+        message = _DAEMON_STATUS_MESSAGES.get(
+            self._daemon_status,
+            _DAEMON_STATUS_MESSAGES["stopped"],
+        )
+        self._status_label.setText(f"  {message}")
+        self._status_label.setVisible(True)
 
     # --- Input key handling ---------------------------------------------
 

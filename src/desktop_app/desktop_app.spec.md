@@ -183,7 +183,7 @@ In subprocess mode, the daemon runs as a separate process. IPC is achieved via s
 - Desktop app intercepts these lines from the log stream
 - DiaryUpdateDialog's `process_log_line()` parses and emits signals
 - Chat IPC lines are marshalled onto the Qt main thread via `ChatIpcSignals`, then `_on_chat_ipc_line()` forwards them to `ChatWindow.process_ipc_line()`
-- When the daemon stops or a subprocess exits, the tray disables any open ChatWindow and clears its subprocess stdin submit function; daemon restart refreshes the submit function and re-enables the window.
+- When the daemon starts, stops, or a subprocess exits unexpectedly, the tray updates any open ChatWindow lifecycle banner and clears or refreshes its subprocess stdin submit function so the window never writes to a dead pipe.
 - Same UI experience as bundled mode
 
 ## Theme System
