@@ -226,6 +226,26 @@ Leave `embedding_provider` empty to use the same provider as chat. When no embed
 </details>
 
 <details>
+<summary><strong>Power and Startup</strong></summary>
+
+Jarvis favours fast first responses by default: it warms Whisper, the chat
+model, and the intent judge before announcing that it is listening. On Macs or
+laptops where heat and battery matter more than instant first-token latency,
+enable **⚙️ Settings → ✨ Features → Low Power Mode**.
+
+```json
+{
+  "low_power_mode": true
+}
+```
+
+Low Power Mode skips LLM startup warmup and shortens Ollama model residency for
+the intent judge from 30 minutes to 1 minute. Whisper still warms so voice input
+is ready. The first LLM-backed request after startup or idle may be slower.
+
+</details>
+
+<details>
 <summary><strong>Speech Recognition (Whisper)</strong></summary>
 
 #### Language Modes
@@ -535,13 +555,15 @@ Get API key at [composio.dev](https://composio.dev)
 <details>
 <summary><strong>Common issues</strong></summary>
 
-**First startup takes a bit** - Jarvis pre-warms the Whisper, chat, and intent-judge models before announcing "Listening!" so the first engagement feels instant. This adds a few seconds on cold start and is bounded at 60 s — if Ollama is slow, Jarvis will start listening anyway and load the models on demand.
+**First startup takes a bit** - Jarvis pre-warms the Whisper, chat, and intent-judge models before announcing "Listening!" so the first engagement feels instant. This adds a few seconds on cold start and is bounded at 60 s. If Ollama is slow, Jarvis will start listening anyway and load the models on demand. Enable **Low Power Mode** in Settings to skip LLM startup warmup.
 
 **Jarvis doesn't hear me** - Check microphone permissions, speak clearly after "Jarvis"
 
 **Not sure what is running** - Open the tray menu and click **🩺 Runtime Status**. It shows whether Jarvis is listening, whether Ollama is needed/running, which models are configured, and how many MCP servers are enabled.
 
 **Responses are slow** - Ensure you have enough VRAM (8GB+ for default model; see System Requirements for other models)
+
+**Mac gets warm while Jarvis is active** - Enable **⚙️ Settings → ✨ Features → Low Power Mode**. This keeps voice recognition ready while avoiding background LLM warmup and shortening Ollama's idle residency window.
 
 **Mac is still warm after quitting** - If Jarvis starts Ollama for you, quitting Jarvis also stops that owned Ollama runtime. If Ollama was already running before Jarvis opened, Jarvis leaves it running so it does not interrupt your other local AI tools.
 

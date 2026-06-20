@@ -21,7 +21,12 @@ from .echo_detection import EchoDetector
 from .state_manager import StateManager, ListeningState
 from .wake_detection import is_wake_word_detected, extract_query_after_wake, is_stop_command
 from .transcript_buffer import TranscriptBuffer
-from .intent_judge import IntentJudge, create_intent_judge, warm_up_chat_model
+from .intent_judge import (
+    IntentJudge,
+    _is_low_power_mode_enabled,
+    create_intent_judge,
+    warm_up_chat_model,
+)
 from ..debug import debug_log
 from ..utils.location import is_location_available
 
@@ -1504,6 +1509,11 @@ class VoiceListener(threading.Thread):
         announcing "Listening!" so the ready state actually means ready.
         """
         self._llm_warmup_results: dict[str, tuple[str, bool]] = {}
+
+        if _is_low_power_mode_enabled(self.cfg):
+            print("     🌱 Low power mode: LLM warmup skipped", flush=True)
+            debug_log("low power mode enabled: skipping LLM warmup", "voice")
+            return []
 
         chat_model = str(getattr(self.cfg, "llm_chat_model", "") or "").strip()
         chat_timeout = max(float(getattr(self.cfg, "llm_tools_timeout_sec", 8.0)), 60.0)
