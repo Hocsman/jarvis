@@ -1211,13 +1211,19 @@ class VoiceListener(threading.Thread):
 
         # Import reply engine
         from ..reply.engine import run_reply_engine
+        from ..daemon import query_lock
 
-        # Process the query (keep thinking tune playing during processing)
+        # Process the query (keep thinking tune playing during processing).
+        # Hold the shared voice+text query lock so a voice query and a text
+        # chat query cannot run the reply engine concurrently against the
+        # same dialogue memory. Voice blocks while a text query finishes
+        # rather than being dropped (see daemon.query_lock).
         try:
-            reply = run_reply_engine(
-                self.db, self.cfg, None, query, self.dialogue_memory,
-                language=self._last_detected_language,
-            )
+            with query_lock():
+                reply = run_reply_engine(
+                    self.db, self.cfg, None, query, self.dialogue_memory,
+                    language=self._last_detected_language,
+                )
         except Exception as e:
             # Log the error visibly - this should never happen silently
             print(f"\n  ❌ Reply engine error: {e}", flush=True)

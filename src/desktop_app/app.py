@@ -1285,6 +1285,14 @@ class JarvisSystemTray:
         self.chat_window = None
         self._chat_submit_fn = None
 
+        # Main-thread signal bridge for chat IPC. The log reader thread emits
+        # ``line_received`` (a queued connection) so the chat window is created
+        # and the IPC line is parsed on the Qt main thread, never on the
+        # worker thread (Qt widgets must be created on the GUI thread).
+        from desktop_app.chat_window import ChatIpcSignals
+        self._chat_ipc_signals = ChatIpcSignals()
+        self._chat_ipc_signals.line_received.connect(self._on_chat_ipc_line)
+
         # Log reader threads
         self.log_reader_threads = []
 
@@ -1874,6 +1882,11 @@ class JarvisSystemTray:
                     env["PYTHONPATH"] = f"{src_path}{os.pathsep}{env['PYTHONPATH']}"
                 else:
                     env["PYTHONPATH"] = str(src_path)
+                # Signal the daemon that we own its stdin (chat query-in IPC)
+                # so it starts the stdin monitor. Without this the daemon would
+                # treat a non-TTY stdin as "no monitor" on non-Windows, and a
+                # stray /dev/null wouldn't kill it.
+                env["JARVIS_STDIN_IPC"] = "1"
 
                 # Use creationflags to prevent console window popup on Windows
                 # CREATE_NEW_PROCESS_GROUP is needed for CTRL_BREAK_EVENT to work
@@ -1907,9 +1920,20 @@ class JarvisSystemTray:
                         _proc.stdin.write(f"{CHAT_QUERY_IPC_PREFIX}{_json.dumps({'text': text})}\n")
                         _proc.stdin.flush()
                     except Exception as exc:
+                        # stdin closed / pipe broken (daemon died or is
+                        # restarting). Surface a terminal event so the chat
+                        # window resets instead of hanging in the thinking
+                        # state forever waiting for a reply that won't come.
                         debug_log(f"chat stdin submit failed: {exc}", "desktop")
+                        if self.chat_window is not None:
+                            self.chat_window.signals.completed.emit(None)
 
                 self._chat_submit_fn = _submit_chat_subprocess
+                # If the chat window already exists (daemon restarted while
+                # the window was open), refresh its submit fn so it doesn't
+                # keep writing to the old (dead) subprocess stdin.
+                if self.chat_window is not None:
+                    self.chat_window._submit_fn = self._chat_submit_fn
 
                 # Start log reader thread
                 log_thread = threading.Thread(
@@ -1985,39 +2009,27 @@ class JarvisSystemTray:
                 # Debug: log IPC events specifically
                 if "__DIARY__:" in line:
                     debug_log(f"log reader: IPC event read: {line[:80]}...", "desktop")
-                # Route chat events to the chat window's signal bridge.
+                # Route chat events to the main thread via the IPC signal
+                # bridge. The line is parsed and the chat window is created
+                # on the Qt main thread, never here on the log reader thread
+                # (Qt widgets must be created on the GUI thread).
                 if line.startswith(CHAT_IPC_PREFIX):
-                    self._dispatch_chat_ipc(line)
+                    self._chat_ipc_signals.line_received.emit(line)
                 self.log_signals.new_log.emit(line)
         except Exception as e:
             debug_log(f"log reader error: {e}", "desktop")
             self.log_signals.new_log.emit(f"⚠️ Log reader error: {e}\n")
 
-    def _dispatch_chat_ipc(self, line: str) -> None:
-        """Forward a ``__CHAT__:`` event line to the chat window's signals.
+    def _on_chat_ipc_line(self, line: str) -> None:
+        """Handle a ``__CHAT__:`` event line on the Qt main thread.
 
-        Creates the window lazily so events that arrive before the user opens
-        chat (rare, but possible) don't get lost silently.
+        Creates the chat window lazily (safe on the GUI thread) and forwards
+        the line to ``ChatWindow.process_ipc_line`` for parsing + signal emit.
         """
-        import json as _json
-        from jarvis.daemon import CHAT_IPC_PREFIX
-        try:
-            payload = _json.loads(line[len(CHAT_IPC_PREFIX):])
-        except Exception:
-            debug_log(f"malformed {CHAT_IPC_PREFIX} line ignored", "desktop")
-            return
         if self.chat_window is None:
             from desktop_app.chat_window import ChatWindow
             self.chat_window = ChatWindow(submit_fn=self._chat_submit_fn)
-        signals = self.chat_window._signals
-        kind = payload.get("type")
-        data = payload.get("data")
-        if kind == "start":
-            signals.started.emit(str(data) if data is not None else "")
-        elif kind == "complete":
-            signals.completed.emit(data)
-        elif kind == "busy":
-            signals.busy.emit()
+        self.chat_window.process_ipc_line(line)
 
     def stop_daemon(self, show_diary_dialog: bool = True) -> None:
         """Stop the Jarvis daemon.

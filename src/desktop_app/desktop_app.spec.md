@@ -179,7 +179,7 @@ In subprocess mode, the daemon runs as a separate process. IPC is achieved via s
 - **Chat events**: Daemon emits `__CHAT__:` events (start/complete/busy); the desktop app sends queries in via `__CHAT_QUERY__:` lines on the daemon's stdin (see `chat_window.spec.md`)
 - Desktop app intercepts these lines from the log stream
 - DiaryUpdateDialog's `process_log_line()` parses and emits signals
-- `_dispatch_chat_ipc()` routes chat events to the ChatWindow's signal bridge
+- Chat IPC lines are marshalled onto the Qt main thread via `ChatIpcSignals`, then `_on_chat_ipc_line()` forwards them to `ChatWindow.process_ipc_line()`
 - Same UI experience as bundled mode
 
 ## Theme System

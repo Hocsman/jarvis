@@ -157,18 +157,47 @@ class TestChatWindowCallbacks:
 
 @pytest.mark.unit
 class TestChatWindowStop:
-    """The stop button routes to the shared daemon stop signal."""
+    """The stop button cancels the chat query, not the whole daemon."""
 
-    def test_stop_calls_request_stop(self, qapp, monkeypatch):
+    def test_stop_calls_cancel_active_chat_query(self, qapp, monkeypatch):
         from desktop_app.chat_window import ChatWindow
 
         called = []
         monkeypatch.setattr(
-            "jarvis.daemon.request_stop", lambda: called.append(True)
+            "jarvis.daemon.cancel_active_chat_query", lambda: called.append(True)
+        )
+        # request_stop must NOT be called because it tears down the whole
+        # voice assistant.
+        request_stop_called = []
+        monkeypatch.setattr(
+            "jarvis.daemon.request_stop",
+            lambda: request_stop_called.append(True),
         )
         win = ChatWindow()
+        win.show()
+        qapp.processEvents()
+        win._set_thinking(True)
+        qapp.processEvents()
         win._stop()
+        qapp.processEvents()
         assert called == [True]
+        assert request_stop_called == []
+
+    def test_stop_resets_thinking_indicator(self, qapp, monkeypatch):
+        from desktop_app.chat_window import ChatWindow
+
+        monkeypatch.setattr(
+            "jarvis.daemon.cancel_active_chat_query", lambda: None
+        )
+        win = ChatWindow()
+        win.show()
+        qapp.processEvents()
+        win._set_thinking(True)
+        qapp.processEvents()
+        assert win.stop_button.isVisible()
+        win._stop()
+        qapp.processEvents()
+        assert not win.stop_button.isVisible()
 
 
 @pytest.mark.unit
@@ -216,41 +245,65 @@ class TestChatWindowSubmitFn:
 
 @pytest.mark.unit
 class TestDesktopAppChatDispatch:
-    """The desktop app routes ``__CHAT__:`` IPC lines to the chat window."""
+    """The desktop app routes ``__CHAT__:`` IPC lines to the chat window on the
+    main thread via ``_on_chat_ipc_line`` + ``ChatWindow.process_ipc_line``."""
 
-    def test_dispatch_creates_window_lazily_and_emits_complete(self, qapp, monkeypatch):
-        from jarvis.daemon import CHAT_IPC_PREFIX
+    def _make_tray(self):
         import desktop_app.app as app_mod
-
-        # A minimal stand-in for JarvisSystemTray with just the attributes the
-        # dispatch path touches. We avoid constructing the full tray (which
-        # pulls in the daemon, face widget, etc.).
         tray = app_mod.JarvisSystemTray.__new__(app_mod.JarvisSystemTray)
         tray.chat_window = None
         tray._chat_submit_fn = None
+        return tray
 
-        line = f'{CHAT_IPC_PREFIX}{{"type":"complete","data":"hello back"}}'
-        tray._dispatch_chat_ipc(line)
-
+    def test_on_chat_ipc_line_creates_window_lazily(self, qapp):
+        from jarvis.daemon import CHAT_IPC_PREFIX
+        tray = self._make_tray()
+        assert tray.chat_window is None
+        tray._on_chat_ipc_line(f'{CHAT_IPC_PREFIX}{{"type":"complete","data":"hi"}}')
         assert tray.chat_window is not None
-        # The signal is queued on the Qt event loop; flush it so the slot runs
-        # and appends the reply to the transcript.
+
+    def test_dispatch_complete_appends_reply(self, qapp):
+        from jarvis.daemon import CHAT_IPC_PREFIX
+        tray = self._make_tray()
+        tray._on_chat_ipc_line(f'{CHAT_IPC_PREFIX}{{"type":"complete","data":"hello back"}}')
         tray.chat_window.show()
         qapp.processEvents()
         assert "hello back" in tray.chat_window.transcript_widget.toPlainText()
 
-    def test_dispatch_malformed_line_is_swallowed(self, qapp, monkeypatch):
+    def test_dispatch_start_sets_thinking(self, qapp):
         from jarvis.daemon import CHAT_IPC_PREFIX
-        import desktop_app.app as app_mod
-
-        tray = app_mod.JarvisSystemTray.__new__(app_mod.JarvisSystemTray)
-        tray.chat_window = None
-        tray._chat_submit_fn = None
-
-        # Must not raise.
-        tray._dispatch_chat_ipc(f"{CHAT_IPC_PREFIX}not json")
-        # A window is still created lazily, but no reply text lands.
+        tray = self._make_tray()
+        tray._on_chat_ipc_line(f'{CHAT_IPC_PREFIX}{{"type":"start","data":"a query"}}')
+        tray.chat_window.show()
         qapp.processEvents()
+        assert tray.chat_window.stop_button.isVisible()
+
+    def test_dispatch_busy_appends_notice(self, qapp):
+        from jarvis.daemon import CHAT_IPC_PREFIX
+        tray = self._make_tray()
+        tray._on_chat_ipc_line(f'{CHAT_IPC_PREFIX}{{"type":"busy","data":null}}')
+        tray.chat_window.show()
+        qapp.processEvents()
+        text = tray.chat_window.transcript_widget.toPlainText().lower()
+        assert "busy" in text
+
+    def test_dispatch_malformed_line_is_swallowed(self, qapp):
+        from jarvis.daemon import CHAT_IPC_PREFIX
+        tray = self._make_tray()
+        # Must not raise; window is created lazily but no reply text lands.
+        tray._on_chat_ipc_line(f"{CHAT_IPC_PREFIX}not json")
+        qapp.processEvents()
+
+    def test_process_ipc_line_returns_false_for_non_chat(self, qapp):
+        from desktop_app.chat_window import ChatWindow
+        win = ChatWindow()
+        assert win.process_ipc_line("not a chat line") is False
+
+    def test_process_ipc_line_returns_true_for_malformed_chat(self, qapp):
+        from desktop_app.chat_window import ChatWindow
+        from jarvis.daemon import CHAT_IPC_PREFIX
+        win = ChatWindow()
+        assert win.process_ipc_line(f"{CHAT_IPC_PREFIX}not json") is True
 
     def test_subprocess_submit_fn_writes_chat_query_line(self, qapp, monkeypatch):
         """The stdin-bridge callable writes a __CHAT_QUERY__: JSON line."""
@@ -278,3 +331,50 @@ class TestDesktopAppChatDispatch:
         assert written.startswith(CHAT_QUERY_IPC_PREFIX)
         payload = json.loads(written[len(CHAT_QUERY_IPC_PREFIX):].strip())
         assert payload["text"] == "hello over stdin"
+
+
+@pytest.mark.unit
+class TestChatWindowInputKeys:
+    """Enter sends; Shift+Enter inserts a newline (does not send)."""
+
+    def test_enter_sends(self, qapp, monkeypatch):
+        from desktop_app.chat_window import ChatWindow
+        from PyQt6.QtCore import Qt as _Qt, QEvent
+        from PyQt6.QtGui import QKeyEvent
+
+        calls = []
+        monkeypatch.setattr(
+            "jarvis.daemon.submit_text_query",
+            lambda text, **kw: calls.append(text),
+        )
+        win = ChatWindow()
+        win.input_widget.setPlainText("hi")
+        event = QKeyEvent(
+            QEvent.Type.KeyPress,
+            _Qt.Key.Key_Return,
+            _Qt.KeyboardModifier.NoModifier,
+        )
+        win._input_key_press(event)
+        assert calls == ["hi"]
+        assert win.input_widget.toPlainText() == ""
+
+    def test_shift_enter_does_not_send(self, qapp, monkeypatch):
+        from desktop_app.chat_window import ChatWindow
+        from PyQt6.QtCore import Qt as _Qt, QEvent
+        from PyQt6.QtGui import QKeyEvent
+
+        calls = []
+        monkeypatch.setattr(
+            "jarvis.daemon.submit_text_query",
+            lambda text, **kw: calls.append(text),
+        )
+        win = ChatWindow()
+        win.input_widget.setPlainText("line one")
+        event = QKeyEvent(
+            QEvent.Type.KeyPress,
+            _Qt.Key.Key_Return,
+            _Qt.KeyboardModifier.ShiftModifier,
+        )
+        win._input_key_press(event)
+        # Default QPlainTextEdit handling inserts a newline; no send.
+        assert calls == []
