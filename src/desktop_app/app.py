@@ -91,6 +91,7 @@ class RuntimeStatusSnapshot:
     ollama_version: Optional[str]
     ollama_owner: str
     ollama_launch_method: str
+    low_power_mode: bool
     llm_provider: str
     chat_model: str
     embedding_provider: str
@@ -147,6 +148,7 @@ def _collect_runtime_status_snapshot(
     chat_model = "unknown"
     embedding_provider = "unknown"
     embedding_model = "unknown"
+    low_power_mode = False
     mcp_count = 0
     if cfg is not None:
         llm_provider = str(getattr(cfg, "llm_provider", "") or "unknown")
@@ -155,6 +157,7 @@ def _collect_runtime_status_snapshot(
             getattr(cfg, "embedding_provider", "") or llm_provider or "unknown"
         )
         embedding_model = str(getattr(cfg, "embedding_model", "") or "unknown")
+        low_power_mode = getattr(cfg, "low_power_mode", False) is True
         mcps = getattr(cfg, "mcps", {}) or {}
         mcp_count = len(mcps) if isinstance(mcps, dict) else 0
 
@@ -167,6 +170,7 @@ def _collect_runtime_status_snapshot(
         ollama_version=ollama_version,
         ollama_owner=ollama_owner,
         ollama_launch_method=ownership.launch_method or "n/a",
+        low_power_mode=low_power_mode,
         llm_provider=llm_provider,
         chat_model=chat_model,
         embedding_provider=embedding_provider,
@@ -193,6 +197,7 @@ def _format_runtime_status(snapshot: RuntimeStatusSnapshot) -> str:
             f"  State: {snapshot.daemon_state}",
             f"  Mode: {snapshot.daemon_mode}",
             f"  PID: {pid}",
+            f"  Low Power Mode: {'On' if snapshot.low_power_mode else 'Off'}",
             "",
             "🦙 Ollama",
             f"  Needed: {'Yes' if snapshot.ollama_needed else 'No'}",
