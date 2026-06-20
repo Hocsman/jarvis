@@ -137,6 +137,13 @@ face/logs/memory entries. Clicking it shows (or raises) the `ChatWindow`. The
 window is created lazily on first open and kept alive for the session
 (same lifecycle as `DictationHistoryWindow`).
 
+The chat window is usable only while the daemon is running. When the tray
+state is stopped, the input and send button are disabled and a local notice
+asks the user to start listening first. On daemon start/restart, the tray
+refreshes the window's submit function and re-enables the controls. On daemon
+stop or unexpected subprocess exit, the tray clears the subprocess stdin
+submit function so the chat window cannot write to a dead pipe.
+
 ### Theme
 
 All styling uses `JARVIS_THEME_STYLESHEET` from `desktop_app.themes`. No

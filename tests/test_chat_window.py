@@ -8,7 +8,7 @@ These verify the contract in ``src/desktop_app/chat_window.spec.md``:
   user's message to the transcript.
 - Daemon callback signals (start/complete/busy) update the transcript and the
   status indicator on the Qt main thread.
-- The stop button calls ``jarvis.daemon.request_stop``.
+- The stop button calls ``jarvis.daemon.cancel_active_chat_query``.
 - Closing hides the window; it does not quit the daemon.
 - Styling uses the shared theme stylesheet (no hardcoded colour literals in
   the widget classes).
@@ -99,6 +99,23 @@ class TestChatWindowSend:
         win.input_widget.setPlainText("   ")
         win._send()
         assert calls == []
+
+    def test_send_when_daemon_unavailable_does_not_submit(self, qapp, monkeypatch):
+        from desktop_app.chat_window import ChatWindow
+
+        calls = []
+        monkeypatch.setattr(
+            "jarvis.daemon.submit_text_query",
+            lambda text, **kw: calls.append(text),
+        )
+        win = ChatWindow(daemon_available=False)
+        win.input_widget.setPlainText("are you there")
+        win._send()
+
+        assert calls == []
+        text = win.transcript_widget.toPlainText().lower()
+        assert "start listening" in text
+        assert win.input_widget.toPlainText() == "are you there"
 
 
 @pytest.mark.unit
@@ -242,6 +259,21 @@ class TestChatWindowSubmitFn:
         win._send()
         assert calls == ["via stdin"]
 
+    def test_daemon_availability_toggles_input_controls(self, qapp):
+        from desktop_app.chat_window import ChatWindow
+
+        win = ChatWindow(daemon_available=False)
+        assert not win.send_button.isEnabled()
+        assert not win.input_widget.isEnabled()
+
+        win.set_daemon_available(True)
+        assert win.send_button.isEnabled()
+        assert win.input_widget.isEnabled()
+
+        win.set_daemon_available(False)
+        assert not win.send_button.isEnabled()
+        assert not win.input_widget.isEnabled()
+
 
 @pytest.mark.unit
 class TestDesktopAppChatDispatch:
@@ -253,6 +285,7 @@ class TestDesktopAppChatDispatch:
         tray = app_mod.JarvisSystemTray.__new__(app_mod.JarvisSystemTray)
         tray.chat_window = None
         tray._chat_submit_fn = None
+        tray.is_listening = True
         return tray
 
     def test_on_chat_ipc_line_creates_window_lazily(self, qapp):
@@ -305,6 +338,16 @@ class TestDesktopAppChatDispatch:
         win = ChatWindow()
         assert win.process_ipc_line(f"{CHAT_IPC_PREFIX}not json") is True
 
+    def test_late_ipc_line_creates_unavailable_window_when_daemon_stopped(self, qapp):
+        from jarvis.daemon import CHAT_IPC_PREFIX
+        tray = self._make_tray()
+        tray.is_listening = False
+
+        tray._on_chat_ipc_line(f'{CHAT_IPC_PREFIX}{{"type":"complete","data":"late"}}')
+
+        assert tray.chat_window is not None
+        assert not tray.chat_window.send_button.isEnabled()
+
     def test_subprocess_submit_fn_writes_chat_query_line(self, qapp, monkeypatch):
         """The stdin-bridge callable writes a __CHAT_QUERY__: JSON line."""
         import io
@@ -331,6 +374,33 @@ class TestDesktopAppChatDispatch:
         assert written.startswith(CHAT_QUERY_IPC_PREFIX)
         payload = json.loads(written[len(CHAT_QUERY_IPC_PREFIX):].strip())
         assert payload["text"] == "hello over stdin"
+
+    def test_show_chat_marks_window_unavailable_when_daemon_stopped(self, qapp):
+        import desktop_app.app as app_mod
+
+        tray = app_mod.JarvisSystemTray.__new__(app_mod.JarvisSystemTray)
+        tray.chat_window = None
+        tray._chat_submit_fn = None
+        tray.is_listening = False
+
+        tray.show_chat()
+
+        assert tray.chat_window is not None
+        assert not tray.chat_window.send_button.isEnabled()
+
+    def test_show_chat_marks_existing_window_available_when_daemon_started(self, qapp):
+        import desktop_app.app as app_mod
+        from desktop_app.chat_window import ChatWindow
+
+        tray = app_mod.JarvisSystemTray.__new__(app_mod.JarvisSystemTray)
+        tray.chat_window = ChatWindow(daemon_available=False)
+        tray._chat_submit_fn = lambda text: None
+        tray.is_listening = True
+
+        tray.show_chat()
+
+        assert tray.chat_window.send_button.isEnabled()
+        assert tray.chat_window._submit_fn is tray._chat_submit_fn
 
 
 @pytest.mark.unit
