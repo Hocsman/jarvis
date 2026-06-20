@@ -67,6 +67,21 @@ def _default_db_path() -> str:
 
 
 @dataclass(frozen=True)
+class UISettings:
+    """Desktop-app UI choices.
+
+    Currently a single knob: whether the reactive orb renders its
+    ambient particle layer. Disabling particles cuts per-frame draw
+    work (relevant on lower-end hardware where the orb's animation
+    adds noticeable GPU load) and is also an aesthetic preference for
+    a calmer orb. Set ``"ui": {"orb_particles_enabled": false}`` in
+    config.json to turn them off.
+    """
+
+    orb_particles_enabled: bool
+
+
+@dataclass(frozen=True)
 class Settings:
     # Database & Storage
     db_path: str
@@ -270,6 +285,9 @@ class Settings:
 
     # MCP Integration
     mcps: Dict[str, Any]
+
+    # Desktop UI choices (orb particle layer, etc.)
+    ui: UISettings
 
 
 
@@ -602,6 +620,14 @@ def get_default_config() -> Dict[str, Any]:
 
         # MCP Integration (external servers Jarvis can use). No defaults.
         "mcps": {},
+
+        # Desktop UI. ``orb_particles_enabled`` controls whether the
+        # reactive orb renders its ambient particle layer (default
+        # True). Set false to skip the particle draw entirely (perf
+        # or aesthetic preference).
+        "ui": {
+            "orb_particles_enabled": True,
+        },
     }
 
 
@@ -819,6 +845,21 @@ def load_settings() -> Settings:
     raw_dict = merged.get("dictation_custom_dictionary", [])
     dictation_custom_dictionary = list(raw_dict) if isinstance(raw_dict, list) else []
     mcps = _ensure_dict(merged.get("mcps"))
+
+    # Parse ui subsection. ``orb_particles_enabled`` defaults to True;
+    # coerced via bool()/string rules so a hand-edited config that
+    # writes "false"/0/"no" still resolves sensibly. A missing or
+    # non-dict ``ui`` block falls back to the default.
+    raw_ui = merged.get("ui", {})
+    if not isinstance(raw_ui, dict):
+        raw_ui = {}
+    raw_particles = raw_ui.get("orb_particles_enabled", True)
+    if isinstance(raw_particles, str):
+        orb_particles_enabled = raw_particles.strip().lower() not in {"false", "0", "no", "off"}
+    else:
+        orb_particles_enabled = bool(raw_particles)
+    ui = UISettings(orb_particles_enabled=orb_particles_enabled)
+
     whisper_min_confidence = float(merged.get("whisper_min_confidence", 0.4))
     whisper_no_speech_threshold = float(merged.get("whisper_no_speech_threshold", 0.5))
     whisper_min_audio_duration = float(merged.get("whisper_min_audio_duration", 0.3))
@@ -966,4 +1007,7 @@ def load_settings() -> Settings:
 
         # MCP Integration
         mcps=mcps,
+
+        # Desktop UI
+        ui=ui,
     )
