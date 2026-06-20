@@ -22,6 +22,7 @@ src/desktop_app/
 ├── face_widget.py       # Animated face visualization
 ├── themes.py            # Qt stylesheets and color palette
 ├── diary_dialog.py      # End-of-session diary update dialog
+├── chat_window.py       # Text chat interface (see chat_window.spec.md)
 ├── memory_viewer.py     # Flask-based memory browser
 ├── updater.py           # Update checking logic
 ├── update_dialog.py     # Update notification dialogs
@@ -94,6 +95,7 @@ The central controller that manages:
 | **SettingsWindow** | Auto-generated config editor with tabbed categories |
 | **SetupWizard** | First-run configuration (Ollama, models, profile) |
 | **DictationHistoryWindow** | Scrollable list of past dictations with copy/delete/clear actions |
+| **ChatWindow** | Text chat interface alongside voice; shares one conversation with the voice path (see `chat_window.spec.md`) |
 
 ### Tray Menu: GPU Library Recovery (Windows)
 
@@ -173,9 +175,11 @@ In bundled mode, the daemon runs in the same process, so callbacks can be set di
 #### Subprocess Mode (Development)
 
 In subprocess mode, the daemon runs as a separate process. IPC is achieved via stdout:
-- Daemon emits JSON events prefixed with `__DIARY__:` (e.g., `__DIARY__:{"type":"token","data":"Hello"}`)
+- **Diary updates**: Daemon emits JSON events prefixed with `__DIARY__:` (e.g., `__DIARY__:{"type":"token","data":"Hello"}`)
+- **Chat events**: Daemon emits `__CHAT__:` events (start/complete/busy); the desktop app sends queries in via `__CHAT_QUERY__:` lines on the daemon's stdin (see `chat_window.spec.md`)
 - Desktop app intercepts these lines from the log stream
 - DiaryUpdateDialog's `process_log_line()` parses and emits signals
+- `_dispatch_chat_ipc()` routes chat events to the ChatWindow's signal bridge
 - Same UI experience as bundled mode
 
 ## Theme System
