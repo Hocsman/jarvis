@@ -1596,6 +1596,12 @@ class JarvisSystemTray:
         self.toggle_action.triggered.connect(self.toggle_listening)
         self.menu.addAction(self.toggle_action)
 
+        # Fast stop action
+        self.quick_stop_action = QAction("⚡ Stop Now (Skip Diary)")
+        self.quick_stop_action.setEnabled(False)
+        self.quick_stop_action.triggered.connect(self.quick_stop_daemon)
+        self.menu.addAction(self.quick_stop_action)
+
         self.menu.addSeparator()
 
         # View logs action
@@ -2034,6 +2040,13 @@ class JarvisSystemTray:
         else:
             self.start_daemon()
 
+    def quick_stop_daemon(self) -> None:
+        """Stop the daemon quickly without the final shutdown diary pass."""
+        if not self.is_listening:
+            return
+        debug_log("fast stop requested from tray", "desktop")
+        self.stop_daemon(show_diary_dialog=False, skip_diary_update=True)
+
     def start_daemon(self) -> None:
         """Start the Jarvis daemon."""
         try:
@@ -2199,6 +2212,8 @@ class JarvisSystemTray:
 
             self.is_listening = True
             self.toggle_action.setText("⏸️ Stop Listening")
+            if hasattr(self, "quick_stop_action"):
+                self.quick_stop_action.setEnabled(True)
             self.status_action.setText("🟢 Status: Listening")
             self.update_icon()
 
@@ -2235,6 +2250,8 @@ class JarvisSystemTray:
         if self.is_listening:
             self.is_listening = False
             self.toggle_action.setText("▶️ Start Listening")
+            if hasattr(self, "quick_stop_action"):
+                self.quick_stop_action.setEnabled(False)
             self.status_action.setText("⚪ Status: Stopped")
             self.update_icon()
             self.daemon_thread = None
@@ -2284,18 +2301,29 @@ class JarvisSystemTray:
             self.chat_window = ChatWindow(submit_fn=self._chat_submit_fn)
         self.chat_window.process_ipc_line(line)
 
-    def stop_daemon(self, show_diary_dialog: bool = True) -> None:
+    def stop_daemon(
+        self,
+        show_diary_dialog: bool = True,
+        skip_diary_update: bool = False,
+    ) -> None:
         """Stop the Jarvis daemon.
 
         Args:
             show_diary_dialog: If True (and bundled), shows a dialog with live diary update progress.
+            skip_diary_update: If True, skips the final shutdown diary LLM pass.
         """
         # Timeout must be longer than SHUTDOWN_DIARY_TIMEOUT_SEC (45s) in daemon.py
         # to allow the diary update LLM call to complete before force-killing
         shutdown_wait_timeout_sec = 60
         diary_dialog = None
 
-        debug_log(f"stop_daemon called: is_bundled={self.is_bundled}, daemon_thread={self.daemon_thread}, show_diary_dialog={show_diary_dialog}", "desktop")
+        debug_log(
+            f"stop_daemon called: is_bundled={self.is_bundled}, "
+            f"daemon_thread={self.daemon_thread}, "
+            f"show_diary_dialog={show_diary_dialog}, "
+            f"skip_diary_update={skip_diary_update}",
+            "desktop",
+        )
 
         try:
             if self.is_bundled and self.daemon_thread:
@@ -2344,7 +2372,7 @@ class JarvisSystemTray:
                     self.app.processEvents()
 
                     # Request graceful stop
-                    request_stop()
+                    request_stop(skip_diary_update=skip_diary_update)
 
                     # Process events while waiting for thread to finish
                     # Note: We avoid QThread.terminate() as it can corrupt state
@@ -2377,7 +2405,7 @@ class JarvisSystemTray:
                     # No dialog - simple wait
                     # Note: We avoid QThread.terminate() as it can corrupt state
                     from jarvis.daemon import request_stop
-                    request_stop()
+                    request_stop(skip_diary_update=skip_diary_update)
 
                     if not self.daemon_thread.wait(shutdown_wait_timeout_sec * 1000):
                         self.log_signals.new_log.emit("⚠️ Daemon taking longer than expected...\n")
@@ -2416,8 +2444,21 @@ class JarvisSystemTray:
                     if hasattr(self, 'log_viewer') and self.log_viewer.isVisible():
                         self.log_viewer.hide()
 
-                # Send signal for graceful shutdown
-                if sys.platform == "win32":
+                # Send signal for graceful shutdown. Fast stop goes through
+                # stdin so the subprocess receives the skip-diary flag before
+                # entering its shutdown block.
+                if skip_diary_update:
+                    try:
+                        from jarvis.daemon import SHUTDOWN_SKIP_DIARY_COMMAND
+                        if self.daemon_process.stdin:
+                            self.daemon_process.stdin.write(
+                                f"{SHUTDOWN_SKIP_DIARY_COMMAND}\n"
+                            )
+                            self.daemon_process.stdin.flush()
+                    except Exception as exc:
+                        debug_log(f"fast stop stdin command failed: {exc}", "desktop")
+                        self.daemon_process.send_signal(signal.SIGINT)
+                elif sys.platform == "win32":
                     # On Windows, signals don't work reliably with CREATE_NO_WINDOW
                     # Close stdin to trigger graceful shutdown in daemon
                     try:
@@ -2510,6 +2551,8 @@ class JarvisSystemTray:
 
             self.is_listening = False
             self.toggle_action.setText("▶️ Start Listening")
+            if hasattr(self, "quick_stop_action"):
+                self.quick_stop_action.setEnabled(False)
             self.status_action.setText("⚪ Status: Stopped")
             self.update_icon()
 
@@ -2554,6 +2597,8 @@ class JarvisSystemTray:
                 if self.is_listening:
                     self.is_listening = False
                     self.toggle_action.setText("▶️ Start Listening")
+                    if hasattr(self, "quick_stop_action"):
+                        self.quick_stop_action.setEnabled(False)
                     self.status_action.setText("⚪ Status: Stopped")
                     self.update_icon()
 
