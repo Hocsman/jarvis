@@ -45,6 +45,7 @@ from .utils.location import get_location_context, is_location_available
 # Global instances for coordination between modules
 _global_dialogue_memory: Optional[DialogueMemory] = None
 _global_stop_requested: bool = False
+_global_skip_shutdown_diary_update: bool = False
 _warm_profile_graph_listener = None  # registered callback, kept for shutdown unregister
 _global_tts_engine = None  # TTS engine reference for face animation polling
 _global_dictation_engine = None  # Dictation engine reference for history UI
@@ -83,12 +84,25 @@ _chat_cancel_event: Optional[threading.Event] = None
 # __CHAT_QUERY__:  desktop -> daemon (query submission, read from stdin)
 CHAT_IPC_PREFIX = "__CHAT__:"
 CHAT_QUERY_IPC_PREFIX = "__CHAT_QUERY__:"
+SHUTDOWN_SKIP_DIARY_COMMAND = "SHUTDOWN_SKIP_DIARY"
 
 
-def request_stop() -> None:
-    """Request the daemon to stop gracefully. Used by desktop app for QThread shutdown."""
-    global _global_stop_requested
+def request_stop(skip_diary_update: bool = False) -> None:
+    """Request the daemon to stop gracefully.
+
+    ``skip_diary_update`` is reserved for explicit fast-stop UI paths where
+    freeing local model resources is more important than the final shutdown
+    diary pass. The normal stop path keeps diary saving enabled.
+    """
+    global _global_stop_requested, _global_skip_shutdown_diary_update
     _global_stop_requested = True
+    if skip_diary_update:
+        _global_skip_shutdown_diary_update = True
+
+
+def is_shutdown_diary_update_skipped() -> bool:
+    """Check whether shutdown should skip the final diary update."""
+    return _global_skip_shutdown_diary_update
 
 
 def set_diary_update_callbacks(
@@ -533,9 +547,11 @@ def main() -> None:
     """Main daemon entry point."""
     global _global_dialogue_memory, _global_stop_requested, _global_tts_engine, _global_dictation_engine
     global _warm_profile_graph_listener
+    global _global_skip_shutdown_diary_update
 
     # Reset stop flag at start (in case of restart)
     _global_stop_requested = False
+    _global_skip_shutdown_diary_update = False
 
     _install_signal_handlers()
 
@@ -790,19 +806,22 @@ def main() -> None:
     #      text when the daemon runs as a separate process. Non-chat lines are
     #      ignored so the monitor is a no-op for users who never open the chat.
     def stdin_monitor():
-        global _global_stop_requested
         try:
             # When parent closes our stdin, readline returns empty
             while True:
                 line = sys.stdin.readline()
                 if not line:  # EOF - stdin closed
                     debug_log("stdin closed, requesting stop", "jarvis")
-                    _global_stop_requested = True
+                    request_stop()
                     break
                 stripped = line.strip()
+                if stripped == SHUTDOWN_SKIP_DIARY_COMMAND:
+                    debug_log("fast shutdown command received, skipping diary update", "jarvis")
+                    request_stop(skip_diary_update=True)
+                    break
                 if stripped == "SHUTDOWN":
                     debug_log("SHUTDOWN command received, requesting stop", "jarvis")
-                    _global_stop_requested = True
+                    request_stop()
                     break
                 # Chat query-in (subprocess mode). Returns False for any other
                 # line, which we silently ignore.
@@ -866,25 +885,29 @@ def main() -> None:
                 pass
             debug_log("voice thread stopped", "jarvis")
 
-        # Final diary update before shutdown
-        debug_log("performing final diary update (force=True)...", "jarvis")
-        print("📝 Updating diary before shutdown...", flush=True)
-
-        # Check dialogue memory status
-        if _global_dialogue_memory is None:
-            print("⚠️ Dialogue memory is None - nothing to save", flush=True)
+        if _global_skip_shutdown_diary_update:
+            debug_log("shutdown diary update skipped by fast stop request", "jarvis")
+            print("⏭️ Skipping diary update before shutdown", flush=True)
         else:
-            # Display-only count; actual save uses the atomic snapshot path.
-            pending = _global_dialogue_memory.get_pending_chunks()
-            print(f"💬 Found {len(pending)} pending conversation chunks", flush=True)
+            # Final diary update before shutdown
+            debug_log("performing final diary update (force=True)...", "jarvis")
+            print("📝 Updating diary before shutdown...", flush=True)
 
-        # Use callbacks if they were set by desktop app (for live UI updates in bundled mode)
-        # Use IPC (stdout events) if callbacks not set (subprocess mode)
-        use_callbacks = any(_diary_update_callbacks.values())
-        use_ipc = not use_callbacks  # Subprocess mode - emit events to stdout
-        _check_and_update_diary(db, cfg, verbose=True, force=True, timeout_sec=SHUTDOWN_DIARY_TIMEOUT_SEC, use_callbacks=use_callbacks, use_ipc=use_ipc)
-        print("✅ Diary update complete", flush=True)
-        debug_log("diary update complete", "jarvis")
+            # Check dialogue memory status
+            if _global_dialogue_memory is None:
+                print("⚠️ Dialogue memory is None - nothing to save", flush=True)
+            else:
+                # Display-only count; actual save uses the atomic snapshot path.
+                pending = _global_dialogue_memory.get_pending_chunks()
+                print(f"💬 Found {len(pending)} pending conversation chunks", flush=True)
+
+            # Use callbacks if they were set by desktop app (for live UI updates in bundled mode)
+            # Use IPC (stdout events) if callbacks not set (subprocess mode)
+            use_callbacks = any(_diary_update_callbacks.values())
+            use_ipc = not use_callbacks  # Subprocess mode - emit events to stdout
+            _check_and_update_diary(db, cfg, verbose=True, force=True, timeout_sec=SHUTDOWN_DIARY_TIMEOUT_SEC, use_callbacks=use_callbacks, use_ipc=use_ipc)
+            print("✅ Diary update complete", flush=True)
+            debug_log("diary update complete", "jarvis")
 
         if tts is not None:
             tts.stop()

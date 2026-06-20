@@ -38,6 +38,7 @@ def _reset_daemon_globals():
     daemon._global_cfg = None
     daemon._global_db = None
     daemon._global_stop_requested = False
+    daemon._global_skip_shutdown_diary_update = False
     daemon._chat_query_lock = threading.Lock()
 
 
@@ -415,3 +416,29 @@ class TestChatQueryStdinHandler:
         line = f'{daemon.CHAT_QUERY_IPC_PREFIX}{{"text":["not", "text"]}}'
         assert daemon.handle_chat_query_stdin_line(line) is True
         assert submitted == []
+
+
+@pytest.mark.unit
+class TestDaemonShutdownMode:
+    """Shutdown requests can skip the final diary LLM pass when explicitly asked."""
+
+    def setup_method(self, _method):
+        _reset_daemon_globals()
+
+    def teardown_method(self, _method):
+        _reset_daemon_globals()
+
+    def test_normal_stop_keeps_shutdown_diary_update_enabled(self):
+        daemon.request_stop()
+
+        assert daemon.is_stop_requested() is True
+        assert daemon.is_shutdown_diary_update_skipped() is False
+
+    def test_fast_stop_marks_shutdown_diary_update_skipped(self):
+        daemon.request_stop(skip_diary_update=True)
+
+        assert daemon.is_stop_requested() is True
+        assert daemon.is_shutdown_diary_update_skipped() is True
+
+    def test_shutdown_skip_diary_command_is_not_a_chat_query(self):
+        assert daemon.handle_chat_query_stdin_line(daemon.SHUTDOWN_SKIP_DIARY_COMMAND) is False
