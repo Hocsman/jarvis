@@ -128,7 +128,9 @@ A `QMainWindow` with:
   daemon shutdown) and never tears down the voice listener. Visible only
   while a query is in flight.
 - A status indicator label that shows "Jarvis is thinking…" while a query is
-  running and is hidden otherwise.
+  running. When the daemon is starting, stopping, stopped, or has exited
+  unexpectedly, the same area stays visible as a local lifecycle banner and
+  explains whether the user should wait or start listening again.
 
 ### Tray integration
 
@@ -138,11 +140,12 @@ window is created lazily on first open and kept alive for the session
 (same lifecycle as `DictationHistoryWindow`).
 
 The chat window is usable only while the daemon is running. When the tray
-state is stopped, the input and send button are disabled and a local notice
-asks the user to start listening first. On daemon start/restart, the tray
-refreshes the window's submit function and re-enables the controls. On daemon
-stop or unexpected subprocess exit, the tray clears the subprocess stdin
-submit function so the chat window cannot write to a dead pipe.
+state is starting, stopping, stopped, or has ended unexpectedly, the input and
+send button are disabled and a local banner explains the state. On daemon
+start/restart, the tray refreshes the window's submit function, hides the
+banner, and re-enables the controls. On daemon stop or unexpected subprocess
+exit, the tray clears the subprocess stdin submit function so the chat window
+cannot write to a dead pipe.
 
 ### Theme
 

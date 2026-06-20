@@ -404,6 +404,106 @@ class TestDesktopAppChatDispatch:
 
 
 @pytest.mark.unit
+class TestChatWindowDaemonStatus:
+    """The chat window shows daemon lifecycle state without requiring logs."""
+
+    def test_initial_unavailable_state_shows_status_banner(self, qapp):
+        from desktop_app.chat_window import ChatWindow
+
+        win = ChatWindow(daemon_available=False)
+        win.show()
+        qapp.processEvents()
+
+        assert not win.send_button.isEnabled()
+        assert not win.input_widget.isEnabled()
+        assert win._status_label.isVisible()
+        assert "Start Listening" in win._status_label.text()
+
+    def test_starting_state_disables_submission_and_shows_progress(self, qapp):
+        from desktop_app.chat_window import ChatWindow
+
+        win = ChatWindow()
+        win.show()
+        qapp.processEvents()
+
+        win.set_daemon_status("starting")
+        qapp.processEvents()
+
+        assert not win.send_button.isEnabled()
+        assert not win.input_widget.isEnabled()
+        assert win._status_label.isVisible()
+        assert "Starting" in win._status_label.text()
+
+    def test_stopping_state_disables_submission_and_shows_progress(self, qapp):
+        from desktop_app.chat_window import ChatWindow
+
+        win = ChatWindow()
+        win.show()
+        qapp.processEvents()
+
+        win.set_daemon_status("stopping")
+        qapp.processEvents()
+
+        assert not win.send_button.isEnabled()
+        assert not win.input_widget.isEnabled()
+        assert win._status_label.isVisible()
+        assert "Stopping" in win._status_label.text()
+
+    def test_running_state_hides_status_banner_and_reenables_submission(self, qapp):
+        from desktop_app.chat_window import ChatWindow
+
+        win = ChatWindow(daemon_available=False)
+        win.show()
+        qapp.processEvents()
+
+        win.set_daemon_status("running")
+        qapp.processEvents()
+
+        assert win.send_button.isEnabled()
+        assert win.input_widget.isEnabled()
+        assert not win._status_label.isVisible()
+
+    def test_crashed_state_resets_thinking_and_explains_reconnect(self, qapp):
+        from desktop_app.chat_window import ChatWindow
+
+        win = ChatWindow()
+        win.show()
+        qapp.processEvents()
+        win._set_thinking(True)
+        qapp.processEvents()
+
+        win.set_daemon_status("crashed")
+        qapp.processEvents()
+
+        assert not win.stop_button.isVisible()
+        assert not win.send_button.isEnabled()
+        assert win._status_label.isVisible()
+        label = win._status_label.text().lower()
+        assert "unexpectedly" in label
+        assert "start listening" in label
+
+
+@pytest.mark.unit
+class TestDesktopAppChatStatus:
+    """The tray forwards daemon lifecycle state to an open chat window."""
+
+    def test_set_chat_daemon_status_updates_existing_window(self, qapp):
+        import desktop_app.app as app_mod
+        from desktop_app.chat_window import ChatWindow
+
+        tray = app_mod.JarvisSystemTray.__new__(app_mod.JarvisSystemTray)
+        tray.chat_window = ChatWindow()
+        tray.chat_window.show()
+        tray._chat_submit_fn = lambda text: None
+
+        tray._set_chat_daemon_status("crashed")
+        qapp.processEvents()
+
+        assert not tray.chat_window.send_button.isEnabled()
+        assert "unexpectedly" in tray.chat_window._status_label.text().lower()
+
+
+@pytest.mark.unit
 class TestChatWindowInputKeys:
     """Enter sends; Shift+Enter inserts a newline (does not send)."""
 
