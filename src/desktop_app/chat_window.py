@@ -146,12 +146,13 @@ class ChatWindow(QMainWindow):
     as callbacks.
     """
 
-    def __init__(self, submit_fn=None) -> None:
+    def __init__(self, submit_fn=None, daemon_available: bool = True) -> None:
         super().__init__()
         self.setWindowTitle("Jarvis Chat")
         self.setMinimumSize(520, 560)
         self.setStyleSheet(JARVIS_THEME_STYLESHEET)
         self._submit_fn = submit_fn
+        self._daemon_available = daemon_available
 
         # Signal bridge: daemon worker -> Qt main thread.
         self.signals = ChatSignals()
@@ -203,12 +204,16 @@ class ChatWindow(QMainWindow):
         layout.addLayout(row)
 
         self._query_in_flight = False
+        self.set_daemon_available(daemon_available)
 
     # --- Sending --------------------------------------------------------
 
     def _send(self) -> None:
         text = self.input_widget.toPlainText().strip()
         if not text:
+            return
+        if not self._daemon_available:
+            self._append_system("Start Listening to use chat.")
             return
 
         # Echo the user message into the transcript immediately.
@@ -241,6 +246,19 @@ class ChatWindow(QMainWindow):
         # Reset the thinking indicator immediately so the user sees feedback
         # without waiting for the engine to finish.
         self._set_thinking(False)
+
+    def set_daemon_available(self, available: bool) -> None:
+        """Enable or disable chat submission based on daemon availability."""
+        self._daemon_available = available
+        if not available:
+            self._set_thinking(False)
+        self.input_widget.setEnabled(available)
+        self.send_button.setEnabled(available and not self._query_in_flight)
+        self.input_widget.setPlaceholderText(
+            "Type a message to Jarvis… (Enter to send, Shift+Enter for newline)"
+            if available
+            else "Start Listening from the tray to use chat"
+        )
 
     # --- Daemon callback slots (run on the main thread via signals) -----
 
@@ -310,7 +328,7 @@ class ChatWindow(QMainWindow):
     def _set_thinking(self, thinking: bool) -> None:
         self._query_in_flight = thinking
         self.stop_button.setVisible(thinking)
-        self.send_button.setEnabled(not thinking)
+        self.send_button.setEnabled(self._daemon_available and not thinking)
         self._status_label.setVisible(thinking)
         if thinking:
             self._status_label.setText("  Jarvis is thinking…")

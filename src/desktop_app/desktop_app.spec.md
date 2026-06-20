@@ -95,7 +95,7 @@ The central controller that manages:
 | **SettingsWindow** | Auto-generated config editor with tabbed categories |
 | **SetupWizard** | First-run configuration (Ollama, models, profile) |
 | **DictationHistoryWindow** | Scrollable list of past dictations with copy/delete/clear actions |
-| **ChatWindow** | Text chat interface alongside voice; shares one conversation with the voice path (see `chat_window.spec.md`) |
+| **ChatWindow** | Text chat interface alongside voice; shares one conversation with the voice path and is enabled only while the daemon is running (see `chat_window.spec.md`) |
 
 ### Tray Menu: GPU Library Recovery (Windows)
 
@@ -181,6 +181,7 @@ In subprocess mode, the daemon runs as a separate process. IPC is achieved via s
 - Desktop app intercepts these lines from the log stream
 - DiaryUpdateDialog's `process_log_line()` parses and emits signals
 - Chat IPC lines are marshalled onto the Qt main thread via `ChatIpcSignals`, then `_on_chat_ipc_line()` forwards them to `ChatWindow.process_ipc_line()`
+- When the daemon stops or a subprocess exits, the tray disables any open ChatWindow and clears its subprocess stdin submit function; daemon restart refreshes the submit function and re-enables the window.
 - Same UI experience as bundled mode
 
 ## Theme System

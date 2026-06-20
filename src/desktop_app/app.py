@@ -1907,10 +1907,23 @@ class JarvisSystemTray:
         """Show the text chat window (created lazily on first open)."""
         if self.chat_window is None:
             from desktop_app.chat_window import ChatWindow
-            self.chat_window = ChatWindow(submit_fn=self._chat_submit_fn)
+            self.chat_window = ChatWindow(
+                submit_fn=self._chat_submit_fn,
+                daemon_available=self.is_listening,
+            )
+        else:
+            self.chat_window._submit_fn = self._chat_submit_fn
+            self.chat_window.set_daemon_available(self.is_listening)
         self.chat_window.show()
         self.chat_window.raise_()
         self.chat_window.activateWindow()
+
+    def _set_chat_daemon_available(self, available: bool) -> None:
+        """Update an existing chat window when the daemon starts or stops."""
+        if self.chat_window is None:
+            return
+        self.chat_window._submit_fn = self._chat_submit_fn
+        self.chat_window.set_daemon_available(available)
 
     def _connect_dictation_history(self, retries_left: int = 3) -> None:
         """Wire dictation engine's result callback to the history window signal.
@@ -2200,6 +2213,7 @@ class JarvisSystemTray:
                 # keep writing to the old (dead) subprocess stdin.
                 if self.chat_window is not None:
                     self.chat_window._submit_fn = self._chat_submit_fn
+                    self.chat_window.set_daemon_available(True)
 
                 # Start log reader thread
                 log_thread = threading.Thread(
@@ -2216,6 +2230,7 @@ class JarvisSystemTray:
                 self.quick_stop_action.setEnabled(True)
             self.status_action.setText("🟢 Status: Listening")
             self.update_icon()
+            self._set_chat_daemon_available(True)
 
             # Show log viewer when starting listening
             self.log_viewer.show()
@@ -2249,12 +2264,14 @@ class JarvisSystemTray:
         """Called when daemon thread finishes."""
         if self.is_listening:
             self.is_listening = False
+            self._chat_submit_fn = None
             self.toggle_action.setText("▶️ Start Listening")
             if hasattr(self, "quick_stop_action"):
                 self.quick_stop_action.setEnabled(False)
             self.status_action.setText("⚪ Status: Stopped")
             self.update_icon()
             self.daemon_thread = None
+            self._set_chat_daemon_available(False)
             # Reset face to asleep so it doesn't look ready while daemon is down
             try:
                 from desktop_app.face_widget import JarvisState, get_jarvis_state
@@ -2298,7 +2315,10 @@ class JarvisSystemTray:
         """
         if self.chat_window is None:
             from desktop_app.chat_window import ChatWindow
-            self.chat_window = ChatWindow(submit_fn=self._chat_submit_fn)
+            self.chat_window = ChatWindow(
+                submit_fn=self._chat_submit_fn,
+                daemon_available=self.is_listening,
+            )
         self.chat_window.process_ipc_line(line)
 
     def stop_daemon(
@@ -2548,6 +2568,7 @@ class JarvisSystemTray:
                     diary_dialog.close()
 
                 self.daemon_process = None
+                self._chat_submit_fn = None
 
             self.is_listening = False
             self.toggle_action.setText("▶️ Start Listening")
@@ -2555,6 +2576,7 @@ class JarvisSystemTray:
                 self.quick_stop_action.setEnabled(False)
             self.status_action.setText("⚪ Status: Stopped")
             self.update_icon()
+            self._set_chat_daemon_available(False)
 
             self.tray_icon.showMessage(
                 "Jarvis Stopped",
@@ -2594,6 +2616,7 @@ class JarvisSystemTray:
             if poll is not None:
                 # Process has terminated
                 self.daemon_process = None
+                self._chat_submit_fn = None
                 if self.is_listening:
                     self.is_listening = False
                     self.toggle_action.setText("▶️ Start Listening")
@@ -2601,6 +2624,7 @@ class JarvisSystemTray:
                         self.quick_stop_action.setEnabled(False)
                     self.status_action.setText("⚪ Status: Stopped")
                     self.update_icon()
+                    self._set_chat_daemon_available(False)
 
                     self.tray_icon.showMessage(
                         "Jarvis Stopped",
