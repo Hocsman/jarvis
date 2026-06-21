@@ -1501,6 +1501,14 @@ class JarvisSystemTray:
         # in the main thread, which is important for cross-thread signal delivery
         self.face_window = FaceWindow()
 
+        # Floating reactive orb, always-on-top, shown at startup. It reads
+        # the shared cross-process JarvisState (idle/listening/thinking/
+        # speaking) and pulses accordingly, so it's the live visual of the
+        # assistant during voice — visible without opening the chat window.
+        # The same orb visual is also embedded in the chat window; this is
+        # the standalone floating instance for voice-first use.
+        self.orb_window = self._build_floating_orb()
+
         # Create dictation history window (hidden by default)
         from desktop_app.dictation_history import DictationHistoryWindow
         from jarvis.dictation.history import DictationHistory
@@ -1541,6 +1549,11 @@ class JarvisSystemTray:
         # Show tray icon
         self.tray_icon.show()
 
+        # Show the floating orb at startup so it's the live visual of the
+        # assistant from the moment the app launches (it sits at IDLE/ASLEEP
+        # until the voice pipeline reports activity).
+        self.show_orb_window()
+
         # Register cleanup on app exit
         self.app.aboutToQuit.connect(self.cleanup_on_exit)
 
@@ -1573,6 +1586,13 @@ class JarvisSystemTray:
     def cleanup_on_exit(self) -> None:
         """Cleanup when app is exiting."""
         debug_log("cleaning up on exit", "desktop")
+        # Close the floating orb so its render timer + hotkey listener
+        # are torn down cleanly before the app quits.
+        if getattr(self, "orb_window", None) is not None:
+            try:
+                self.orb_window.close()
+            except Exception as e:
+                debug_log(f"error closing orb window on exit: {e}", "desktop")
         if self.is_listening:
             self.stop_daemon()
         # Stop memory viewer server
@@ -1634,6 +1654,12 @@ class JarvisSystemTray:
         self.face_action = QAction("👤 Show Face")
         self.face_action.triggered.connect(self.show_face_window)
         self.menu.addAction(self.face_action)
+
+        # Floating orb toggle (only when the orb stack is available)
+        if self.orb_window is not None:
+            self.orb_action = QAction("🟠 Toggle Orb")
+            self.orb_action.triggered.connect(self.toggle_orb_window)
+            self.menu.addAction(self.orb_action)
 
         # Setup wizard action
         self.setup_wizard_action = QAction("🔧 Setup Wizard")
@@ -1970,6 +1996,48 @@ class JarvisSystemTray:
         self.face_window.show()
         self.face_window.raise_()
         self.face_window.activateWindow()
+
+    def _build_floating_orb(self):
+        """Construct the floating orb window wired to the shared
+        JarvisState, or return ``None`` if the orb stack can't load
+        (the app then runs without it). The orb's StateController polls
+        ``get_jarvis_state().state`` each frame and maps it to the orb's
+        visual mode, so the floating orb tracks the voice pipeline with
+        no extra signal wiring."""
+        try:
+            from desktop_app.orb.orb_window import OrbWindow
+            from desktop_app.orb.state_controller import StateController
+            from desktop_app.face_widget import get_jarvis_state
+
+            particles = True
+            try:
+                from jarvis.config import load_settings
+
+                particles = bool(load_settings().ui.orb_particles_enabled)
+            except Exception:
+                pass
+
+            controller = StateController(
+                jarvis_state_provider=lambda: get_jarvis_state().state
+            )
+            return OrbWindow(state_controller=controller, particles_enabled=particles)
+        except Exception as exc:
+            debug_log(f"floating orb unavailable, continuing without it: {exc}", "desktop")
+            return None
+
+    def show_orb_window(self) -> None:
+        """Show the floating orb (no-op if it failed to build)."""
+        if self.orb_window is not None:
+            self.orb_window.show_orb()
+
+    def toggle_orb_window(self) -> None:
+        """Toggle the floating orb's visibility from the tray menu."""
+        if self.orb_window is None:
+            return
+        if self.orb_window.isVisible():
+            self.orb_window.hide_orb()
+        else:
+            self.orb_window.show_orb()
 
     def open_directory(self, directory_path: Path, directory_name: str) -> None:
         """Open a directory in the system file manager."""
