@@ -287,6 +287,19 @@ class OpenAICompatibleBackend(LLMBackend):
             # for diagnosis and drop the URL.
             status = e.response.status_code if e.response is not None else "?"
             print(f"  ❌ LLM HTTP error (status {status})", flush=True)
+            # The response BODY is the provider's own error message (e.g.
+            # "model X requires parameter Y", a rejected tool schema, etc.).
+            # It carries no URL/token, so it's safe to surface for diagnosis
+            # — without it a 400 is undebuggable.
+            if e.response is not None:
+                try:
+                    debug_log(
+                        f"OpenAICompatibleBackend.chat: HTTP {status} body: "
+                        f"{e.response.text[:600]}",
+                        "llm",
+                    )
+                except Exception:
+                    pass
             return None
         except Exception as e:
             # Generic exception messages can carry whatever the caller embedded

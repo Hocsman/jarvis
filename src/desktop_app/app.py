@@ -2327,9 +2327,10 @@ class JarvisSystemTray:
                 2000
             )
 
-            # Show face window when starting
-            self.face_window.show()
-            self.face_window.raise_()
+            # The reactive orb is the assistant's visual now (floating +
+            # chat hero), so we no longer auto-show the low-poly face on
+            # start. It stays available on demand via the tray "👤 Show
+            # Face" action for anyone who prefers it.
 
             debug_log("daemon started from desktop app", "desktop")
 
