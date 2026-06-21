@@ -38,7 +38,15 @@ class DashboardWindow(QMainWindow):
         self.setCentralWidget(self._view)
 
         # Bridge + channel: registered as ``jarvis`` on the JS side.
-        self.bridge = DashboardBridge(submit_fn=submit_fn, parent=self)
+        weather_city = "Paris"
+        try:
+            from jarvis.config import load_settings
+            weather_city = (load_settings().weather_city or "Paris").strip() or "Paris"
+        except Exception:
+            pass
+        self.bridge = DashboardBridge(
+            submit_fn=submit_fn, weather_city=weather_city, parent=self
+        )
         self._channel = QWebChannel(self)
         self._channel.registerObject("jarvis", self.bridge)
         self._view.page().setWebChannel(self._channel)

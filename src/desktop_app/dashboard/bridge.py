@@ -48,9 +48,11 @@ class DashboardBridge(QObject):
     busy = pyqtSignal()                # daemon busy with another query
 
     def __init__(self, submit_fn: Optional[Callable[[str], None]] = None,
+                 weather_city: str = "Paris",
                  parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
         self._submit_fn = submit_fn
+        self._weather_city = (weather_city or "Paris").strip() or "Paris"
         self._last_state: Optional[str] = None
         # Text-chat doesn't necessarily flip the cross-process JarvisState,
         # so we track an in-flight chat query locally and force the orb to
@@ -68,6 +70,13 @@ class DashboardBridge(QObject):
         self._state_timer = QTimer(self)
         self._state_timer.timeout.connect(self._emit_state_if_changed)
         self._state_timer.start(200)
+
+        # Weather: refresh every 10 min (the first fetch fires on ready()).
+        # The network call runs on a worker thread; the signal hop back to
+        # the main thread is handled by Qt's queued connection.
+        self._weather_timer = QTimer(self)
+        self._weather_timer.timeout.connect(self._fetch_weather_async)
+        self._weather_timer.start(600_000)
 
     # ── setters used by the host (tray) ────────────────────────────────
     def set_submit_fn(self, fn: Optional[Callable[[str], None]]) -> None:
@@ -114,6 +123,24 @@ class DashboardBridge(QObject):
         blank until the first timer tick."""
         self._emit_stats()
         self._emit_state(force=True)
+        self._fetch_weather_async()
+
+    # ── weather ────────────────────────────────────────────────────────
+    def _fetch_weather_async(self) -> None:
+        import threading
+
+        def _work():
+            try:
+                from jarvis.utils.weather_now import fetch_weather_summary
+                data = fetch_weather_summary(self._weather_city)
+                if data:
+                    # Emitted from a worker thread; Qt queues it onto the
+                    # main thread for the JS push.
+                    self.weatherUpdated.emit(json.dumps(data, ensure_ascii=False))
+            except Exception as exc:
+                debug_log(f"dashboard weather fetch failed: {exc}", "desktop")
+
+        threading.Thread(target=_work, name="dashboard-weather", daemon=True).start()
 
     # ── internal emitters ──────────────────────────────────────────────
     def _emit_stats(self) -> None:

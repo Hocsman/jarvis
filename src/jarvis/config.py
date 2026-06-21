@@ -304,6 +304,10 @@ class Settings:
     # "français". Layered into the system prompt by build_system_prompt.
     response_language: str
 
+    # City shown on the dashboard weather card (Open-Meteo geocoded).
+    # Empty falls back to "Paris".
+    weather_city: str
+
     # Desktop UI choices (orb particle layer, etc.)
     ui: UISettings
 
@@ -668,6 +672,9 @@ def get_default_config() -> Dict[str, Any]:
         # Force reply language (empty = mirror the user's language).
         "response_language": "",
 
+        # Dashboard weather card city (empty = "Paris").
+        "weather_city": "",
+
         # Desktop UI. ``orb_particles_enabled`` controls whether the
         # reactive orb renders its ambient particle layer (default
         # True). Set false to skip the particle draw entirely (perf
@@ -905,6 +912,7 @@ def load_settings() -> Settings:
     dictation_custom_dictionary = list(raw_dict) if isinstance(raw_dict, list) else []
     mcps = _ensure_dict(merged.get("mcps"))
     response_language = str(merged.get("response_language", "") or "").strip()
+    weather_city = str(merged.get("weather_city", "") or "").strip()
 
     # Parse ui subsection. ``orb_particles_enabled`` defaults to True;
     # coerced via bool()/string rules so a hand-edited config that
@@ -1070,6 +1078,7 @@ def load_settings() -> Settings:
         # MCP Integration
         mcps=mcps,
         response_language=response_language,
+        weather_city=weather_city,
 
         # Desktop UI
         ui=ui,
