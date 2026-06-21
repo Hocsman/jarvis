@@ -62,3 +62,28 @@ class DashboardWindow(QMainWindow):
 
     def deliver_busy(self) -> None:
         self.bridge.deliver_busy()
+
+    def process_ipc_line(self, line: str) -> bool:
+        """Parse a ``__CHAT__:`` daemon event line and drive the bridge.
+
+        Mirrors ``ChatWindow.process_ipc_line`` so the dashboard can be
+        fed the same daemon event stream by the tray's log reader.
+        Returns True if the line was a chat event.
+        """
+        from jarvis.daemon import CHAT_IPC_PREFIX
+        if not line.startswith(CHAT_IPC_PREFIX):
+            return False
+        import json as _json
+        try:
+            payload = _json.loads(line[len(CHAT_IPC_PREFIX):])
+        except Exception:
+            return True
+        kind = payload.get("type")
+        data = payload.get("data")
+        if kind == "complete":
+            self.bridge.deliver_reply(data)
+        elif kind == "busy":
+            self.bridge.deliver_busy()
+        # "start" needs no action: submitQuery already set the orb to
+        # THINKING locally when the user sent the message.
+        return True

@@ -1521,6 +1521,10 @@ class JarvisSystemTray:
         # starts so the window can route queries in subprocess mode.
         self.chat_window = None
         self._chat_submit_fn = None
+        # The HUD dashboard (unified web UI). Created lazily on first open;
+        # shares the same daemon chat submission + IPC event stream as the
+        # chat window.
+        self.dashboard_window = None
         self._daemon_stop_expected = False
 
         # Main-thread signal bridge for chat IPC. The log reader thread emits
@@ -1644,6 +1648,12 @@ class JarvisSystemTray:
         self.dictation_history_action = QAction("🎙️ Dictation History")
         self.dictation_history_action.triggered.connect(self.show_dictation_history)
         self.menu.addAction(self.dictation_history_action)
+
+        # Dashboard (unified HUD) action — the primary interface.
+        if HAS_WEBENGINE:
+            self.dashboard_action = QAction("🖥️ Dashboard")
+            self.dashboard_action.triggered.connect(self.show_dashboard)
+            self.menu.addAction(self.dashboard_action)
 
         # Chat window action
         self.chat_action = QAction("💬 Chat…")
@@ -1952,12 +1962,34 @@ class JarvisSystemTray:
         self.chat_window.raise_()
         self.chat_window.activateWindow()
 
+    def show_dashboard(self) -> None:
+        """Show the unified HUD dashboard (created lazily on first open).
+
+        It shares the daemon chat submission callable and the ``__CHAT__:``
+        IPC event stream with the chat window, so voice and text and the
+        dashboard are all one conversation.
+        """
+        if not HAS_WEBENGINE:
+            return
+        if self.dashboard_window is None:
+            from desktop_app.dashboard_window import DashboardWindow
+            self.dashboard_window = DashboardWindow(submit_fn=self._chat_submit_fn)
+        else:
+            self.dashboard_window.set_submit_fn(self._chat_submit_fn)
+        self.dashboard_window.show()
+        self.dashboard_window.raise_()
+        self.dashboard_window.activateWindow()
+
     def _set_chat_daemon_available(self, available: bool) -> None:
         """Update an existing chat window when the daemon starts or stops."""
         self._set_chat_daemon_status("running" if available else "stopped")
 
     def _set_chat_daemon_status(self, status: str) -> None:
         """Update an existing chat window with daemon lifecycle state."""
+        # Keep the dashboard's submit callable in sync too — it routes
+        # chat through the same daemon path.
+        if self.dashboard_window is not None:
+            self.dashboard_window.set_submit_fn(self._chat_submit_fn)
         if self.chat_window is None:
             return
         self.chat_window._submit_fn = self._chat_submit_fn
@@ -2408,6 +2440,10 @@ class JarvisSystemTray:
                 daemon_available=self.is_listening,
             )
         self.chat_window.process_ipc_line(line)
+        # Fan the same daemon event out to the dashboard if it's open, so
+        # its conversation panel + orb stay in sync with the chat window.
+        if self.dashboard_window is not None:
+            self.dashboard_window.process_ipc_line(line)
 
     def stop_daemon(
         self,

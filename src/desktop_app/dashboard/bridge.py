@@ -52,6 +52,11 @@ class DashboardBridge(QObject):
         super().__init__(parent)
         self._submit_fn = submit_fn
         self._last_state: Optional[str] = None
+        # Text-chat doesn't necessarily flip the cross-process JarvisState,
+        # so we track an in-flight chat query locally and force the orb to
+        # THINKING while one is pending — the orb pulses for text queries
+        # too, not only voice.
+        self._chat_pending: bool = False
 
         # System stats: poll every 2 s.
         self._stats_timer = QTimer(self)
@@ -70,10 +75,14 @@ class DashboardBridge(QObject):
 
     def deliver_reply(self, text: Optional[str]) -> None:
         """Called by the host when the daemon returns a reply."""
+        self._chat_pending = False
+        self._emit_state(force=True)  # settle the orb out of THINKING
         if text:
             self.replyReceived.emit(str(text))
 
     def deliver_busy(self) -> None:
+        self._chat_pending = False
+        self._emit_state(force=True)
         self.busy.emit()
 
     # ── JS -> Python ───────────────────────────────────────────────────
@@ -86,10 +95,14 @@ class DashboardBridge(QObject):
             return
         self.userEcho.emit(text)
         if self._submit_fn is not None:
+            self._chat_pending = True
+            self._emit_state(force=True)  # orb -> THINKING while generating
             try:
                 self._submit_fn(text)
             except Exception as exc:
                 debug_log(f"dashboard submitQuery failed: {exc}", "desktop")
+                self._chat_pending = False
+                self._emit_state(force=True)
                 self.replyReceived.emit("(échec d'envoi au daemon)")
         else:
             # Standalone preview without a daemon.
@@ -128,12 +141,19 @@ class DashboardBridge(QObject):
             return "idle"
 
     def _emit_state_if_changed(self) -> None:
+        if self._chat_pending:
+            return  # held at THINKING until the reply lands
         st = self._current_jarvis_state()
         if st != self._last_state:
             self._emit_state(state=st)
 
     def _emit_state(self, state: Optional[str] = None, force: bool = False) -> None:
-        st = state if state is not None else self._current_jarvis_state()
+        # A pending text-chat query overrides the polled voice state so the
+        # orb pulses THINKING during generation.
+        if self._chat_pending:
+            st = "thinking"
+        else:
+            st = state if state is not None else self._current_jarvis_state()
         self._last_state = st
         accent, label = _STATE_VIEW.get(st, _STATE_DEFAULT)
         self.stateChanged.emit(json.dumps({"accent": list(accent), "status": label}))
