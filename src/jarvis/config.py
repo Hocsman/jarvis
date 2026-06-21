@@ -103,6 +103,11 @@ class Settings:
     # "OPENROUTER_API_KEY"). Empty = use the literal ``llm_api_key``.
     llm_api_key_env: str
     llm_chat_model: str
+    # Provider-specific extra request fields merged into every cloud chat
+    # payload (OpenAI-compatible path only). Example for OpenRouter, to pin
+    # the fastest upstream for a multi-provider model:
+    # {"provider": {"sort": "throughput"}}. Empty = standard OpenAI shape.
+    llm_extra_body: Dict[str, Any]
     # Scrub secret-shaped tokens (emails, API keys, JWTs, password/
     # token/secret pairs) from prompts before they leave the machine
     # for a remote OpenAI-compatible provider. Default True (privacy-
@@ -495,6 +500,7 @@ def get_default_config() -> Dict[str, Any]:
         "llm_api_key": "",
         "llm_api_key_env": "",  # name of env var holding the key (preferred over plaintext)
         "llm_chat_model": "",  # falls back to ollama_chat_model when empty
+        "llm_extra_body": {},  # provider-specific extra chat payload fields
         "auto_redact_before_cloud": True,  # scrub secrets before remote egress
         "embedding_provider": "",  # "" = same as llm_provider
         "embedding_base_url": "",
@@ -752,6 +758,8 @@ def load_settings() -> Settings:
         if env_key:
             llm_api_key = env_key
     auto_redact_before_cloud = bool(merged.get("auto_redact_before_cloud", True))
+    raw_extra_body = merged.get("llm_extra_body", {})
+    llm_extra_body = raw_extra_body if isinstance(raw_extra_body, dict) else {}
     if llm_provider == "openai_compatible":
         llm_chat_model = str(merged.get("llm_chat_model", "") or "").strip() or ollama_chat_model
     else:
@@ -949,6 +957,7 @@ def load_settings() -> Settings:
         llm_api_key=llm_api_key,
         llm_api_key_env=llm_api_key_env,
         llm_chat_model=llm_chat_model,
+        llm_extra_body=llm_extra_body,
         auto_redact_before_cloud=auto_redact_before_cloud,
         embedding_provider=embedding_provider,
         embedding_base_url=embedding_base_url,

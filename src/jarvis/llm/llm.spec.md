@@ -67,6 +67,7 @@ Provider-aware fields in `Settings` (see [src/jarvis/config.py](../config.py)):
 | `llm_base_url` | (OpenAI-compatible only) | The OpenAI-compatible server's URL, e.g. `http://localhost:1234/v1` (LM Studio default). Read only when `llm_provider == openai_compatible`; the Ollama path always uses `ollama_base_url`. |
 | `llm_api_key` | `""` | Optional bearer token. Sent only when non-empty. |
 | `llm_chat_model` | (OpenAI-compatible only) | The model name the OpenAI-compatible server exposes. Read only when `llm_provider == openai_compatible` (falling back to `ollama_chat_model` if blank); the Ollama path uses `ollama_chat_model`. |
+| `llm_extra_body` | `{}` | Provider-specific request fields merged into every OpenAI-compatible chat payload (`direct` / `streaming` / `chat`). Example: `{"provider": {"sort": "throughput"}}` to pin the fastest upstream for an OpenRouter model served by several providers. Never overrides the keys the backend owns (`model` / `messages` / `stream`). No effect on the Ollama path. |
 | `embedding_provider` | inherits `llm_provider` | `"ollama"` / `"openai_compatible"`. Override for runtimes without embeddings. |
 | `embedding_base_url` | inherits from llm config | Override per-provider URL. |
 | `embedding_api_key` | inherits `llm_api_key` | Override per-provider key. |
@@ -80,6 +81,7 @@ The `ollama_base_url` / `ollama_chat_model` / `ollama_embed_model` keys hold the
 - `get_llm_backend(cfg)` reads `llm_provider`. For `openai_compatible` it resolves `llm_base_url` (falling back to `ollama_base_url`); for `ollama` it uses `ollama_base_url` directly so a stale `llm_base_url` from a previous OpenAI-compatible config cannot leak into the Ollama backend. `llm_api_key` is read regardless (sent only when non-empty).
 - `get_embedding_backend(cfg)` reads `embedding_provider` (falls back to `llm_provider` when unset), resolves `embedding_base_url` (falls back per-provider: `llm_base_url` for OpenAI-compatible, `ollama_base_url` for Ollama), and `embedding_api_key` (falls back to `llm_api_key`).
 - Construction is fail-soft: an unset URL becomes the default Ollama URL, so `get_*_backend` never raises. Errors surface at request time, not construction time.
+- Backends are **memoised** by their resolved connection parameters (provider, URL, key, redaction flag, `llm_extra_body`). A single reply makes many `get_llm_backend` calls; returning one cached instance lets them share the backend's persistent HTTP session (keep-alive) instead of each paying a fresh TLS handshake and the provider's cold-start. `clear_backend_cache()` drops the cache after a config reload so the next call rebuilds against the new settings.
 
 ### v1 → v2 config migration
 
@@ -106,7 +108,9 @@ The migration in `_migrate_config` runs once when `_config_version < 2`:
 - Tool calls: native `tools` parameter; OpenAI returns `tool_calls[*].function.arguments` as a JSON-encoded string. The backend decodes them to a dict so the reply engine sees a single shape.
 - Response normalisation: `_normalise_response` lifts `choices[0].message` to top-level `message` so callers do not branch on provider. Servers that already return Ollama-shaped responses pass through unchanged.
 - `extra_options` lifts sampling fields (`temperature`, `max_tokens`, `top_p`, `stop`, …) to the payload root and silently drops Ollama-only knobs (`keep_alive`, `num_ctx`, `num_predict`, `think`) that have no equivalent in the OpenAI shape.
-- `warm_up()` is a no-op (returns `True`): OpenAI-compatible servers keep models warm at server load time.
+- `llm_extra_body` fields are merged into the chat payload root via `setdefault` (the backend-owned `model` / `messages` / `stream` keys always win). Embeddings are not affected.
+- One persistent `requests.Session` per backend: the TCP + TLS connection to the provider is kept alive across calls (HTTP keep-alive), so each request skips the handshake. On a remote cloud endpoint that handshake is a large share of a short request's latency.
+- `warm_up(model)` fires one minimal (`max_tokens: 1`) chat request to establish the session's connection and warm the provider before the first user query. There is nothing to page into memory on a remote endpoint, but the first call to a cold connection pays the TLS handshake and the provider's routing/cold-start (several seconds on a cloud endpoint); absorbing that at startup keeps the first reply on a warm path. Returns `True` on success, `False` on error or empty model.
 - Authentication: `Authorization: Bearer <api_key>` header sent only when `api_key` is non-empty.
 - Error logs do not echo URLs or API keys: HTTP errors print only the status code, generic exceptions print only the class name, connection errors print a fixed string and re-raise so callers can apply their own back-off.
 

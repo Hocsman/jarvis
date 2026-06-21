@@ -31,7 +31,7 @@ import requests  # noqa: F401  — re-exported for test patching, see module doc
 from .backend import LLMBackend, ToolsNotSupportedError
 from .ollama import OllamaBackend, extract_text_from_response
 from .openai_compatible import OpenAICompatibleBackend
-from .factory import get_embedding_backend, get_llm_backend
+from .factory import clear_backend_cache, get_embedding_backend, get_llm_backend
 
 __all__ = [
     "LLMBackend",
@@ -40,6 +40,7 @@ __all__ = [
     "ToolsNotSupportedError",
     "get_llm_backend",
     "get_embedding_backend",
+    "clear_backend_cache",
     "extract_text_from_response",
     "call_llm_direct",
     "call_llm_streaming",

@@ -85,9 +85,31 @@ def _normalise_response(data: Dict[str, Any]) -> Dict[str, Any]:
 class OpenAICompatibleBackend(LLMBackend):
     """:class:`LLMBackend` implementation for OpenAI-compatible servers."""
 
-    def __init__(self, base_url: str, api_key: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: Optional[str] = None,
+        extra_body: Optional[Dict[str, Any]] = None,
+    ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key or None
+        # Provider-specific request fields merged into every chat payload
+        # (e.g. OpenRouter's ``{"provider": {"sort": "throughput"}}`` to
+        # pin the fastest upstream provider for a model served by several).
+        # These are non-standard extensions to the OpenAI shape, so they're
+        # opt-in via config rather than baked in. Never overrides the keys
+        # the backend sets itself (model / messages / stream).
+        self._extra_body: Dict[str, Any] = dict(extra_body or {})
+        # One persistent HTTP session per backend: keeps the TCP + TLS
+        # connection to the provider alive across calls (HTTP keep-alive)
+        # so each request skips the handshake. On a remote cloud endpoint
+        # that handshake is a large share of a short request's latency.
+        self._session = requests.Session()
+
+    def _apply_extra_body(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        for key, value in self._extra_body.items():
+            payload.setdefault(key, value)
+        return payload
 
     @property
     def base_url(self) -> str:
@@ -129,9 +151,9 @@ class OpenAICompatibleBackend(LLMBackend):
             payload["temperature"] = temperature
 
         try:
-            with requests.post(
+            with self._session.post(
                 f"{self._base_url}/chat/completions",
-                json=payload,
+                json=self._apply_extra_body(payload),
                 headers=self._headers(),
                 timeout=timeout_sec,
             ) as resp:
@@ -191,9 +213,9 @@ class OpenAICompatibleBackend(LLMBackend):
         }
 
         try:
-            with requests.post(
+            with self._session.post(
                 f"{self._base_url}/chat/completions",
-                json=payload,
+                json=self._apply_extra_body(payload),
                 headers=self._headers(),
                 timeout=timeout_sec,
                 stream=True,
@@ -270,9 +292,9 @@ class OpenAICompatibleBackend(LLMBackend):
             payload["tools"] = tools
 
         try:
-            with requests.post(
+            with self._session.post(
                 f"{self._base_url}/chat/completions",
-                json=payload,
+                json=self._apply_extra_body(payload),
                 headers=self._headers(),
                 timeout=timeout_sec,
             ) as resp:
@@ -332,7 +354,7 @@ class OpenAICompatibleBackend(LLMBackend):
         timeout_sec: float = 15.0,
     ) -> Optional[List[float]]:
         try:
-            resp = requests.post(
+            resp = self._session.post(
                 f"{self._base_url}/embeddings",
                 json={"model": model, "input": text},
                 headers=self._headers(),
@@ -351,7 +373,7 @@ class OpenAICompatibleBackend(LLMBackend):
 
     def list_models(self, timeout_sec: float = 5.0) -> List[str]:
         try:
-            resp = requests.get(
+            resp = self._session.get(
                 f"{self._base_url}/models",
                 headers=self._headers(),
                 timeout=timeout_sec,
@@ -368,3 +390,42 @@ class OpenAICompatibleBackend(LLMBackend):
             return names
         except Exception:
             return []
+
+    def warm_up(
+        self,
+        model: str,
+        timeout_sec: float = 60.0,
+        keep_alive: str = "30m",
+    ) -> bool:
+        """Establish the persistent session's connection and warm the
+        provider ahead of the first real query.
+
+        There's nothing to page into memory on a remote endpoint, but the
+        first request to a cold connection pays the TLS handshake and the
+        provider's routing/cold-start — on a cloud endpoint that's several
+        seconds, the dominant share of the first reply's latency. Firing
+        one minimal (1-token) request at startup absorbs that cost up front
+        so the user's first query lands on a warm path. The session is
+        reused (the backend is cached), so the warm connection persists.
+        """
+        if not model:
+            return False
+        try:
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 1,
+                "stream": False,
+            }
+            with self._session.post(
+                f"{self._base_url}/chat/completions",
+                json=self._apply_extra_body(payload),
+                headers=self._headers(),
+                timeout=timeout_sec,
+            ) as resp:
+                resp.raise_for_status()
+                resp.json()
+            return True
+        except Exception as e:
+            debug_log(f"OpenAICompatibleBackend.warm_up: {e}", "llm")
+            return False
