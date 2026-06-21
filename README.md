@@ -377,6 +377,14 @@ To use different Piper voices, download from [HuggingFace](https://huggingface.c
 }
 ```
 
+**Kokoro** - more natural neural voice (Kokoro-82M), still real-time on CPU:
+```json
+{ "tts_engine": "kokoro", "tts_kokoro_voice": "ff_siwis", "tts_kokoro_lang_code": "f" }
+```
+- Noticeably more natural than Piper while staying fast enough for modest hardware
+- Multilingual; non-English voices need `espeak-ng` installed (`brew install espeak-ng` on macOS)
+- Model weights download once from Hugging Face (~330MB)
+
 **Chatterbox** - AI voice with emotion control (requires running from source):
 ```json
 { "tts_engine": "chatterbox" }

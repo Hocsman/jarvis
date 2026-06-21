@@ -144,7 +144,7 @@ class Settings:
 
     # Text-to-Speech
     tts_enabled: bool
-    tts_engine: str  # "piper" (default) or "chatterbox"
+    tts_engine: str  # "piper" (default), "kokoro", or "chatterbox"
     tts_voice: str | None
     tts_rate: int | None  # Words per minute (WPM), 200=normal
     tts_chatterbox_device: str  # "cuda", "auto", or "cpu" for Chatterbox
@@ -159,6 +159,11 @@ class Settings:
     tts_piper_noise_scale: float  # Audio variation
     tts_piper_noise_w: float  # Phoneme width variation
     tts_piper_sentence_silence: float  # Post-sentence silence in seconds
+
+    # Kokoro TTS (more natural neural voice; real-time on CPU)
+    tts_kokoro_voice: str  # Voice id, e.g. "ff_siwis" (French)
+    tts_kokoro_lang_code: str  # Kokoro language code, e.g. "f" (French)
+    tts_kokoro_speed: float  # Speech speed multiplier (1.0 = normal)
 
     # Voice Input & Audio
     voice_device: str | None
@@ -532,7 +537,7 @@ def get_default_config() -> Dict[str, Any]:
 
         # Text-to-Speech
         "tts_enabled": True,
-        "tts_engine": "piper",  # "piper" (default) or "chatterbox"
+        "tts_engine": "piper",  # "piper" (default), "kokoro", or "chatterbox"
         "tts_voice": None,
         "tts_rate": 200,  # Words per minute (WPM), 200=normal
         "tts_chatterbox_device": "cuda",  # "cuda" (recommended), "auto", or "cpu"
@@ -547,6 +552,11 @@ def get_default_config() -> Dict[str, Any]:
         "tts_piper_noise_scale": 0.8,  # Audio variation (higher = more expressive)
         "tts_piper_noise_w": 1.0,  # Phoneme width variation (higher = more lively)
         "tts_piper_sentence_silence": 0.2,  # Post-sentence silence in seconds
+
+        # Kokoro TTS
+        "tts_kokoro_voice": "ff_siwis",  # French voice
+        "tts_kokoro_lang_code": "f",  # French
+        "tts_kokoro_speed": 1.0,  # Speech speed multiplier
 
         # Voice Input & Audio
         "voice_device": None,
@@ -780,7 +790,7 @@ def load_settings() -> Settings:
     active_profiles = _ensure_list(merged.get("active_profiles"))
     tts_enabled = bool(merged.get("tts_enabled", True))
     tts_engine = str(merged.get("tts_engine", "piper")).lower()
-    if tts_engine not in ("piper", "chatterbox"):
+    if tts_engine not in ("piper", "chatterbox", "kokoro"):
         tts_engine = "piper"  # Default to piper if invalid value
     tts_voice_val = merged.get("tts_voice")
     tts_voice = None if tts_voice_val in (None, "", "null") else str(tts_voice_val)
@@ -809,6 +819,12 @@ def load_settings() -> Settings:
     tts_piper_noise_scale = float(merged.get("tts_piper_noise_scale", 0.8))
     tts_piper_noise_w = float(merged.get("tts_piper_noise_w", 1.0))
     tts_piper_sentence_silence = float(merged.get("tts_piper_sentence_silence", 0.2))
+    tts_kokoro_voice = str(merged.get("tts_kokoro_voice", "ff_siwis") or "ff_siwis").strip()
+    tts_kokoro_lang_code = str(merged.get("tts_kokoro_lang_code", "f") or "f").strip()
+    try:
+        tts_kokoro_speed = float(merged.get("tts_kokoro_speed", 1.0))
+    except Exception:
+        tts_kokoro_speed = 1.0
 
     voice_device_val = merged.get("voice_device")
     voice_device = None if voice_device_val in (None, "", "default", "system") else str(voice_device_val)
@@ -997,6 +1013,9 @@ def load_settings() -> Settings:
         tts_piper_noise_scale=tts_piper_noise_scale,
         tts_piper_noise_w=tts_piper_noise_w,
         tts_piper_sentence_silence=tts_piper_sentence_silence,
+        tts_kokoro_voice=tts_kokoro_voice,
+        tts_kokoro_lang_code=tts_kokoro_lang_code,
+        tts_kokoro_speed=tts_kokoro_speed,
 
         # Voice Input & Audio
         voice_device=voice_device,

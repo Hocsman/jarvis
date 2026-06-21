@@ -964,6 +964,315 @@ class PiperTTS:
         return self._last_spoken_text
 
 
+def _find_espeak_library() -> Optional[str]:
+    """Locate the espeak-ng shared library for phonemizer.
+
+    Kokoro's non-English G2P (misaki) phonemises through espeak-ng. The
+    phonemizer backend reads ``PHONEMIZER_ESPEAK_LIBRARY`` for the library
+    path; when unset it probes these well-known install locations. Returns
+    None if none exist, letting phonemizer fall back to its own discovery.
+    """
+    candidates = [
+        "/opt/homebrew/lib/libespeak-ng.dylib",          # macOS Apple Silicon (brew)
+        "/opt/homebrew/lib/libespeak-ng.1.dylib",
+        "/usr/local/lib/libespeak-ng.dylib",             # macOS Intel (brew)
+        "/usr/lib/x86_64-linux-gnu/libespeak-ng.so.1",   # Debian / Ubuntu
+        "/usr/lib/libespeak-ng.so.1",
+        "/usr/local/lib/libespeak-ng.so",
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return None
+
+
+class KokoroTTS:
+    """TTS implementation using Kokoro-82M (StyleTTS2-based neural TTS).
+
+    More natural than Piper while still running faster than real-time on
+    CPU, which makes it the local upgrade for machines too weak for the
+    heavier neural engines. Multilingual via misaki G2P; non-English
+    languages (e.g. French) phonemise through espeak-ng, so libespeak-ng
+    must be installed. Model weights download once from Hugging Face
+    (``hexgrad/Kokoro-82M``).
+
+    Mirrors :class:`PiperTTS`'s threading / queue / streaming-playback
+    structure (each engine is self-contained in this module) so the
+    listener's loopback guard, interruption, and duration/completion
+    callbacks behave identically regardless of engine.
+    """
+
+    def __init__(
+        self,
+        enabled: bool = True,
+        voice: str = "ff_siwis",
+        lang_code: str = "f",
+        speed: float = 1.0,
+    ) -> None:
+        self.enabled = enabled
+        self.voice = voice or "ff_siwis"
+        self.lang_code = lang_code or "f"
+        self.speed = float(speed) if speed else 1.0
+
+        # Threading and queue setup (same pattern as PiperTTS).
+        self._q: queue.Queue[str] = queue.Queue()
+        self._thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+        self._is_speaking = threading.Event()
+        self._last_spoken_text: str = ""
+        self._completion_callback: Optional[Callable[[], None]] = None
+        self._duration_callback: Optional[Callable[[float], None]] = None
+        self._should_interrupt = threading.Event()
+
+        # Kokoro pipeline (lazy loaded).
+        self._pipe = None
+        self._sample_rate: int = 24000  # Kokoro's fixed output rate
+        self._initialized = False
+        self._init_lock = threading.Lock()
+        self._init_error: Optional[str] = None
+
+        # Audio stream for interruption.
+        self._audio_stream = None
+        self._audio_lock = threading.Lock()
+
+    def _ensure_initialized(self) -> bool:
+        """Load the Kokoro pipeline. Returns True if successful."""
+        if self._initialized:
+            return self._pipe is not None
+        if not self.enabled:
+            return False
+
+        with self._init_lock:
+            if self._initialized:
+                return self._pipe is not None
+
+            try:
+                # Point phonemizer at espeak-ng for non-English G2P. Only
+                # set when the user hasn't already pinned a library path.
+                if "PHONEMIZER_ESPEAK_LIBRARY" not in os.environ:
+                    lib = _find_espeak_library()
+                    if lib:
+                        os.environ["PHONEMIZER_ESPEAK_LIBRARY"] = lib
+                        debug_log(f"Kokoro TTS espeak-ng library: {lib}", "tts")
+
+                from kokoro import KPipeline
+
+                debug_log(f"Kokoro TTS loading pipeline (lang={self.lang_code})", "tts")
+                self._pipe = KPipeline(lang_code=self.lang_code)
+                debug_log("Kokoro TTS initialized", "tts")
+
+            except ImportError as e:
+                self._init_error = f"kokoro not installed: {e}"
+                debug_log(f"Kokoro TTS init failed: {self._init_error}", "tts")
+            except Exception as e:
+                self._init_error = f"Failed to load Kokoro pipeline: {e}"
+                debug_log(f"Kokoro TTS init failed: {self._init_error}", "tts")
+
+            self._initialized = True
+            return self._pipe is not None
+
+    def start(self) -> None:
+        if not self.enabled or self._thread is not None:
+            return
+        # The first-use HF download + pipeline load is slow (tens of
+        # seconds), so warm it in the background instead of blocking daemon
+        # startup. The worker's _ensure_initialized re-checks under the same
+        # lock, so a speak arriving before the load finishes simply waits.
+        threading.Thread(target=self._ensure_initialized, daemon=True,
+                         name="kokoro-init").start()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        if self._thread is None:
+            return
+        try:
+            self.interrupt()
+        except Exception:
+            pass
+        self._stop.set()
+        try:
+            self._q.put_nowait("")
+        except Exception:
+            pass
+        self._thread.join(timeout=2.0)
+        self._thread = None
+        self._stop.clear()
+
+    def speak(self, text: str, completion_callback: Optional[Callable[[], None]] = None,
+              duration_callback: Optional[Callable[[float], None]] = None) -> None:
+        if not self.enabled or not text.strip():
+            return
+        if self._thread is None:
+            self.start()
+        self._completion_callback = completion_callback
+        self._duration_callback = duration_callback
+        processed_text = _preprocess_for_speech(text)
+        try:
+            self._q.put_nowait(processed_text)
+        except Exception:
+            pass
+
+    def interrupt(self) -> None:
+        """Stop current speech immediately."""
+        self._should_interrupt.set()
+        with self._audio_lock:
+            if self._audio_stream is not None:
+                try:
+                    self._audio_stream.abort()
+                except Exception:
+                    pass
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                text = self._q.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if not text:
+                continue
+            try:
+                self._speak_once(text)
+            except Exception as e:
+                debug_log(f"Kokoro TTS error in _speak_once: {e}", "tts")
+                continue
+
+    def _speak_once(self, text: str) -> None:
+        self._is_speaking.set()
+        self._last_spoken_text = text
+        self._should_interrupt.clear()
+        interrupted = False
+
+        self._notify_speaking_state(True)
+
+        try:
+            if not self._ensure_initialized():
+                if self._init_error:
+                    print(f"  ⚠️ Kokoro TTS: {self._init_error}", flush=True)
+                return
+
+            import sounddevice as sd
+            import numpy as np
+
+            start_time = time.time()
+            debug_log(f"Kokoro TTS starting synthesis: {len(text.split())} words", "tts")
+
+            if self._should_interrupt.is_set():
+                return
+
+            # The pipeline yields one (graphemes, phonemes, audio) tuple per
+            # sentence; collect the waveform, converting torch tensors to a
+            # float32 numpy array for sounddevice.
+            audio_chunks = []
+            for _gs, _ps, audio in self._pipe(text, voice=self.voice, speed=self.speed):
+                if self._should_interrupt.is_set():
+                    return
+                arr = audio.detach().cpu().numpy() if hasattr(audio, "detach") else np.asarray(audio)
+                audio_chunks.append(arr.astype(np.float32))
+
+            if self._should_interrupt.is_set():
+                return
+            if not audio_chunks:
+                debug_log("Kokoro TTS: no audio generated", "tts")
+                return
+
+            full_audio = np.concatenate(audio_chunks)
+            if len(full_audio) == 0:
+                debug_log("Kokoro TTS: empty audio", "tts")
+                return
+
+            exact_duration = len(full_audio) / self._sample_rate
+            debug_log(f"Kokoro TTS synthesis complete: {exact_duration:.2f}s, {len(full_audio)} samples", "tts")
+
+            if self._duration_callback is not None:
+                try:
+                    self._duration_callback(exact_duration)
+                except Exception as e:
+                    debug_log(f"Kokoro TTS duration callback error: {e}", "tts")
+
+            # Stream playback in small blocks so interruption is responsive.
+            play_position = [0]
+            blocksize = 1024
+
+            def audio_callback(outdata, frames, time_info, status):
+                if self._should_interrupt.is_set():
+                    raise sd.CallbackAbort()
+                start = play_position[0]
+                end = start + frames
+                chunk = full_audio[start:end]
+                if len(chunk) < frames:
+                    outdata[:len(chunk), 0] = chunk
+                    outdata[len(chunk):, 0] = 0
+                    raise sd.CallbackStop()
+                else:
+                    outdata[:, 0] = chunk
+                play_position[0] = end
+
+            with self._audio_lock:
+                self._audio_stream = sd.OutputStream(
+                    samplerate=self._sample_rate,
+                    channels=1,
+                    dtype='float32',
+                    blocksize=blocksize,
+                    callback=audio_callback,
+                )
+                self._audio_stream.start()
+
+            try:
+                while self._audio_stream is not None and self._audio_stream.active:
+                    if self._should_interrupt.is_set():
+                        interrupted = True
+                        with self._audio_lock:
+                            if self._audio_stream is not None:
+                                self._audio_stream.abort()
+                        break
+                    time.sleep(0.05)
+            finally:
+                with self._audio_lock:
+                    if self._audio_stream is not None:
+                        try:
+                            self._audio_stream.close()
+                        except Exception:
+                            pass
+                        self._audio_stream = None
+
+            actual_duration = time.time() - start_time
+            debug_log(f"Kokoro TTS complete: actual={actual_duration:.2f}s (audio={exact_duration:.2f}s)", "tts")
+
+        except Exception as e:
+            debug_log(f"Kokoro TTS error: {e}", "tts")
+            print(f"  ⚠️ Kokoro TTS error: {e}", flush=True)
+        finally:
+            self._is_speaking.clear()
+            self._notify_speaking_state(False)
+            if self._completion_callback is not None and not interrupted:
+                try:
+                    self._completion_callback()
+                except Exception as e:
+                    print(f"  ⚠️ Kokoro TTS completion callback error: {e}", flush=True)
+                self._completion_callback = None
+
+    def _notify_speaking_state(self, is_speaking: bool) -> None:
+        """Notify the face/orb widget of speaking state changes."""
+        try:
+            from desktop_app.face_widget import get_jarvis_state, JarvisState
+            state_manager = get_jarvis_state()
+            if is_speaking:
+                debug_log("setting face state to SPEAKING (kokoro)", "tts")
+                state_manager.set_state(JarvisState.SPEAKING)
+        except ImportError:
+            debug_log("face widget not available (ImportError) (kokoro)", "tts")
+        except Exception as e:
+            debug_log(f"failed to set face state to SPEAKING (kokoro): {e}", "tts")
+
+    # Loopback guard helpers (same interface as the other engines).
+    def is_speaking(self) -> bool:
+        return self._is_speaking.is_set()
+
+    def get_last_spoken_text(self) -> str:
+        return self._last_spoken_text
+
+
 def create_tts_engine(
     engine: str = "piper",
     enabled: bool = True,
@@ -981,11 +1290,16 @@ def create_tts_engine(
     piper_noise_scale: float = 0.667,
     piper_noise_w: float = 0.8,
     piper_sentence_silence: float = 0.2,
+    # Kokoro parameters
+    kokoro_voice: str = "ff_siwis",
+    kokoro_lang_code: str = "f",
+    kokoro_speed: float = 1.0,
 ):
     """Factory function to create the appropriate TTS engine.
 
     Supported engines:
-    - "piper" (default): Neural TTS with auto-download, exact duration tracking
+    - "piper" (default): light neural TTS with auto-download, exact duration
+    - "kokoro": more natural neural TTS (Kokoro-82M), real-time on CPU
     - "chatterbox": AI voice with emotion control (requires PyTorch)
     """
     if engine.lower() == "chatterbox":
@@ -997,6 +1311,13 @@ def create_tts_engine(
             audio_prompt_path=audio_prompt_path,
             exaggeration=exaggeration,
             cfg_weight=cfg_weight,
+        )
+    elif engine.lower() == "kokoro":
+        return KokoroTTS(
+            enabled=enabled,
+            voice=kokoro_voice,
+            lang_code=kokoro_lang_code,
+            speed=kokoro_speed,
         )
     else:
         # Default to Piper TTS
