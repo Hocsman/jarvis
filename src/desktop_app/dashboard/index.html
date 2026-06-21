@@ -375,6 +375,7 @@
 
 </div>
 
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
 <script>
   // ── Clock ──────────────────────────────────────────────────────
   const MOIS = ["janv.","févr.","mars","avr.","mai","juin","juil.","août","sept.","oct.","nov.","déc."];
@@ -460,24 +461,73 @@
   }
   drawOrb();
 
-  // ── Mock chat echo (until the Python bridge lands) ─────────────
+  // ── Chat helpers ───────────────────────────────────────────────
   const input = document.getElementById("chat-input");
   const sendBtn = document.getElementById("chat-send");
   const msgs = document.getElementById("messages");
+  function escapeHtml(s){ const d=document.createElement("div"); d.textContent=s; return d.innerHTML; }
   function addMsg(text, who) {
     const d = new Date(), p = n => String(n).padStart(2, "0");
     const el = document.createElement("div");
     el.className = "msg " + who;
-    el.innerHTML = text + `<span class="time">${p(d.getHours())}:${p(d.getMinutes())}</span>`;
+    el.innerHTML = escapeHtml(text) + `<span class="time">${p(d.getHours())}:${p(d.getMinutes())}</span>`;
     msgs.appendChild(el); msgs.scrollTop = msgs.scrollHeight;
   }
+
+  // ── Bridge (QWebChannel) ───────────────────────────────────────
+  let jarvis = null;
+  function setStatus(txt){ document.getElementById("status-text").textContent = txt; }
+  function setAccent(rgb){ if (Array.isArray(rgb) && rgb.length === 3) accent = rgb; }
+
   function send() {
     const v = input.value.trim(); if (!v) return;
-    addMsg(v, "user"); input.value = "";
-    setTimeout(() => addMsg("(aperçu visuel — le pont vers DeepSeek arrive au jalon 2)", "bot"), 500);
+    input.value = "";
+    if (jarvis) { jarvis.submitQuery(v); }   // userEcho comes back from Python
+    else { addMsg(v, "user"); addMsg("(pont non connecté)", "bot"); }
   }
   sendBtn.onclick = send;
   input.addEventListener("keydown", e => { if (e.key === "Enter") send(); });
+
+  function wireBridge(obj) {
+    jarvis = obj;
+    jarvis.userEcho.connect(t => addMsg(t, "user"));
+    jarvis.replyReceived.connect(t => addMsg(t, "bot"));
+    jarvis.busy.connect(() => addMsg("Jarvis est déjà occupé sur une autre requête.", "bot"));
+    jarvis.stateChanged.connect(s => {
+      try { const o = JSON.parse(s); setAccent(o.accent); if (o.status) setStatus(o.status); } catch(e){}
+    });
+    jarvis.statsUpdated.connect(s => {
+      try {
+        const o = JSON.parse(s);
+        document.getElementById("cpu-pct").textContent = o.cpu + "%";
+        document.getElementById("cpu-bar").style.width = o.cpu + "%";
+        document.getElementById("cpu-v").textContent = o.cpu + "%";
+        document.getElementById("ram-pct").textContent = o.ram + "%";
+        document.getElementById("ram-bar").style.width = o.ram + "%";
+        document.getElementById("ram-v").textContent = o.ram + "%";
+        document.getElementById("disk-v").textContent = o.disk_used + " GB";
+      } catch(e){}
+    });
+    jarvis.weatherUpdated.connect(s => {
+      try {
+        const o = JSON.parse(s);
+        if (o.temp != null) { document.getElementById("wx-temp").textContent = o.temp + "°C";
+          document.getElementById("wx-chip-temp").textContent = o.temp + "°C"; }
+        if (o.loc)  { document.getElementById("wx-loc").textContent = o.loc;
+          document.getElementById("wx-chip-loc").textContent = o.loc; }
+        if (o.desc) document.getElementById("wx-desc").textContent = o.desc;
+        if (o.icon) document.getElementById("wx-ico").textContent = o.icon;
+        if (o.hum  != null) document.getElementById("wx-hum").textContent = o.hum + "%";
+        if (o.wind != null) document.getElementById("wx-wind").textContent = o.wind + " km/h";
+        if (o.feels!= null) document.getElementById("wx-feels").textContent = o.feels + "°C";
+      } catch(e){}
+    });
+    if (jarvis.ready) jarvis.ready();
+  }
+
+  if (typeof QWebChannel !== "undefined" && window.qt && qt.webChannelTransport) {
+    new QWebChannel(qt.webChannelTransport, ch => wireBridge(ch.objects.jarvis));
+  }
 </script>
 </body>
 </html>
