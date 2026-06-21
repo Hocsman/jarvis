@@ -1553,10 +1553,17 @@ class JarvisSystemTray:
         # Show tray icon
         self.tray_icon.show()
 
-        # Show the floating orb at startup so it's the live visual of the
-        # assistant from the moment the app launches (it sits at IDLE/ASLEEP
-        # until the voice pipeline reports activity).
-        self.show_orb_window()
+        # The unified HUD dashboard is the primary window: open it at
+        # startup so the orb (its centrepiece), conversation, and system
+        # stats are all there from launch. The standalone floating orb
+        # is now redundant (the dashboard embeds the same orb), so it is
+        # no longer auto-shown — it stays available on demand via the
+        # "🟠 Toggle Orb" tray action. Falls back to the floating orb only
+        # when WebEngine isn't available.
+        if HAS_WEBENGINE:
+            self.show_dashboard()
+        else:
+            self.show_orb_window()
 
         # Register cleanup on app exit
         self.app.aboutToQuit.connect(self.cleanup_on_exit)
@@ -2347,10 +2354,9 @@ class JarvisSystemTray:
             self.update_icon()
             self._set_chat_daemon_status("running")
 
-            # Show log viewer when starting listening
-            self.log_viewer.show()
-            self.log_viewer.raise_()
-            self.log_viewer.activateWindow()
+            # The log viewer no longer pops up on start — it's a debug
+            # surface, available on demand via the "📝 View Logs" tray
+            # action. The dashboard is the primary window.
 
             self.tray_icon.showMessage(
                 "Jarvis Started",
