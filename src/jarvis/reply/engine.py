@@ -1439,7 +1439,8 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
     action_plan = strip_memory_directives(action_plan)
 
     _assistant_name = str(getattr(cfg, "wake_word", "jarvis") or "jarvis").strip().capitalize()
-    _persona_prompt = build_system_prompt(_assistant_name)
+    _response_language = str(getattr(cfg, "response_language", "") or "").strip()
+    _persona_prompt = build_system_prompt(_assistant_name, response_language=_response_language)
 
     def _build_initial_system_message() -> str:
         guidance = [_persona_prompt.strip()]

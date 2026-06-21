@@ -79,11 +79,47 @@ _SYSTEM_PROMPT_TEMPLATE: str = (
 )
 
 
-def build_system_prompt(assistant_name: str = "Jarvis") -> str:
+def build_system_prompt(assistant_name: str = "Jarvis",
+                        response_language: str = "") -> str:
     """Render the persona prompt with the configured assistant name.
 
     The name comes from the user's wake word (capitalised); defaults to
     "Jarvis" when no config is available (tests, eval harnesses).
+
+    When ``response_language`` is set (e.g. "français"), a hard
+    language-lock is layered in: a CRITICAL directive at the start
+    (primacy — models weigh early instructions heaviest), a reminder
+    at the end (recency), and — for French — a final reminder written
+    in French so the prompt's last tokens already sit in the target
+    language and bias the model's first output token toward it.
     """
     name = (assistant_name or "Jarvis").strip() or "Jarvis"
-    return _SYSTEM_PROMPT_TEMPLATE.format(name=name)
+    rendered = _SYSTEM_PROMPT_TEMPLATE.format(name=name)
+
+    lang = (response_language or "").strip()
+    if not lang:
+        return rendered
+
+    opening = (
+        f"CRITICAL LANGUAGE DIRECTIVE: every single response you produce "
+        f"MUST be in {lang}. This applies to ALL turns, ALL topics. The "
+        f"user may write or speak in any language, but YOUR REPLY is "
+        f"always in {lang}. This is an absolute, non-negotiable rule. "
+        f"If you catch yourself starting in another language, STOP and "
+        f"restart in {lang}. "
+    )
+    closing = (
+        f" Final reminder: respond in {lang} only, whatever language the "
+        f"user used. Translate quotes and references into {lang} where "
+        f"natural; code identifiers and proper nouns stay as-is."
+    )
+    rendered = opening + rendered + closing
+
+    if lang.lower() in {"français", "francais", "french", "fr"}:
+        rendered += (
+            " Rappel final, en français : tu réponds toujours en français, "
+            "peu importe la langue de l'utilisateur. Si tu commences une "
+            "phrase dans une autre langue, arrête-toi et reformule en "
+            "français. Le français est ta langue de travail, point final."
+        )
+    return rendered

@@ -299,6 +299,11 @@ class Settings:
     # MCP Integration
     mcps: Dict[str, Any]
 
+    # Force the assistant's reply language regardless of input language.
+    # Empty = mirror the user's language (model default). Example:
+    # "français". Layered into the system prompt by build_system_prompt.
+    response_language: str
+
     # Desktop UI choices (orb particle layer, etc.)
     ui: UISettings
 
@@ -660,6 +665,9 @@ def get_default_config() -> Dict[str, Any]:
         # MCP Integration (external servers Jarvis can use). No defaults.
         "mcps": {},
 
+        # Force reply language (empty = mirror the user's language).
+        "response_language": "",
+
         # Desktop UI. ``orb_particles_enabled`` controls whether the
         # reactive orb renders its ambient particle layer (default
         # True). Set false to skip the particle draw entirely (perf
@@ -896,6 +904,7 @@ def load_settings() -> Settings:
     raw_dict = merged.get("dictation_custom_dictionary", [])
     dictation_custom_dictionary = list(raw_dict) if isinstance(raw_dict, list) else []
     mcps = _ensure_dict(merged.get("mcps"))
+    response_language = str(merged.get("response_language", "") or "").strip()
 
     # Parse ui subsection. ``orb_particles_enabled`` defaults to True;
     # coerced via bool()/string rules so a hand-edited config that
@@ -1060,6 +1069,7 @@ def load_settings() -> Settings:
 
         # MCP Integration
         mcps=mcps,
+        response_language=response_language,
 
         # Desktop UI
         ui=ui,
