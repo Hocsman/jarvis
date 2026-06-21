@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>J.A.R.V.I.S</title>
+<style>
+  /* ── Theme tokens ───────────────────────────────────────────── */
+  :root {
+    --bg:        #05080f;
+    --bg-2:      #070b15;
+    --panel:     rgba(16, 26, 44, 0.55);
+    --panel-brd: rgba(80, 160, 200, 0.16);
+    --panel-glow:rgba(40, 120, 170, 0.10);
+    --cyan:      #38d8e8;
+    --cyan-dim:  #2aa6b8;
+    --cyan-soft: rgba(56, 216, 232, 0.14);
+    --txt:       #d7e6f0;
+    --txt-dim:   #6f8aa3;
+    --txt-faint: #4a627a;
+    --good:      #46e0a0;
+    --bar-bg:    rgba(80, 130, 160, 0.14);
+    --radius:    14px;
+    --font: -apple-system, "SF Pro Display", "Segoe UI", system-ui, sans-serif;
+    --mono: "SF Mono", "JetBrains Mono", ui-monospace, Menlo, monospace;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: var(--font);
+    color: var(--txt);
+    background:
+      radial-gradient(1200px 800px at 50% 8%, rgba(30, 90, 130, 0.10), transparent 60%),
+      radial-gradient(900px 700px at 80% 100%, rgba(40, 100, 140, 0.07), transparent 55%),
+      var(--bg);
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+  /* faint grid overlay */
+  body::before {
+    content: "";
+    position: fixed; inset: 0;
+    background-image:
+      linear-gradient(rgba(70, 140, 180, 0.035) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(70, 140, 180, 0.035) 1px, transparent 1px);
+    background-size: 44px 44px;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .app {
+    position: relative; z-index: 1;
+    height: 100vh;
+    display: grid;
+    grid-template-rows: 56px 1fr;
+    grid-template-columns: 320px 1fr 380px;
+    grid-template-areas:
+      "top top top"
+      "left center right";
+    gap: 14px;
+    padding: 14px;
+  }
+
+  /* ── Top bar ─────────────────────────────────────────────────── */
+  .topbar {
+    grid-area: top;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 18px;
+    background: var(--panel);
+    border: 1px solid var(--panel-brd);
+    border-radius: var(--radius);
+    backdrop-filter: blur(14px);
+  }
+  .brand {
+    font-family: var(--mono);
+    font-weight: 700; letter-spacing: 4px; font-size: 18px;
+    color: var(--cyan);
+    text-shadow: 0 0 14px rgba(56, 216, 232, 0.5);
+    display: flex; align-items: center; gap: 12px;
+  }
+  .pill {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 11px; font-weight: 600; letter-spacing: .5px;
+    padding: 4px 10px; border-radius: 999px;
+    background: rgba(70, 224, 160, 0.10);
+    color: var(--good);
+    border: 1px solid rgba(70, 224, 160, 0.25);
+  }
+  .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--good);
+    box-shadow: 0 0 8px var(--good); animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+
+  .clock {
+    font-family: var(--mono);
+    display: flex; align-items: center; gap: 12px;
+    font-size: 15px; color: var(--txt);
+    background: rgba(10, 18, 32, 0.5);
+    border: 1px solid var(--panel-brd);
+    padding: 7px 16px; border-radius: 999px;
+  }
+  .clock .sep { color: var(--txt-faint); }
+  .clock .date { color: var(--txt-dim); font-size: 13px; }
+
+  .top-right { display: flex; align-items: center; gap: 12px; }
+  .weather-chip {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 13px;
+    background: rgba(10, 18, 32, 0.5);
+    border: 1px solid var(--panel-brd);
+    padding: 6px 13px; border-radius: 999px;
+  }
+  .weather-chip .temp { color: var(--cyan); font-weight: 600; }
+  .weather-chip .loc { color: var(--txt-dim); }
+  .gear {
+    width: 34px; height: 34px; border-radius: 50%;
+    display: grid; place-items: center;
+    background: rgba(10, 18, 32, 0.5);
+    border: 1px solid var(--panel-brd);
+    color: var(--txt-dim); cursor: pointer; font-size: 15px;
+    transition: .2s;
+  }
+  .gear:hover { color: var(--cyan); border-color: var(--cyan-dim); }
+
+  /* ── Cards (left & right shared) ─────────────────────────────── */
+  .col { display: flex; flex-direction: column; gap: 14px; overflow-y: auto; }
+  .col::-webkit-scrollbar { width: 0; }
+  .left  { grid-area: left; }
+  .right { grid-area: right; }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--panel-brd);
+    border-radius: var(--radius);
+    backdrop-filter: blur(14px);
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.25), inset 0 0 0 1px var(--panel-glow);
+    padding: 14px 16px;
+  }
+  .card-head {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 14px;
+  }
+  .card-title {
+    display: flex; align-items: center; gap: 9px;
+    font-size: 13px; font-weight: 600; letter-spacing: .4px;
+    color: var(--cyan);
+  }
+  .card-title .ico { font-size: 14px; filter: drop-shadow(0 0 6px var(--cyan-soft)); }
+  .refresh { color: var(--txt-faint); cursor: pointer; font-size: 13px; transition:.2s; }
+  .refresh:hover { color: var(--cyan); transform: rotate(90deg); }
+
+  /* stat bars */
+  .stat-row { margin-bottom: 12px; }
+  .stat-row:last-child { margin-bottom: 0; }
+  .stat-label { display: flex; justify-content: space-between; font-size: 12px;
+    color: var(--txt-dim); margin-bottom: 6px; }
+  .stat-label b { color: var(--txt); font-weight: 600; }
+  .bar { height: 6px; border-radius: 999px; background: var(--bar-bg); overflow: hidden; }
+  .bar > i {
+    display: block; height: 100%; border-radius: 999px;
+    background: linear-gradient(90deg, var(--cyan-dim), var(--cyan));
+    box-shadow: 0 0 10px var(--cyan-soft);
+    transition: width .6s ease;
+  }
+  .tri { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 14px; }
+  .tri .cell {
+    background: rgba(10, 18, 32, 0.4);
+    border: 1px solid var(--panel-brd);
+    border-radius: 10px; padding: 9px 6px; text-align: center;
+  }
+  .tri .cell .k { font-size: 10px; color: var(--txt-faint); letter-spacing:.5px; }
+  .tri .cell .v { font-size: 13px; color: var(--txt); font-weight: 600; margin-top: 3px; }
+
+  /* weather card */
+  .wx-main { display: flex; align-items: flex-start; justify-content: space-between; }
+  .wx-temp { font-size: 34px; font-weight: 700; color: var(--txt);
+    text-shadow: 0 0 18px rgba(56,216,232,.25); line-height: 1; }
+  .wx-loc { font-size: 13px; color: var(--txt-dim); margin-top: 6px; }
+  .wx-desc { font-size: 11px; color: var(--txt-faint); }
+  .wx-ico { font-size: 38px; opacity: .85; }
+
+  /* uptime */
+  .uptime-big { font-family: var(--mono); font-size: 26px; color: var(--cyan);
+    text-align: right; text-shadow: 0 0 12px rgba(56,216,232,.4); }
+
+  /* ── Center: orb ─────────────────────────────────────────────── */
+  .center {
+    grid-area: center;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 26px; position: relative;
+  }
+  .orb-wrap { position: relative; width: 360px; height: 360px; display: grid; place-items: center; }
+  #orb { width: 360px; height: 360px; }
+  .orb-title {
+    font-family: var(--mono); font-weight: 700; letter-spacing: 10px; font-size: 26px;
+    color: var(--cyan); text-shadow: 0 0 20px rgba(56,216,232,.55);
+  }
+  .status-pill {
+    display: inline-flex; align-items: center; gap: 9px;
+    font-size: 13px; color: var(--txt);
+    background: rgba(10, 18, 32, 0.55);
+    border: 1px solid var(--panel-brd);
+    padding: 8px 18px; border-radius: 999px;
+  }
+  .status-pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--cyan);
+    box-shadow: 0 0 10px var(--cyan); animation: pulse 1.6s infinite; }
+
+  .controls { display: flex; align-items: center; gap: 16px; margin-top: 4px; }
+  .ctl {
+    width: 50px; height: 50px; border-radius: 50%;
+    display: grid; place-items: center; font-size: 19px;
+    background: rgba(12, 22, 38, 0.6);
+    border: 1px solid var(--panel-brd);
+    color: var(--txt-dim); cursor: pointer; transition: .2s;
+  }
+  .ctl:hover { color: var(--cyan); border-color: var(--cyan-dim);
+    box-shadow: 0 0 18px var(--cyan-soft); }
+  .ctl.mic { width: 60px; height: 60px; font-size: 22px;
+    background: radial-gradient(circle at 50% 40%, rgba(56,216,232,.18), rgba(12,22,38,.6));
+    color: var(--cyan); border-color: var(--cyan-dim); }
+
+  /* ── Right: conversation ─────────────────────────────────────── */
+  .convo { display: flex; flex-direction: column; height: 100%; padding: 0; }
+  .convo-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 16px; border-bottom: 1px solid var(--panel-brd);
+  }
+  .convo-head .t { font-size: 14px; font-weight: 600; color: var(--txt); }
+  .convo-actions { display: flex; gap: 8px; }
+  .btn-sm {
+    font-size: 11px; color: var(--txt-dim); cursor: pointer;
+    background: rgba(10, 18, 32, 0.5);
+    border: 1px solid var(--panel-brd);
+    padding: 5px 10px; border-radius: 8px; transition: .2s;
+  }
+  .btn-sm:hover { color: var(--cyan); border-color: var(--cyan-dim); }
+  .messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+  .messages::-webkit-scrollbar { width: 0; }
+  .msg { max-width: 88%; font-size: 13px; line-height: 1.5; padding: 11px 14px; border-radius: 12px; }
+  .msg .time { display: block; font-size: 10px; color: var(--txt-faint); margin-top: 6px; }
+  .msg.bot { align-self: flex-start;
+    background: rgba(20, 34, 54, 0.6);
+    border: 1px solid var(--panel-brd);
+    color: var(--txt); border-bottom-left-radius: 4px; }
+  .msg.user { align-self: flex-end;
+    background: var(--cyan-soft);
+    border: 1px solid rgba(56,216,232,.3);
+    color: var(--txt); border-bottom-right-radius: 4px; }
+  .composer { display: flex; gap: 10px; padding: 14px 16px; border-top: 1px solid var(--panel-brd); }
+  .composer input {
+    flex: 1; background: rgba(10, 18, 32, 0.6);
+    border: 1px solid var(--panel-brd);
+    border-radius: 10px; padding: 11px 14px; color: var(--txt);
+    font-family: var(--font); font-size: 13px; outline: none;
+  }
+  .composer input::placeholder { color: var(--txt-faint); }
+  .composer input:focus { border-color: var(--cyan-dim); }
+  .send {
+    width: 44px; border-radius: 10px; display: grid; place-items: center;
+    background: linear-gradient(135deg, var(--cyan-dim), var(--cyan));
+    color: #04222a; cursor: pointer; font-size: 16px; border: none;
+    box-shadow: 0 0 16px var(--cyan-soft);
+  }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- TOP BAR -->
+  <header class="topbar">
+    <div class="brand">J.A.R.V.I.S
+      <span class="pill"><span class="dot"></span><span id="online-text">En ligne</span></span>
+    </div>
+    <div class="clock">
+      <span id="clock-time">--:--:--</span>
+      <span class="sep">|</span>
+      <span class="date" id="clock-date">—</span>
+    </div>
+    <div class="top-right">
+      <div class="weather-chip">
+        <span>🌡️</span><span class="temp" id="wx-chip-temp">--°C</span>
+        <span class="loc" id="wx-chip-loc">—</span>
+      </div>
+      <div class="gear" title="Réglages">⚙️</div>
+    </div>
+  </header>
+
+  <!-- LEFT COLUMN -->
+  <section class="col left">
+    <div class="card">
+      <div class="card-head">
+        <div class="card-title"><span class="ico">⚙️</span>Stats Système</div>
+        <span class="refresh">⟳</span>
+      </div>
+      <div class="stat-row">
+        <div class="stat-label">Processeur <b id="cpu-pct">8%</b></div>
+        <div class="bar"><i id="cpu-bar" style="width:8%"></i></div>
+      </div>
+      <div class="stat-row">
+        <div class="stat-label">Mémoire <b id="ram-pct">44%</b></div>
+        <div class="bar"><i id="ram-bar" style="width:44%"></i></div>
+      </div>
+      <div class="tri">
+        <div class="cell"><div class="k">CPU</div><div class="v" id="cpu-v">8%</div></div>
+        <div class="cell"><div class="k">MÉMOIRE</div><div class="v" id="ram-v">44%</div></div>
+        <div class="cell"><div class="k">DISQUE</div><div class="v" id="disk-v">439 GB</div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <div class="card-title"><span class="ico">☁️</span>Météo</div>
+        <span class="refresh">⟳</span>
+      </div>
+      <div class="wx-main">
+        <div>
+          <div class="wx-temp" id="wx-temp">25.2°C</div>
+          <div class="wx-loc" id="wx-loc">Paris, FR</div>
+          <div class="wx-desc" id="wx-desc">nuageux</div>
+        </div>
+        <div class="wx-ico" id="wx-ico">☁️</div>
+      </div>
+      <div class="tri">
+        <div class="cell"><div class="k">HUMIDITÉ</div><div class="v" id="wx-hum">75%</div></div>
+        <div class="cell"><div class="k">VENT</div><div class="v" id="wx-wind">13 km/h</div></div>
+        <div class="cell"><div class="k">RESSENTI</div><div class="v" id="wx-feels">23°C</div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <div class="card-title"><span class="ico">⏱️</span>Activité</div>
+      </div>
+      <div class="stat-label">Session active depuis</div>
+      <div class="uptime-big" id="uptime">00:00:00</div>
+      <div class="tri">
+        <div class="cell"><div class="k">SESSION</div><div class="v" id="sess-n">1</div></div>
+        <div class="cell"><div class="k">REQUÊTES</div><div class="v" id="req-n">0</div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CENTER -->
+  <section class="center">
+    <div class="orb-wrap"><canvas id="orb" width="360" height="360"></canvas></div>
+    <div class="orb-title">J.A.R.V.I.S</div>
+    <div class="status-pill"><span class="dot"></span><span id="status-text">En écoute du mot d'éveil…</span></div>
+    <div class="controls">
+      <div class="ctl" title="Caméra">📷</div>
+      <div class="ctl mic" title="Micro">🎙️</div>
+      <div class="ctl" title="Clavier">⌨️</div>
+    </div>
+  </section>
+
+  <!-- RIGHT COLUMN -->
+  <section class="col right">
+    <div class="card convo">
+      <div class="convo-head">
+        <div class="t">Conversation</div>
+        <div class="convo-actions">
+          <span class="btn-sm">🗑️ Effacer</span>
+          <span class="btn-sm">⬇️ Exporter</span>
+        </div>
+      </div>
+      <div class="messages" id="messages">
+        <div class="msg bot">Bonjour, je suis Jarvis. Comment puis-je vous aider aujourd'hui ?
+          <span class="time">14:52</span></div>
+      </div>
+      <div class="composer">
+        <input id="chat-input" placeholder="Tapez un message…" />
+        <button class="send" id="chat-send">➤</button>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<script>
+  // ── Clock ──────────────────────────────────────────────────────
+  const MOIS = ["janv.","févr.","mars","avr.","mai","juin","juil.","août","sept.","oct.","nov.","déc."];
+  function tickClock() {
+    const d = new Date();
+    const p = n => String(n).padStart(2, "0");
+    document.getElementById("clock-time").textContent = `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    document.getElementById("clock-date").textContent = `${d.getDate()} ${MOIS[d.getMonth()]} ${d.getFullYear()}`;
+  }
+  setInterval(tickClock, 1000); tickClock();
+
+  // ── Uptime ─────────────────────────────────────────────────────
+  const t0 = Date.now();
+  setInterval(() => {
+    const s = Math.floor((Date.now() - t0) / 1000);
+    const p = n => String(n).padStart(2, "0");
+    document.getElementById("uptime").textContent = `${p(Math.floor(s/3600))}:${p(Math.floor(s/60)%60)}:${p(s%60)}`;
+  }, 1000);
+
+  // ── Orb: arc-reactor canvas animation ──────────────────────────
+  const cv = document.getElementById("orb");
+  const ctx = cv.getContext("2d");
+  const CX = cv.width / 2, CY = cv.height / 2;
+  // state colour (cyan idle). Will later be driven by JarvisState.
+  let accent = [56, 216, 232];
+  let t = 0;
+  function rgba(c, a) { return `rgba(${c[0]},${c[1]},${c[2]},${a})`; }
+
+  function drawOrb() {
+    t += 0.016;
+    ctx.clearRect(0, 0, cv.width, cv.height);
+
+    // outer glow
+    const glow = ctx.createRadialGradient(CX, CY, 40, CX, CY, 170);
+    glow.addColorStop(0, rgba(accent, 0.18));
+    glow.addColorStop(1, rgba(accent, 0));
+    ctx.fillStyle = glow;
+    ctx.fillRect(0, 0, cv.width, cv.height);
+
+    // rotating outer ring (dashed)
+    ctx.save();
+    ctx.translate(CX, CY); ctx.rotate(t * 0.25);
+    ctx.strokeStyle = rgba(accent, 0.5); ctx.lineWidth = 2;
+    ctx.setLineDash([4, 14]);
+    ctx.beginPath(); ctx.arc(0, 0, 150, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+
+    // counter-rotating ring
+    ctx.save();
+    ctx.translate(CX, CY); ctx.rotate(-t * 0.4);
+    ctx.strokeStyle = rgba(accent, 0.35); ctx.lineWidth = 1.5;
+    ctx.setLineDash([2, 22]);
+    ctx.beginPath(); ctx.arc(0, 0, 128, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+
+    // solid mid rings
+    ctx.setLineDash([]);
+    for (const [r, a, w] of [[112, 0.5, 2], [92, 0.7, 2.5]]) {
+      ctx.strokeStyle = rgba(accent, a); ctx.lineWidth = w;
+      ctx.beginPath(); ctx.arc(CX, CY, r, 0, Math.PI * 2); ctx.stroke();
+    }
+
+    // breathing core
+    const breath = 1 + 0.06 * Math.sin(t * 2);
+    const coreR = 66 * breath;
+    const core = ctx.createRadialGradient(CX, CY, 8, CX, CY, coreR);
+    core.addColorStop(0, rgba(accent, 0.95));
+    core.addColorStop(0.5, rgba(accent, 0.35));
+    core.addColorStop(1, rgba(accent, 0.05));
+    ctx.fillStyle = core;
+    ctx.beginPath(); ctx.arc(CX, CY, coreR, 0, Math.PI * 2); ctx.fill();
+
+    // center pulse dots (……)
+    ctx.fillStyle = rgba([220, 245, 250], 0.9);
+    for (let i = 0; i < 4; i++) {
+      const a = 0.4 + 0.6 * Math.abs(Math.sin(t * 3 - i * 0.5));
+      ctx.globalAlpha = a;
+      ctx.beginPath(); ctx.arc(CX - 18 + i * 12, CY, 2.4, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    requestAnimationFrame(drawOrb);
+  }
+  drawOrb();
+
+  // ── Mock chat echo (until the Python bridge lands) ─────────────
+  const input = document.getElementById("chat-input");
+  const sendBtn = document.getElementById("chat-send");
+  const msgs = document.getElementById("messages");
+  function addMsg(text, who) {
+    const d = new Date(), p = n => String(n).padStart(2, "0");
+    const el = document.createElement("div");
+    el.className = "msg " + who;
+    el.innerHTML = text + `<span class="time">${p(d.getHours())}:${p(d.getMinutes())}</span>`;
+    msgs.appendChild(el); msgs.scrollTop = msgs.scrollHeight;
+  }
+  function send() {
+    const v = input.value.trim(); if (!v) return;
+    addMsg(v, "user"); input.value = "";
+    setTimeout(() => addMsg("(aperçu visuel — le pont vers DeepSeek arrive au jalon 2)", "bot"), 500);
+  }
+  sendBtn.onclick = send;
+  input.addEventListener("keydown", e => { if (e.key === "Enter") send(); });
+</script>
+</body>
+</html>
