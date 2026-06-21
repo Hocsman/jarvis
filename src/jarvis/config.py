@@ -93,7 +93,15 @@ class Settings:
     # reading them keeps working when the provider is Ollama.
     llm_provider: str  # "ollama" | "openai_compatible"
     llm_base_url: str
+    # Resolved API key for the OpenAI-compatible provider. When
+    # ``llm_api_key_env`` names an environment variable that is set, the
+    # parser populates this from that variable so the secret never has
+    # to live in config.json. Otherwise it falls back to the literal
+    # ``llm_api_key`` value from the config file.
     llm_api_key: str
+    # Name of the environment variable to read the API key from (e.g.
+    # "OPENROUTER_API_KEY"). Empty = use the literal ``llm_api_key``.
+    llm_api_key_env: str
     llm_chat_model: str
     # Scrub secret-shaped tokens (emails, API keys, JWTs, password/
     # token/secret pairs) from prompts before they leave the machine
@@ -452,6 +460,7 @@ def get_default_config() -> Dict[str, Any]:
         "llm_provider": "ollama",
         "llm_base_url": "",  # falls back to ollama_base_url when empty
         "llm_api_key": "",
+        "llm_api_key_env": "",  # name of env var holding the key (preferred over plaintext)
         "llm_chat_model": "",  # falls back to ollama_chat_model when empty
         "auto_redact_before_cloud": True,  # scrub secrets before remote egress
         "embedding_provider": "",  # "" = same as llm_provider
@@ -695,7 +704,14 @@ def load_settings() -> Settings:
     if llm_provider not in ("ollama", "openai_compatible"):
         llm_provider = "ollama"
     llm_base_url = str(merged.get("llm_base_url", "") or "").strip() or ollama_base_url
+    # API key resolution: prefer the named environment variable (keeps
+    # the secret out of config.json), fall back to the literal field.
+    llm_api_key_env = str(merged.get("llm_api_key_env", "") or "").strip()
     llm_api_key = str(merged.get("llm_api_key", "") or "").strip()
+    if llm_api_key_env:
+        env_key = os.environ.get(llm_api_key_env, "").strip()
+        if env_key:
+            llm_api_key = env_key
     auto_redact_before_cloud = bool(merged.get("auto_redact_before_cloud", True))
     if llm_provider == "openai_compatible":
         llm_chat_model = str(merged.get("llm_chat_model", "") or "").strip() or ollama_chat_model
@@ -886,6 +902,7 @@ def load_settings() -> Settings:
         llm_provider=llm_provider,
         llm_base_url=llm_base_url,
         llm_api_key=llm_api_key,
+        llm_api_key_env=llm_api_key_env,
         llm_chat_model=llm_chat_model,
         auto_redact_before_cloud=auto_redact_before_cloud,
         embedding_provider=embedding_provider,
