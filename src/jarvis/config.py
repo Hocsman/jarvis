@@ -415,6 +415,30 @@ def load_config() -> Dict[str, Any]:
     return {**defaults, **cfg_json}
 
 
+def _cloud_safe_model(value: str, provider: str, fallback: str) -> str:
+    """Keep auxiliary model names valid for the active provider.
+
+    Jarvis runs several small LLM tasks (intent judge, tool router,
+    evaluator, planner) on their own configured model. Those configs
+    commonly hold a local Ollama tag like ``gemma4:e2b``. When the
+    active provider is the cloud OpenAI-compatible one, sending an
+    Ollama tag to the remote endpoint fails with HTTP 400 ("X is not a
+    valid model ID"), because cloud model IDs are namespaced as
+    ``vendor/model`` (e.g. ``deepseek/deepseek-v4-flash``).
+
+    Heuristic: under ``openai_compatible``, a non-empty model name with
+    no ``/`` is a stale local tag — fall back to the cloud chat model so
+    the auxiliary task works instead of 400-ing. Names that already look
+    like cloud IDs (contain ``/``) and empty values (which resolve via
+    the engine's own fallback chain) are left untouched.
+    """
+    if not value:
+        return value
+    if provider == "openai_compatible" and "/" not in value:
+        return fallback
+    return value
+
+
 def _ensure_list(value: Any) -> list[str]:
     if value is None:
         return []
@@ -798,6 +822,7 @@ def load_settings() -> Settings:
 
     # Intent Judge - always used when available
     intent_judge_model = str(merged.get("intent_judge_model", "gemma4:e2b"))
+    intent_judge_model = _cloud_safe_model(intent_judge_model, llm_provider, llm_chat_model)
     intent_judge_timeout_sec = float(merged.get("intent_judge_timeout_sec", 10.0))
 
     # Transcript Buffer - ambient speech context for intent judge (separate from dialogue)
@@ -828,7 +853,9 @@ def load_settings() -> Settings:
     if tool_selection_strategy not in ("all", "keyword", "embedding", "llm"):
         tool_selection_strategy = "llm"
     tool_router_model = str(merged.get("tool_router_model", "") or "").strip()
+    tool_router_model = _cloud_safe_model(tool_router_model, llm_provider, llm_chat_model)
     evaluator_model = str(merged.get("evaluator_model", "") or "").strip()
+    evaluator_model = _cloud_safe_model(evaluator_model, llm_provider, llm_chat_model)
     _eval_raw = merged.get("evaluator_enabled", None)
     evaluator_enabled: Optional[bool]
     if _eval_raw is None:
@@ -836,6 +863,7 @@ def load_settings() -> Settings:
     else:
         evaluator_enabled = bool(_eval_raw)
     planner_model = str(merged.get("planner_model", "") or "").strip()
+    planner_model = _cloud_safe_model(planner_model, llm_provider, llm_chat_model)
     planner_enabled = bool(merged.get("planner_enabled", True))
     try:
         planner_timeout_sec = float(merged.get("planner_timeout_sec", 6.0))

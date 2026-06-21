@@ -152,6 +152,19 @@ class OpenAICompatibleBackend(LLMBackend):
         except requests.exceptions.Timeout:
             debug_log(f"OpenAICompatibleBackend.direct: timeout after {timeout_sec}s", "llm")
             return None
+        except requests.exceptions.HTTPError as e:
+            body = ""
+            if e.response is not None:
+                try:
+                    body = e.response.text[:500]
+                except Exception:
+                    body = ""
+            status = e.response.status_code if e.response is not None else "?"
+            debug_log(
+                f"OpenAICompatibleBackend.direct: HTTP {status} body: {body}",
+                "llm",
+            )
+            return None
         except Exception as e:
             debug_log(f"OpenAICompatibleBackend.direct: request failed — {e}", "llm")
             return None
