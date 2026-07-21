@@ -334,18 +334,15 @@ class OllamaBackend(LLMBackend):
 
     def warm_up(self, model: str, timeout_sec: float = 60.0) -> bool:
         """Probe ``/api/version`` to verify the server is Ollama, then issue a
-        minimal ``/api/chat`` request so it loads ``model`` into resident memory
-        with a 30-minute ``keep_alive``.  The chat-endpoint warmup exercises the
-        full inference pipeline (JIT compilation, KV-cache allocation) that an
-        empty ``/api/generate`` would not trigger, preventing a timeout on the
-        first real intent-judge or reply-engine call.  Best-effort: errors are
+        minimal ``/api/generate`` request so it loads ``model`` into resident
+        memory with a 30-minute ``keep_alive``.  Best-effort: errors are
         swallowed so callers never crash on warmup failure."""
         if not self._base_url or not model:
             return False
         try:
             # Verify the server is actually Ollama before warming up —
             # a non-Ollama HTTP server on the same port could return 200
-            # to a chat POST and produce a false positive.
+            # to the generate POST and produce a false positive.
             version_to = min(timeout_sec, 5.0)
             ok, _ = check_version(self._base_url, timeout=version_to)
             if not ok:
@@ -353,16 +350,13 @@ class OllamaBackend(LLMBackend):
 
             remaining = max(1.0, timeout_sec - version_to)
             resp = requests.post(
-                f"{self._base_url}/api/chat",
+                f"{self._base_url}/api/generate",
                 json={
                     "model": model,
-                    "messages": [
-                        {"role": "system", "content": "You are a helpful assistant."},
-                        {"role": "user", "content": "ping"},
-                    ],
+                    "prompt": "",
                     "stream": False,
                     "keep_alive": "30m",
-                    "options": {"num_predict": 1, "temperature": 0.0},
+                    "options": {"num_predict": 1},
                 },
                 timeout=remaining,
             )
