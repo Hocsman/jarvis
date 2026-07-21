@@ -216,9 +216,16 @@ _PROMPT_TEMPLATE = (
     "8. Final step is always a synthesis/reply step when any "
     "searchMemory or tool steps were planned: "
     "`Reply to the user with the combined findings.`\n"
-    "9. For trivial greetings, small-talk, opinions or questions the "
-    "assistant can answer directly, emit a single step: "
-    "`Reply to the user.`\n"
+    "9. For trivial greetings, small-talk, or opinions the assistant can "
+    "answer perfectly well from its own knowledge, consider a single "
+    "`Reply to the user.` step — but ONLY when no AVAILABLE TOOL would "
+    "meaningfully improve the answer. If a relevant tool is listed in "
+    "AVAILABLE TOOLS (e.g. `webSearch` for a joke, a recipe, creative "
+    "content, or any request where freshness or variety matters), PLAN "
+    "TO USE IT. The AVAILABLE TOOLS list already indicates the query "
+    "likely needs external information; a reply-only plan overrides "
+    "that and produces a stale or dismissive answer. When in doubt, "
+    "prefer a tool step over a direct reply.\n"
     "10. Maximum {max_steps} steps. Do not number them — one step per line.\n"
     "11. Output ONLY the steps, no preamble, no trailing commentary, no "
     "JSON fences, no explanations.\n"
@@ -329,15 +336,27 @@ def tool_steps_of(plan: Sequence[str]) -> List[str]:
     """Non-synthesis, non-directive tool steps of a plan.
 
     Drops any `searchMemory` directives (engine-internal) and the final
-    synthesis step. A 1-step plan is a reply-only plan by the planner's
-    contract (rule 9), so it has no tool steps and we return an empty
-    list — that lets the engine's plan-driven paths (direct-exec,
-    progress nudge) skip cleanly for the pure-reply case.
+    synthesis step. A 1-step plan that is a tool step (starts with a
+    known tool-like identifier — already validated by the engine's
+    allow-list guard at injection time) is returned as a tool step;
+    a 1-step "Reply to the user." plan has no tool steps (empty list).
     """
     steps = strip_memory_directives(plan)
-    if len(steps) > 1:
-        return list(steps[:-1])
-    return []
+    if not steps:
+        return []
+    if len(steps) == 1:
+        # Could be "Reply to the user." (no tool) or "webSearch ..." (tool).
+        # The engine's allow-list guard handles validation at plan-injection
+        # time; here we just strip the synthesis step if present. A single
+        # step that looks like a reply is not a tool step.
+        first = steps[0].strip()
+        if first.lower().startswith("reply") or first.lower().startswith(
+            "synthes"
+        ):
+            return []
+        return list(steps)
+    # 2+ steps: everything except the final synthesis step.
+    return list(steps[:-1])
 
 
 _TOOL_NAME_HEAD_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_-]*)")
@@ -426,7 +445,7 @@ def plan_query(
     effective_timeout = float(
         timeout_sec
         if timeout_sec is not None
-        else getattr(cfg, "planner_timeout_sec", 6.0)
+        else getattr(cfg, "planner_timeout_sec", 3.0)
     )
 
     system_prompt = _PROMPT_TEMPLATE.format(max_steps=MAX_STEPS)
@@ -695,7 +714,7 @@ def resolve_next_tool_call(
     effective_timeout = float(
         timeout_sec
         if timeout_sec is not None
-        else getattr(cfg, "planner_timeout_sec", 6.0)
+        else getattr(cfg, "planner_timeout_sec", 3.0)
     )
 
     user_content = (
