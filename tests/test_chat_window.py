@@ -548,3 +548,52 @@ class TestChatWindowInputKeys:
         win._input_key_press(event)
         # Default QPlainTextEdit handling inserts a newline; no send.
         assert calls == []
+
+
+@pytest.mark.unit
+class TestChatWindowTranscriptScroll:
+    """New messages keep the latest content visible (auto-scroll to bottom)."""
+
+    def test_append_scrolls_to_bottom_after_many_lines(self, qapp, monkeypatch):
+        from desktop_app.chat_window import ChatWindow
+
+        monkeypatch.setattr(
+            "jarvis.daemon.submit_text_query", lambda text, **kw: None
+        )
+        win = ChatWindow()
+        win.show()
+        qapp.processEvents()
+        # Force a tall transcript so the viewport is scrolled past the first
+        # lines. Each append must bring the cursor (the view) back to the end.
+        for _ in range(80):
+            win._append_assistant("line of transcript content " * 4)
+        qapp.processEvents()
+
+        scroll_bar = win.transcript_widget.verticalScrollBar()
+        assert scroll_bar.value() == scroll_bar.maximum()
+
+
+@pytest.mark.unit
+class TestChatWindowCloseHidesNotDestroys:
+    """Closing the window hides it; the tray re-shows the same instance."""
+
+    def test_close_event_hides_window_without_destroying(self, qapp, monkeypatch):
+        from desktop_app.chat_window import ChatWindow
+        from PyQt6.QtGui import QCloseEvent
+
+        monkeypatch.setattr(
+            "jarvis.daemon.submit_text_query", lambda text, **kw: None
+        )
+        win = ChatWindow()
+        win.show()
+        qapp.processEvents()
+        assert win.isVisible()
+
+        win.closeEvent(QCloseEvent())
+        qapp.processEvents()
+
+        # Hidden, but the same instance is still usable (not destroyed).
+        assert not win.isVisible()
+        # The transcript and inputs remain intact: closing never resets state.
+        assert win.transcript_widget is not None
+        assert win.input_widget is not None

@@ -398,5 +398,9 @@ class ChatWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         # Hide instead of destroying; the tray re-shows the same instance.
         # We intentionally do NOT call request_stop here — closing the chat
-        # window does not stop the daemon or end the conversation.
+        # window does not stop the daemon or end the conversation. The explicit
+        # hide() guarantees the window disappears regardless of how the close
+        # is triggered (title bar button, ESC, tray toggle) and keeps the
+        # instance alive so a reply that lands while hidden still lands here.
+        self.hide()
         event.accept()
