@@ -442,3 +442,39 @@ class TestDaemonShutdownMode:
 
     def test_shutdown_skip_diary_command_is_not_a_chat_query(self):
         assert daemon.handle_chat_query_stdin_line(daemon.SHUTDOWN_SKIP_DIARY_COMMAND) is False
+
+
+@pytest.mark.unit
+class TestGetHotWindowMessages:
+    """``get_hot_window_messages`` backs the chat window's first-show replay."""
+
+    def setup_method(self, _method):
+        _reset_daemon_globals()
+
+    def teardown_method(self, _method):
+        _reset_daemon_globals()
+
+    def test_empty_when_daemon_not_booted(self):
+        assert daemon.get_hot_window_messages() == []
+
+    def test_returns_recent_turns_in_order(self):
+        dm = _install_dialogue_memory()
+        dm.add_message("user", "what is the weather")
+        dm.add_message("assistant", "It is sunny.")
+
+        messages = daemon.get_hot_window_messages()
+
+        assert [m["role"] for m in messages] == ["user", "assistant"]
+        assert messages[0]["content"] == "what is the weather"
+        assert messages[1]["content"] == "It is sunny."
+
+    def test_empty_when_hot_window_has_aged_out(self):
+        """Turns older than the recent window are not replayed."""
+        import time as _time
+        dm = _install_dialogue_memory()
+        # A 1-second recent window makes anything added now age out after sleep.
+        dm.RECENT_WINDOW_SEC = 1
+        dm.add_message("user", "old turn")
+        _time.sleep(1.2)
+
+        assert daemon.get_hot_window_messages() == []

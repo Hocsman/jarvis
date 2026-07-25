@@ -156,10 +156,18 @@ the app.
 ### Lifecycle
 
 - Created lazily on first tray open.
-- Hidden windows stay responsive: a `showEvent` reloads nothing (the transcript
-  is in-memory and authoritative for the session); the daemon-side callback
-  still fires while hidden, so a reply that lands while the window is closed
-  appears on next open.
+- First show seeds the transcript from the daemon's current hot window
+  (`jarvis.daemon.get_hot_window_messages()`), so a user who has been talking
+  by voice sees their recent turns instead of a blank panel. Seeding runs once
+  per instance: re-showing (from the tray or after a hide) never duplicates
+  turns. The hot-window content is already redacted (redaction runs before a
+  turn is added to the dialogue memory), so seeding never leaks raw sensitive
+  input. When the daemon accessor is unavailable (e.g. subprocess mode before
+  the bridge is wired) seeding is skipped and the window opens blank.
+- Hidden windows stay responsive: the daemon-side callback still fires while
+  hidden, so a reply that lands while the window is closed appears on next
+  open. (Subsequent `showEvent`s only seed once; the transcript is in-memory
+  and authoritative for the session thereafter.)
 - Closing the window hides it; it does not stop the daemon or end the
   conversation. The conversation ends on the same inactivity timeout as the
   voice path (`cfg.dialogue_memory_timeout`).

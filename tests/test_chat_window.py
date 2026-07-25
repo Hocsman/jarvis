@@ -597,3 +597,68 @@ class TestChatWindowCloseHidesNotDestroys:
         # The transcript and inputs remain intact: closing never resets state.
         assert win.transcript_widget is not None
         assert win.input_widget is not None
+
+
+@pytest.mark.unit
+class TestChatWindowHotWindowReplay:
+    """Opening the window for the first time replays the daemon's current hot
+    window so the user sees recent voice/text turns instead of a blank
+    transcript. Seeded once; re-showing never duplicates."""
+
+    def test_first_show_seeds_transcript_from_hot_window(self, qapp, monkeypatch):
+        from desktop_app.chat_window import ChatWindow
+
+        monkeypatch.setattr(
+            "jarvis.daemon.submit_text_query", lambda text, **kw: None
+        )
+        hot_window = [
+            {"role": "user", "content": "what is the weather"},
+            {"role": "assistant", "content": "It is sunny."},
+        ]
+        monkeypatch.setattr(
+            "desktop_app.chat_window.get_hot_window_messages",
+            lambda: hot_window,
+        )
+        win = ChatWindow()
+        win.show()
+        qapp.processEvents()
+
+        text = win.transcript_widget.toPlainText()
+        assert "what is the weather" in text
+        assert "It is sunny." in text
+
+    def test_re_show_does_not_duplicate_seeded_turns(self, qapp, monkeypatch):
+        from desktop_app.chat_window import ChatWindow
+
+        monkeypatch.setattr(
+            "jarvis.daemon.submit_text_query", lambda text, **kw: None
+        )
+        monkeypatch.setattr(
+            "desktop_app.chat_window.get_hot_window_messages",
+            lambda: [{"role": "user", "content": "hi"}],
+        )
+        win = ChatWindow()
+        win.show()
+        qapp.processEvents()
+        win.hide()
+        qapp.processEvents()
+        win.show()
+        qapp.processEvents()
+
+        text = win.transcript_widget.toPlainText()
+        assert text.count("hi") == 1
+
+    def test_empty_hot_window_leaves_transcript_blank(self, qapp, monkeypatch):
+        from desktop_app.chat_window import ChatWindow
+
+        monkeypatch.setattr(
+            "jarvis.daemon.submit_text_query", lambda text, **kw: None
+        )
+        monkeypatch.setattr(
+            "desktop_app.chat_window.get_hot_window_messages", lambda: []
+        )
+        win = ChatWindow()
+        win.show()
+        qapp.processEvents()
+
+        assert win.transcript_widget.toPlainText() == ""

@@ -143,6 +143,21 @@ def get_pending_diary_chunks() -> list:
     return _global_dialogue_memory.get_pending_chunks()
 
 
+def get_hot_window_messages() -> list:
+    """Return the current hot-window turns (last ``RECENT_WINDOW_SEC``) as
+    ``[{"role": "user"|"assistant", "content": str}, ...]``.
+
+    The chat window seeds its transcript from this on first open so a user who
+    has been talking by voice sees recent turns instead of a blank panel. The
+    content is already redacted (redaction runs before a turn is added to the
+    dialogue memory), so this never leaks raw sensitive input. Returns an empty
+    list when the daemon has not booted or the hot window is empty.
+    """
+    if _global_dialogue_memory is None:
+        return []
+    return _global_dialogue_memory.get_recent_messages()
+
+
 # Diary IPC protocol prefix - desktop app intercepts lines starting with this
 DIARY_IPC_PREFIX = "__DIARY__:"
 

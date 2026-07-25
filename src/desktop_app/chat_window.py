@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import Optional
 
 from PyQt6.QtCore import Qt, pyqtSignal, QObject
-from PyQt6.QtGui import QCloseEvent, QTextCursor
+from PyQt6.QtGui import QCloseEvent, QShowEvent, QTextCursor
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -28,6 +28,18 @@ from PyQt6.QtWidgets import (
 
 from jarvis.debug import debug_log
 from desktop_app.themes import COLORS, JARVIS_THEME_STYLESHEET
+
+
+def get_hot_window_messages() -> list:
+    """Thin wrapper around ``jarvis.daemon.get_hot_window_messages``.
+
+    Lives at module scope so tests can monkeypatch
+    ``desktop_app.chat_window.get_hot_window_messages`` without touching the
+    daemon module (which the bundled and subprocess paths resolve
+    differently).
+    """
+    from jarvis import daemon
+    return daemon.get_hot_window_messages()
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +232,9 @@ class ChatWindow(QMainWindow):
         layout.addLayout(row)
 
         self._query_in_flight = False
+        # Whether the transcript has been seeded from the daemon's hot window.
+        # Seeded once on first show so re-opening never duplicates turns.
+        self._hot_window_seeded = False
         self.set_daemon_available(daemon_available)
 
     # --- Sending --------------------------------------------------------
@@ -394,6 +409,27 @@ class ChatWindow(QMainWindow):
         QPlainTextEdit.keyPressEvent(self.input_widget, event)
 
     # --- Lifecycle ------------------------------------------------------
+
+    def showEvent(self, event: QShowEvent) -> None:
+        # Seed the transcript from the daemon's hot window once, on first show,
+        # so a user who has been talking by voice sees their recent turns
+        # instead of a blank panel. Runs only once per instance: re-showing
+        # (from the tray or after a hide) must never duplicate turns. Fails
+        # silently when the daemon accessor is unavailable (e.g. subprocess
+        # mode before the bridge is wired) — the window just opens blank.
+        if not self._hot_window_seeded:
+            self._hot_window_seeded = True
+            try:
+                for msg in get_hot_window_messages():
+                    role = msg.get("role")
+                    content = msg.get("content")
+                    if role == "user" and content:
+                        self._append_user(content)
+                    elif role == "assistant" and content:
+                        self._append_assistant(content)
+            except Exception as exc:
+                debug_log(f"hot window replay failed: {exc}", "chat")
+        super().showEvent(event)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         # Hide instead of destroying; the tray re-shows the same instance.
