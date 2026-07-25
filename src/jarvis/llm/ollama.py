@@ -235,8 +235,21 @@ class OllamaBackend(LLMBackend):
             "messages": messages,
             "stream": False,
             "options": {"num_ctx": 8192},
-            "think": thinking,
         }
+        # A request carrying tools never says ``think: false``. Ollama reads
+        # an explicit false as an instruction about the model's reasoning
+        # mode, and on a model that has no such mode it suppresses native
+        # tool calls outright: measured on gemma4:e2b, the same request
+        # scores 3/3 tool calls with the key absent and 0/3 with the flag,
+        # for ``remember`` and ``getWeather`` alike.
+        #
+        # Only tool-carrying requests drop it. On tool-free calls the flag
+        # earns its place: the same model extracts nothing at all from a
+        # summary once it is free to ramble, so the knowledge extractor
+        # fell from 5/5 to 3/5 eval cases when this was applied blanket.
+        # Callers can still force the flag either way via ``extra_options``.
+        if thinking or not tools:
+            payload["think"] = thinking
         # ``extra_options`` keys land at the Ollama wire root for known
         # request-level fields (``keep_alive``, ``format``, ``think``); the
         # rest fold into the sampling-options dict. The split lets callers
