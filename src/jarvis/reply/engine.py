@@ -1117,27 +1117,28 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
             if _memory_topic_hint:
                 break
 
-    # Step 3.5: Warm profile — pull the User + Directives branches of
-    # the knowledge graph into a compact, query-agnostic block that gets
-    # injected into the system prompt on every turn. These two branches
-    # are bounded by design (identity + standing rules), don't depend on
-    # the query, and changing rarely — so loading them unconditionally
-    # is the right tradeoff. No LLM call, just a SQLite traversal.
+    # Step 3.5: Core profile — read the user's two core files into a
+    # compact, query-agnostic block injected into the system prompt on
+    # every turn. The core is bounded by design (identity + standing
+    # rules), doesn't depend on the query, and changes rarely, so loading
+    # it unconditionally is the right tradeoff. No LLM call, just two
+    # file reads.
     #
     # This is the architectural pivot that lets the planner stop routing
     # personalisation queries through searchMemory: "news that might
     # interest me" can be answered directly when the model already sees
     # the user's interests in its system prompt.
     warm_profile_block = ""
-    # Conversation-scoped cache: warm profile is query-agnostic and the
-    # User / Directives branches change rarely, so reusing the block for
-    # the lifetime of the conversation saves the SQLite BFS on every
-    # follow-up turn. The cache is invalidated on:
+    # Conversation-scoped cache: the block is query-agnostic and the core
+    # changes rarely, so reusing it for the lifetime of the conversation
+    # saves two file reads on every follow-up turn. The cache is
+    # invalidated on:
     #   - new conversation entry (cleared above with the full hot cache),
     #   - the stop signal (also clears the full hot cache),
-    #   - any User/Directives graph mutation (via the listener registered
-    #     in daemon.py, which calls ``invalidate_warm_profile`` on the
-    #     active DialogueMemory).
+    #   - any core write (via the listener registered in daemon.py, which
+    #     calls ``invalidate_warm_profile`` on the active DialogueMemory),
+    #     so a fact remembered mid-conversation is in the prompt on the
+    #     very next turn.
     _wp_cache_key = getattr(
         type(dialogue_memory),
         "WARM_PROFILE_CACHE_KEY",
@@ -1152,21 +1153,23 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         debug_log("warm profile served from conversation cache", "memory")
     else:
         try:
-            from ..memory.graph import GraphMemoryStore
-            from ..memory.graph_ops import build_warm_profile, format_warm_profile_block
-            _graph_store_warm = GraphMemoryStore(cfg.db_path)
-            _warm_profile = build_warm_profile(_graph_store_warm)
+            from ..memory.core import (
+                MemoryCore,
+                build_core_profile,
+                format_warm_profile_block,
+            )
+            _warm_profile = build_core_profile(MemoryCore.for_config(cfg))
             warm_profile_block = format_warm_profile_block(_warm_profile)
             if warm_profile_block:
                 _user_len = len(_warm_profile.get("user", ""))
                 _dir_len = len(_warm_profile.get("directives", ""))
                 print(
-                    f"  🪴 Warm profile: {_user_len} user chars, "
-                    f"{_dir_len} directive chars",
+                    f"  🪨 Core profile: {_user_len} profile chars, "
+                    f"{_dir_len} rule chars",
                     flush=True,
                 )
                 debug_log(
-                    f"warm profile loaded: user={_user_len} directives={_dir_len}",
+                    f"core profile loaded: user={_user_len} directives={_dir_len}",
                     "memory",
                 )
             if dialogue_memory and hasattr(dialogue_memory, "hot_cache_put"):

@@ -1,0 +1,68 @@
+# 🪨 Core — the assistant's readable, portable memory
+
+The core is what the assistant knows about its user and how it has been told to behave, held in plain text files the user can open, read, correct, and back up. Models come and go; the core is what stays. Everything else in the memory system (diary, knowledge graph, hot window) is derived, model-generated, or disposable — the core is neither.
+
+Implemented in [core.py](core.py). Two files, both Markdown:
+
+| File | Holds | Prompt section |
+|------|-------|----------------|
+| `profil.md` | Facts about the user: who they are, where they live, what they do, what they like | `INFORMATION THE USER HAS SHARED IN PRIOR CONVERSATIONS` |
+| `regles.md` | Standing instructions the user has issued at the assistant: tone, language, style, do/don't | `STANDING INSTRUCTIONS FROM THE USER` |
+
+They live in a `yuba/` directory beside the database, resolved from `cfg.db_path`'s parent (`~/.local/share/jarvis/yuba/` by default), so a relocated database keeps its core alongside it.
+
+File and section names are the user's own language, not the codebase's. These are the one artefact in the project the user reads and hand-edits, and they are the assistant's memory of *them*.
+
+## What may be written
+
+Two paths, both requiring the user to have said something. Nothing else writes to the core.
+
+1. **Explicit** — the user asks for it: "remember that…", "from now on, always…", "note that I…". The assistant calls `rememberTool` with the fact or rule, phrased as close to the user's own words as the third person allows.
+2. **Corrective** — the user corrects something the assistant got wrong, whether or not a core entry caused the error. The correction is written as a new entry, and any core entry it contradicts is retired.
+
+**Implicit deduction is not a write path, deliberately.** The assistant does not infer facts from the flow of conversation, does not extract them from summaries, and does not store its own conclusions about the user. A wrong memory is worse than a missing one: it is invisible, it is injected into every subsequent prompt, and it makes the assistant confidently wrong in a way the user cannot easily trace. The cost of this choice is that the core fills slowly. That is the intended trade.
+
+## Guardrails
+
+- **Only what the user said.** The entry text restates the user's own statement. The assistant's inferences, summaries of its own advice, and observations about the user's mood or habits are not eligible.
+- **Every entry is dated and attributed.** A line records when it was learnt and how (`dit` for a plain statement, `corrigé` for a correction).
+- **Nothing is erased silently.** Superseding an entry retires it: the line stays in the file, struck through, with the date and reason. The user can always see what the assistant used to believe and when it stopped. Deleting a line is the user's prerogative, done by hand in the file.
+- **Duplicates are no-ops.** Remembering text already present as an active entry rewrites nothing and reports back that it was already known.
+- **Hand edits survive.** Any line the parser does not recognise is preserved verbatim on rewrite. The file belongs to the user; the parser is a guest in it.
+
+## Line grammar
+
+```markdown
+- 2026-07-25 · dit — Il s'appelle Hocine.
+- 2026-07-25 · corrigé — Il vit à Lyon.
+- ~~2026-07-18 · dit — Il vit à Paris.~~ · retiré le 2026-07-25 : corrigé par l'utilisateur
+```
+
+- Active entry: `- <date> · <source> — <text>`
+- Retired entry: `- ~~<date> · <source> — <text>~~ · retiré le <date> : <reason>`
+- Dates are `YYYY-MM-DD`, UTC.
+- Source is `dit` or `corrigé`.
+
+Parsing is forgiving by design. A `- ` line that does not match the grammar is still an entry with unknown date and source; its text is whatever follows the bullet. Only entries with recognised strikethrough are treated as retired. A file the user has rewritten in their own shape still works.
+
+Each file opens with a heading and an HTML comment explaining the format, so a user who opens `profil.md` cold understands what they are looking at and how to edit it.
+
+## Injection into the prompt
+
+`build_core_profile()` reads both files and returns `{"user": ..., "directives": ...}` — active entries only, most recent first, each capped by character budget. `format_warm_profile_block()` renders the pair as the labelled system-prompt block, using denial-template mirroring (see CLAUDE.md): the headings occupy the exact semantic slot that a small model's canonical denial refers to, so the denial stops firing.
+
+Entry text is injected without its date and source prefix — the metadata is for the user reading the file, not for the model, which only needs the fact.
+
+Injection is unconditional and query-agnostic, at Step 3.5 of `reply()`. No LLM call is involved: it is two file reads. The result is cached in `DialogueMemory` under `WARM_PROFILE_CACHE_KEY` for the life of the conversation and invalidated when the core is written, so a fact remembered mid-conversation is in the prompt on the very next turn.
+
+## Relationship to the knowledge graph
+
+The core is the sole authority for what the assistant believes about the user and how it has been told to behave. The graph's `user` and `directives` branches no longer reach the prompt and are no longer written to: `extract_graph_memories()` classifies into the `world` branch only, so the graph holds looked-up external facts and nothing about the user.
+
+Existing `user` and `directives` nodes are migrated into the core once, on first run, as undated entries attributed to `migré`. The nodes are left in place — the migration is additive and re-running it writes nothing new, since migrated text already present is a duplicate.
+
+## Failure modes
+
+Reading fails open: an unreadable or malformed file yields an empty section and a debug log, never an exception into the reply path. An assistant with no core is a worse assistant, not a broken one.
+
+Writing fails closed and says so: the write goes to a temporary file in the same directory and is moved into place atomically, so a crash mid-write cannot truncate the user's file. If the write fails, `rememberTool` reports the failure rather than claiming success — a user told "noted" about something that was never saved is the one outcome worse than an error message.

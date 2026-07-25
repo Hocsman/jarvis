@@ -30,7 +30,7 @@ class ToolSelectionStrategy(Enum):
 
 
 # Tools that must always be available regardless of selection strategy.
-_ALWAYS_INCLUDED = {"stop"}
+_ALWAYS_INCLUDED = {"stop", "remember"}
 
 # Minimum number of tools to return from similarity-based strategies.
 # Prevents overly aggressive filtering that would leave the model with nothing useful.
@@ -143,11 +143,16 @@ def _select_keyword(
         scored.append((name, score))
 
     matched = [name for name, score in scored if score > 0]
-    matched = _ensure_always_included(matched, builtin_tools, mcp_tools)
 
-    if len(matched) <= len(_ALWAYS_INCLUDED):
+    # Mandatory tools are not evidence that the query was understood, so
+    # the "we found nothing" test looks past them at what actually
+    # scored. Counting instead would misjudge any catalogue that happens
+    # not to carry every mandatory tool.
+    if not [name for name in matched if name not in _ALWAYS_INCLUDED]:
         debug_log("Keyword tool selection found no matches, falling back to all tools", "planning")
         return _all_tool_names(builtin_tools, mcp_tools)
+
+    matched = _ensure_always_included(matched, builtin_tools, mcp_tools)
 
     debug_log(f"Keyword tool selection: {len(matched)}/{len(builtin_tools) + len(mcp_tools)} tools selected", "planning")
     return matched
@@ -359,11 +364,13 @@ def _select_llm(
     if len(selected) > _LLM_MAX_SELECTED:
         selected = selected[:_LLM_MAX_SELECTED]
 
-    selected = _ensure_always_included(selected, builtin_tools, mcp_tools)
-
-    if len(selected) <= len(_ALWAYS_INCLUDED):
+    # As in the keyword strategy: mandatory tools don't count as a match,
+    # so look past them before deciding the router came back empty.
+    if not [name for name in selected if name not in _ALWAYS_INCLUDED]:
         debug_log("LLM tool selection matched nothing, falling back to keyword strategy", "planning")
         return _select_keyword(query, builtin_tools, mcp_tools)
+
+    selected = _ensure_always_included(selected, builtin_tools, mcp_tools)
 
     debug_log(f"LLM tool selection: {len(selected)}/{len(known)} tools selected", "planning")
     return selected

@@ -1,16 +1,20 @@
 """
-End-to-end eval — single-turn flow where the user's location lives in the
-User branch of the knowledge graph (warm profile). The warm profile is
-always-loaded into the system prompt, so the chat model and planner can
-ground ``getWeather`` on it without a ``searchMemory`` step.
+End-to-end eval — single-turn flow where the user's location lives in
+their core profile. The core is always loaded into the system prompt, so
+the chat model and planner can ground ``getWeather`` on it without a
+``searchMemory`` step.
 
-This stresses the warm-profile-injection path. It complements:
+This is the payoff for keeping a readable core at all: a fact the user
+stated once, in a file they can see, answers a question weeks later
+without a memory search.
+
+It complements:
   - ``evals/test_followup_supplies_missing_tool_arg.py`` (hot-window
     carry-over, two-turn).
   - ``evals/test_diary_supplies_missing_tool_arg.py`` (diary recall via
     planner-emitted ``searchMemory``).
 
-Run: EVAL_JUDGE_MODEL=gemma4:e2b ./scripts/run_evals.sh graph_supplies_missing_tool_arg
+Run: EVAL_JUDGE_MODEL=gemma4:e2b ./scripts/run_evals.sh core_supplies_missing_tool_arg
 """
 
 from unittest.mock import patch
@@ -58,40 +62,33 @@ def _make_runner(capture: ToolCallCapture):
 
 @pytest.mark.eval
 @requires_judge_llm
-class TestGraphSuppliesMissingToolArg:
-    """Warm-profile injection path: a User-branch fact ("lives in
-    Edinburgh") is always loaded into the system prompt, so the chat
-    model can supply it as the location argument without an extra
-    memory search."""
+class TestCoreSuppliesMissingToolArg:
+    """Core injection path: a profile fact ("lives in Edinburgh") is
+    always loaded into the system prompt, so the chat model can supply
+    it as the location argument without an extra memory search."""
 
-    def test_warm_profile_user_fact_grounds_get_weather_call(
-        self, mock_config, eval_db, eval_dialogue_memory,
+    def test_core_profile_fact_grounds_get_weather_call(
+        self, mock_config, eval_db, eval_dialogue_memory, tmp_path,
     ):
+        from jarvis.memory.core import SECTION_PROFILE, MemoryCore
         from jarvis.reply.engine import run_reply_engine
 
         mock_config.ollama_base_url = "http://localhost:11434"
         mock_config.ollama_chat_model = JUDGE_MODEL
         # Geoip disabled — the only way the model gets a location is from
-        # the warm profile loaded out of the graph.
+        # the core loaded into the system prompt.
         mock_config.location_enabled = False
+
+        # Write a real core beside a real database path so the engine
+        # reads the files exactly as it would in production, rather than
+        # trusting a patched builder to have the right shape.
+        mock_config.db_path = str(tmp_path / "jarvis.db")
+        core = MemoryCore.for_config(mock_config)
+        core.remember(SECTION_PROFILE, "The user lives in Edinburgh.")
 
         capture = ToolCallCapture()
 
-        # Inject a User-branch fact directly into the warm-profile builder
-        # rather than seeding the SQLite-backed graph store. The warm-
-        # profile path the engine relies on is `build_warm_profile` →
-        # `format_warm_profile_block`; seeding via the public API replays
-        # the production shape without depending on graph-mutation
-        # listeners or branch-root bootstrapping in the test DB.
-        warm_profile = {
-            "user": "The user lives in Edinburgh.",
-            "directives": "",
-        }
-
         with patch(
-            "jarvis.memory.graph_ops.build_warm_profile",
-            return_value=warm_profile,
-        ), patch(
             "jarvis.reply.engine.run_tool_with_retries",
             side_effect=_make_runner(capture),
         ):
@@ -101,13 +98,13 @@ class TestGraphSuppliesMissingToolArg:
                 dialogue_memory=eval_dialogue_memory,
             )
 
-        print(f"\n  Graph Supplies Missing Tool Arg ({JUDGE_MODEL}):")
+        print(f"\n  Core Supplies Missing Tool Arg ({JUDGE_MODEL}):")
         print(f"  Tools called: {capture.tool_names()}")
         for c in capture.calls:
             print(f"    - {c['name']}({c['args']})")
         print(f"  Response: {(response or '')[:300]}")
 
-        assert_not_fallback_reply(response, context="warm-profile")
+        assert_not_fallback_reply(response, context="core-profile")
 
         weather_calls = [c for c in capture.calls if c["name"] == "getWeather"]
         edinburgh_calls = [
@@ -116,7 +113,7 @@ class TestGraphSuppliesMissingToolArg:
         ]
         assert edinburgh_calls, (
             "getWeather was not invoked with location='Edinburgh' even "
-            "though the warm profile names Edinburgh as the user's home. "
+            "though the core names Edinburgh as the user's home. "
             "The chat model must use always-loaded user facts as tool "
             "arguments without an explicit prompt to do so. "
             f"All getWeather calls: {[c['args'] for c in weather_calls]}. "
@@ -126,12 +123,12 @@ class TestGraphSuppliesMissingToolArg:
 
         response_lower = (response or "").lower()
         assert "edinburgh" in response_lower, (
-            "Reply does not mention Edinburgh despite the warm profile "
+            "Reply does not mention Edinburgh despite the core "
             f"naming it as the user's location. Response: {(response or '')[:400]}"
         )
 
         assert "hackney" not in response_lower, (
-            "Reply mentions Hackney — the warm profile clearly states "
+            "Reply mentions Hackney — the core clearly states "
             "Edinburgh, and geoip is disabled in this test. The model "
             f"leaked a hardcoded default. Response: {(response or '')[:400]}"
         )

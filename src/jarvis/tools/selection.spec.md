@@ -27,6 +27,7 @@ Controlled by `tool_selection_strategy` in config:
 
 Regardless of strategy, these tools are **always** included:
 - `stop` — needed so the user can dismiss the assistant at any time.
+- `remember` — an explicit "remember that…" must never be silently dropped because the router failed to offer the tool. Being always available is safe here because the tool is inert unless the user asked for it, and because every write lands in a plain-text file the user can read and edit.
 
 ### Keyword Strategy
 
