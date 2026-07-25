@@ -268,6 +268,37 @@ class TestSubmitTextQueryContract:
         assert "test@example.com" not in start_query
         assert "[REDACTED_EMAIL]" in start_query
 
+    def test_redaction_failure_releases_lock_and_fails_open(self, monkeypatch):
+        """If redact() raises on the caller's thread, submit_text_query must
+        release the query lock, fire complete(None), and leave the daemon able
+        to accept a subsequent submission. A leaked lock would reject every
+        future query as busy forever."""
+        _install_dialogue_memory(cfg=object(), db=object())
+        engine_calls = []
+        monkeypatch.setattr(
+            "jarvis.reply.engine.run_reply_engine",
+            lambda *a, **k: engine_calls.append(True),
+        )
+
+        def boom(_text):
+            raise RuntimeError("redact exploded")
+
+        monkeypatch.setattr("jarvis.utils.redact.redact", boom)
+
+        events = []
+        daemon.submit_text_query(
+            "hi", on_complete=lambda r: events.append(("complete", r)),
+        )
+        _wait_for_complete(events)
+        assert events[-1] == ("complete", None)
+        assert engine_calls == []
+
+        # The lock must be released so a follow-up submission is accepted.
+        assert daemon._chat_query_lock.acquire(blocking=False) is True
+        daemon._chat_query_lock.release()
+        # _chat_cancel_event must be cleared (not orphaned on the failed query).
+        assert daemon._chat_cancel_event is None
+
 
 @pytest.mark.unit
 class TestSubmitTextQueryConcurrency:
@@ -308,6 +339,68 @@ class TestSubmitTextQueryConcurrency:
         # Let the first query finish so the worker thread exits cleanly.
         slow_done.set()
         _wait_for_complete(events)
+
+
+@pytest.mark.unit
+class TestSharedVoiceTextQueryLock:
+    """Voice and text run_reply_engine against one dialogue memory, so they
+    share ``_chat_query_lock``. The voice path acquires it blocking
+    (``daemon.query_lock()``); the text path acquires it non-blocking. This is
+    the load-bearing invariant of the "one conversation" design."""
+
+    def setup_method(self, _method):
+        _reset_daemon_globals()
+
+    def teardown_method(self, _method):
+        _reset_daemon_globals()
+
+    def test_voice_query_lock_blocks_while_text_holds_the_lock(self):
+        """While a text query holds _chat_query_lock, the voice path's
+        query_lock() context manager must block until it is released."""
+        acquired = threading.Event()
+        released = threading.Event()
+        voice_entered = threading.Event()
+
+        def hold_then_release():
+            daemon._chat_query_lock.acquire()
+            acquired.set()
+            released.wait(timeout=5)
+            daemon._chat_query_lock.release()
+
+        holder = threading.Thread(target=hold_then_release)
+        holder.start()
+        assert acquired.wait(timeout=2)
+
+        def voice_path():
+            with daemon.query_lock():
+                voice_entered.set()
+
+        voice = threading.Thread(target=voice_path)
+        voice.start()
+        # Voice must NOT enter while the text path holds the lock.
+        assert not voice_entered.wait(timeout=0.3)
+
+        released.set()
+        # Voice enters once the lock is released.
+        assert voice_entered.wait(timeout=2)
+        holder.join(timeout=2)
+        voice.join(timeout=2)
+
+    def test_text_submission_rejected_as_busy_while_voice_holds_the_lock(self):
+        """While the voice path holds the lock, a text submission is rejected
+        via on_busy (non-blocking acquire) rather than queueing."""
+        _install_dialogue_memory(cfg=object(), db=object())
+        daemon._chat_query_lock.acquire()
+        try:
+            events = []
+            daemon.submit_text_query(
+                "during voice",
+                on_busy=lambda: events.append("busy"),
+                on_complete=lambda r: events.append(("complete", r)),
+            )
+            assert "busy" in events
+        finally:
+            daemon._chat_query_lock.release()
 
 
 @pytest.mark.unit

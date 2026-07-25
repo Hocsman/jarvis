@@ -322,14 +322,16 @@ def submit_text_query(
     cancel_event = threading.Event()
     _chat_cancel_event = cancel_event
 
-    # Snapshot the redacted query for the start event. ``run_reply_engine``
-    # redacts internally too; we mirror that here so the IPC stream and the
-    # UI never carry raw user text even if the engine hasn't run yet.
-    from .utils.redact import redact
-    display_query = redact(text)
-
     def _worker() -> None:
         try:
+            # Snapshot the redacted query for the start event. ``run_reply_engine``
+            # redacts internally too; we mirror that here so the IPC stream and
+            # the UI never carry raw user text even if the engine hasn't run yet.
+            # Done inside the worker's try/except so a redaction failure fails
+            # open (complete(None)) and the shared lock is released in finally
+            # rather than leaking and blocking every future submission.
+            from .utils.redact import redact
+            display_query = redact(text)
             _notify_chat("start", display_query, callbacks=callbacks, use_ipc=use_ipc)
             from .reply.engine import run_reply_engine
             reply = run_reply_engine(

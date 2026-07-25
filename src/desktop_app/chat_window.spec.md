@@ -119,7 +119,7 @@ A `QMainWindow` with:
 
 - A read-only transcript area (chat bubbles or monospaced log style; theme
   colours from `themes.py`).
-- A single-line input box with send button. Enter sends; Shift+Enter inserts a
+- A multi-line input box with send button. Enter sends; Shift+Enter inserts a
   newline (multi-line input).
 - A "Stop" button that calls `jarvis.daemon.cancel_active_chat_query()`. This
   sets a per-query cancellation flag; the chat worker drops the reply when

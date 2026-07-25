@@ -528,6 +528,27 @@ class TestChatWindowInputKeys:
         assert calls == ["hi"]
         assert win.input_widget.toPlainText() == ""
 
+    def test_numpad_enter_sends(self, qapp, monkeypatch):
+        """Numpad Enter (Key_Enter) sends just like the main Return key."""
+        from desktop_app.chat_window import ChatWindow
+        from PyQt6.QtCore import Qt as _Qt, QEvent
+        from PyQt6.QtGui import QKeyEvent
+
+        calls = []
+        monkeypatch.setattr(
+            "jarvis.daemon.submit_text_query",
+            lambda text, **kw: calls.append(text),
+        )
+        win = ChatWindow()
+        win.input_widget.setPlainText("hi")
+        event = QKeyEvent(
+            QEvent.Type.KeyPress,
+            _Qt.Key.Key_Enter,
+            _Qt.KeyboardModifier.NoModifier,
+        )
+        win._input_key_press(event)
+        assert calls == ["hi"]
+
     def test_shift_enter_does_not_send(self, qapp, monkeypatch):
         from desktop_app.chat_window import ChatWindow
         from PyQt6.QtCore import Qt as _Qt, QEvent

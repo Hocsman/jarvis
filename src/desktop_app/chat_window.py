@@ -401,8 +401,12 @@ class ChatWindow(QMainWindow):
         from PyQt6.QtGui import QKeyEvent
         from PyQt6.QtCore import Qt as _Qt
 
-        if isinstance(event, QKeyEvent) and event.key() == _Qt.Key.Key_Return and not (event.modifiers() & _Qt.KeyboardModifier.ShiftModifier):
-            # Enter sends; Shift+Enter inserts a newline (default).
+        if (
+            isinstance(event, QKeyEvent)
+            and event.key() in (_Qt.Key.Key_Return, _Qt.Key.Key_Enter)
+            and not (event.modifiers() & _Qt.KeyboardModifier.ShiftModifier)
+        ):
+            # Enter (or numpad Enter) sends; Shift+Enter inserts a newline.
             self._send()
             return
         # Default handling for all other keys.
