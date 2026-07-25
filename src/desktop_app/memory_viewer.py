@@ -17,6 +17,7 @@ from flask import Flask, jsonify, request, Response
 
 from jarvis.config import load_settings
 from jarvis.debug import debug_log
+from jarvis.memory.core import SECTION_PROFILE, SECTION_RULES, MemoryCore
 from jarvis.memory.graph import FIXED_BRANCH_IDS, GraphMemoryStore
 
 
@@ -25,6 +26,7 @@ app = Flask(__name__)
 # Global database connection
 _db_conn: Optional[sqlite3.Connection] = None
 _graph_store: Optional[GraphMemoryStore] = None
+_core: Optional[MemoryCore] = None
 
 
 def _get_db_path() -> str:
@@ -46,6 +48,49 @@ def get_db() -> sqlite3.Connection:
         _db_conn = sqlite3.connect(db_path, check_same_thread=False)
         _db_conn.row_factory = sqlite3.Row
     return _db_conn
+
+
+def get_core() -> MemoryCore:
+    """Get or create the core reader, rooted beside the database."""
+    global _core
+    if _core is None:
+        try:
+            _core = MemoryCore.for_config(load_settings())
+        except Exception:
+            _core = MemoryCore(Path(_get_db_path()).parent / "yuba")
+    return _core
+
+
+# The two halves of the core, in the order the tab shows them.
+_CORE_SECTIONS = (SECTION_PROFILE, SECTION_RULES)
+
+
+def _core_section_payload(section: str) -> dict[str, Any]:
+    """Everything the tab needs for one file: the entries as parsed, and
+    the raw text, because the file is the user's and editing it directly
+    is the point."""
+    core = get_core()
+    path = core.path_for(section)
+    try:
+        raw = path.read_text(encoding="utf-8") if path.exists() else ""
+    except OSError as e:
+        debug_log(f"core read failed for {path.name}: {e}", "memory")
+        raw = ""
+    return {
+        "path": str(path),
+        "raw": raw,
+        "entries": [
+            {
+                "text": entry.text,
+                "date": entry.date,
+                "source": entry.source,
+                "retired": entry.retired,
+                "retired_on": entry.retired_on,
+                "retired_reason": entry.retired_reason,
+            }
+            for entry in core.entries(section)
+        ],
+    }
 
 
 def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -316,6 +361,41 @@ def get_graph_store() -> GraphMemoryStore:
     return _graph_store
 
 
+@app.route("/api/core")
+def core_get() -> Response:
+    """Both core files: what is believed, what was retired, and the raw text."""
+    try:
+        return jsonify({section: _core_section_payload(section) for section in _CORE_SECTIONS})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/core/<section>", methods=["PUT"])
+def core_save(section: str) -> Response:
+    """Write a core file back exactly as the user typed it.
+
+    No reformatting and no dropping of lines the parser does not
+    recognise: the file belongs to the user, and an editor that rewrites
+    what you typed is one you stop trusting with the thing it holds.
+    """
+    if section not in _CORE_SECTIONS:
+        return jsonify({"error": f"unknown section: {section}"}), 404
+
+    data = request.get_json(silent=True) or {}
+    raw = data.get("raw")
+    if not isinstance(raw, str):
+        return jsonify({"error": "missing 'raw' text"}), 400
+
+    core = get_core()
+    try:
+        core.write_raw(section, raw)
+    except OSError as e:
+        debug_log(f"core save failed for {section}: {e}", "memory")
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify(_core_section_payload(section))
+
+
 @app.route("/api/graph/nodes")
 def graph_get_all_nodes() -> Response:
     """Get all nodes for the graph visualisation."""
@@ -329,6 +409,35 @@ def graph_get_all_nodes() -> Response:
         return jsonify({"error": str(e)}), 500
 
 
+# The branches the core took over. They stay seeded so the one-time
+# hand-over has somewhere to read from, but the Knowledge tab is about
+# what the assistant looked up, and a tab that says its contents reach
+# every reply must not show a branch nothing consults. They reappear only
+# while they still hold something, which is the window before the daemon
+# next starts and moves it.
+_SUPERSEDED_BRANCHES = ("user", "directives")
+
+
+def _subtree_holds_data(subtree: dict) -> bool:
+    node = subtree.get("node") or {}
+    if (node.get("data") or "").strip():
+        return True
+    return any(_subtree_holds_data(child) for child in subtree.get("children") or [])
+
+
+def _hide_superseded_branches(tree: dict) -> dict:
+    """Drop the branches the core superseded, unless they still hold text."""
+    children = tree.get("children")
+    if not children:
+        return tree
+    tree["children"] = [
+        child for child in children
+        if (child.get("node") or {}).get("id") not in _SUPERSEDED_BRANCHES
+        or _subtree_holds_data(child)
+    ]
+    return tree
+
+
 @app.route("/api/graph/tree")
 def graph_get_tree() -> Response:
     """Get the full tree structure for the sidebar."""
@@ -337,6 +446,8 @@ def graph_get_tree() -> Response:
         root_id = request.args.get("root", "root")
         max_depth = min(int(request.args.get("max_depth", 10)), 20)
         tree = store.get_subtree(root_id, max_depth=max_depth)
+        if root_id == "root":
+            tree = _hide_superseded_branches(tree)
         return jsonify(tree)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1041,6 +1152,92 @@ def index() -> str:
             min-height: 0;
         }
 
+        .core-intro {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-md);
+            padding: 14px 18px;
+            margin-bottom: 18px;
+            line-height: 1.55;
+        }
+        .core-file {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-md);
+            margin-bottom: 22px;
+            overflow: hidden;
+        }
+        .core-file-head {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 18px;
+            border-bottom: 1px solid var(--border-color);
+            flex-wrap: wrap;
+        }
+        .core-file-title { font-weight: 600; font-size: 15px; }
+        .core-file-path {
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 12px;
+            opacity: 0.55;
+            flex: 1;
+            min-width: 200px;
+            overflow-wrap: anywhere;
+        }
+        .core-entries { padding: 8px 18px 16px; }
+        .core-entry {
+            display: flex;
+            gap: 10px;
+            align-items: baseline;
+            padding: 7px 0;
+            border-bottom: 1px solid rgba(128, 128, 128, 0.12);
+        }
+        .core-entry:last-child { border-bottom: none; }
+        .core-entry-meta {
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 11px;
+            opacity: 0.5;
+            white-space: nowrap;
+        }
+        .core-entry-text { flex: 1; line-height: 1.5; }
+        .core-entry.retired .core-entry-body {
+            text-decoration: line-through;
+            opacity: 0.45;
+        }
+        /* The annotation explains why the line is struck out, so it must
+           not be struck out itself. */
+        .core-entry-why {
+            font-size: 11px;
+            opacity: 0.75;
+            font-style: italic;
+            text-decoration: none;
+            display: inline-block;
+        }
+        .core-empty { padding: 18px; opacity: 0.6; }
+        .core-editor {
+            display: none;
+            padding: 0 18px 16px;
+        }
+        .core-editor textarea {
+            width: 100%;
+            min-height: 280px;
+            background: var(--bg-primary);
+            color: inherit;
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-sm);
+            padding: 12px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 13px;
+            line-height: 1.55;
+            resize: vertical;
+        }
+        .core-editor-actions {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin-top: 10px;
+        }
+        .core-status { font-size: 12px; opacity: 0.7; }
         .tab-pane.with-sidebar {
             display: grid;
             grid-template-columns: 280px 1fr;
@@ -2076,6 +2273,9 @@ def index() -> str:
             <button class="tab active" data-tab="memories">
                 <span>💭</span> Diary
             </button>
+            <button class="tab" data-tab="core">
+                <span>🪨</span> Core
+            </button>
             <button class="tab" data-tab="graph">
                 <span>🧠</span> Knowledge
             </button>
@@ -2125,8 +2325,8 @@ def index() -> str:
                             🧪 The knowledge graph holds what the assistant has <strong>looked up</strong>:
                             films, businesses, recipes, events. Query-driven graph recall runs alongside
                             the diary via <code>Enrichment Source = all</code>. What the assistant knows
-                            about <em>you</em> lives in your core files instead, which you can open and edit
-                            by hand.
+                            about <em>you</em> lives in the <strong>🪨 Core</strong> tab instead, in files
+                            you can open and edit by hand.
                         </p>
                         <p>
                             👉 Structure and classification are stable; extractor quality is still being tuned.
@@ -2165,6 +2365,20 @@ def index() -> str:
                             <p>Select a node to view its details</p>
                         </div>
                     </div>
+                </div>
+            </div>
+
+            <div id="core-content" class="tab-pane" style="display: none;">
+                <div class="core-intro">
+                    <p>
+                        🪨 What the assistant knows about <strong>you</strong>, and the rules you
+                        have given it. These are two Markdown files on your disk: nothing is
+                        written here by inference, only what you asked it to remember or
+                        corrected. Edit them freely, here or in any text editor.
+                    </p>
+                </div>
+                <div class="core-files" id="core-files">
+                    <div class="loading"><div class="spinner"></div></div>
                 </div>
             </div>
 
@@ -2208,6 +2422,7 @@ def index() -> str:
         const memoriesPane = document.getElementById('memories-content');
         const mealsPane = document.getElementById('meals-content');
         const graphContent = document.getElementById('graph-content');
+        const corePane = document.getElementById('core-content');
         const memoriesContent = memoriesPane.querySelector('.memory-list');
         const mealsContent = mealsPane.querySelector('.memory-list');
         const tabs = document.querySelectorAll('.tab');
@@ -2529,6 +2744,127 @@ def index() -> str:
             loadMeals();
         });
 
+        // ── Core tab ────────────────────────────────────────────────
+        //
+        // Two views of the same file: the entries as the assistant reads
+        // them, and the raw Markdown. The raw view is the one that saves,
+        // because the file is the user's — an editor that rewrites what
+        // you typed is one you stop trusting with the thing it holds.
+
+        const CORE_SECTIONS = [
+            { key: 'profile', title: '🪨 Profil', blurb: 'What it knows about you' },
+            { key: 'rules', title: '📏 Règles', blurb: 'Rules you have given it' },
+        ];
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text == null ? '' : text;
+            return div.innerHTML;
+        }
+
+        function renderCoreEntries(entries) {
+            if (!entries.length) {
+                return '<div class="core-empty">Nothing yet. Say "remember that…" and it lands here.</div>';
+            }
+            return '<div class="core-entries">' + entries.map(e => {
+                const meta = [e.date, e.source].filter(Boolean).join(' · ');
+                const why = e.retired
+                    ? `<span class="core-entry-why">retiré${e.retired_on ? ' le ' + escapeHtml(e.retired_on) : ''}${e.retired_reason ? ' : ' + escapeHtml(e.retired_reason) : ''}</span>`
+                    : '';
+                return `<div class="core-entry${e.retired ? ' retired' : ''}">
+                    <span class="core-entry-meta">${escapeHtml(meta)}</span>
+                    <span class="core-entry-text"><span class="core-entry-body">${escapeHtml(e.text)}</span> ${why}</span>
+                </div>`;
+            }).join('') + '</div>';
+        }
+
+        function renderCoreFile(section, payload) {
+            return `<div class="core-file" data-section="${section.key}">
+                <div class="core-file-head">
+                    <span class="core-file-title">${section.title}</span>
+                    <span class="core-file-path" title="${escapeHtml(payload.path)}">${escapeHtml(payload.path)}</span>
+                    <button class="graph-btn" data-core-edit="${section.key}" title="Edit the file directly">✏️</button>
+                </div>
+                <div class="core-rendered">${renderCoreEntries(payload.entries)}</div>
+                <div class="core-editor">
+                    <textarea spellcheck="false"></textarea>
+                    <div class="core-editor-actions">
+                        <button class="graph-btn" data-core-save="${section.key}" title="Save">💾</button>
+                        <button class="graph-btn" data-core-cancel="${section.key}" title="Cancel">✖️</button>
+                        <span class="core-status"></span>
+                    </div>
+                </div>
+            </div>`;
+        }
+
+        let coreData = {};
+
+        async function loadCore() {
+            const container = document.getElementById('core-files');
+            try {
+                const resp = await fetch('/api/core');
+                coreData = await resp.json();
+            } catch (e) {
+                container.innerHTML = '<div class="core-empty">Could not read the core files.</div>';
+                return;
+            }
+            container.innerHTML = CORE_SECTIONS
+                .map(section => renderCoreFile(section, coreData[section.key] || { path: '', raw: '', entries: [] }))
+                .join('');
+        }
+
+        function coreFileEl(key) {
+            return document.querySelector(`.core-file[data-section="${key}"]`);
+        }
+
+        document.getElementById('core-files').addEventListener('click', async (ev) => {
+            const editKey = ev.target.dataset && ev.target.dataset.coreEdit;
+            const saveKey = ev.target.dataset && ev.target.dataset.coreSave;
+            const cancelKey = ev.target.dataset && ev.target.dataset.coreCancel;
+
+            if (editKey) {
+                const el = coreFileEl(editKey);
+                el.querySelector('textarea').value = (coreData[editKey] || {}).raw || '';
+                el.querySelector('.core-rendered').style.display = 'none';
+                el.querySelector('.core-editor').style.display = 'block';
+                return;
+            }
+
+            if (cancelKey) {
+                const el = coreFileEl(cancelKey);
+                el.querySelector('.core-editor').style.display = 'none';
+                el.querySelector('.core-rendered').style.display = '';
+                el.querySelector('.core-status').textContent = '';
+                return;
+            }
+
+            if (saveKey) {
+                const el = coreFileEl(saveKey);
+                const status = el.querySelector('.core-status');
+                status.textContent = 'Saving…';
+                try {
+                    const resp = await fetch('/api/core/' + saveKey, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ raw: el.querySelector('textarea').value }),
+                    });
+                    if (!resp.ok) {
+                        const err = await resp.json().catch(() => ({}));
+                        status.textContent = 'Not saved: ' + (err.error || resp.status);
+                        return;
+                    }
+                    const payload = await resp.json();
+                    coreData[saveKey] = payload;
+                    el.querySelector('.core-rendered').innerHTML = renderCoreEntries(payload.entries);
+                    el.querySelector('.core-editor').style.display = 'none';
+                    el.querySelector('.core-rendered').style.display = '';
+                    status.textContent = '';
+                } catch (e) {
+                    status.textContent = 'Not saved: ' + e;
+                }
+            }
+        });
+
         function switchTab(tabName) {
             tabs.forEach(t => t.classList.remove('active'));
             document.querySelector(`.tab[data-tab="${tabName}"]`).classList.add('active');
@@ -2538,10 +2874,14 @@ def index() -> str:
             memoriesPane.style.display = 'none';
             graphContent.style.display = 'none';
             mealsPane.style.display = 'none';
+            corePane.style.display = 'none';
 
             if (currentTab === 'memories') {
                 memoriesPane.style.display = '';
                 loadMemories();
+            } else if (currentTab === 'core') {
+                corePane.style.display = '';
+                loadCore();
             } else if (currentTab === 'graph') {
                 graphContent.style.display = '';
                 initGraph();

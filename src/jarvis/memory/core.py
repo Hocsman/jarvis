@@ -335,6 +335,37 @@ class MemoryCore:
                 pass
             raise
 
+    def write_raw(self, section: str, content: str) -> None:
+        """Replace a section's file with exactly this text.
+
+        For surfaces where the user edits the file itself rather than
+        asking the assistant to. Nothing is reformatted and no
+        unrecognised line is dropped: an editor that rewrites what you
+        typed is one you stop trusting with the thing it holds.
+        """
+        self._write(section, content)
+        debug_log(f"core: {section} rewritten by hand", "memory")
+        _notify_core_mutation("edit", section)
+
+    def fingerprint(self) -> tuple:
+        """A cheap stamp of the files' current state.
+
+        Callers that cache the injected block hold this alongside it and
+        rebuild when it changes. Without it an edit made outside the
+        running process — from the memory viewer, or from the user's own
+        text editor — appears to do nothing until the conversation ends,
+        which reads exactly like the correction was ignored.
+        """
+        stamp = []
+        for section in (SECTION_PROFILE, SECTION_RULES):
+            path = self.path_for(section)
+            try:
+                stat = path.stat()
+                stamp.append((section, stat.st_mtime_ns, stat.st_size))
+            except OSError:
+                stamp.append((section, None, None))
+        return tuple(stamp)
+
     def remember(
         self,
         section: str,
