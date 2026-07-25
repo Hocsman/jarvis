@@ -237,15 +237,34 @@ class WeatherTool(Tool):
                         location_str = extracted
                         place_from_fallback = True
                     else:
-                        # Auto-detect genuinely failed and the user didn't name
-                        # a place in this utterance. Asking is the right move.
-                        return ToolExecutionResult(
-                            success=False,
-                            reply_text=(
-                                "I couldn't auto-detect your location. "
-                                "Please tell me which city to check the weather for."
-                            ),
-                        )
+                        # Still nothing: fall back to the home city the user
+                        # declared in config. Geo-IP needs a local GeoLite2
+                        # database that many installs don't have, and a failed
+                        # tool result is precisely what tempts the model into
+                        # inventing a plausible forecast — so a city the user
+                        # has already told us about beats asking again.
+                        home_city = str(
+                            getattr(getattr(context, "cfg", None), "weather_city", "") or ""
+                        ).strip()
+                        if home_city:
+                            debug_log(
+                                f"    📍 auto-detect unavailable; using configured "
+                                f"weather_city: '{home_city}'",
+                                "tools",
+                            )
+                            location_str = home_city
+                            place_from_fallback = True
+                        else:
+                            # Auto-detect genuinely failed, the user didn't name
+                            # a place, and no home city is configured. Asking is
+                            # the right move.
+                            return ToolExecutionResult(
+                                success=False,
+                                reply_text=(
+                                    "I couldn't auto-detect your location. "
+                                    "Please tell me which city to check the weather for."
+                                ),
+                            )
 
             if location_str:
                 # User specified a location (or we pulled one from their text) — geocode it.
