@@ -249,11 +249,19 @@ class MockConfig:
     llm_provider: str = ""
     llm_base_url: str = ""
     llm_chat_model: str = ""
+    # Hosted OpenAI-compatible endpoints need a key where a local one does
+    # not. Named through an env var rather than pasted, matching how the
+    # real config carries it (``llm_api_key_env``), and never written to
+    # disk or printed by the suite.
+    llm_api_key: str = ""
     embedding_model: Optional[str] = None
 
     def __post_init__(self):
         """Auto-configure provider from EVAL_JUDGE_BASE_URL when set."""
         import os as _os
+        key_env = _os.environ.get("EVAL_JUDGE_API_KEY_ENV", "").strip()
+        if key_env:
+            self.llm_api_key = _os.environ.get(key_env, "")
         judge_url = _os.environ.get("EVAL_JUDGE_BASE_URL", "").strip()
         if judge_url and "11434" not in judge_url:
             # Non-default judge URL (e.g. LM Studio) → switch to
