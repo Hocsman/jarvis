@@ -239,9 +239,50 @@ def create_mock_tool_run(
     return mock_tool_run
 
 
+_REAL_DEFAULTS = None
+
+
+def _real_default_settings():
+    """A real ``Settings`` built from defaults only, cached.
+
+    Loaded against an empty config file so the developer's own
+    ``config.json`` (cloud provider, API keys, home city…) cannot leak into
+    eval runs and make them non-reproducible.
+    """
+    global _REAL_DEFAULTS
+    if _REAL_DEFAULTS is None:
+        import json
+        import tempfile
+        from jarvis.config import load_settings
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "config.json")
+            with open(path, "w") as fh:
+                json.dump({}, fh)
+            previous = os.environ.get("JARVIS_CONFIG_PATH")
+            os.environ["JARVIS_CONFIG_PATH"] = path
+            try:
+                _REAL_DEFAULTS = load_settings()
+            finally:
+                if previous is None:
+                    os.environ.pop("JARVIS_CONFIG_PATH", None)
+                else:
+                    os.environ["JARVIS_CONFIG_PATH"] = previous
+    return _REAL_DEFAULTS
+
+
 @dataclass
 class MockConfig:
-    """Minimal config object for eval tests."""
+    """Minimal config object for eval tests.
+
+    Only fields the evals actually pin are declared here; anything else
+    falls through to the real ``Settings`` defaults (see ``__getattr__``).
+    That indirection exists because this mock had drifted 72 fields behind
+    ``Settings`` — every eval died on ``AttributeError`` before asserting
+    anything, so the whole suite was reporting red for a reason unrelated to
+    agent behaviour. Falling back means a newly added setting can no longer
+    silently break the suite.
+    """
     ollama_base_url: str = "http://localhost:11434"
     ollama_chat_model: str = "gemma4:e2b"
     ollama_embed_model: str = "nomic-embed-text"
@@ -281,6 +322,24 @@ class MockConfig:
     dialogue_memory_timeout: int = 300
     mcps: Dict[str, Any] = field(default_factory=dict)
     use_stdin: bool = True
+
+    def __getattr__(self, name: str):
+        """Fall back to the real ``Settings`` default for undeclared fields.
+
+        Only called for attributes the dataclass doesn't define, so declared
+        fields keep their eval-specific values (local Ollama URL, test model,
+        in-memory DB). Private/dunder names are refused so this never
+        interferes with copy, pickle, or pytest introspection.
+        """
+        if name.startswith("_"):
+            raise AttributeError(name)
+        defaults = _real_default_settings()
+        try:
+            return getattr(defaults, name)
+        except AttributeError:
+            raise AttributeError(
+                f"{name!r} is neither a MockConfig field nor a Settings default"
+            ) from None
 
 
 @dataclass
