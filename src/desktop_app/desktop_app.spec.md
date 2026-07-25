@@ -254,12 +254,18 @@ sequenceDiagram
 
 ## Memory Viewer
 
-A Flask-based web interface for browsing conversation history:
+A Flask-based web interface for browsing what the assistant holds:
 
 - Runs on `localhost:5050`
 - **Bundled mode**: Flask runs in a daemon thread
 - **Development mode**: Flask runs as subprocess
 - Opens in embedded QWebEngineView or system browser (macOS fallback)
+
+Four tabs: **Diary** (conversation summaries), **Core**, **Knowledge** (the graph), **Meals**.
+
+The Core tab is the surface for the user's own memory files (see `src/jarvis/memory/core.spec.md`). Each file shows its entries as the assistant reads them, retired ones struck through with the date and reason still legible, and its path so it can be found outside the app. Editing swaps to the raw Markdown and saves it back byte for byte: the file belongs to the user, and an editor that reformats what they typed, or drops a line its parser did not recognise, is one they stop trusting with the thing it holds.
+
+The Knowledge tab hides the `user` and `directives` branches once they are empty. The core took them over, so a tab whose contents reach replies must not invite corrections to a line nothing consults. They stay visible while they still hold text, which is the window before the daemon next starts and hands it over.
 
 ## Error Handling
 

@@ -381,6 +381,57 @@ def test_a_written_core_survives_a_reopen(core, tmp_path):
     assert [e.text for e in reopened.active(SECTION_PROFILE)] == ["Il s'appelle Hocine."]
 
 
+# ── Editing the file through a surface other than a text editor ───────
+
+
+def test_a_raw_edit_lands_exactly_as_written(core):
+    body = "# Mon profil\n\nUne note en prose.\n\n- Il déteste le lundi.\n"
+
+    core.write_raw(SECTION_PROFILE, body)
+
+    assert core.path_for(SECTION_PROFILE).read_text(encoding="utf-8") == body
+    assert [e.text for e in core.active(SECTION_PROFILE)] == ["Il déteste le lundi."]
+
+
+def test_a_raw_edit_announces_itself_so_caches_can_rebuild(core):
+    from src.jarvis.memory import core as core_module
+
+    seen = []
+
+    def _listener(*, action, section):
+        seen.append((action, section))
+
+    core_module.register_core_mutation_listener(_listener)
+    try:
+        core.write_raw(SECTION_PROFILE, "# Profil\n\n- Il vit à Lyon.\n")
+    finally:
+        core_module.unregister_core_mutation_listener(_listener)
+
+    assert seen == [("edit", SECTION_PROFILE)]
+
+
+def test_the_fingerprint_changes_when_a_file_does(core):
+    """The daemon caches the injected block for a whole conversation. A
+    file edited underneath it — from the app, or from the user's own
+    editor — has to be noticed, or corrections appear to do nothing
+    until the conversation ends."""
+    before = core.fingerprint()
+
+    core.remember(SECTION_PROFILE, "Il vit à Lyon.", on_date="2026-07-20")
+
+    assert core.fingerprint() != before
+
+
+def test_the_fingerprint_is_stable_when_nothing_changes(core):
+    core.remember(SECTION_PROFILE, "Il vit à Lyon.", on_date="2026-07-20")
+
+    assert core.fingerprint() == core.fingerprint()
+
+
+def test_a_missing_core_still_has_a_fingerprint(core):
+    assert core.fingerprint() == core.fingerprint()
+
+
 # ── How the block is worded for the model ─────────────────────────────
 
 
