@@ -26,24 +26,26 @@ Two paths, both requiring the user to have said something. Nothing else writes t
 
 - **Only what the user said.** The entry text restates the user's own statement. The assistant's inferences, summaries of its own advice, and observations about the user's mood or habits are not eligible.
 - **Every entry is dated and attributed.** A line records when it was learnt and how (`dit` for a plain statement, `corrigé` for a correction).
-- **Nothing is erased silently.** Superseding an entry retires it: the line stays in the file, struck through, with the date and reason. The user can always see what the assistant used to believe and when it stopped. Deleting a line is the user's prerogative, done by hand in the file.
+- **Nothing is erased silently.** Superseding an entry retires it: the line stays in the file, struck through, with the date and reason. The user can always see what the assistant used to believe and when it stopped. Deleting a line outright is the user's prerogative, done by hand in the file, and nothing puts it back.
 - **Duplicates are no-ops.** Remembering text already present as an active entry rewrites nothing and reports back that it was already known.
 - **Hand edits survive.** Any line the parser does not recognise is preserved verbatim on rewrite. The file belongs to the user; the parser is a guest in it.
 
 ## Line grammar
 
 ```markdown
-- 2026-07-25 · dit — Il s'appelle Hocine.
-- 2026-07-25 · corrigé — Il vit à Lyon.
-- ~~2026-07-18 · dit — Il vit à Paris.~~ · retiré le 2026-07-25 : corrigé par l'utilisateur
+- 2026-07-25 · dit : Il s'appelle Hocine.
+- 2026-07-25 · corrigé : Il vit à Lyon.
+- ~~2026-07-18 · dit : Il vit à Paris.~~ · retiré le 2026-07-25 : corrigé par l'utilisateur
 ```
 
-- Active entry: `- <date> · <source> — <text>`
-- Retired entry: `- ~~<date> · <source> — <text>~~ · retiré le <date> : <reason>`
+- Active entry: `- <date> · <source> : <text>`
+- Retired entry: `- ~~<date> · <source> : <text>~~` followed by an optional `· retiré le <date>`, itself followed by an optional `: <reason>`
 - Dates are `YYYY-MM-DD`, UTC.
-- Source is `dit` or `corrigé`.
+- Source is `dit`, `corrigé`, or `migré`.
 
-Parsing is forgiving by design. A `- ` line that does not match the grammar is still an entry with unknown date and source; its text is whatever follows the bullet. Only entries with recognised strikethrough are treated as retired. A file the user has rewritten in their own shape still works.
+**Strikethrough alone retires an entry.** The stamp that follows is bookkeeping the assistant writes; a line the user struck out by hand carries no stamp and is just as retired. The header in every core file says so, and striking a line out is the obvious way to drop a belief when editing by hand, so the parser has to honour it or the file lies to its reader.
+
+Parsing is forgiving by design. A `- ` line that does not match the grammar is still an entry with unknown date and source; its text is whatever follows the bullet. Date and attribution are read off a struck line when present and simply absent when not. A file the user has rewritten in their own shape still works.
 
 Each file opens with a heading and an HTML comment explaining the format, so a user who opens `profil.md` cold understands what they are looking at and how to edit it.
 
@@ -59,7 +61,9 @@ Injection is unconditional and query-agnostic, at Step 3.5 of `reply()`. No LLM 
 
 The core is the sole authority for what the assistant believes about the user and how it has been told to behave. The graph's `user` and `directives` branches no longer reach the prompt and are no longer written to: `extract_graph_memories()` classifies into the `world` branch only, so the graph holds looked-up external facts and nothing about the user.
 
-Existing `user` and `directives` nodes are migrated into the core once, on first run, as undated entries attributed to `migré`. The nodes are left in place — the migration is additive and re-running it writes nothing new, since migrated text already present is a duplicate.
+Existing `user` and `directives` nodes are handed over to the core at start-up, as entries attributed to `migré`. A node keeps its place in the tree and gives up its data once its facts are safely in the files.
+
+Emptying the source is what makes the hand-over honest. Left in place, the text would be found by query-driven recall and put a retired belief back into the prompt from the node it was copied from, and a line the user pruned from their own file would be rewritten on the next start-up, for ever. With the source emptied, both are impossible and every subsequent run is a no-op, because there is nothing left to hand over. A node is cleared only when all of its facts reached the core; a failed write leaves them in the graph rather than losing them.
 
 ## Failure modes
 

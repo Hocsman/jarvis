@@ -124,16 +124,24 @@ def _notify_core_mutation(action: str, section: str) -> None:
 
 _DATE_RE = r"\d{4}-\d{2}-\d{2}"
 
-# An active entry: "- 2026-07-25 · dit : Il s'appelle Hocine."
-_ACTIVE_RE = re.compile(
-    rf"^-\s+(?P<date>{_DATE_RE})\s+·\s+(?P<source>\S+)\s*:\s*(?P<text>.+?)\s*$"
+# The date and attribution an entry carries: "2026-07-25 · dit : ".
+_PREFIX_RE = re.compile(
+    rf"^(?P<date>{_DATE_RE})\s+·\s+(?P<source>\S+)\s*:\s*(?P<text>.+?)\s*$"
 )
 
-# A retired one, struck through with its retirement stamp appended:
-# "- ~~2026-07-18 · dit : Il vit à Paris.~~ · retiré le 2026-07-25 : corrigé"
-_RETIRED_RE = re.compile(
-    rf"^-\s+~~(?P<date>{_DATE_RE})\s+·\s+(?P<source>\S+)\s*:\s*(?P<text>.+?)~~"
-    rf"\s+·\s+retiré le\s+(?P<retired_on>{_DATE_RE})\s*:\s*(?P<reason>.*?)\s*$"
+# An active entry: "- 2026-07-25 · dit : Il s'appelle Hocine."
+_ACTIVE_RE = re.compile(rf"^-\s+{_PREFIX_RE.pattern[1:]}")
+
+# A retired one. The strikethrough alone is what retires an entry — the
+# header in every core file tells the user exactly that, and striking a
+# line out is the obvious way to drop a belief when editing by hand. The
+# stamp that follows is bookkeeping the assistant adds; a line without it
+# is just as retired.
+_STRUCK_RE = re.compile(r"^-\s+~~(?P<inner>.+?)~~\s*(?P<stamp>.*?)\s*$")
+
+# "· retiré le 2026-07-25 : corrigé par l'utilisateur", reason optional.
+_STAMP_RE = re.compile(
+    rf"^·?\s*retiré le\s+(?P<retired_on>{_DATE_RE})\s*(?::\s*(?P<reason>.*?))?\s*$"
 )
 
 # Anything else starting with a bullet. Hand-written entries land here:
@@ -192,15 +200,25 @@ def _flatten(text: str) -> str:
 
 def _parse_line(line: str) -> Optional[CoreEntry]:
     """Read one line of a core file, or return None if it holds no entry."""
-    match = _RETIRED_RE.match(line)
+    match = _STRUCK_RE.match(line)
     if match:
+        inner = match.group("inner").strip()
+        prefix = _PREFIX_RE.match(inner)
+        # The date and attribution survive when they are there, but a
+        # user who struck out their own bare line still gets an entry.
+        date = prefix.group("date") if prefix else None
+        source = prefix.group("source") if prefix else None
+        text = prefix.group("text").strip() if prefix else inner
+
+        stamp = _STAMP_RE.match(match.group("stamp"))
+        reason = (stamp.group("reason") or "").strip() if stamp else ""
         return CoreEntry(
-            text=match.group("text").strip(),
-            date=match.group("date"),
-            source=match.group("source"),
+            text=text,
+            date=date,
+            source=source,
             retired=True,
-            retired_on=match.group("retired_on"),
-            retired_reason=match.group("reason") or None,
+            retired_on=stamp.group("retired_on") if stamp else None,
+            retired_reason=reason or None,
             raw=line,
         )
 
