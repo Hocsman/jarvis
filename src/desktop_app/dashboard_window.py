@@ -19,7 +19,7 @@ from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebChannel import QWebChannel
 
 from jarvis.debug import debug_log
-from desktop_app.dashboard.bridge import DashboardBridge
+from desktop_app.dashboard.bridge import DashboardBridge, dispatch_chat_ipc_line
 
 
 def _dashboard_index() -> Path:
@@ -78,20 +78,4 @@ class DashboardWindow(QMainWindow):
         fed the same daemon event stream by the tray's log reader.
         Returns True if the line was a chat event.
         """
-        from jarvis.daemon import CHAT_IPC_PREFIX
-        if not line.startswith(CHAT_IPC_PREFIX):
-            return False
-        import json as _json
-        try:
-            payload = _json.loads(line[len(CHAT_IPC_PREFIX):])
-        except Exception:
-            return True
-        kind = payload.get("type")
-        data = payload.get("data")
-        if kind == "complete":
-            self.bridge.deliver_reply(data)
-        elif kind == "busy":
-            self.bridge.deliver_busy()
-        # "start" needs no action: submitQuery already set the orb to
-        # THINKING locally when the user sent the message.
-        return True
+        return dispatch_chat_ipc_line(line, self.bridge)

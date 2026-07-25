@@ -75,12 +75,20 @@ class LLMBackend(ABC):
         extra_options: Optional[Dict[str, Any]] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         thinking: bool = False,
+        on_token: Optional[Callable[[str], None]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Arbitrary-messages chat. Returns the raw response dict so the
         caller (today: the reply engine) can inspect both content and
         ``tool_calls``. Raises :class:`ToolsNotSupportedError` when the
         model rejects the ``tools`` parameter so the caller can fall
-        back to text-based tool calling without losing the turn."""
+        back to text-based tool calling without losing the turn.
+
+        ``on_token``, when given, receives content deltas as the model
+        generates them, so a UI can render the reply progressively. The
+        return value must be identical whether or not it is supplied —
+        streaming is an additional output channel, never a different
+        result. Implementations that cannot stream must still accept the
+        argument and may ignore it."""
 
     @abstractmethod
     def embed(

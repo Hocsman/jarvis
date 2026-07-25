@@ -246,6 +246,12 @@
     background: var(--cyan-soft);
     border: 1px solid rgba(56,216,232,.3);
     color: var(--txt); border-bottom-right-radius: 4px; }
+  /* Reply still being written: a blinking caret trails the text so the
+     pause between tokens reads as "typing" rather than as a stall. */
+  .msg.streaming::after {
+    content: "▌"; color: var(--cyan); margin-left: 2px;
+    animation: caret 1s step-end infinite; }
+  @keyframes caret { 50% { opacity: 0; } }
   .composer { display: flex; gap: 10px; padding: 14px 16px; border-top: 1px solid var(--panel-brd); }
   .composer input {
     flex: 1; background: rgba(10, 18, 32, 0.6);
@@ -474,6 +480,29 @@
     msgs.appendChild(el); msgs.scrollTop = msgs.scrollHeight;
   }
 
+  // ── Streamed reply ─────────────────────────────────────────────
+  // Tokens arrive while the model generates; they fill a provisional
+  // bubble so the reply reads as it is written. The bubble is discarded
+  // when the completed reply lands — that text is authoritative (a
+  // tool-calling turn can emit text that isn't part of the final answer).
+  let streamEl = null, streamText = "";
+  function streamToken(chunk) {
+    if (!chunk) return;
+    if (!streamEl) {
+      streamEl = document.createElement("div");
+      streamEl.className = "msg bot streaming";
+      msgs.appendChild(streamEl);
+      streamText = "";
+    }
+    streamText += chunk;
+    streamEl.textContent = streamText;
+    msgs.scrollTop = msgs.scrollHeight;
+  }
+  function clearStream() {
+    if (streamEl) { streamEl.remove(); streamEl = null; streamText = ""; }
+  }
+  function settleReply(text) { clearStream(); addMsg(text, "bot"); }
+
   // ── Bridge (QWebChannel) ───────────────────────────────────────
   let jarvis = null;
   function setStatus(txt){ document.getElementById("status-text").textContent = txt; }
@@ -491,8 +520,9 @@
   function wireBridge(obj) {
     jarvis = obj;
     jarvis.userEcho.connect(t => addMsg(t, "user"));
-    jarvis.replyReceived.connect(t => addMsg(t, "bot"));
-    jarvis.busy.connect(() => addMsg("Jarvis est déjà occupé sur une autre requête.", "bot"));
+    if (jarvis.tokenReceived) jarvis.tokenReceived.connect(streamToken);
+    jarvis.replyReceived.connect(settleReply);
+    jarvis.busy.connect(() => { clearStream(); addMsg("Jarvis est déjà occupé sur une autre requête.", "bot"); });
     jarvis.stateChanged.connect(s => {
       try { const o = JSON.parse(s); setAccent(o.accent); if (o.status) setStatus(o.status); } catch(e){}
     });

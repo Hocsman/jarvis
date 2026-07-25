@@ -1994,9 +1994,11 @@ class JarvisSystemTray:
     def _set_chat_daemon_status(self, status: str) -> None:
         """Update an existing chat window with daemon lifecycle state."""
         # Keep the dashboard's submit callable in sync too — it routes
-        # chat through the same daemon path.
-        if self.dashboard_window is not None:
-            self.dashboard_window.set_submit_fn(self._chat_submit_fn)
+        # chat through the same daemon path. getattr for the same reason as
+        # in _on_chat_ipc_line: no dashboard must never block the chat window.
+        dashboard = getattr(self, "dashboard_window", None)
+        if dashboard is not None:
+            dashboard.set_submit_fn(self._chat_submit_fn)
         if self.chat_window is None:
             return
         self.chat_window._submit_fn = self._chat_submit_fn
@@ -2448,8 +2450,12 @@ class JarvisSystemTray:
         self.chat_window.process_ipc_line(line)
         # Fan the same daemon event out to the dashboard if it's open, so
         # its conversation panel + orb stay in sync with the chat window.
-        if self.dashboard_window is not None:
-            self.dashboard_window.process_ipc_line(line)
+        # getattr: the attribute is absent on builds without WebEngine (and on
+        # partially-constructed trays), and a missing dashboard must never
+        # break delivery of a reply to the chat window.
+        dashboard = getattr(self, "dashboard_window", None)
+        if dashboard is not None:
+            dashboard.process_ipc_line(line)
 
     def stop_daemon(
         self,

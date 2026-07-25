@@ -256,6 +256,80 @@ class OpenAICompatibleBackend(LLMBackend):
         except Exception:
             return None
 
+    def _consume_chat_stream(
+        self,
+        resp: Any,
+        on_token: Callable[[str], None],
+    ) -> Dict[str, Any]:
+        """Reassemble a streamed chat completion into the buffered shape.
+
+        Content deltas are forwarded to ``on_token`` as they arrive and also
+        accumulated; tool-call deltas are keyed by ``index`` and their
+        ``arguments`` fragments concatenated (a single call's JSON arrives
+        split across chunks). The result is returned in the server's
+        non-streaming ``{"choices": [{"message": ...}]}`` shape so the same
+        :func:`_normalise_response` handles it — callers cannot tell the two
+        paths apart, which keeps the reply engine's tool loop unchanged.
+
+        A raising ``on_token`` never costs the reply: UI errors are swallowed
+        so the fully accumulated message is still returned.
+        """
+        content: List[str] = []
+        # index -> partial tool call (arguments accumulated as a string)
+        tool_calls: Dict[int, Dict[str, Any]] = {}
+
+        for raw in resp.iter_lines():
+            if not raw:
+                continue
+            line = raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else raw
+            if not line.startswith("data:"):
+                continue  # SSE comments (``: ping``) and unrelated lines
+            payload_str = line[len("data:"):].strip()
+            if payload_str == "[DONE]":
+                break
+            try:
+                chunk = json.loads(payload_str)
+            except json.JSONDecodeError:
+                continue
+            choices = chunk.get("choices") if isinstance(chunk, dict) else None
+            if not isinstance(choices, list) or not choices:
+                continue
+            delta = choices[0].get("delta") if isinstance(choices[0], dict) else None
+            if not isinstance(delta, dict):
+                continue
+
+            text = delta.get("content")
+            if isinstance(text, str) and text:
+                content.append(text)
+                try:
+                    on_token(text)
+                except Exception as e:
+                    debug_log(f"OpenAICompatibleBackend: on_token raised — {e}", "llm")
+
+            for tc in delta.get("tool_calls") or []:
+                if not isinstance(tc, dict):
+                    continue
+                idx = tc.get("index", 0)
+                slot = tool_calls.setdefault(
+                    idx, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
+                )
+                if tc.get("id"):
+                    slot["id"] = tc["id"]
+                if tc.get("type"):
+                    slot["type"] = tc["type"]
+                func = tc.get("function")
+                if isinstance(func, dict):
+                    if func.get("name"):
+                        slot["function"]["name"] = func["name"]
+                    args = func.get("arguments")
+                    if isinstance(args, str):
+                        slot["function"]["arguments"] += args
+
+        message: Dict[str, Any] = {"role": "assistant", "content": "".join(content)}
+        if tool_calls:
+            message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
+        return {"choices": [{"message": message}]}
+
     def chat(
         self,
         chat_model: str,
@@ -264,11 +338,15 @@ class OpenAICompatibleBackend(LLMBackend):
         extra_options: Optional[Dict[str, Any]] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         thinking: bool = False,
+        on_token: Optional[Callable[[str], None]] = None,
     ) -> Optional[Dict[str, Any]]:
+        # Streaming is opt-in per call: it exists so a UI can render the reply
+        # while it generates. The return value is identical either way.
+        streaming = on_token is not None
         payload: Dict[str, Any] = {
             "model": chat_model,
             "messages": messages,
-            "stream": False,
+            "stream": streaming,
         }
         if extra_options and isinstance(extra_options, dict):
             # ``temperature``, ``max_tokens``, ``top_p`` etc. live at the
@@ -297,9 +375,13 @@ class OpenAICompatibleBackend(LLMBackend):
                 json=self._apply_extra_body(payload),
                 headers=self._headers(),
                 timeout=timeout_sec,
+                stream=streaming,
             ) as resp:
                 resp.raise_for_status()
-                data = resp.json()
+                data = (
+                    self._consume_chat_stream(resp, on_token)
+                    if streaming else resp.json()
+                )
             if isinstance(data, dict):
                 return _normalise_response(data)
         except requests.exceptions.Timeout:

@@ -66,7 +66,7 @@ main thread. All are optional and default to `None`.
 | Callback | Payload | When |
 |----------|---------|------|
 | `on_start` | `str` (the redacted query, for display) | Worker thread has picked up the query |
-| `on_token` | `str` | Not emitted by the current engine; reserved for future streaming reply support |
+| `on_token` | `str` | A content delta, as the model generates it (see [Streaming](#streaming)) |
 | `on_tool_call` | `dict` | Not emitted by the current engine; reserved for future per-tool-call visibility |
 | `on_complete` | `Optional[str]` (final reply, or `None` on failure/stop/cancel) | Worker thread is done |
 | `on_busy` | `None` | A submission was rejected because a query is already running |
@@ -85,7 +85,7 @@ Event shapes (mirrors the diary IPC):
 
 ```json
 {"type": "start",  "data": "<redacted query>"}
-{"type": "token",  "data": "<chunk>"}        // reserved for future streaming; not emitted today
+{"type": "token",  "data": "<chunk>"}        // content delta while the reply generates
 {"type": "tool",   "data": {"name": "...", "args": "...", "result": "..."}}  // reserved for future per-tool visibility; not emitted today
 {"type": "complete", "data": "<final reply or null>"}
 {"type": "busy",   "data": null}
@@ -179,12 +179,34 @@ the app.
   event) and event metadata, so the subprocess stdout stream (which the
   desktop app captures for the log viewer) never leaks raw user input.
 
+## Streaming
+
+The reply is displayed progressively while the model generates it. The path:
+
+1. `OpenAICompatibleBackend.chat(..., on_token=...)` requests an SSE stream
+   and forwards each content delta. Tool-call deltas are reassembled by
+   `index` and the result is returned in the **same normalised shape as the
+   buffered path**, so the reply engine's tool loop is identical either way.
+   Without `on_token` the request is not streamed.
+2. `run_reply_engine(..., on_token=...)` threads the callback to its
+   generation turn.
+3. `submit_text_query` forwards each delta as an `on_token` callback and a
+   `{"type": "token"}` IPC event.
+4. The dashboard fills a provisional bubble (blinking caret) from those
+   deltas and discards it when `complete` arrives.
+
+**`complete` remains authoritative.** Streaming is display only: a
+tool-calling turn can emit text that is not part of the final answer, so
+consumers must settle on the completed reply rather than on accumulated
+tokens. Both the engine and the daemon fall back to the buffered path if the
+callee predates the parameter (`TypeError`), and a raising `on_token` never
+costs the reply.
+
 ## What the system does not do
 
-- **No streaming tokens.** The reply is delivered as a single string on
-  `on_complete`. The `on_token` / `on_tool_call` callbacks and IPC event
-  types are declared but not emitted by the current engine; they are reserved
-  for future streaming and per-tool-call visibility work.
+- **No per-tool-call visibility.** The `on_tool_call` callback and the
+  `{"type": "tool"}` IPC event are declared but not emitted; they are
+  reserved for future work.
 - **No external integrations** (Slack, Telegram, Discord). Those would route
   through the same `submit_text_query` entry point but are not wired.
 - **No text-input wake word.** Text is always "directed": there is no intent

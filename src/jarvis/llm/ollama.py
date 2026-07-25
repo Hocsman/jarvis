@@ -206,7 +206,16 @@ class OllamaBackend(LLMBackend):
         extra_options: Optional[Dict[str, Any]] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         thinking: bool = False,
+        on_token: Optional[Callable[[str], None]] = None,
     ) -> Optional[Dict[str, Any]]:
+        # ``on_token`` is accepted for interface parity but not yet honoured
+        # here: Ollama streams JSON-lines rather than SSE, so it needs its own
+        # reassembly path. Buffering is a correct (if less lively) fallback —
+        # the returned value is the same either way, which is what the
+        # contract guarantees. Progressive display matters most on the cloud
+        # path, where round-trip latency is highest.
+        if on_token is not None:
+            debug_log("OllamaBackend.chat: streaming not implemented, buffering", "llm")
         """Send an arbitrary messages array to Ollama and return the
         raw response JSON. Caller is responsible for interpreting
         assistant content (including JSON / tool calls).

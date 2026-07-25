@@ -113,7 +113,11 @@ class RedactingBackend(LLMBackend):
         extra_options: Optional[Dict[str, Any]] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         thinking: bool = False,
+        on_token: Optional[Callable[[str], None]] = None,
     ) -> Optional[Dict[str, Any]]:
+        # ``on_token`` carries model output, not user input, so it needs no
+        # scrubbing — redaction guards what leaves the machine. It is passed
+        # through so streaming survives the decorator.
         return self._inner.chat(
             chat_model,
             _scrub_messages(messages),
@@ -121,6 +125,7 @@ class RedactingBackend(LLMBackend):
             extra_options=extra_options,
             tools=tools,
             thinking=thinking,
+            on_token=on_token,
         )
 
     def embed(

@@ -38,13 +38,57 @@ _STATE_VIEW = {
 _STATE_DEFAULT = ((56, 216, 232), "En écoute du mot d'éveil…")
 
 
+def parse_chat_ipc_line(line: str):
+    """Parse a daemon ``__CHAT__:`` line into ``(kind, data)``.
+
+    Returns None when the line isn't a chat event, and ``(None, None)``
+    for a chat line whose payload is malformed (the caller still counts it
+    as consumed, so a bad payload isn't re-handled as a log line).
+
+    Lives here — free of Qt and of the web view — so the wire contract can
+    be tested headlessly; importing the window pulls in QtWebEngine, which
+    cannot be constructed in a headless test run.
+    """
+    from jarvis.daemon import CHAT_IPC_PREFIX
+    if not line.startswith(CHAT_IPC_PREFIX):
+        return None
+    try:
+        payload = json.loads(line[len(CHAT_IPC_PREFIX):])
+    except Exception:
+        return (None, None)
+    if not isinstance(payload, dict):
+        return (None, None)
+    return (payload.get("type"), payload.get("data"))
+
+
+def dispatch_chat_ipc_line(line: str, bridge) -> bool:
+    """Route a daemon chat event line to ``bridge``. Returns True if the
+    line was a chat event (consumed), False otherwise.
+
+    ``start`` needs no action: ``submitQuery`` already put the orb into its
+    thinking state locally when the user sent the message.
+    """
+    parsed = parse_chat_ipc_line(line)
+    if parsed is None:
+        return False
+    kind, data = parsed
+    if kind == "token":
+        bridge.deliver_token(data)
+    elif kind == "complete":
+        bridge.deliver_reply(data)
+    elif kind == "busy":
+        bridge.deliver_busy()
+    return True
+
+
 class DashboardBridge(QObject):
     # Python -> JS
     statsUpdated = pyqtSignal(str)     # JSON: {cpu, ram, disk_used, disk_total, disk_pct}
     stateChanged = pyqtSignal(str)     # JSON: {accent:[r,g,b], status:"…"}
     weatherUpdated = pyqtSignal(str)   # JSON: {temp, loc, desc, icon, hum, wind, feels}
     userEcho = pyqtSignal(str)         # echo the user's message into the transcript
-    replyReceived = pyqtSignal(str)    # assistant reply text
+    tokenReceived = pyqtSignal(str)    # content delta while the reply generates
+    replyReceived = pyqtSignal(str)    # assistant reply text (authoritative)
     busy = pyqtSignal()                # daemon busy with another query
 
     def __init__(self, submit_fn: Optional[Callable[[str], None]] = None,
@@ -81,6 +125,18 @@ class DashboardBridge(QObject):
     # ── setters used by the host (tray) ────────────────────────────────
     def set_submit_fn(self, fn: Optional[Callable[[str], None]]) -> None:
         self._submit_fn = fn
+
+    def deliver_token(self, chunk: Optional[str]) -> None:
+        """Called by the host for each content delta while generating.
+
+        Deliberately does NOT clear ``_chat_pending``: the reply is still
+        in flight, so the orb keeps its thinking state until the completed
+        reply lands. Progressive display only — ``deliver_reply`` remains
+        authoritative for the final text.
+        """
+        if not chunk:
+            return
+        self.tokenReceived.emit(str(chunk))
 
     def deliver_reply(self, text: Optional[str]) -> None:
         """Called by the host when the daemon returns a reply."""

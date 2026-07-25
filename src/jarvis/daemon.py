@@ -317,7 +317,17 @@ def submit_text_query(
         try:
             _notify_chat("start", display_query, callbacks=callbacks, use_ipc=use_ipc)
             from .reply.engine import run_reply_engine
-            reply = run_reply_engine(
+
+            def _on_token(chunk: str) -> None:
+                # Progressive display only — ``complete`` below still carries
+                # the authoritative reply. Never let a UI/IPC hiccup kill the
+                # generation the user is waiting on.
+                try:
+                    _notify_chat("token", chunk, callbacks=callbacks, use_ipc=use_ipc)
+                except Exception as exc:
+                    debug_log(f"chat token emit failed: {exc}", "chat")
+
+            engine_kwargs = dict(
                 db=db,
                 cfg=cfg,
                 tts=None,
@@ -325,6 +335,13 @@ def submit_text_query(
                 dialogue_memory=dm,
                 language=None,
             )
+            try:
+                reply = run_reply_engine(on_token=_on_token, **engine_kwargs)
+            except TypeError:
+                # Engine build without streaming support: fall back to the
+                # buffered call rather than failing the query.
+                debug_log("reply engine has no on_token; buffered reply", "chat")
+                reply = run_reply_engine(**engine_kwargs)
             if cancel_event.is_set():
                 debug_log("chat query cancelled, dropping reply", "chat")
                 reply = None

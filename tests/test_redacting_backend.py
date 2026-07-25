@@ -35,7 +35,7 @@ class _SpyBackend(LLMBackend):
         return "ok"
 
     def chat(self, chat_model, messages, timeout_sec=30.0, extra_options=None,
-             tools=None, thinking=False):
+             tools=None, thinking=False, on_token=None):
         self.calls["chat"] = {"messages": messages}
         return {"message": {"role": "assistant", "content": "ok"}}
 

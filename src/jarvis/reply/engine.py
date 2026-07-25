@@ -21,22 +21,32 @@ from ..llm import (
 
 
 def chat_with_messages(cfg, messages, *, timeout_sec=30.0, extra_options=None,
-                       tools=None, thinking=False):
+                       tools=None, thinking=False, on_token=None):
     """Local indirection: route the engine's chat call through the active
     backend (Ollama or OpenAI-compatible, per ``cfg.llm_provider``) so the
     runtime swap is transparent to the rest of the engine.
 
     Kept as a module-level function so tests can patch this single symbol
     to capture every chat call rather than reaching into the backend ABC.
+
+    ``on_token`` streams content deltas to the caller as they arrive (for a
+    UI that renders the reply while it generates). Backends that predate the
+    parameter are called without it, so streaming degrades to the buffered
+    path rather than raising.
     """
     backend = get_llm_backend(cfg)
-    return backend.chat(
-        cfg.llm_chat_model, messages,
+    kwargs = dict(
         timeout_sec=timeout_sec,
         extra_options=extra_options,
         tools=tools,
         thinking=thinking,
     )
+    if on_token is not None:
+        try:
+            return backend.chat(cfg.llm_chat_model, messages, on_token=on_token, **kwargs)
+        except TypeError:
+            debug_log("backend.chat has no on_token; falling back to buffered", "planning")
+    return backend.chat(cfg.llm_chat_model, messages, **kwargs)
 from .enrichment import (
     extract_search_params_for_memory,
     digest_memory_for_query,
@@ -799,7 +809,8 @@ def _build_enrichment_context_hint(cfg, recent_messages: list) -> Optional[str]:
 
 def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                     text: str, dialogue_memory: "DialogueMemory",
-                    language: Optional[str] = None) -> Optional[str]:
+                    language: Optional[str] = None,
+                    on_token: Optional[Any] = None) -> Optional[str]:
     """
     Main entry point for reply generation.
 
@@ -809,6 +820,11 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         tts: Text-to-speech engine (optional)
         text: User query text
         dialogue_memory: Dialogue memory instance
+        on_token: Optional callback receiving content deltas as the model
+            generates them, so a UI can render the reply progressively. It is
+            advisory output only — the returned string remains the source of
+            truth (a tool-calling turn may emit text that is not part of the
+            final answer), so callers must settle on the return value.
         language: ISO-639-1 code Whisper detected for this utterance (e.g.
             "en", "tr"). Threaded through to tool execution so tools like
             web_search can pick locale-appropriate resources (e.g. the
@@ -1952,6 +1968,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 extra_options=None,
                 tools=_dump_tools_schema,
                 thinking=getattr(cfg, 'llm_thinking_enabled', False),
+                on_token=on_token,
             )
             dump_reply_turn(
                 session_id=_dump_session_id,
