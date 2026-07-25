@@ -60,50 +60,50 @@ GOOD_EXTRACTION_CASES = [
             summary=(
                 "The user asked about boxing gyms in Hackney. I found that "
                 "Trenches Boxing Club offers evening classes on weekdays from "
-                "6-8pm, priced at 15 pounds per session. The user mentioned "
-                "they've been living in Hackney for 2 years."
+                "6-8pm, priced at 15 pounds per session. I also confirmed "
+                "that its Mare Street location has been open since 2019."
             ),
             date_utc="2026-04-10",
-            should_extract_keywords=["Trenches", "Hackney", "boxing"],
+            should_extract_keywords=["Trenches", "Hackney"],
             min_facts=2,
         ),
-        id="Novel knowledge: local business details and user location",
+        id="Novel knowledge: local business details",
     ),
     pytest.param(
         ExtractionTestCase(
             summary=(
-                "The user follows an 1800 kcal daily meal plan with a target "
-                "of 150g protein. They mentioned preferring air-fried chicken "
-                "breast with a soy-oyster-teriyaki glaze — a recipe they've "
-                "been perfecting over the past month."
+                "I looked up how to cook chicken breast in an air fryer: 18 "
+                "minutes at 190C, turning once. A soy-oyster-teriyaki glaze "
+                "brushed on in the last five minutes keeps it from drying "
+                "out. A 150g cooked breast carries roughly 46g of protein."
             ),
             date_utc="2026-04-08",
-            should_extract_keywords=["1800", "protein"],
+            should_extract_keywords=["air", "protein"],
             min_facts=2,
         ),
-        id="Novel knowledge: user diet plan and preferred recipe",
+        id="Novel knowledge: technique and nutrition lookups",
     ),
     pytest.param(
         ExtractionTestCase(
             summary=(
-                "The user is planning to move from London to Tbilisi, Georgia "
-                "in June 2026. They've already secured a flat in Vera district "
-                "for 800 USD per month. They work remotely as a software "
-                "engineer for a UK-based startup called Equals Money."
+                "The user asked about moving to Tbilisi. I found that Georgia "
+                "grants citizens of most countries a one-year visa-free stay, "
+                "that the Vera district rents at around 800 USD per month for "
+                "a one-bedroom flat, and that the local currency is the lari."
             ),
             date_utc="2026-04-12",
-            should_extract_keywords=["Tbilisi", "Equals Money"],
+            should_extract_keywords=["Tbilisi", "Vera"],
             min_facts=3,
         ),
-        id="Novel knowledge: relocation plans and employment",
+        id="Novel knowledge: country facts from a relocation question",
     ),
     pytest.param(
         ExtractionTestCase(
             summary=(
                 "Kullanıcı Kadıköy'deki Çiya Sofrası restoranını sordu. "
                 "Öğle yemeği menüsü 250 TL civarında, özellikle kuzu tandır "
-                "ve enginar yemeği çok beğeniliyormuş. Kullanıcı İstanbul'da "
-                "Kadıköy semtinde yaşıyor ve haftada 3 kez dışarıda yemek yiyor."
+                "ve enginar yemeği çok beğeniliyormuş. Restoran 1987'de "
+                "kurulmuş ve pazar günleri kapalıymış."
             ),
             date_utc="2026-04-11",
             should_extract_keywords=["Çiya", "Kadıköy"],
@@ -173,7 +173,7 @@ REFRAMING_CASES = [
                 "decided against it since it's not fully vegetarian."
             ),
             date_utc="2026-04-10",
-            should_extract_keywords=["Mildreds", "vegetarian"],
+            should_extract_keywords=["Mildreds"],
             should_not_extract_patterns=[
                 r"(?i)user asked about",
                 r"(?i)user enquired",
@@ -186,13 +186,13 @@ REFRAMING_CASES = [
     pytest.param(
         ExtractionTestCase(
             summary=(
-                "The user mentioned they started a new job at Equals Money "
-                "on March 1st 2026 as a senior backend engineer. They're "
-                "working with Python and FastAPI. Their team lead is someone "
-                "called Hakan."
+                "The user asked what Equals Money does. I found it is a "
+                "UK-based fintech founded in 2007, offering multi-currency "
+                "accounts to businesses, and that it was formerly known as "
+                "FairFX before rebranding in 2021."
             ),
             date_utc="2026-04-05",
-            should_extract_keywords=["Equals Money", "March"],
+            should_extract_keywords=["Equals Money", "FairFX"],
             should_not_extract_patterns=[
                 r"(?i)user mentioned",
                 r"(?i)user said",
@@ -200,7 +200,7 @@ REFRAMING_CASES = [
             ],
             min_facts=2,
         ),
-        id="Reframing: life events framed as facts with temporal context",
+        id="Reframing: company lookups framed as facts with temporal context",
     ),
 ]
 
@@ -212,20 +212,18 @@ REFRAMING_CASES = [
 def _run_extraction(case: ExtractionTestCase, config: MockConfig) -> list[str]:
     """Run extract_graph_memories with the given case and config.
 
-    Returns a flat list of fact strings. The extractor now returns
-    ``(branch_id, fact)`` tuples; these evals predate branch tagging
-    and only care about the fact text. The new branch-routing evals
-    live in ``test_graph_branch_routing.py``.
+    Covers extraction quality: novelty, self-containment, no assistant
+    voice, no stale snapshots. The rule that nothing about the user may
+    be extracted has its own suite in ``test_graph_user_exclusion.py``.
     """
-    tagged = extract_graph_memories(
+    return extract_graph_memories(
         summary=case.summary,
-        ollama_base_url=config.ollama_base_url,
-        ollama_chat_model=config.ollama_chat_model,
+        cfg=config,
+        chat_model=config.llm_chat_model,
         timeout_sec=config.llm_chat_timeout_sec,
         thinking=False,
         date_utc=case.date_utc,
     )
-    return [fact for _branch, fact in tagged]
 
 
 def _fact_matches_keyword(facts: list[str], keyword: str) -> bool:
@@ -425,22 +423,30 @@ class TestKnowledgeExtractionJudge:
 
     @requires_judge_llm
     def test_judge_mixed_summary_filters_noise(self, mock_config):
-        """A summary with both novel knowledge and noise should only extract the novel parts."""
+        """A summary with a lookup buried in noise should yield the lookup
+        and nothing else. Every other sentence here is a different kind of
+        banned content, so a model that keeps any of them is failing a
+        specific rule rather than being vaguely over-eager."""
         case = ExtractionTestCase(
             summary=(
                 "The user asked about the weather — it's 22 degrees and sunny "
                 "in Hackney right now. I recommended they go for a walk in "
                 "Victoria Park. The user mentioned they just adopted a cat "
-                "named Miso from Battersea Dogs & Cats Home last week. They "
-                "also asked what time it is."
+                "named Miso. I looked up Battersea Dogs & Cats Home: it was "
+                "founded in 1860 and rehomes around 5,000 animals a year."
             ),
             date_utc="2026-04-10",
         )
         facts = _run_extraction(case, mock_config)
 
-        # Should capture the cat adoption (novel, specific)
-        assert _fact_matches_keyword(facts, "Miso") or _fact_matches_keyword(facts, "cat"), (
-            f"Should have extracted cat adoption fact: {facts}"
+        # Should capture the lookup
+        assert _fact_matches_keyword(facts, "Battersea") or _fact_matches_keyword(facts, "1860"), (
+            f"Should have extracted the Battersea lookup: {facts}"
+        )
+
+        # Should NOT capture anything about the user, including their cat
+        assert not _fact_matches_keyword(facts, "Miso"), (
+            f"The user's cat is a fact about the user, not knowledge: {facts}"
         )
 
         # Should NOT capture weather snapshot

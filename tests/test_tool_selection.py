@@ -445,13 +445,15 @@ class TestLLMStrategy:
         we should..." that the parser strips to nothing — pre-fix this fell
         open to all 41 tools; post-fix it narrows on query keywords."""
         backend = _llm_backend(return_value="I think we should pick one")
+        builtin = _builtin()
+        mcp = {"chrome-devtools__navigate_page": FakeToolSpec(
+            "chrome-devtools__navigate_page",
+            "Navigate the browser to a given URL.",
+        )}
         result = select_tools(
             "navigate to youtube.com",
-            _builtin(),
-            {"chrome-devtools__navigate_page": FakeToolSpec(
-                "chrome-devtools__navigate_page",
-                "Navigate the browser to a given URL.",
-            )},
+            builtin,
+            mcp,
             strategy=ToolSelectionStrategy.LLM,
             llm_backend=backend,
             llm_model="test",
@@ -460,7 +462,7 @@ class TestLLMStrategy:
         assert "chrome-devtools__navigate_page" in result
         # The full catalogue must NOT be returned — that's the regression we're
         # fixing (small-model 41-tool overload).
-        assert len(result) < len(_builtin()) + 1
+        assert len(result) < len(builtin) + len(mcp)
 
     @pytest.mark.unit
     def test_ignores_hallucinated_tool_names(self):

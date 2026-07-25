@@ -53,8 +53,8 @@ def _mock_cfg():
 
 
 @pytest.mark.unit
-@patch("src.jarvis.memory.graph_ops.format_warm_profile_block", return_value="")
-@patch("src.jarvis.memory.graph_ops.build_warm_profile", return_value={"user": "", "directives": ""})
+@patch("src.jarvis.memory.core.format_warm_profile_block", return_value="")
+@patch("src.jarvis.memory.core.build_core_profile", return_value={"user": "", "directives": ""})
 @patch("src.jarvis.memory.graph.GraphMemoryStore")
 @patch("src.jarvis.reply.engine.select_tools", return_value=[])
 @patch("src.jarvis.reply.engine.plan_query", return_value=[])
@@ -87,8 +87,8 @@ def test_tool_router_cached_across_turns(
 
 
 @pytest.mark.unit
-@patch("src.jarvis.memory.graph_ops.format_warm_profile_block", return_value="")
-@patch("src.jarvis.memory.graph_ops.build_warm_profile", return_value={"user": "", "directives": ""})
+@patch("src.jarvis.memory.core.format_warm_profile_block", return_value="")
+@patch("src.jarvis.memory.core.build_core_profile", return_value={"user": "", "directives": ""})
 @patch("src.jarvis.memory.graph.GraphMemoryStore")
 @patch("src.jarvis.reply.engine.plan_query", return_value=[])
 @patch("src.jarvis.reply.engine.extract_search_params_for_memory", return_value={})
@@ -137,8 +137,8 @@ def test_router_fallback_to_all_tools_is_not_cached(
 
 
 @pytest.mark.unit
-@patch("src.jarvis.memory.graph_ops.format_warm_profile_block", return_value="")
-@patch("src.jarvis.memory.graph_ops.build_warm_profile", return_value={"user": "", "directives": ""})
+@patch("src.jarvis.memory.core.format_warm_profile_block", return_value="")
+@patch("src.jarvis.memory.core.build_core_profile", return_value={"user": "", "directives": ""})
 @patch("src.jarvis.memory.graph.GraphMemoryStore")
 @patch("src.jarvis.reply.engine.select_tools", return_value=["webSearch"])
 @patch("src.jarvis.reply.engine.plan_query", return_value=[])
@@ -178,8 +178,8 @@ def test_memory_extractor_cached_across_turns(
 
 
 @pytest.mark.unit
-@patch("src.jarvis.memory.graph_ops.format_warm_profile_block", return_value="warm-block")
-@patch("src.jarvis.memory.graph_ops.build_warm_profile", return_value={"user": "u", "directives": "d"})
+@patch("src.jarvis.memory.core.format_warm_profile_block", return_value="warm-block")
+@patch("src.jarvis.memory.core.build_core_profile", return_value={"user": "u", "directives": "d"})
 @patch("src.jarvis.memory.graph.GraphMemoryStore")
 @patch("src.jarvis.reply.engine.select_tools", return_value=[])
 @patch("src.jarvis.reply.engine.plan_query", return_value=[])
@@ -212,8 +212,8 @@ def test_warm_profile_cached_across_turns(
 
 
 @pytest.mark.unit
-@patch("src.jarvis.memory.graph_ops.format_warm_profile_block", return_value="")
-@patch("src.jarvis.memory.graph_ops.build_warm_profile", return_value={"user": "", "directives": ""})
+@patch("src.jarvis.memory.core.format_warm_profile_block", return_value="")
+@patch("src.jarvis.memory.core.build_core_profile", return_value={"user": "", "directives": ""})
 @patch("src.jarvis.memory.graph.GraphMemoryStore")
 @patch("src.jarvis.reply.engine.select_tools", return_value=["webSearch"])
 @patch(
@@ -260,8 +260,8 @@ def test_planner_search_memory_overrides_recall_gate(
 
 
 @pytest.mark.unit
-@patch("src.jarvis.memory.graph_ops.format_warm_profile_block", return_value="")
-@patch("src.jarvis.memory.graph_ops.build_warm_profile", return_value={"user": "", "directives": ""})
+@patch("src.jarvis.memory.core.format_warm_profile_block", return_value="")
+@patch("src.jarvis.memory.core.build_core_profile", return_value={"user": "", "directives": ""})
 @patch("src.jarvis.memory.graph.GraphMemoryStore")
 @patch("src.jarvis.reply.engine.select_tools", return_value=[])
 @patch("src.jarvis.reply.engine.plan_query", return_value=[])

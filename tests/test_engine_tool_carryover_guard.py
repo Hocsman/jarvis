@@ -132,8 +132,8 @@ def _failed_text_tool_turn(tool_name: str) -> list[dict]:
 
 
 @pytest.mark.unit
-@patch("src.jarvis.memory.graph_ops.format_warm_profile_block", return_value="")
-@patch("src.jarvis.memory.graph_ops.build_warm_profile",
+@patch("src.jarvis.memory.core.format_warm_profile_block", return_value="")
+@patch("src.jarvis.memory.core.build_core_profile",
        return_value={"user": "", "directives": ""})
 @patch("src.jarvis.memory.graph.GraphMemoryStore")
 @patch("src.jarvis.reply.engine.plan_query", return_value=[])
@@ -179,8 +179,8 @@ def test_followup_carries_over_failed_previous_tool(
 
 
 @pytest.mark.unit
-@patch("src.jarvis.memory.graph_ops.format_warm_profile_block", return_value="")
-@patch("src.jarvis.memory.graph_ops.build_warm_profile",
+@patch("src.jarvis.memory.core.format_warm_profile_block", return_value="")
+@patch("src.jarvis.memory.core.build_core_profile",
        return_value={"user": "", "directives": ""})
 @patch("src.jarvis.memory.graph.GraphMemoryStore")
 @patch("src.jarvis.reply.engine.plan_query", return_value=[])
@@ -225,8 +225,8 @@ def test_successful_previous_tool_does_not_trigger_carryover(
 
 
 @pytest.mark.unit
-@patch("src.jarvis.memory.graph_ops.format_warm_profile_block", return_value="")
-@patch("src.jarvis.memory.graph_ops.build_warm_profile",
+@patch("src.jarvis.memory.core.format_warm_profile_block", return_value="")
+@patch("src.jarvis.memory.core.build_core_profile",
        return_value={"user": "", "directives": ""})
 @patch("src.jarvis.memory.graph.GraphMemoryStore")
 @patch("src.jarvis.reply.engine.plan_query", return_value=[])
@@ -260,8 +260,8 @@ def test_cold_start_does_not_trigger_carryover(
 
 
 @pytest.mark.unit
-@patch("src.jarvis.memory.graph_ops.format_warm_profile_block", return_value="")
-@patch("src.jarvis.memory.graph_ops.build_warm_profile",
+@patch("src.jarvis.memory.core.format_warm_profile_block", return_value="")
+@patch("src.jarvis.memory.core.build_core_profile",
        return_value={"user": "", "directives": ""})
 @patch("src.jarvis.memory.graph.GraphMemoryStore")
 @patch("src.jarvis.reply.engine.plan_query", return_value=[])
@@ -308,8 +308,8 @@ def test_carryover_does_not_pollute_router_cache(
 
 
 @pytest.mark.unit
-@patch("src.jarvis.memory.graph_ops.format_warm_profile_block", return_value="")
-@patch("src.jarvis.memory.graph_ops.build_warm_profile",
+@patch("src.jarvis.memory.core.format_warm_profile_block", return_value="")
+@patch("src.jarvis.memory.core.build_core_profile",
        return_value={"user": "", "directives": ""})
 @patch("src.jarvis.memory.graph.GraphMemoryStore")
 @patch("src.jarvis.reply.engine.plan_query", return_value=[])
@@ -360,8 +360,8 @@ def test_long_followup_still_carries_over_when_previous_failed(
 
 
 @pytest.mark.unit
-@patch("src.jarvis.memory.graph_ops.format_warm_profile_block", return_value="")
-@patch("src.jarvis.memory.graph_ops.build_warm_profile",
+@patch("src.jarvis.memory.core.format_warm_profile_block", return_value="")
+@patch("src.jarvis.memory.core.build_core_profile",
        return_value={"user": "", "directives": ""})
 @patch("src.jarvis.memory.graph.GraphMemoryStore")
 @patch("src.jarvis.reply.engine.plan_query", return_value=[])
@@ -405,8 +405,8 @@ def test_text_tool_fallback_failure_carries_over(
 
 
 @pytest.mark.unit
-@patch("src.jarvis.memory.graph_ops.format_warm_profile_block", return_value="")
-@patch("src.jarvis.memory.graph_ops.build_warm_profile",
+@patch("src.jarvis.memory.core.format_warm_profile_block", return_value="")
+@patch("src.jarvis.memory.core.build_core_profile",
        return_value={"user": "", "directives": ""})
 @patch("src.jarvis.memory.graph.GraphMemoryStore")
 @patch("src.jarvis.reply.engine.plan_query", return_value=[])
@@ -471,8 +471,8 @@ def test_multi_tool_call_only_failed_sibling_carries_over(
 
 
 @pytest.mark.unit
-@patch("src.jarvis.memory.graph_ops.format_warm_profile_block", return_value="")
-@patch("src.jarvis.memory.graph_ops.build_warm_profile",
+@patch("src.jarvis.memory.core.format_warm_profile_block", return_value="")
+@patch("src.jarvis.memory.core.build_core_profile",
        return_value={"user": "", "directives": ""})
 @patch("src.jarvis.memory.graph.GraphMemoryStore")
 @patch("src.jarvis.reply.engine.extract_search_params_for_memory", return_value={})

@@ -2122,9 +2122,11 @@ def index() -> str:
                     <span class="alpha-badge">Beta</span>
                     <div class="alpha-body">
                         <p>
-                            🧪 The knowledge graph is on by default: a compact <strong>warm profile</strong>
-                            (User + Directives branches) is injected into every reply, and query-driven graph
-                            recall runs alongside the diary via <code>Enrichment Source = all</code>.
+                            🧪 The knowledge graph holds what the assistant has <strong>looked up</strong>:
+                            films, businesses, recipes, events. Query-driven graph recall runs alongside
+                            the diary via <code>Enrichment Source = all</code>. What the assistant knows
+                            about <em>you</em> lives in your core files instead, which you can open and edit
+                            by hand.
                         </p>
                         <p>
                             👉 Structure and classification are stable; extractor quality is still being tuned.

@@ -310,7 +310,7 @@ class GraphMemoryStore:
 
         The purpose-driven taxonomy (root → User / Directives / World)
         is a hard reorganisation: pre-existing nodes under root that
-        don't match this shape would sit invisible to the warm profile
+        don't match this shape would sit unreachable by traversal
         forever.
         Rather than carrying them as dead weight, we wipe on daemon
         start-up and let the diary re-import repopulate with correctly
@@ -515,8 +515,8 @@ class GraphMemoryStore:
         """Delete a node. Children are orphaned (parent_id set to NULL by FK).
 
         Root and the seeded fixed branches (see ``FIXED_BRANCHES``) are
-        non-deletable — the warm profile and extractor routing rely on
-        their stable presence (graph.spec.md §"Fixed Top-Level Branches").
+        non-deletable — extractor routing relies on their stable
+        presence (graph.spec.md §"Fixed Top-Level Branches").
         """
         if node_id == "root" or node_id in FIXED_BRANCH_IDS:
             return False
