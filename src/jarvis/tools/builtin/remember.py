@@ -42,10 +42,14 @@ class RememberTool(Tool):
                 "text": {
                     "type": "string",
                     "description": (
-                        "What to remember, as a self-contained statement. For "
-                        "a fact, write about the user in the third person "
-                        "('He is vegetarian'). For a rule, write it as an "
-                        "instruction ('Always answer in French')."
+                        "What to remember, as a self-contained statement, "
+                        "written in the SAME LANGUAGE the user just spoke. "
+                        "Never translate it: the user reads these entries in "
+                        "a file of their own and corrects them by hand. For a "
+                        "fact, write about the user in the third person ('He "
+                        "is vegetarian' / 'Il est végétarien'). For a rule, "
+                        "write it as an instruction ('Always answer in "
+                        "French' / 'Toujours répondre en français')."
                     ),
                 },
                 "kind": {

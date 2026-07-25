@@ -144,11 +144,11 @@ def _select_keyword(
 
     matched = [name for name, score in scored if score > 0]
 
-    # Mandatory tools are not evidence that the query was understood, so
-    # the "we found nothing" test looks past them at what actually
-    # scored. Counting instead would misjudge any catalogue that happens
-    # not to carry every mandatory tool.
-    if not [name for name in matched if name not in _ALWAYS_INCLUDED]:
+    # The fallback is for a query nothing matched at all. It runs before
+    # the mandatory tools are added, so plain emptiness is the test:
+    # discounting a mandatory tool here would read a correct single-tool
+    # answer as a failure and hand the model the whole catalogue instead.
+    if not matched:
         debug_log("Keyword tool selection found no matches, falling back to all tools", "planning")
         return _all_tool_names(builtin_tools, mcp_tools)
 
@@ -364,9 +364,13 @@ def _select_llm(
     if len(selected) > _LLM_MAX_SELECTED:
         selected = selected[:_LLM_MAX_SELECTED]
 
-    # As in the keyword strategy: mandatory tools don't count as a match,
-    # so look past them before deciding the router came back empty.
-    if not [name for name in selected if name not in _ALWAYS_INCLUDED]:
+    # As in the keyword strategy, the check runs before the mandatory
+    # tools are added, so it asks whether the router named anything at
+    # all. A router that answers "remember" to "remember that I am
+    # vegetarian" has understood the query perfectly, and treating that
+    # as empty would bury the right tool in a 12-tool catalogue that a
+    # small model then fails to pick from.
+    if not selected:
         debug_log("LLM tool selection matched nothing, falling back to keyword strategy", "planning")
         return _select_keyword(query, builtin_tools, mcp_tools)
 

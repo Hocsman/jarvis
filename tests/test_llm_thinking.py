@@ -3,6 +3,12 @@ Tests for the LLM thinking mode feature.
 
 Verifies that the ``llm_thinking_enabled`` config option correctly controls
 the ``think`` parameter sent to Ollama across all call sites.
+
+Asking for thinking sends ``think: true``. Not asking for it sends
+``think: false``, except on a request that carries tools, where the flag is
+omitted entirely: Ollama reads an explicit false as an instruction about the
+model's reasoning mode, and on a model that has no such mode it suppresses
+native tool calls outright.
 """
 
 import json
@@ -12,6 +18,62 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from jarvis.config import get_default_config
+
+
+
+class TestThinkingAndTools:
+    """A request carrying tools must not tell the model not to think.
+
+    Ollama reads ``think: false`` as an instruction about the model's
+    reasoning mode; on a model that has no such mode it stops emitting
+    native tool calls altogether, so an assistant offered a tool never
+    calls it. Tool-free calls keep the flag, which measurably steadies
+    small-model extraction.
+    """
+
+    def _payload(self, mock_post):
+        _, kwargs = mock_post.call_args
+        return kwargs.get("json") or {}
+
+    def _ok(self):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {"message": {"content": "ok"}}
+        return resp
+
+    @patch("jarvis.llm.ollama.requests.post")
+    def test_a_tool_carrying_call_does_not_suppress_thinking(self, mock_post):
+        from jarvis.llm.ollama import OllamaBackend
+
+        mock_post.return_value = self._ok()
+        OllamaBackend("http://localhost:11434").chat(
+            "gemma4:e2b", [{"role": "user", "content": "hi"}],
+            tools=[{"type": "function", "function": {"name": "stop"}}],
+            thinking=False,
+        )
+        assert "think" not in self._payload(mock_post)
+
+    @patch("jarvis.llm.ollama.requests.post")
+    def test_a_tool_free_call_still_suppresses_thinking(self, mock_post):
+        from jarvis.llm.ollama import OllamaBackend
+
+        mock_post.return_value = self._ok()
+        OllamaBackend("http://localhost:11434").chat(
+            "gemma4:e2b", [{"role": "user", "content": "hi"}], thinking=False,
+        )
+        assert self._payload(mock_post)["think"] is False
+
+    @patch("jarvis.llm.ollama.requests.post")
+    def test_thinking_is_still_requested_alongside_tools(self, mock_post):
+        from jarvis.llm.ollama import OllamaBackend
+
+        mock_post.return_value = self._ok()
+        OllamaBackend("http://localhost:11434").chat(
+            "gemma4:e2b", [{"role": "user", "content": "hi"}],
+            tools=[{"type": "function", "function": {"name": "stop"}}],
+            thinking=True,
+        )
+        assert self._payload(mock_post)["think"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -45,7 +107,7 @@ class TestThinkingConfig:
 # ---------------------------------------------------------------------------
 
 class TestLlmThinkingPayload:
-    """Verify the ``think`` key appears in Ollama request payloads."""
+    """Verify how the ``think`` key reaches Ollama request payloads."""
 
     def _capture_payload(self, mock_post, *, expect_stream=False):
         """Extract the JSON payload from the first call to requests.post."""

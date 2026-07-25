@@ -107,6 +107,7 @@ The migration in `_migrate_config` runs once when `_config_version < 2`:
 - Endpoints: `POST /api/chat`, `POST /api/embeddings`, `GET /api/tags`, `POST /api/generate` (used by `warm_up`).
 - Streaming: JSON-lines (`{...}\n`).
 - Tool calls: native `tools` parameter (Ollama 0.4+); arguments returned as a Python dict.
+- A request carrying `tools` never sends `think: false`; the key is omitted instead. Ollama reads an explicit false as an instruction about the model's reasoning mode, and on a model that has no such mode it suppresses native tool calls outright. Measured on `gemma4:e2b`: an identical request scores 3/3 tool calls with the key absent and 0/3 with the flag, for `remember` and `getWeather` alike. Tool-free calls keep it, because there the flag earns its place: applied blanket, the same model stopped extracting anything from a summary and the knowledge extractor fell from 5/5 to 3/5 eval cases. `extra_options` can still force the flag either way.
 - `extra_options` keys map onto the wire shape: `keep_alive` / `format` / `think` go to the payload root; everything else (incl. `temperature`, `num_ctx`, `num_predict`) folds into the nested `options` object. Callers can also pass an explicit `options` sub-dict for explicit nesting.
 - `warm_up(model)` first verifies the endpoint is actually an Ollama server via `GET /api/version`, then issues `POST /api/generate` with an empty prompt and `keep_alive: "30m"`; the model stays resident for 30 minutes after each call.
 

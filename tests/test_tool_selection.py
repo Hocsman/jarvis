@@ -465,6 +465,30 @@ class TestLLMStrategy:
         assert len(result) < len(builtin) + len(mcp)
 
     @pytest.mark.unit
+    def test_a_router_naming_only_a_mandatory_tool_is_trusted(self):
+        """"remember that I am vegetarian" is a query the router answers
+        with one tool that happens to be mandatory. Reading that as "the
+        router found nothing" would hand a small model the whole
+        catalogue, and small models pick the wrong tool from a long list."""
+        builtin = _builtin()
+        builtin["remember"] = FakeTool("remember", "Save something to long-term memory.")
+        backend = _llm_backend(return_value="remember")
+
+        result = select_tools(
+            "remember that I am vegetarian",
+            builtin,
+            {},
+            strategy=ToolSelectionStrategy.LLM,
+            llm_backend=backend,
+            llm_model="test",
+        )
+
+        assert "remember" in result
+        assert len(result) < len(builtin), (
+            f"Expected a narrow selection, got the whole catalogue: {result}"
+        )
+
+    @pytest.mark.unit
     def test_ignores_hallucinated_tool_names(self):
         backend = _llm_backend(return_value="webSearch, nonExistentTool, getWeather")
         result = select_tools(
