@@ -123,7 +123,9 @@ def test_knowledge_nested_deeper_in_the_branch_is_not_missed(store, core):
     ]
 
 
-def test_the_graph_is_left_intact(store, core):
+def test_the_node_survives_but_no_longer_holds_the_facts(store, core):
+    """A hand-over, not a copy. Leaving the text in the graph would let
+    query-driven recall put back what a correction just retired."""
     node = store.create_node(
         name="Identity",
         description="Who the user is",
@@ -134,6 +136,71 @@ def test_the_graph_is_left_intact(store, core):
     migrate_graph_branches_into_core(store, core)
 
     assert store.get_node(node.id) is not None
+    assert store.get_node(node.id).data == ""
+
+
+def test_a_branch_root_holding_facts_is_emptied_too(store, core):
+    store.update_node(BRANCH_USER, data="Le nom de l'utilisateur est Hocine.")
+
+    migrate_graph_branches_into_core(store, core)
+
+    assert store.get_node(BRANCH_USER).data == ""
+
+
+def test_world_knowledge_is_never_emptied(store, core):
+    node = store.create_node(
+        name="Films",
+        description="Films looked up",
+        data="Possessor est sorti en 2020.",
+        parent_id=BRANCH_WORLD,
+    )
+
+    migrate_graph_branches_into_core(store, core)
+
+    assert store.get_node(node.id).data == "Possessor est sorti en 2020."
+
+
+def test_a_line_the_user_deletes_does_not_come_back(store, core):
+    """The core files are the user's to prune. A migration that re-ran
+    over the same nodes would undo that on every restart."""
+    store.create_node(
+        name="Health",
+        description="Sensitive",
+        data="Il prend un traitement pour la tension.",
+        parent_id=BRANCH_USER,
+    )
+    migrate_graph_branches_into_core(store, core)
+
+    path = core.path_for(SECTION_PROFILE)
+    kept = [
+        line for line in path.read_text(encoding="utf-8").splitlines()
+        if "tension" not in line
+    ]
+    path.write_text("\n".join(kept) + "\n", encoding="utf-8")
+
+    migrate_graph_branches_into_core(store, core)
+
+    assert core.active(SECTION_PROFILE) == []
+
+
+def test_a_failed_write_leaves_the_facts_in_the_graph(store, core, monkeypatch):
+    """Clearing a node before its facts are safely in the core would
+    lose them outright."""
+    node = store.create_node(
+        name="Identity",
+        description="Who the user is",
+        data="Le nom de l'utilisateur est Hocine.",
+        parent_id=BRANCH_USER,
+    )
+
+    def _boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("pathlib.Path.write_text", _boom)
+
+    migrate_graph_branches_into_core(store, core)
+
+    assert store.get_node(node.id).data == "Le nom de l'utilisateur est Hocine."
 
 
 def test_running_it_again_adds_nothing(store, core):

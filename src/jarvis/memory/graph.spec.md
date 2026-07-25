@@ -38,7 +38,7 @@ Called **only** from the daemon start-up path in `daemon.main()`. The memory vie
 
 `migrate_graph_branches_into_core(store, core)` walks the `user` and `directives` subtrees and writes every stored fact into the core's `profil.md` and `regles.md`, attributed as `migré`. It runs at daemon start-up, before the legacy-shape check that could wipe the table.
 
-Additive and idempotent: nodes are left in place, and text the core already holds is skipped — including entries the user has since retired, so a re-run never resurrects a corrected belief.
+A hand-over, not a copy: a node keeps its place in the tree and gives up its data once its facts are in the core. Text left behind would be found by query-driven recall and put a retired belief back into the prompt, and would be rewritten into the core on every subsequent start-up even after the user pruned it. Emptying the source makes the migration idempotent by construction. A node is cleared only when all of its facts reached the core, so a failed write leaves them in the graph rather than losing them.
 
 ## Data Model
 

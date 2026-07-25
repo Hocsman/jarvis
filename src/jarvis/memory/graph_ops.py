@@ -1073,35 +1073,52 @@ _BRANCH_TO_CORE_SECTION = {
 
 
 def migrate_graph_branches_into_core(store: GraphMemoryStore, core: MemoryCore) -> int:
-    """Copy the user and directives branches into the core files.
+    """Hand the user and directives branches over to the core files.
 
     The core is the authority for what the assistant believes about its
     user, so knowledge the graph accumulated under those two branches has
     to reach the files the user can read and correct. Returns the number
     of entries actually written.
 
-    Additive and idempotent: nodes are left in place, and any text the
-    core already holds is skipped, including entries the user has since
-    retired. Runs at daemon start-up, where a second run over an
-    unchanged graph writes nothing.
+    A hand-over, not a copy: once a node's facts are safely in the core,
+    the node keeps its place in the tree but gives up its data. Leaving
+    the text behind would break the core's two central promises. Recall
+    still searches the graph, so a retired belief would be pulled back
+    into the prompt from the node it was copied from; and a line the user
+    pruned from their own file would be rewritten on the next start-up,
+    for ever. Emptying the source makes both impossible and makes the
+    migration a no-op on every subsequent run, since there is nothing
+    left to hand over.
+
+    A node is cleared only when every one of its facts reached the core.
+    Text the core already holds counts as arrived, so a partial run
+    finishes cleanly on the next boot; a write that fails leaves the
+    facts in the graph rather than losing them.
     """
     written = 0
     for branch_id, section in _BRANCH_TO_CORE_SECTION.items():
-        for text in _walk_branch_facts(store, branch_id):
-            if core.knows(section, text):
-                continue
-            try:
-                core.remember(section, text, source=SOURCE_MIGRATED)
-                written += 1
-            except (OSError, ValueError) as e:
-                debug_log(f"core migration skipped '{text[:40]}': {e}", "memory")
+        for node_id, facts in _walk_branch_nodes(store, branch_id):
+            handed_over = True
+            for text in facts:
+                if core.knows(section, text):
+                    continue
+                try:
+                    core.remember(section, text, source=SOURCE_MIGRATED)
+                    written += 1
+                except (OSError, ValueError) as e:
+                    handed_over = False
+                    debug_log(f"core migration skipped '{text[:40]}': {e}", "memory")
+            if handed_over:
+                store.update_node(node_id, data="")
     if written:
         debug_log(f"core migration: {written} entries moved from the graph", "memory")
     return written
 
 
-def _walk_branch_facts(store: GraphMemoryStore, branch_root_id: str) -> Iterator[str]:
-    """Yield every stored fact in a branch's subtree, one line at a time."""
+def _walk_branch_nodes(
+    store: GraphMemoryStore, branch_root_id: str,
+) -> Iterator[tuple[str, list[str]]]:
+    """Yield ``(node_id, facts)`` for every populated node in a subtree."""
     if store.get_node(branch_root_id) is None:
         return
 
@@ -1115,7 +1132,8 @@ def _walk_branch_facts(store: GraphMemoryStore, branch_root_id: str) -> Iterator
         node = store.get_node(node_id)
         if node is None:
             continue
-        for line in _split_data_lines(node.data):
-            yield line.strip()
+        facts = [line.strip() for line in _split_data_lines(node.data)]
+        if facts:
+            yield node_id, facts
         for child in store.get_children(node_id):
             queue.append(child.id)

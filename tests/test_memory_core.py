@@ -229,6 +229,55 @@ def test_a_hand_written_line_survives_a_later_write(core):
     assert "Il s'appelle Hocine." in content
 
 
+def test_a_line_the_user_strikes_through_stops_being_believed(core):
+    """The header written into every core file tells the user a struck
+    line is retired. Striking one by hand is the obvious way to drop a
+    belief, so it has to work without the bookkeeping stamp."""
+    core.remember(SECTION_PROFILE, "Il vit à Paris.", on_date="2026-07-18")
+    path = core.path_for(SECTION_PROFILE)
+    content = path.read_text(encoding="utf-8").replace(
+        "- 2026-07-18 · dit : Il vit à Paris.",
+        "- ~~2026-07-18 · dit : Il vit à Paris.~~",
+    )
+    path.write_text(content, encoding="utf-8")
+
+    assert core.active(SECTION_PROFILE) == []
+    assert "Paris" not in build_core_profile(core)["user"]
+
+
+def test_a_bare_struck_line_is_retired_and_readable_as_history(core):
+    path = core.path_for(SECTION_PROFILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# Profil\n\n- ~~Il vit à Paris.~~\n", encoding="utf-8")
+
+    entry = core.entries(SECTION_PROFILE)[0]
+    assert entry.retired is True
+    assert entry.text == "Il vit à Paris."
+
+
+def test_a_struck_line_never_leaks_its_markup_into_the_prompt(core):
+    path = core.path_for(SECTION_PROFILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "# Profil\n\n- ~~2026-07-18 · dit : Il vit à Paris.~~ plus vrai\n",
+        encoding="utf-8",
+    )
+
+    assert build_core_profile(core)["user"] == ""
+
+
+def test_retiring_without_a_reason_still_reads_back_as_retired(core):
+    core.remember(SECTION_PROFILE, "Il vit à Paris.", on_date="2026-07-18")
+
+    core.retire(SECTION_PROFILE, "Il vit à Paris.", on_date="2026-07-25")
+
+    entry = core.entries(SECTION_PROFILE)[0]
+    assert entry.retired is True
+    assert entry.retired_on == "2026-07-25"
+    assert core.active(SECTION_PROFILE) == []
+    assert build_core_profile(core)["user"] == ""
+
+
 def test_an_unreadable_core_yields_no_entries_rather_than_raising(core, monkeypatch):
     core.remember(SECTION_PROFILE, "Il s'appelle Hocine.", on_date="2026-07-25")
 
