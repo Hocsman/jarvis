@@ -8,15 +8,16 @@ from ..debug import debug_log
 
 def call_llm_direct(*, cfg, chat_model, system_prompt, user_content,
                     timeout_sec=10.0, thinking=False, num_ctx=4096,
-                    temperature=None):
+                    temperature=None, max_tokens=None):
     """Local indirection: route enrichment LLM calls through the backend
     configured by ``cfg.llm_provider``. Tests patch this single symbol
     to intercept every enrichment call."""
     return get_llm_backend(cfg).direct(
         chat_model, system_prompt, user_content,
         timeout_sec=timeout_sec, thinking=thinking,
-        num_ctx=num_ctx, temperature=temperature,
+        num_ctx=num_ctx, temperature=temperature, max_tokens=max_tokens,
     )
+
 
 
 def extract_search_params_for_memory(query: str, cfg, chat_model: str,

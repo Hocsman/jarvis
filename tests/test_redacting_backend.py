@@ -25,7 +25,7 @@ class _SpyBackend(LLMBackend):
         self.calls: Dict[str, Any] = {}
 
     def direct(self, chat_model, system_prompt, user_content, timeout_sec=10.0,
-               thinking=False, num_ctx=4096, temperature=None):
+               thinking=False, num_ctx=4096, temperature=None, max_tokens=None):
         self.calls["direct"] = {"system": system_prompt, "user": user_content}
         return "ok"
 

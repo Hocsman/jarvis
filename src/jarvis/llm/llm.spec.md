@@ -76,6 +76,23 @@ Provider-aware fields in `Settings` (see [src/jarvis/config.py](../config.py)):
 
 The `ollama_base_url` / `ollama_chat_model` / `ollama_embed_model` keys hold the Ollama configuration and are authoritative whenever the active (chat or embedding) provider is Ollama. `_load_settings` resolves `cfg.llm_chat_model` and `cfg.embedding_model` per-provider — the Ollama keys win on the Ollama path, the provider-aware keys win on the OpenAI-compatible path — so the codebase reads a single resolved field (`cfg.llm_chat_model`) while each provider keeps its own on-disk model name. The v1 → v2 migration promotes any explicitly-set `ollama_*` values into the provider-aware keys; per-provider resolution means a promoted value never shadows the Ollama picker.
 
+### Splitting roles across models
+
+`intent_judge_model` / `tool_router_model` / `planner_model` / `evaluator_model` exist so the classification-shaped calls can run on a different model from the reply. On a cloud provider this is not a micro-optimisation — it dominates latency.
+
+Measured on the memory extractor (same prompt, same query, OpenRouter):
+
+| Model | Median | Tokens emitted |
+|-------|--------|----------------|
+| `deepseek/deepseek-v4-flash` | 12.3 s | 632 |
+| `openai/gpt-oss-120b` | **0.4 s** | 281 |
+| `qwen/qwen3.5-flash` | 40.9 s | 6198 |
+| `mistralai/ministral-8b` | 0.8 s | 50 |
+
+All returned valid JSON: the spread is verbosity, not capability. Reasoning-style models narrate before answering, which is worth paying for in a reply and pure latency in an extractor. Routing the auxiliary roles to a terse model took a weather+news query from 26.9 s to 11.2 s end to end — auxiliary calls fell from 21.0 s to 1.4 s — with identical answers.
+
+Capping generation instead (`max_tokens`) does **not** work here: the JSON arrives after the narration, so every cap tested (220/400/600) truncated before it, failing the parse and triggering the extractor's retry — which made the whole reply slower, not faster. Pick a terse model for these roles rather than trying to silence a verbose one.
+
 ### Factory dispatch
 
 - `get_llm_backend(cfg)` reads `llm_provider`. For `openai_compatible` it resolves `llm_base_url` (falling back to `ollama_base_url`); for `ollama` it uses `ollama_base_url` directly so a stale `llm_base_url` from a previous OpenAI-compatible config cannot leak into the Ollama backend. `llm_api_key` is read regardless (sent only when non-empty).

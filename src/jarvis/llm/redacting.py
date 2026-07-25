@@ -76,6 +76,7 @@ class RedactingBackend(LLMBackend):
         thinking: bool = False,
         num_ctx: int = 4096,
         temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ) -> Optional[str]:
         return self._inner.direct(
             chat_model,
@@ -85,6 +86,7 @@ class RedactingBackend(LLMBackend):
             thinking=thinking,
             num_ctx=num_ctx,
             temperature=temperature,
+            max_tokens=max_tokens,
         )
 
     def streaming(

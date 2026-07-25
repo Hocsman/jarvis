@@ -48,9 +48,18 @@ class LLMBackend(ABC):
         thinking: bool = False,
         num_ctx: int = 4096,
         temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ) -> Optional[str]:
         """Single-shot system+user prompt; returns the assistant text or
-        ``None`` on timeout / error / empty response."""
+        ``None`` on timeout / error / empty response.
+
+        ``max_tokens`` caps the generation. The classification-shaped callers
+        (tool router, memory extractor, digests) have bounded output — a list
+        of tool names, a small JSON object — but an uncapped model rambles
+        well past it: measured 200-358 tokens for a ~35-token answer, and the
+        wasted tokens are pure latency on a remote endpoint. Set it generously
+        (2-3x the expected answer) so a slightly long reply is never truncated
+        mid-JSON."""
 
     @abstractmethod
     def streaming(

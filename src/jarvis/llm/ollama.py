@@ -77,6 +77,7 @@ class OllamaBackend(LLMBackend):
         thinking: bool = False,
         num_ctx: int = 4096,
         temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ) -> Optional[str]:
         """Direct LLM call without temporal context, location, or other
         ``ask_coach`` features.
@@ -101,6 +102,9 @@ class OllamaBackend(LLMBackend):
         options: Dict[str, Any] = {"num_ctx": num_ctx}
         if temperature is not None:
             options["temperature"] = temperature
+        if max_tokens is not None:
+            # Ollama spells the generation cap ``num_predict``.
+            options["num_predict"] = max_tokens
 
         payload: Dict[str, Any] = {
             "model": chat_model,
