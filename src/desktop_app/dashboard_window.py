@@ -1,5 +1,5 @@
 """HUD dashboard window: a single full-screen interface hosting the
-J.A.R.V.I.S dashboard rendered as a local web page.
+YUBA dashboard rendered as a local web page.
 
 The page (``dashboard/index.html``) is driven live by a
 :class:`DashboardBridge` exposed over ``QWebChannel`` as ``window.jarvis``:
@@ -31,7 +31,7 @@ class DashboardWindow(QMainWindow):
 
     def __init__(self, submit_fn: Optional[Callable[[str], None]] = None) -> None:
         super().__init__()
-        self.setWindowTitle("J.A.R.V.I.S")
+        self.setWindowTitle("YUBA")
         self.setMinimumSize(1100, 680)
 
         self._view = QWebEngineView(self)
