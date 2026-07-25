@@ -30,7 +30,7 @@ class ToolSelectionStrategy(Enum):
 
 
 # Tools that must always be available regardless of selection strategy.
-_ALWAYS_INCLUDED = {"stop", "remember"}
+_ALWAYS_INCLUDED = {"stop", "remember", "forget"}
 
 # Minimum number of tools to return from similarity-based strategies.
 # Prevents overly aggressive filtering that would leave the model with nothing useful.

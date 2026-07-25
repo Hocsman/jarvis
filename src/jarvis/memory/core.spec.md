@@ -20,6 +20,12 @@ Two paths, both requiring the user to have said something. Nothing else writes t
 1. **Explicit** — the user asks for it: "remember that…", "from now on, always…", "note that I…". The assistant calls `rememberTool` with the fact or rule, phrased as close to the user's own words as the third person allows.
 2. **Corrective** — the user corrects something the assistant got wrong, whether or not a core entry caused the error. The correction is written as a new entry, and any core entry it contradicts is retired.
 
+3. **On request** — the user asks for something to go away: "forget where I live", "that rule no longer applies". `forgetTool` retires the entry. This is a removal, not a write, and it exists so the assistant never has to answer a removal by asserting a negation: "he no longer lives in Paris" adds personal information rather than removing any, and leaves the original belief active underneath.
+
+Forgetting drops one entry per call and refuses to guess. Retiring the wrong belief is worse than retiring none, because the user is told it worked and stops watching, so the bar is that the wording must **account for an entry**, not merely overlap it: a bare topic word drops nothing. Scoring the other way round, against whichever side is shorter, let `tout` score a perfect match against "Il mange de tout." and drop a dietary fact in answer to "forget everything", and let `son adresse` land on the email address rather than the postal one a person means by it.
+
+The entries are in the model's context, so it can quote the one the user means. A near miss comes back with the held entries named so the next call lands, and an ambiguous one comes back with the candidates; neither retires anything. Wiping the core wholesale has no representation: that goes through the user's own hands, on a file they can see.
+
 **Implicit deduction is not a write path, deliberately.** The assistant does not infer facts from the flow of conversation, does not extract them from summaries, and does not store its own conclusions about the user. A wrong memory is worse than a missing one: it is invisible, it is injected into every subsequent prompt, and it makes the assistant confidently wrong in a way the user cannot easily trace. The cost of this choice is that the core fills slowly. That is the intended trade.
 
 ## Guardrails
