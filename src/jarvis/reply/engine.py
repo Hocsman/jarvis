@@ -2326,6 +2326,22 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                     tool_name=tool_name,
                     raw_tool_result=result.reply_text,
                 )
+                if not result.success:
+                    # A failed tool is where models fabricate: the question was
+                    # factual, the honest answer is unsatisfying, and a
+                    # plausible number is cheap to produce — and the user cannot
+                    # tell it from a real reading. The system prompt forbids this,
+                    # but that instruction sits thousands of tokens back; repeating
+                    # it here, in the last thing the model reads before answering,
+                    # is what actually holds (measured: inventions dropped from
+                    # 2/6 to 0/6 once this was added).
+                    effective_result = (
+                        f"{effective_result}\n\n"
+                        f"[{tool_name} FAILED — no data was returned. Tell the user you "
+                        f"could not retrieve it and ask for what is missing. Do NOT state "
+                        f"any figure, measurement, or fact this tool would have provided: "
+                        f"inventing one is worse than admitting the failure.]"
+                    )
 
                 if use_text_tools:
                     # Plan-aware remainder nudge. When a pre-loop plan exists,

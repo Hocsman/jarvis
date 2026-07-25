@@ -373,6 +373,17 @@ Behaviour:
 - **User-facing logging**: prints `🧩 Tool digest: N chars — "preview…"` when the digest replaces the raw payload, or the NONE fallback line above. Debug logs under the `tools` category record raw→digest size plus batch counts.
 - **Raw payload preserved in debug**: the debug logs capture the original length so field captures can compare digested vs raw behaviour.
 
+### Failed Tools Must Not Be Papered Over
+
+A failed tool is the moment the model is most likely to fabricate: the user asked something factual, the honest answer is unsatisfying, and a plausible-looking value is cheap to produce. Measured on `getWeather` failing (DeepSeek V4 Flash, 6 runs), the unguarded model invented readings — "19°, 11 km/h", "28 degrés" — in **2 of 6** replies, presented as fact with no hint that the lookup had failed.
+
+Two layers guard this, because the prompt alone was not enough (it only moved 2/6 → 1/6):
+
+1. **System prompt** (`system_prompt.py`, "Tool results (hard)"): tool results are the only source for live data; when one fails, say so and ask for what is missing, never state the figures it would have returned.
+2. **Failure note appended to the result** (`engine.py`): when `result.success` is false, the tool-result message the model reads gets `[<tool> FAILED — no data was returned. … Do NOT state any figure, measurement, or fact this tool would have provided …]`. This is what actually holds: the system prompt sits thousands of tokens back, while this lands in the last thing the model reads before answering. Together: **0 of 6**.
+
+Covered by `evals/test_tool_failure_honesty.py`, which samples several runs rather than one — fabrication is probabilistic, so a single-shot assertion would have passed two thirds of the time against the pre-fix behaviour and let the regression through.
+
 ### Logging and Privacy
 - Use `debug_log` for key steps: `memory`, `planning`, and `voice` categories.
 - Avoid excessive logging; logs must remain readable and privacy-preserving.
