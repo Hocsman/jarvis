@@ -25,6 +25,23 @@ import os
 JUDGE_MODEL = os.environ.get("EVAL_JUDGE_MODEL", "gemma4:e2b")
 JUDGE_BASE_URL = os.environ.get("EVAL_JUDGE_BASE_URL", "http://localhost:11434")
 
+# Which backend the suite runs against. Ollama by default, because the
+# default judge model is local and free. Point these at an
+# OpenAI-compatible endpoint to measure the tier a user actually runs:
+#
+#   EVAL_LLM_PROVIDER=openai_compatible \
+#   EVAL_LLM_BASE_URL=https://openrouter.ai/api/v1 \
+#   EVAL_LLM_API_KEY_ENV=OPENROUTER_API_KEY \
+#   EVAL_JUDGE_MODEL=openai/gpt-oss-120b ./scripts/run_evals.sh <suite>
+#
+# This is not a detail: the reply engine forces text-based tool calling
+# for models it classifies as SMALL, so a local small-model run never
+# exercises the native tool-call path at all. A suite about whether a
+# tool gets invoked measures a different mechanism on each tier.
+EVAL_LLM_PROVIDER = os.environ.get("EVAL_LLM_PROVIDER", "ollama")
+EVAL_LLM_BASE_URL = os.environ.get("EVAL_LLM_BASE_URL", "")
+EVAL_LLM_API_KEY_ENV = os.environ.get("EVAL_LLM_API_KEY_ENV", "")
+
 
 # =============================================================================
 # Tool Call Capture
@@ -285,6 +302,17 @@ class MockConfig:
     """
     ollama_base_url: str = "http://localhost:11434"
     ollama_chat_model: str = "gemma4:e2b"
+    # Backend selection. Declared rather than left to fall through so a
+    # suite can be pointed at the tier the user actually runs; the
+    # factory dispatches on ``llm_provider``.
+    llm_provider: str = EVAL_LLM_PROVIDER
+    llm_base_url: str = EVAL_LLM_BASE_URL
+    llm_api_key_env: str = EVAL_LLM_API_KEY_ENV
+    # Resolved here rather than left to ``Settings``, which reads the env
+    # var named by ``llm_api_key_env`` only while loading a real config
+    # file. The key is never written to disk or printed by the suite.
+    llm_api_key: str = os.environ.get(EVAL_LLM_API_KEY_ENV, "") if EVAL_LLM_API_KEY_ENV else ""
+    llm_chat_model: str = JUDGE_MODEL
     ollama_embed_model: str = "nomic-embed-text"
     db_path: str = ":memory:"
     sqlite_vss_path: Optional[str] = None
@@ -455,8 +483,29 @@ class JudgeVerdict:
 
 
 def is_judge_llm_available() -> bool:
-    """Check if the judge LLM is available and the model exists."""
+    """Check whether the configured judge model can be reached.
+
+    Provider-aware: an OpenAI-compatible endpoint is probed with a free
+    model listing rather than Ollama's ``/api/tags``, which would report
+    every remote model as missing and silently skip the whole suite.
+    """
     import requests
+
+    if EVAL_LLM_PROVIDER != "ollama":
+        if not EVAL_LLM_BASE_URL:
+            return False
+        headers = {}
+        key = os.environ.get(EVAL_LLM_API_KEY_ENV, "") if EVAL_LLM_API_KEY_ENV else ""
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        try:
+            resp = requests.get(
+                f"{EVAL_LLM_BASE_URL.rstrip('/')}/models", headers=headers, timeout=10,
+            )
+            return resp.status_code == 200
+        except Exception:
+            return False
+
     try:
         # First check if Ollama is running
         resp = requests.get(f"{JUDGE_BASE_URL.rstrip('/')}/api/tags", timeout=2)
@@ -476,8 +525,23 @@ def is_judge_llm_available() -> bool:
 
 
 def call_judge_llm(system_prompt: str, user_prompt: str, timeout_sec: float = 120.0) -> Optional[str]:
-    """Call the judge LLM with a prompt."""
+    """Call the judge LLM with a prompt.
+
+    Routes through the configured backend when the suite is pointed at a
+    non-Ollama provider, so judge-scored cases measure the same tier as
+    the behaviour under test.
+    """
     import requests
+
+    if EVAL_LLM_PROVIDER != "ollama":
+        from jarvis.llm import get_llm_backend
+        try:
+            return get_llm_backend(MockConfig()).direct(
+                JUDGE_MODEL, system_prompt, user_prompt, timeout_sec=timeout_sec,
+            )
+        except Exception as e:
+            print(f"⚠️ Judge LLM call failed: {e}")
+            return None
 
     payload = {
         "model": JUDGE_MODEL,

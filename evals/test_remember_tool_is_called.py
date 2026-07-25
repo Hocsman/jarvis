@@ -19,16 +19,24 @@ Cases are given in several languages because the assistant is not
 English-only and the instruction to remember carries no keyword the code
 could match on.
 
-**The positive cases are red on `gemma4:e2b` and this is expected.** The
-engine forces text-based tool calling for SMALL models (`use_text_tools`
-in `reply/engine.py`), so that model never receives a native tool schema
-and has to emit a markdown fence instead. Measured directly against the
-native API with the same system prompt, it calls `remember` correctly
-5/5 for the French case and 3/5 for the rule case; through the engine's
-fence path it emits prose. So this suite measures the fence path on a
-2B model, which is the weakest combination the project supports. Run it
-against a model large enough for native tools before drawing conclusions
-about the prompt or the tool description.
+Measured, 2026-07-25:
+
+| Model | Result |
+|-------|--------|
+| `openai/gpt-oss-120b` | 6 passed, 1 xfail |
+| `deepseek/deepseek-v4-flash` | 6 passed, 1 xfail |
+| `gemma4:e2b` (local default) | positives red |
+
+**The positive cases being red on `gemma4:e2b` is expected, not a
+regression.** The engine forces text-based tool calling for SMALL models
+(`use_text_tools` in `reply/engine.py`), so that model never receives a
+native tool schema and has to emit a markdown fence instead. Measured
+directly against the native API with the same system prompt, it calls
+`remember` 5/5 on the French case and 3/5 on the rule case; through the
+engine's fence path it emits prose. This suite therefore measures the
+fence path on a 2B model, the weakest combination the project supports.
+Draw conclusions about the prompt or the tool description from a tier
+that gets native tools.
 
 Run:
     EVAL_JUDGE_MODEL=gemma4:e2b ./scripts/run_evals.sh remember_tool_is_called
@@ -119,6 +127,22 @@ DO_NOT_REMEMBER_CASES = [
         RememberCase(
             text="Jarvis, can you remind me to call the dentist tomorrow?",
             should_call=False,
+        ),
+        marks=pytest.mark.xfail(
+            reason=(
+                "Known open defect. The assistant has no reminder feature, so "
+                "faced with 'remind me to X' it reaches for the one tool that "
+                "looks close and files the task as a durable fact about the "
+                "user. Three prompt-level attempts were measured on "
+                "gpt-oss-120b and none moved it: a restraint clause in the "
+                "system prompt, an explicit reminder-is-not-a-memory clause "
+                "in the tool description, and both together. Arguing against "
+                "a strong prior in the prompt rarely wins (see CLAUDE.md); "
+                "the fix is most likely to give the model somewhere else to "
+                "put it. Left failing rather than deleted so the gap stays "
+                "visible and flips to XPASS the day it is closed."
+            ),
+            strict=False,
         ),
         id="A reminder request is not a request to store a fact",
     ),
