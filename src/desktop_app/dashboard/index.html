@@ -252,6 +252,10 @@
     content: "▌"; color: var(--cyan); margin-left: 2px;
     animation: caret 1s step-end infinite; }
   @keyframes caret { 50% { opacity: 0; } }
+  /* Preparation phase, not content: dimmed and italic so it reads as a
+     status line, and drops the caret (nothing is being typed yet). */
+  .msg.streaming.stage { color: var(--txt-faint); font-style: italic; }
+  .msg.streaming.stage::after { content: none; }
   .composer { display: flex; gap: 10px; padding: 14px 16px; border-top: 1px solid var(--panel-brd); }
   .composer input {
     flex: 1; background: rgba(10, 18, 32, 0.6);
@@ -486,16 +490,33 @@
   // when the completed reply lands — that text is authoritative (a
   // tool-calling turn can emit text that isn't part of the final answer).
   let streamEl = null, streamText = "";
-  function streamToken(chunk) {
-    if (!chunk) return;
+  // A pending bubble exists from the moment work starts: first it shows the
+  // preparation phase (tool routing, memory, …), then real tokens replace
+  // that placeholder. Without it the seconds before generation look frozen.
+  let stageEl = null;
+  function pendingBubble() {
     if (!streamEl) {
       streamEl = document.createElement("div");
       streamEl.className = "msg bot streaming";
       msgs.appendChild(streamEl);
       streamText = "";
     }
+    return streamEl;
+  }
+  function showStage(label) {
+    if (!label) return;
+    const el = pendingBubble();
+    if (streamText) return;      // real text already flowing; don't overwrite it
+    el.classList.add("stage");
+    el.textContent = label;
+    msgs.scrollTop = msgs.scrollHeight;
+  }
+  function streamToken(chunk) {
+    if (!chunk) return;
+    const el = pendingBubble();
+    if (!streamText) el.classList.remove("stage");  // first token clears the phase
     streamText += chunk;
-    streamEl.textContent = streamText;
+    el.textContent = streamText;
     msgs.scrollTop = msgs.scrollHeight;
   }
   function clearStream() {
@@ -520,6 +541,7 @@
   function wireBridge(obj) {
     jarvis = obj;
     jarvis.userEcho.connect(t => addMsg(t, "user"));
+    if (jarvis.stageChanged) jarvis.stageChanged.connect(showStage);
     if (jarvis.tokenReceived) jarvis.tokenReceived.connect(streamToken);
     jarvis.replyReceived.connect(settleReply);
     jarvis.busy.connect(() => { clearStream(); addMsg("Jarvis est déjà occupé sur une autre requête.", "bot"); });

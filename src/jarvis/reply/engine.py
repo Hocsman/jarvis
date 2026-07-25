@@ -810,7 +810,8 @@ def _build_enrichment_context_hint(cfg, recent_messages: list) -> Optional[str]:
 def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                     text: str, dialogue_memory: "DialogueMemory",
                     language: Optional[str] = None,
-                    on_token: Optional[Any] = None) -> Optional[str]:
+                    on_token: Optional[Any] = None,
+                    on_stage: Optional[Any] = None) -> Optional[str]:
     """
     Main entry point for reply generation.
 
@@ -825,6 +826,15 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
             advisory output only — the returned string remains the source of
             truth (a tool-calling turn may emit text that is not part of the
             final answer), so callers must settle on the return value.
+        on_stage: Optional callback ``(stage_id, detail)`` announcing which
+            preparation phase is running, so a UI can show progress during
+            the seconds before generation starts. Stage ids are neutral
+            identifiers (``"routing"``, ``"memory"``, ``"planning"``,
+            ``"tool"``, ``"generating"``) — never display strings — because
+            the assistant must not hardcode any one language; the presenting
+            layer owns the wording. ``detail`` is an optional bare noun
+            (today: a tool name). Fail-open: a raising callback is logged
+            and ignored.
         language: ISO-639-1 code Whisper detected for this utterance (e.g.
             "en", "tr"). Threaded through to tool execution so tools like
             web_search can pick locale-appropriate resources (e.g. the
@@ -834,6 +844,19 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
     Returns:
         Generated reply text or None
     """
+    def _stage(stage_id: str, detail: Optional[str] = None) -> None:
+        """Announce the current preparation phase (advisory, fail-open).
+
+        Progress reporting must never be able to fail a reply, so every
+        error from the consumer is swallowed.
+        """
+        if on_stage is None:
+            return
+        try:
+            on_stage(stage_id, detail)
+        except Exception as e:
+            debug_log(f"on_stage raised, ignoring: {e}", "planning")
+
     # Step 1: Redact sensitive information
     redacted = redact(text)
 
@@ -951,6 +974,9 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         routed_tools = list(_cached_routed)
         debug_log("tool router served from hot-window cache", "planning")
     else:
+        # Only announce the phase on a cache miss: a cache hit is instant, and
+        # a stage label that flashes for a millisecond is noise, not progress.
+        _stage("routing")
         routed_tools = select_tools(
             query=redacted,
             builtin_tools=BUILTIN_TOOLS,
@@ -1029,6 +1055,11 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
 
     action_plan: list[str] = []
     try:
+        # Only announce planning when it will actually run: a disabled planner
+        # returns immediately, and a phase that flashes for zero seconds is
+        # noise in the progress display.
+        if getattr(cfg, "planner_enabled", False):
+            _stage("planning")
         action_plan = plan_query(
             cfg=cfg,
             query=redacted,
@@ -1187,6 +1218,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 search_params = _cached_params
                 debug_log("memory extractor served from hot-window cache", "memory")
             else:
+                _stage("memory")
                 search_params = extract_search_params_for_memory(
                     _extractor_query, cfg, resolve_tool_router_model(cfg),
                     timeout_sec=float(getattr(cfg, 'llm_tools_timeout_sec', 8.0)),
@@ -1763,6 +1795,10 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
     # Visible progress indicator before LLM loop (helps diagnose hangs)
     print(f"  💬 Generating response...", flush=True)
     debug_log(f"Starting LLM conversation loop (max {max_turns} turns)...", "planning")
+    # Preparation is done; from here the model is producing the answer. On the
+    # streaming path this is the last stage the UI shows before tokens start
+    # replacing it with real text.
+    _stage("generating")
 
     # Baseline: number of tool_name messages already in the message list from
     # dialogue carryover (prior queries in the same session). The direct-exec
@@ -1868,6 +1904,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                                     }
                                 ],
                             })
+                            _stage("tool", _name)
                             _plan_result = run_tool_with_retries(
                                 db=db,
                                 cfg=cfg,
@@ -2154,6 +2191,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 continue
 
             # Execute tool
+            _stage("tool", tool_name)
             result = run_tool_with_retries(
                 db=db,
                 cfg=cfg,

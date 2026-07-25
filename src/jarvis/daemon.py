@@ -197,6 +197,7 @@ def _notify_chat(event_type: str, data, *, callbacks: dict, use_ipc: bool) -> No
     callback_map = {
         "start": "on_start",
         "token": "on_token",
+        "stage": "on_stage",
         "tool": "on_tool_call",
         "complete": "on_complete",
         "busy": "on_busy",
@@ -252,6 +253,7 @@ def submit_text_query(
     *,
     on_start=None,
     on_token=None,
+    on_stage=None,
     on_tool_call=None,
     on_complete=None,
     on_busy=None,
@@ -275,6 +277,7 @@ def submit_text_query(
     callbacks = {
         "on_start": on_start,
         "on_token": on_token,
+        "on_stage": on_stage,
         "on_tool_call": on_tool_call,
         "on_complete": on_complete,
         "on_busy": on_busy,
@@ -327,6 +330,19 @@ def submit_text_query(
                 except Exception as exc:
                     debug_log(f"chat token emit failed: {exc}", "chat")
 
+            def _on_stage(stage_id: str, detail=None) -> None:
+                # Which preparation phase is running, so the UI can show
+                # progress during the seconds before the first token. The
+                # payload keeps the neutral stage id; wording is the
+                # presenting layer's job (the assistant is multilingual).
+                try:
+                    _notify_chat(
+                        "stage", {"stage": stage_id, "detail": detail},
+                        callbacks=callbacks, use_ipc=use_ipc,
+                    )
+                except Exception as exc:
+                    debug_log(f"chat stage emit failed: {exc}", "chat")
+
             engine_kwargs = dict(
                 db=db,
                 cfg=cfg,
@@ -336,11 +352,13 @@ def submit_text_query(
                 language=None,
             )
             try:
-                reply = run_reply_engine(on_token=_on_token, **engine_kwargs)
+                reply = run_reply_engine(
+                    on_token=_on_token, on_stage=_on_stage, **engine_kwargs
+                )
             except TypeError:
-                # Engine build without streaming support: fall back to the
+                # Engine build without progress support: fall back to the
                 # buffered call rather than failing the query.
-                debug_log("reply engine has no on_token; buffered reply", "chat")
+                debug_log("reply engine has no on_token/on_stage; buffered reply", "chat")
                 reply = run_reply_engine(**engine_kwargs)
             if cancel_event.is_set():
                 debug_log("chat query cancelled, dropping reply", "chat")

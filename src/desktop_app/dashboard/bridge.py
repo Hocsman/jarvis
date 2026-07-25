@@ -38,6 +38,32 @@ _STATE_VIEW = {
 _STATE_DEFAULT = ((56, 216, 232), "En écoute du mot d'éveil…")
 
 
+# Preparation-phase id -> French label. The engine emits neutral ids so it
+# stays language-agnostic; the wording lives here, in the presenting layer,
+# alongside the other user-facing strings of this window.
+_STAGE_VIEW = {
+    "routing":    "🔧 Choix des outils…",
+    "memory":     "🧠 Consultation de la mémoire…",
+    "planning":   "🗺️ Préparation du plan…",
+    "generating": "✍️ Rédaction de la réponse…",
+    "tool":       "⚙️ Utilisation de {detail}…",
+}
+_STAGE_DEFAULT = "⏳ Traitement…"
+
+
+def stage_label(stage_id: str, detail: Optional[str] = None) -> str:
+    """Human-readable label for a preparation phase.
+
+    Unknown ids fall back to a generic label rather than raising: a newer
+    engine emitting a stage this build doesn't know about should degrade to
+    "working on it", never break the window.
+    """
+    template = _STAGE_VIEW.get(stage_id, _STAGE_DEFAULT)
+    if "{detail}" in template:
+        return template.format(detail=detail or "un outil")
+    return template
+
+
 def parse_chat_ipc_line(line: str):
     """Parse a daemon ``__CHAT__:`` line into ``(kind, data)``.
 
@@ -74,6 +100,8 @@ def dispatch_chat_ipc_line(line: str, bridge) -> bool:
     kind, data = parsed
     if kind == "token":
         bridge.deliver_token(data)
+    elif kind == "stage":
+        bridge.deliver_stage(data)
     elif kind == "complete":
         bridge.deliver_reply(data)
     elif kind == "busy":
@@ -87,6 +115,7 @@ class DashboardBridge(QObject):
     stateChanged = pyqtSignal(str)     # JSON: {accent:[r,g,b], status:"…"}
     weatherUpdated = pyqtSignal(str)   # JSON: {temp, loc, desc, icon, hum, wind, feels}
     userEcho = pyqtSignal(str)         # echo the user's message into the transcript
+    stageChanged = pyqtSignal(str)     # localised label for the running phase
     tokenReceived = pyqtSignal(str)    # content delta while the reply generates
     replyReceived = pyqtSignal(str)    # assistant reply text (authoritative)
     busy = pyqtSignal()                # daemon busy with another query
@@ -125,6 +154,20 @@ class DashboardBridge(QObject):
     # ── setters used by the host (tray) ────────────────────────────────
     def set_submit_fn(self, fn: Optional[Callable[[str], None]]) -> None:
         self._submit_fn = fn
+
+    def deliver_stage(self, payload: Any) -> None:
+        """Called by the host when the engine enters a preparation phase.
+
+        Translates the neutral stage id into this window's wording. Like
+        tokens, this never clears ``_chat_pending``: the reply is still on
+        its way.
+        """
+        if not isinstance(payload, dict):
+            return
+        stage_id = payload.get("stage")
+        if not stage_id:
+            return
+        self.stageChanged.emit(stage_label(str(stage_id), payload.get("detail")))
 
     def deliver_token(self, chunk: Optional[str]) -> None:
         """Called by the host for each content delta while generating.

@@ -67,6 +67,7 @@ main thread. All are optional and default to `None`.
 |----------|---------|------|
 | `on_start` | `str` (the redacted query, for display) | Worker thread has picked up the query |
 | `on_token` | `str` | A content delta, as the model generates it (see [Streaming](#streaming)) |
+| `on_stage` | `dict` (`{"stage": str, "detail": Optional[str]}`) | The engine entered a preparation phase (see [Streaming](#streaming)) |
 | `on_tool_call` | `dict` | Not emitted by the current engine; reserved for future per-tool-call visibility |
 | `on_complete` | `Optional[str]` (final reply, or `None` on failure/stop/cancel) | Worker thread is done |
 | `on_busy` | `None` | A submission was rejected because a query is already running |
@@ -86,6 +87,7 @@ Event shapes (mirrors the diary IPC):
 ```json
 {"type": "start",  "data": "<redacted query>"}
 {"type": "token",  "data": "<chunk>"}        // content delta while the reply generates
+{"type": "stage",  "data": {"stage": "routing|memory|planning|tool|generating", "detail": "<tool name or null>"}}
 {"type": "tool",   "data": {"name": "...", "args": "...", "result": "..."}}  // reserved for future per-tool visibility; not emitted today
 {"type": "complete", "data": "<final reply or null>"}
 {"type": "busy",   "data": null}
@@ -201,6 +203,24 @@ consumers must settle on the completed reply rather than on accumulated
 tokens. Both the engine and the daemon fall back to the buffered path if the
 callee predates the parameter (`TypeError`), and a raising `on_token` never
 costs the reply.
+
+### Preparation progress
+
+Tokens only cover generation; several seconds pass before it starts (tool
+routing, memory lookup, tool execution). `run_reply_engine(..., on_stage=...)`
+announces each phase as `(stage_id, detail)`, forwarded as a `stage` IPC
+event and rendered in the same pending bubble the tokens will later fill.
+
+Stage ids are **neutral identifiers** — `routing`, `memory`, `planning`,
+`tool`, `generating` — never display strings: the assistant is not tied to
+one language, so wording belongs to the presenting layer (`_STAGE_VIEW` /
+`stage_label` in the dashboard bridge, which falls back to a generic label
+for ids it doesn't know). `detail` carries a bare noun, today the tool name.
+
+A phase is announced only when it will actually do work — a hot-cache hit or
+a disabled planner emits nothing, since a label that flashes for zero seconds
+is noise rather than progress. Reporting is advisory and fail-open
+throughout: a raising consumer is logged and ignored.
 
 ## What the system does not do
 
