@@ -27,7 +27,7 @@ _SMALL_MODEL_PATTERNS = (
     ":1b", ":3b", ":7b",
     "-1b", "-3b", "-7b",
     "_1b", "_3b", "_7b",
-    "gemma4",  # Gemma 4 - always small regardless of tag
+    "gemma4", "gemma-4",  # Gemma 4 - always small regardless of tag
 )
 
 

@@ -15,6 +15,8 @@ class TestModelSizeDetection:
         ("gemma4", True),
         ("gemma4:e2b", True),
         ("gemma4:e4b", True),
+        ("google/gemma-4-e2b", True),  # OpenAI-compatible format
+        ("google/gemma-4-12b-qat", True),  # OpenAI-compatible format
         ("llama3.2:3b", True),
         ("llama3.2:1b", True),
         ("mistral:7b", True),
