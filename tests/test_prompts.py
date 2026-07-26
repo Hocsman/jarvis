@@ -87,15 +87,29 @@ class TestPromptComponents:
         assert "unknown named entities" in text
         assert "arguments the tool can auto-derive" in text
 
+    def test_small_model_tool_constraints_has_weather_section(self):
+        """Small model constraints include a weather-specific rule that covers
+        statements, questions, and contextual remarks about weather."""
+        from jarvis.reply.prompts import get_system_prompts, ModelSize
+
+        prompts = get_system_prompts(ModelSize.SMALL)
+        text = prompts.tool_constraints.lower()
+
+        assert "weather and current conditions" in text
+        # Must command calling getWeather for weather topics
+        assert "call getweather" in text or "getweather" in text
+        # Must not allow generic pleasantries before tool call
+        assert "generic pleasantry" in text or "opinion" in text or "observation" in text
+
     def test_small_model_balanced_incentives(self):
-        """Small models get balanced tool incentives - use tools but not for greetings."""
+        """Small models get forceful tool incentives - must call tools, exceptions only for greetings."""
         from jarvis.reply.prompts import get_system_prompts, ModelSize
 
         prompts = get_system_prompts(ModelSize.SMALL)
 
-        # Should encourage tool use for legitimate cases
-        assert "use tools" in prompts.tool_incentives.lower()
-        # But mention greetings specifically
+        # Should command tool use for legitimate cases
+        assert "MUST call" in prompts.tool_incentives or "must call" in prompts.tool_incentives
+        # But mention greetings specifically as an exception
         assert "greeting" in prompts.tool_incentives.lower()
 
     def test_large_model_proactive_incentives(self):
