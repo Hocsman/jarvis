@@ -109,7 +109,7 @@ After transcription, text passes through these stages in order:
 | Case                      | Behaviour                                         |
 |---------------------------|----------------------------------------------------|
 | Whisper not yet loaded    | Play "not ready" beep, skip                        |
-| Max recording duration    | 60 s cap to prevent memory exhaustion              |
+| Max recording duration    | No cap — the user controls when to stop by releasing the hotkey. A cap would paste prematurely mid-dictation and restart recording |
 | Empty transcription       | No paste occurs                                    |
 | Concurrent with assistant | Dictation works independently; pauses listener     |
 | macOS permissions         | `pynput` requires Accessibility permissions        |
