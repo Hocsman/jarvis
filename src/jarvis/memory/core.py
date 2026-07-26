@@ -64,7 +64,12 @@ _HEADERS = {
         "  Ce fichier est à toi. Édite-le à la main quand tu veux : toute\n"
         "  ligne commençant par « - » est lue comme une entrée, même sans\n"
         "  date, et rien de ce que tu écris ici n'est réécrit ou supprimé.\n"
+        "\n"
+        "  ATTENTION : écris SOUS ce bloc, pas dedans. Tout ce qui est\n"
+        "  entre <!-- et --> est un commentaire et n'est jamais lu.\n"
         "-->\n"
+        "\n"
+        "<!-- ↓ écris tes lignes ici ↓ -->\n"
     ),
     SECTION_RULES: (
         "# Règles\n"
@@ -85,7 +90,12 @@ _HEADERS = {
         "  Ce fichier est à toi. Édite-le à la main quand tu veux : toute\n"
         "  ligne commençant par « - » est lue comme une entrée, même sans\n"
         "  date, et rien de ce que tu écris ici n'est réécrit ou supprimé.\n"
+        "\n"
+        "  ATTENTION : écris SOUS ce bloc, pas dedans. Tout ce qui est\n"
+        "  entre <!-- et --> est un commentaire et n'est jamais lu.\n"
         "-->\n"
+        "\n"
+        "<!-- ↓ écris tes lignes ici ↓ -->\n"
     ),
 }
 
@@ -130,14 +140,14 @@ _PREFIX_RE = re.compile(
 )
 
 # An active entry: "- 2026-07-25 · dit : Il s'appelle Hocine."
-_ACTIVE_RE = re.compile(rf"^-\s+{_PREFIX_RE.pattern[1:]}")
+_ACTIVE_RE = re.compile(rf"^\s*-\s+{_PREFIX_RE.pattern[1:]}")
 
 # A retired one. The strikethrough alone is what retires an entry — the
 # header in every core file tells the user exactly that, and striking a
 # line out is the obvious way to drop a belief when editing by hand. The
 # stamp that follows is bookkeeping the assistant adds; a line without it
 # is just as retired.
-_STRUCK_RE = re.compile(r"^-\s+~~(?P<inner>.+?)~~\s*(?P<stamp>.*?)\s*$")
+_STRUCK_RE = re.compile(r"^\s*-\s+~~(?P<inner>.+?)~~\s*(?P<stamp>.*?)\s*$")
 
 # "· retiré le 2026-07-25 : corrigé par l'utilisateur", reason optional.
 _STAMP_RE = re.compile(
@@ -146,7 +156,7 @@ _STAMP_RE = re.compile(
 
 # Anything else starting with a bullet. Hand-written entries land here:
 # the text is whatever follows the bullet, with no date or source.
-_LOOSE_RE = re.compile(r"^-\s+(?P<text>\S.*?)\s*$")
+_LOOSE_RE = re.compile(r"^\s*-\s+(?P<text>\S.*?)\s*$")
 
 
 @dataclass(frozen=True)
@@ -196,6 +206,49 @@ def _flatten(text: str) -> str:
     make the line parse as retired, so it goes too.
     """
     return " ".join(text.replace("~~", "").split())
+
+
+_COMMENT_OPEN = "<!--"
+_COMMENT_CLOSE = "-->"
+
+
+def _strip_comments(lines: list[str]) -> list[str]:
+    """Blank out everything inside HTML comments, keeping line numbering.
+
+    The header each file opens with is one long comment explaining the
+    format, and it is exactly where a person starts typing: they read the
+    instruction and add their lines right underneath it, still inside the
+    comment. Reading those would mean the assistant believing its own
+    examples, so a comment stays a comment. The header now says in as
+    many words where entries go instead.
+
+    An unclosed comment swallows the rest of the file, which is
+    Markdown's own rule: guessing where it was meant to end would read
+    prose as facts.
+    """
+    out: list[str] = []
+    in_comment = False
+    for line in lines:
+        rest = line
+        kept = ""
+        while rest:
+            if in_comment:
+                idx = rest.find(_COMMENT_CLOSE)
+                if idx < 0:
+                    rest = ""
+                    break
+                in_comment = False
+                rest = rest[idx + len(_COMMENT_CLOSE):]
+                continue
+            idx = rest.find(_COMMENT_OPEN)
+            if idx < 0:
+                kept += rest
+                break
+            kept += rest[:idx]
+            in_comment = True
+            rest = rest[idx + len(_COMMENT_OPEN):]
+        out.append(kept)
+    return out
 
 
 def _parse_line(line: str) -> Optional[CoreEntry]:
@@ -301,7 +354,8 @@ class MemoryCore:
 
     def entries(self, section: str) -> list[CoreEntry]:
         """Every entry in the section, active and retired, in file order."""
-        parsed = [_parse_line(line) for line in self._read_lines(section)]
+        lines = _strip_comments(self._read_lines(section))
+        parsed = [_parse_line(line) for line in lines]
         return [entry for entry in parsed if entry is not None]
 
     def active(self, section: str) -> list[CoreEntry]:
@@ -387,7 +441,7 @@ class MemoryCore:
 
         key = _normalise(flat)
         existing = self._read_lines_strict(section)
-        for line in existing:
+        for line in _strip_comments(existing):
             entry = _parse_line(line)
             if entry is None or entry.retired:
                 continue
@@ -432,13 +486,14 @@ class MemoryCore:
         lines = self._read_lines_strict(section)
         stamp = on_date or _today_utc()
 
-        for index, line in enumerate(lines):
+        for index, line in enumerate(_strip_comments(lines)):
             entry = _parse_line(line)
             if entry is None or entry.retired:
                 continue
             if _normalise(entry.text) != key:
                 continue
-            lines[index] = _render_retired(entry, stamp, reason)
+            indent = line[: len(line) - len(line.lstrip())]
+            lines[index] = indent + _render_retired(entry, stamp, reason)
             self._write(section, "\n".join(lines) + "\n")
             debug_log(f"core: retired from {section}: '{entry.text[:60]}'", "memory")
             _notify_core_mutation("retire", section)

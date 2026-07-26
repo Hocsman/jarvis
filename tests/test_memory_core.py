@@ -465,3 +465,71 @@ def test_who_the_user_is_comes_before_what_they_asked_for():
     )
 
     assert out.index("INFORMATION THE USER") < out.index("STANDING INSTRUCTIONS")
+
+
+# ── Where a person actually types ─────────────────────────────────────
+#
+# Found on first real use: the header invites hand-editing but never says
+# where, so the lines went in right under the instructions — inside the
+# HTML comment, and indented. Both reasons to ignore them, and the user
+# had no way to tell.
+
+
+def test_a_bullet_inside_the_explanatory_comment_is_not_an_entry(core):
+    """A comment is a comment. The header's own examples must never
+    become things the assistant believes."""
+    path = core.path_for(SECTION_PROFILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "# Profil\n\n<!--\n  Explication.\n  - je m'appelle Hocine\n-->\n",
+        encoding="utf-8",
+    )
+
+    assert core.active(SECTION_PROFILE) == []
+
+
+def test_an_indented_bullet_outside_a_comment_is_an_entry(core):
+    path = core.path_for(SECTION_PROFILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# Profil\n\n   - Il aime le foot.\n", encoding="utf-8")
+
+    assert [e.text for e in core.active(SECTION_PROFILE)] == ["Il aime le foot."]
+
+
+def test_the_shipped_header_contributes_nothing(core):
+    """Regression guard on the header the assistant writes itself: if a
+    future edit to it ever parses as an entry, the assistant starts
+    believing its own instructions."""
+    core.remember(SECTION_PROFILE, "Il vit à Lyon.", on_date="2026-07-26")
+
+    assert [e.text for e in core.active(SECTION_PROFILE)] == ["Il vit à Lyon."]
+
+
+def test_content_after_a_comment_closes_on_the_same_line_is_read(core):
+    path = core.path_for(SECTION_PROFILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("<!-- note --> - Il aime le foot.\n", encoding="utf-8")
+
+    assert [e.text for e in core.active(SECTION_PROFILE)] == ["Il aime le foot."]
+
+
+def test_an_unclosed_comment_swallows_the_rest_rather_than_guessing(core):
+    """Markdown's own rule. Guessing where the user meant it to end would
+    read half a paragraph of prose as facts."""
+    path = core.path_for(SECTION_PROFILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# Profil\n\n<!--\n- pas une entrée\n", encoding="utf-8")
+
+    assert core.active(SECTION_PROFILE) == []
+
+
+def test_retiring_an_indented_entry_keeps_it_where_the_user_put_it(core):
+    path = core.path_for(SECTION_PROFILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# Profil\n\n   - Il aime le foot.\n", encoding="utf-8")
+
+    core.retire(SECTION_PROFILE, "Il aime le foot.", on_date="2026-07-26")
+
+    line = [l for l in path.read_text(encoding="utf-8").splitlines() if "foot" in l][0]
+    assert line.startswith("   -"), f"indentation lost: {line!r}"
+    assert core.active(SECTION_PROFILE) == []
