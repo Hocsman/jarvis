@@ -590,13 +590,17 @@ def main(smoke_test: bool = False) -> None:
 
         db.close()
 
-        if _warm_profile_graph_listener is not None:
+        # Drop the core write listener so the module registry does not
+        # retain a closure pointing at this run's DialogueMemory after
+        # shutdown — relevant for tests and any embedder that re-runs the
+        # daemon in-process.
+        if _warm_profile_core_listener is not None:
             try:
-                from .memory.graph import unregister_graph_mutation_listener
-                unregister_graph_mutation_listener(_warm_profile_graph_listener)
+                from .memory.core import unregister_core_mutation_listener
+                unregister_core_mutation_listener(_warm_profile_core_listener)
             except Exception:
                 pass
-            _warm_profile_graph_listener = None
+            _warm_profile_core_listener = None
 
         # Reset module-level globals so in-process re-entry is clean.
         _global_dialogue_memory = None

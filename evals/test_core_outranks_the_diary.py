@@ -17,9 +17,8 @@ the more voluminous one, because that is the shape a real memory takes:
 months of diary against one corrected line.
 
 Run:
-    EVAL_LLM_PROVIDER=openai_compatible \
-    EVAL_LLM_BASE_URL=https://openrouter.ai/api/v1 \
-    EVAL_LLM_API_KEY_ENV=OPENROUTER_API_KEY \
+    EVAL_JUDGE_BASE_URL=https://openrouter.ai/api \
+    EVAL_JUDGE_API_KEY_ENV=OPENROUTER_API_KEY \
     EVAL_JUDGE_MODEL=openai/gpt-oss-120b ./scripts/run_evals.sh core_outranks_the_diary
 """
 
