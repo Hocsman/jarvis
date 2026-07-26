@@ -128,13 +128,14 @@ class TestOpenAICompatStartupCheck:
             assert _check_openai_compat_reachable(cfg) is False
 
     def test_unreachable_message_names_url_not_key(self):
+        """The unreachable dialog message mentions the URL but never the API key."""
         from types import SimpleNamespace
-        from desktop_app.app import _openai_compat_unreachable_message
+        from desktop_app.app import _build_unreachable_message
         cfg = SimpleNamespace(llm_base_url="http://localhost:1234/v1", llm_api_key="sk-secret")
-        msg = _openai_compat_unreachable_message(cfg)
+        msg = _build_unreachable_message(cfg)
         assert "http://localhost:1234/v1" in msg
         assert "sk-secret" not in msg
-        assert "Settings" in msg
+        assert "Setup Wizard" in msg
 
 
 class TestGetCrashPaths:
