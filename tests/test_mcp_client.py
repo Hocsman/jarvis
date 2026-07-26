@@ -633,6 +633,7 @@ def test_mcp_client_list_and_invoke(monkeypatch):
     res = asyncio.run(client.invoke_tool_async("fake", "alpha", {"x": 1}))
     assert res["content"] == "called:alpha:{'x': 1}"
     assert res.get("isError") is False
+    assert res["text"] == "called:alpha:{'x': 1}"
 
 
 @pytest.mark.unit

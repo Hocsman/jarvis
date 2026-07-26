@@ -86,6 +86,14 @@ verified there:
 - A failure during subprocess spawn propagates to the caller rather
   than hanging.
 - Distinct servers do not share workers.
+- `timeout_sec` overrides the default for `invoke_tool` and `list_tools`.
+- Invalid `timeout_sec` values (non-finite, non-positive, `bool`, or
+  unparseable) fall back to the default and log a diagnostic.
+- `invoke_tool` accepts an optional per-call ``timeout`` override.
+- `list_tools` accepts an optional per-call ``timeout`` override,
+  mirroring `invoke_tool`.
+- An exception with an empty `str(e)` (e.g. bare `TimeoutError`)
+  produces a diagnosable error message via type-name fallback.
 
 ## Non-goals
 

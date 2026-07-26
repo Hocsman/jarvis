@@ -65,11 +65,29 @@ def _resolve_invoke_timeout(server_cfg: Dict[str, Any]) -> float:
     raw = server_cfg.get("timeout_sec")
     if raw is None:
         return _DEFAULT_INVOKE_TIMEOUT_SEC
+    if isinstance(raw, bool):
+        debug_log(
+            f"mcp server timeout_sec is a boolean ({raw}); "
+            "falling back to default "
+            f"({_DEFAULT_INVOKE_TIMEOUT_SEC}s)",
+            "mcp",
+        )
+        return _DEFAULT_INVOKE_TIMEOUT_SEC
     try:
         value = float(raw)
     except (TypeError, ValueError):
+        debug_log(
+            f"mcp server timeout_sec={raw!r} could not be converted to float; "
+            f"falling back to default ({_DEFAULT_INVOKE_TIMEOUT_SEC}s)",
+            "mcp",
+        )
         return _DEFAULT_INVOKE_TIMEOUT_SEC
     if not math.isfinite(value) or value <= 0:
+        debug_log(
+            f"mcp server timeout_sec={value} is non-finite or non-positive; "
+            f"falling back to default ({_DEFAULT_INVOKE_TIMEOUT_SEC}s)",
+            "mcp",
+        )
         return _DEFAULT_INVOKE_TIMEOUT_SEC
     return value
 
@@ -178,7 +196,8 @@ class _PersistentMCPRuntime:
             return worker.invoke(tool_name, arguments, timeout)
 
     def list_tools(
-        self, server_name: str, server_cfg: Dict[str, Any]
+        self, server_name: str, server_cfg: Dict[str, Any],
+        timeout: Optional[float] = None,
     ) -> Any:
         """List tools on the named server, reusing the persistent session.
 
@@ -188,12 +207,16 @@ class _PersistentMCPRuntime:
         startup cost of spawning the server twice (once for discovery,
         once for the first invocation).
 
-        Honours the same ``timeout_sec`` override as ``invoke()`` — a
-        server whose subprocess is slow to spin up (justifying a longer
+        ``timeout`` bounds the ``list_tools`` round trip (not setup). When
+        not given, it is read from ``server_cfg``'s ``timeout_sec``
+        (falling back to ``_DEFAULT_INVOKE_TIMEOUT_SEC``), mirroring the
+        same override behaviour as ``invoke()`` — a server whose
+        subprocess is slow to spin up (justifying a longer
         ``timeout_sec``) needs that same budget for discovery, not just
         for subsequent tool invocations.
         """
-        timeout = _resolve_invoke_timeout(server_cfg)
+        if timeout is None:
+            timeout = _resolve_invoke_timeout(server_cfg)
         worker = self._get_worker(server_name, server_cfg)
         try:
             return worker.list_tools(timeout)
@@ -322,12 +345,13 @@ class _ServerWorker:
         # resident for the runtime's lifetime — required for stateful
         # servers like chrome-devtools-mcp.
         idle = server_cfg.get("idle_timeout_sec")
-        try:
-            self._idle_timeout: Optional[float] = (
-                float(idle) if idle is not None else None
-            )
-        except (TypeError, ValueError):
+        if idle is None or isinstance(idle, bool):
             self._idle_timeout = None
+        else:
+            try:
+                self._idle_timeout: Optional[float] = float(idle)
+            except (TypeError, ValueError):
+                self._idle_timeout = None
 
     def start(self) -> None:
         async def _setup() -> None:
