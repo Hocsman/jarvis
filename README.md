@@ -175,6 +175,7 @@ Jarvis starts listening automatically — just say "Jarvis" and talk!
 
 | Hardware | VRAM | Model |
 |----------|------|-------|
+| Low-VRAM / CPU | 2GB+ | `qwen3.5:0.8b` |
 | Most users | 8GB+ | `gemma4:e2b` (default) |
 | Better quality | 16GB+ | `gemma4:e4b` |
 | High-end | 24GB+ | `gpt-oss:20b` |

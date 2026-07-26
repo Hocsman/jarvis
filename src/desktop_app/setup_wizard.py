@@ -21,6 +21,11 @@ from enum import Enum, auto
 import requests
 
 from jarvis.config import SUPPORTED_CHAT_MODELS, DEFAULT_CHAT_MODEL
+from jarvis.utils.vram import (
+    detect_total_vram_mb,
+    get_recommended_model_id,
+    format_vram_warning,
+)
 
 
 def is_apple_silicon() -> bool:
@@ -1847,6 +1852,7 @@ class ModelsPage(QWizardPage):
         # Model option buttons
         self._model_buttons: Dict[str, QPushButton] = {}
         self._selected_model: str = DEFAULT_CHAT_MODEL
+        self._detected_vram_mb: Optional[int] = None  # set after detection
 
         for model_id, info in self.MODEL_OPTIONS.items():
             btn = QPushButton()
@@ -1878,6 +1884,27 @@ class ModelsPage(QWizardPage):
             btn.clicked.connect(lambda checked, m=model_id: self._on_model_selected(m))
             self._model_buttons[model_id] = btn
             selection_layout.addWidget(btn)
+
+        # Run VRAM detection and show warning if needed
+        self._detected_vram_mb = detect_total_vram_mb()
+        if self._detected_vram_mb is not None:
+            # Auto-select recommended model when VRAM is below the default threshold
+            recommended = get_recommended_model_id(self._detected_vram_mb)
+            if recommended != self._selected_model and recommended in self._model_buttons:
+                self._selected_model = recommended
+                self._model_buttons[recommended].setChecked(True)
+            self._update_vram_warning(self._selected_model)
+
+        # VRAM warning — hidden until detection runs
+        self.vram_warning = QLabel("")
+        self.vram_warning.setWordWrap(True)
+        self.vram_warning.setStyleSheet(
+            "font-size: 12px; color: #fbbf24; background: rgba(251, 191, 36, 0.1); "
+            "border: 1px solid rgba(251, 191, 36, 0.3); border-radius: 6px; "
+            "padding: 8px 12px;"
+        )
+        self.vram_warning.setVisible(False)
+        selection_layout.addWidget(self.vram_warning)
 
         # VRAM note — explains that VRAM values include the always-loaded fast model
         ram_note = QLabel(
@@ -1966,8 +1993,24 @@ class ModelsPage(QWizardPage):
         for m_id, btn in self._model_buttons.items():
             btn.setChecked(m_id == model_id)
 
+        # Update VRAM warning for the newly selected model
+        self._update_vram_warning(model_id)
+
         # Update the models list display
         self._update_models_display()
+
+    def _update_vram_warning(self, model_id: str) -> None:
+        """Show or hide the VRAM warning based on the selected model."""
+        if self._detected_vram_mb is None:
+            self.vram_warning.setVisible(False)
+            return
+
+        warning = format_vram_warning(self._detected_vram_mb, model_id)
+        if warning:
+            self.vram_warning.setText(warning)
+            self.vram_warning.setVisible(True)
+        else:
+            self.vram_warning.setVisible(False)
 
     def _update_models_display(self):
         """Update the models display based on selected model."""

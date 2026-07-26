@@ -68,7 +68,7 @@ Fields suffixed `?` are written only when non-empty (minimal-config invariant).
 
 **OllamaServerPage** — Start button auto-starts Ollama (macOS: `open -a Ollama`, Windows: hidden `ollama serve`, Linux: terminal `ollama serve`). Verify button re-checks `check_ollama_server()`.
 
-**ModelsPage** — Displays `SUPPORTED_CHAT_MODELS` as selectable cards with VRAM requirements (including always-loaded intent judge overhead). Installs: selected chat model + embedding model (`nomic-embed-text`) + intent judge (`gemma4:e2b`). Progress bar and log output during `ollama pull`. User can skip if models are already present.
+**ModelsPage** — Displays `SUPPORTED_CHAT_MODELS` as selectable cards with VRAM requirements (including always-loaded intent judge overhead). On open, runs VRAM detection via `detect_total_vram_mb()` (DXGI on Windows, `nvidia-smi` elsewhere). If VRAM is below the default model's 8 GB requirement, a warning banner appears with a recommendation to switch to ``qwen3.5:0.8b`` (the low-VRAM option), and the selection auto-switches to that model. The warning updates live as the user picks a different model. Installs: selected chat model + embedding model (`nomic-embed-text`) + intent judge (`gemma4:e2b`). Progress bar and log output during `ollama pull`. User can skip if models are already present.
 
 **WhisperSetupPage** — Language mode toggle (multilingual vs English-only), then model size selection from hardcoded options. Apple Silicon: additional FFmpeg and MLX Whisper installation buttons.
 
@@ -93,6 +93,8 @@ Fields suffixed `?` are written only when non-empty (minimal-config invariant).
 | `check_installed_models()` | `list[str]` | Models already pulled |
 | `check_ollama_status()` | `OllamaStatus` | Combined CLI + server + models |
 | `check_mlx_whisper_status()` | `MLXWhisperStatus` | Apple Silicon Whisper readiness |
+| `detect_total_vram_mb()` | `Optional[int]` | GPU VRAM in MB via DXGI (Windows) or `nvidia-smi` |
+| `get_recommended_model_id(vram_mb)` | `str` | Best model ID for the given VRAM (low-VRAM models win below 8 GB) |
 
 ## Threading
 
