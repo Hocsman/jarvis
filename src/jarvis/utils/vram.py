@@ -308,7 +308,7 @@ def format_vram_warning(total_vram_mb: Optional[int],
     if total_vram_mb is None:
         return None  # can't judge
 
-    required = _required_vram_mb(model_id)
+    required = required_vram_mb(model_id)
     if required is None:
         return None  # unknown model — no warning
 
@@ -329,8 +329,10 @@ def format_vram_warning(total_vram_mb: Optional[int],
     )
 
 
-def _required_vram_mb(model_id: str) -> Optional[int]:
+def required_vram_mb(model_id: str) -> Optional[int]:
     """Look up the VRAM requirement for a model ID.
+
+    Returns MB or ``None`` for unknown models.
 
     The low-VRAM model is already included in ``_MODEL_VRAM_TABLE``
     (derived from ``SUPPORTED_CHAT_MODELS``), so the loop catches

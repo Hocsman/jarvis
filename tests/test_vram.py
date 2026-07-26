@@ -15,7 +15,7 @@ from jarvis.utils.vram import (
     detect_total_vram_mb,
     get_recommended_model_id,
     format_vram_warning,
-    _required_vram_mb,
+    required_vram_mb,
     _MODEL_VRAM_TABLE,
     _LOW_VRAM_OPTION,
 )
@@ -93,15 +93,15 @@ class TestRequiredVRAM:
 
     def test_required_vram_for_known_model(self):
         """gemma4:e2b should require 8192 MB."""
-        assert _required_vram_mb("gemma4:e2b") == 8192
+        assert required_vram_mb("gemma4:e2b") == 8192
 
     def test_required_vram_for_low_vram_model(self):
         """qwen3.5:0.8b should require 2048 MB."""
-        assert _required_vram_mb(_LOW_VRAM_OPTION[0]) == 2048
+        assert required_vram_mb(_LOW_VRAM_OPTION[0]) == 2048
 
     def test_required_vram_for_unknown_model(self):
         """Unknown model should return None."""
-        assert _required_vram_mb("nonexistent:99b") is None
+        assert required_vram_mb("nonexistent:99b") is None
 
 
 class TestDetectionMocked:
