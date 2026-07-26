@@ -1513,11 +1513,11 @@ class JarvisSystemTray:
         wizard = SetupWizard()
         result = wizard.exec()
 
-        # Restart daemon after wizard completes (finished or cancelled)
-        # This ensures any config changes (model selection, etc.) are applied
-        # For first-time users: daemon wasn't running, so we start it
-        # For existing users: restart to apply changes
-        if result == QWizard.DialogCode.Accepted or was_listening:
+        # Restart daemon only when the wizard was completed.
+        # Cancelling means the user didn't finalise their setup, so
+        # we leave the daemon stopped rather than starting with a
+        # potentially incomplete configuration.
+        if result == QWizard.DialogCode.Accepted:
             self.start_daemon()
 
     def show_settings(self) -> None:
