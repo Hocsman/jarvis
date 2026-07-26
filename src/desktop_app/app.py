@@ -2769,6 +2769,24 @@ def main() -> int:
             else:
                 print("✅ All required models are installed", flush=True)
 
+        # VRAM check: warn if the configured chat model exceeds available GPU memory.
+        # Runs on Windows (DXGI) and any platform with nvidia-smi.
+        if _chat_on_ollama:
+            try:
+                from jarvis.utils.vram import detect_total_vram_mb, format_vram_warning
+                _vram_mb = detect_total_vram_mb()
+                if _vram_mb is not None:
+                    _chat_model = getattr(_provider_cfg, "llm_chat_model", "") if _provider_cfg else ""
+                    if not _chat_model:
+                        _chat_model = getattr(cfg, "ollama_chat_model", "gemma4:e2b")
+                    _warn = format_vram_warning(_vram_mb, _chat_model)
+                    if _warn:
+                        print(f"  {_warn}", flush=True)
+                        splash.set_status("⚠️ Low VRAM detected — consider a smaller model")
+                        app.processEvents()
+            except Exception as exc:
+                debug_log(f"Startup VRAM check failed: {exc}", "vram")
+
         if _chat_on_ollama:
             # Check if the user is on an unsupported chat model. Only meaningful
             # on the Ollama path — an OpenAI-compatible model name is not in the
