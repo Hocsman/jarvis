@@ -543,7 +543,6 @@ class TestProviderChoicePage:
         wizard = MagicMock()
         wizard.openai_compat_page_id = 42
         page.wizard = MagicMock(return_value=wizard)
-        # isinstance check in nextId: make wizard look like SetupWizard
         with patch("desktop_app.setup_wizard.SetupWizard", MagicMock):
             assert page.nextId() == 42
 
@@ -622,9 +621,8 @@ class TestProviderChoicePage:
         finally:
             cfg_path.unlink(missing_ok=True)
 
-    def test_nextid_ollama_routes_through_welcome_status(self):
-        """Ollama selection goes to the Welcome/status page (which surfaces
-        Ollama readiness only after the user has chosen Ollama)."""
+    def test_nextid_ollama_routes_to_welcome(self):
+        """Ollama selection goes to the Welcome/status page."""
         page = ProviderChoicePage.__new__(ProviderChoicePage)
         page._selected = "ollama"
         wizard = MagicMock()
@@ -633,9 +631,9 @@ class TestProviderChoicePage:
         with patch("desktop_app.setup_wizard.SetupWizard", MagicMock):
             assert page.nextId() == 5
 
-    def test_wizard_starts_on_provider_choice(self, qapp):
-        """Ollama is optional, so the wizard's first step is the provider
-        choice — not the Ollama-centric Welcome/status page."""
+    def test_wizard_starts_on_whisper(self, qapp):
+        """Whisper setup is the first step — it has no LLM dependencies
+        and informs VRAM calculations on the Models page."""
         import tempfile
         from pathlib import Path
         from desktop_app.setup_wizard import SetupWizard
@@ -645,7 +643,7 @@ class TestProviderChoicePage:
         try:
             with patch("jarvis.config.default_config_path", return_value=cfg_path):
                 wiz = SetupWizard()
-            assert wiz.startId() == wiz.provider_choice_page_id
+            assert wiz.startId() == wiz.mlx_whisper_page_id
         finally:
             cfg_path.unlink(missing_ok=True)
 
@@ -724,14 +722,14 @@ class TestOpenAICompatiblePage:
 
     def test_nextid_skips_ollama_pages(self):
         """After configuring the remote provider, the wizard jumps straight
-        to Whisper setup — the Ollama install/server/models pages are
+        to dictation — the Ollama install/server/models pages are
         irrelevant."""
         page = OpenAICompatiblePage.__new__(OpenAICompatiblePage)
         wizard = MagicMock()
-        wizard.mlx_whisper_page_id = 7
+        wizard.dictation_page_id = 8
         page.wizard = MagicMock(return_value=wizard)
         with patch("desktop_app.setup_wizard.SetupWizard", MagicMock):
-            assert page.nextId() == 7
+            assert page.nextId() == 8
 
     def test_initialize_page_prefills_from_existing_config(self, qapp):
         """Re-running the wizard restores the user's saved connection

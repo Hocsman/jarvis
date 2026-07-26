@@ -540,12 +540,12 @@ class SetupWizard(QWizard):
         self.complete_page = CompletePage(self)
 
         self.welcome_page_id = self.addPage(self.welcome_page)
+        self.mlx_whisper_page_id = self.addPage(self.mlx_whisper_page)
         self.provider_choice_page_id = self.addPage(self.provider_choice_page)
         self.openai_compat_page_id = self.addPage(self.openai_compat_page)
         self.ollama_install_page_id = self.addPage(self.ollama_install_page)
         self.ollama_server_page_id = self.addPage(self.ollama_server_page)
         self.models_page_id = self.addPage(self.models_page)
-        self.mlx_whisper_page_id = self.addPage(self.mlx_whisper_page)
         self.dictation_page_id = self.addPage(self.dictation_page)
         self.mcp_page_id = self.addPage(self.mcp_page)
         self.search_providers_page_id = self.addPage(self.search_providers_page)
@@ -556,7 +556,7 @@ class SetupWizard(QWizard):
         # the wizard must ask which runtime the user wants before running any
         # Ollama-specific checks. The Welcome/status page and the Ollama
         # install/server/models pages are only reached on the Ollama branch.
-        self.setStartId(self.provider_choice_page_id)
+        self.setStartId(self.mlx_whisper_page_id)
 
         # Custom button labels
         self.setButtonText(QWizard.WizardButton.NextButton, "Next →")
@@ -1004,9 +1004,6 @@ class ProviderChoicePage(QWizardPage):
             return super().nextId()
         if self._selected == "openai_compatible":
             return wizard.openai_compat_page_id
-        # Ollama branch: show the Welcome/status dashboard first (it populates
-        # the detected Ollama status), which then leads into install/server/
-        # models. Status is only surfaced once the user has chosen Ollama.
         return wizard.welcome_page_id
 
 
@@ -1177,6 +1174,7 @@ class OpenAICompatiblePage(QWizardPage):
         form.addWidget(self._fast_label)
         self._fast_model_combo = QComboBox()
         self._fast_model_combo.setEditable(True)
+        self._fast_model_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._fast_model_combo.lineEdit().setPlaceholderText(
             "leave empty to use the chat model")
         self._fast_model_combo.currentTextChanged.connect(
@@ -1231,6 +1229,7 @@ class OpenAICompatiblePage(QWizardPage):
         form.addWidget(label)
         combo = QComboBox()
         combo.setEditable(True)  # power users can type a model the listing omits
+        combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         combo.lineEdit().setPlaceholderText(placeholder)
         combo.currentTextChanged.connect(lambda *_: self.completeChanged.emit())
         form.addWidget(combo)
@@ -1427,6 +1426,12 @@ class OpenAICompatiblePage(QWizardPage):
         # Only auto-discover when the user hasn't already saved a custom URL.
         if not saved_url:
             self._start_discovery()
+        # Force the wizard to recalculate its height for this page's content.
+        # Without this, Qt compresses widgets to fit the wizard's current size
+        # instead of growing the window (see CLAUDE.md Qt Layout section).
+        wizard = self.wizard()
+        if wizard:
+            QTimer.singleShot(0, wizard.adjustSize)
 
     def _start_discovery(self):
         self._connect_status.setText("🔍 Looking for local servers…")
@@ -1504,7 +1509,7 @@ class OpenAICompatiblePage(QWizardPage):
 
             # Save fast model: when linked it's left empty (defaults to chat)
             # Save fast model: write only when unlinked and non-empty
-            is_linked = True  # safe default (backward compat for __new__)
+            is_linked = True  # safe default (backward compat for __new__-constructed pages)
             try:
                 is_linked = self._openai_linked
             except Exception:
@@ -1520,7 +1525,7 @@ class OpenAICompatiblePage(QWizardPage):
     def nextId(self) -> int:
         wizard = self.wizard()
         if isinstance(wizard, SetupWizard):
-            return wizard.mlx_whisper_page_id
+            return wizard.dictation_page_id
         return super().nextId()
 
 
@@ -1881,7 +1886,7 @@ class ModelsPage(QWizardPage):
 
         Reads the saved whisper model from config (set by WhisperSetupPage
         which now runs before this page).  Falls back to ``_WHISPER_VRAM_MB``
-        (2048 MB = whisper small) when unavailable.
+        (2048 MB = whisper small) when unavailable.
         """
         try:
             cfg = load_settings()
@@ -1922,7 +1927,7 @@ class ModelsPage(QWizardPage):
         layout.addWidget(subtitle)
         layout.addSpacing(8)
 
-        # Link toggle (off by default -- separate models recommended)
+        # Link toggle (off by default — separate models recommended)
         self._link_cb = QCheckBox("\u2699\ufe0f Use same model for both roles")
         self._link_cb.setChecked(False)
         self._link_cb.setStyleSheet("font-size: 14px; color: #e4e4e7; padding: 4px 0;")
@@ -1947,15 +1952,16 @@ class ModelsPage(QWizardPage):
         card_layout.setSpacing(10)
 
         # Chat model dropdown
-        chat_label = QLabel("\U0001f3af Chat Model (conversations)")
+        chat_label = QLabel("🎯 Chat Model (conversations)")
         chat_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #fbbf24;")
         card_layout.addWidget(chat_label)
 
         self._chat_combo = QComboBox()
         self._chat_combo.setMinimumHeight(36)
+        self._chat_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         for mid in self._ALL_MODELS:
             info = self._ALL_MODELS[mid]
-            self._chat_combo.addItem(f"{info['name']}  \u2022  VRAM: {info['vram']}", mid)
+            self._chat_combo.addItem(f"{info['name']}  •  VRAM: {info['vram']}", mid)
         self._chat_combo.setCurrentIndex(self._chat_combo.findData(self._chat_model))
         self._chat_combo.currentIndexChanged.connect(self._on_chat_combo_changed)
         card_layout.addWidget(self._chat_combo)
@@ -1963,15 +1969,16 @@ class ModelsPage(QWizardPage):
         card_layout.addSpacing(8)
 
         # Fast model dropdown
-        fast_label = QLabel("\u26a1 Fast Model (voice intent, tool routing)")
+        fast_label = QLabel("⚡ Fast Model (voice intent, tool routing)")
         fast_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #a78bfa;")
         card_layout.addWidget(fast_label)
 
         self._fast_combo = QComboBox()
         self._fast_combo.setMinimumHeight(36)
+        self._fast_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         for mid in self._FAST_MODEL_IDS:
             info = self._ALL_MODELS[mid]
-            self._fast_combo.addItem(f"{info['name']}  \u2022  VRAM: {info['vram']}", mid)
+            self._fast_combo.addItem(f"{info['name']}  •  VRAM: {info['vram']}", mid)
         self._fast_combo.setCurrentIndex(self._fast_combo.findData(self._fast_model))
         self._fast_combo.currentIndexChanged.connect(self._on_fast_combo_changed)
         card_layout.addWidget(self._fast_combo)
@@ -2067,15 +2074,15 @@ class ModelsPage(QWizardPage):
         self._update_models_display()
 
     def _build_linked_view(self):
-        """No-op -- kept for backward compat. Selection uses dropdowns."""
+        """No-op — kept for backward compat. Selection uses dropdowns."""
         pass
 
     def _build_unlinked_view(self):
-        """No-op -- kept for backward compat. Selection uses dropdowns."""
+        """No-op — kept for backward compat. Selection uses dropdowns."""
         pass
 
     def _make_button(self, info, compact=False):
-        """No-op -- kept for backward compat. Selection uses dropdowns."""
+        """No-op — kept for backward compat. Selection uses dropdowns."""
         pass
 
     def _on_link_toggled(self, linked):
@@ -2087,7 +2094,7 @@ class ModelsPage(QWizardPage):
         self._update_models_display()
 
     def _on_linked_selected(self, mid):
-        """No-op -- selection uses dropdowns."""
+        """No-op — selection uses dropdowns."""
         pass
 
     def _on_fast_combo_changed(self, idx):
@@ -2111,6 +2118,9 @@ class ModelsPage(QWizardPage):
             self._fast_model = mid
             self._fast_combo.setCurrentIndex(self._fast_combo.findData(mid))
         else:
+            # Auto-downgrade: if fast model needs more VRAM than chat model,
+            # or the total (chat + fast + embed + whisper) exceeds our GPU,
+            # pick the smallest fast-suitable model that fits.
             overhead = self._EMBED_VRAM_MB + self._whisper_vram_mb()
             cv = required_vram_mb(mid) or 0
             fv = required_vram_mb(self._fast_model) or 0
@@ -2149,7 +2159,7 @@ class ModelsPage(QWizardPage):
         cv = required_vram_mb(self._chat_model) or 0
         if self._linked or self._fast_model == self._chat_model:
             total = cv + overhead
-            detail = f"(chat {cv // 1024} GB + embed+whisper {overhead // 1024} GB -- shared VRAM)"
+            detail = f"(chat {cv // 1024} GB + embed+whisper {overhead // 1024} GB — shared VRAM)"
         else:
             total = fv + cv + overhead
             detail = (f"(fast {fv // 1024} GB + chat {cv // 1024} GB "
@@ -2257,12 +2267,17 @@ class ModelsPage(QWizardPage):
                 if rc <= cv and fits_vram:
                     self._fast_model = c
                     break
-        # Default to unlinked
+        # Default to unlinked — separate fast model is the recommended layout
+        # even when both happen to be the same model ID.
         self._linked = False
         self._link_cb.setChecked(False)
         self._sync_combo_states()
         self._refresh_vram_display()
         self._update_models_display()
+        # Force the wizard to recalculate its height for this page's content.
+        wiz = self.wizard()
+        if wiz:
+            QTimer.singleShot(0, wiz.adjustSize)
 
     def _install_models(self):
         if not self._save_model_to_config():
@@ -2338,7 +2353,7 @@ class ModelsPage(QWizardPage):
     def nextId(self):
         w = self.wizard()
         if isinstance(w, SetupWizard):
-            return w.mlx_whisper_page_id
+            return w.dictation_page_id
         return super().nextId()
 
     def _set_wizard_height(self, height):
@@ -3013,10 +3028,11 @@ class WhisperSetupPage(QWizardPage):
         return True
 
     def nextId(self) -> int:
-        """Go to dictation setup next."""
+        """Go to Provider Choice so the user can confirm or change
+        their LLM runtime before continuing."""
         wizard = self.wizard()
         if isinstance(wizard, SetupWizard):
-            return wizard.dictation_page_id
+            return wizard.provider_choice_page_id
         return super().nextId()
 
 
