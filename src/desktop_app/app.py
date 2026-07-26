@@ -2339,6 +2339,19 @@ def _smoke_test_main() -> int:
     import multiprocessing
     multiprocessing.freeze_support()
 
+    # Ensure stdout/stderr use UTF-8.  PyInstaller GUI-subsystem executables
+    # (console=False) on Windows default to the ANSI code page when stdout is
+    # redirected, which cannot encode emoji and crashes on the first ✅ print.
+    if sys.platform == 'win32':
+        try:
+            import io
+            if hasattr(sys.stdout, 'buffer') and hasattr(sys.stdout.buffer, 'write'):
+                sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+            if hasattr(sys.stderr, 'buffer') and hasattr(sys.stderr.buffer, 'write'):
+                sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+        except Exception:
+            pass
+
     # Offscreen rendering when no display is available (Linux CI).
     if sys.platform == 'linux' and not os.environ.get('DISPLAY'):
         os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
