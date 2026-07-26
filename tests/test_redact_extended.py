@@ -84,3 +84,46 @@ class TestKeywordAnchoredCredentials:
         out = redact("oauth_token=qwertyuiop")
         assert "qwertyuiop" not in out
         assert "oauth_token=[REDACTED]" in out
+
+
+# ── Recognising our own placeholders ──────────────────────────────────
+#
+# Anything that stores user text long-term needs to tell a real value
+# from the marker left where one used to be. Writing "[REDACTED_EMAIL]"
+# into a memory file keeps nothing useful and tells the user their email
+# was saved.
+
+class TestContainsRedactionPlaceholder:
+
+    def test_plain_text_carries_no_placeholder(self):
+        from src.jarvis.utils.redact import contains_redaction_placeholder
+
+        assert contains_redaction_placeholder("Il vit à Lyon.") is False
+
+    def test_a_labelled_placeholder_is_recognised(self):
+        from src.jarvis.utils.redact import contains_redaction_placeholder, redact
+
+        scrubbed = redact("Son email est hocsman92@gmail.com")
+        assert contains_redaction_placeholder(scrubbed) is True
+
+    def test_a_bare_placeholder_is_recognised(self):
+        from src.jarvis.utils.redact import contains_redaction_placeholder
+
+        assert contains_redaction_placeholder("password=[REDACTED]") is True
+
+    def test_every_label_the_scrubber_emits_is_recognised(self):
+        """Asserted against the rules themselves rather than a copied list,
+        so a new pattern cannot add a label this misses."""
+        from src.jarvis.utils import redact as redact_mod
+
+        for _pattern, replacement in redact_mod._REDACTION_RULES:
+            if "[REDACTED" in replacement:
+                assert redact_mod.contains_redaction_placeholder(replacement), (
+                    f"{replacement!r} is emitted by the scrubber but not recognised"
+                )
+
+    def test_empty_and_none_are_safe(self):
+        from src.jarvis.utils.redact import contains_redaction_placeholder
+
+        assert contains_redaction_placeholder("") is False
+        assert contains_redaction_placeholder(None) is False

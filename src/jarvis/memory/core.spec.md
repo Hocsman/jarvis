@@ -33,6 +33,7 @@ The entries are in the model's context, so it can quote the one the user means. 
 - **Only what the user said.** The entry text restates the user's own statement. The assistant's inferences, summaries of its own advice, and observations about the user's mood or habits are not eligible.
 - **Every entry is dated and attributed.** A line records when it was learnt and how (`dit` for a plain statement, `corrigé` for a correction).
 - **Nothing is erased silently.** Superseding an entry retires it: the line stays in the file, struck through, with the date and reason. The user can always see what the assistant used to believe and when it stopped. Deleting a line outright is the user's prerogative, done by hand in the file, and nothing puts it back.
+- **Sensitive values never land here.** User text is redacted before it reaches the model, so "remember my email is x@y.com" arrives at the tool as a placeholder. Storing it would keep nothing worth having while telling the user their email was saved, which is worse than refusing. `rememberTool` refuses any text still carrying a redaction marker and tells the model to say so plainly.
 - **Duplicates are no-ops.** Remembering text already present as an active entry rewrites nothing and reports back that it was already known.
 - **Hand edits survive.** Any line the parser does not recognise is preserved verbatim on rewrite. The file belongs to the user; the parser is a guest in it.
 
