@@ -1163,10 +1163,10 @@ class OpenAICompatiblePage(QWizardPage):
             "leave empty to skip embeddings (memory uses keyword search)")
 
         # Fast model link toggle + selector
-        self._openai_linked = True
+        self._openai_linked = False
         self._openai_link_cb = QCheckBox(
             "\u2699\ufe0f Use same model for fast tasks (voice, routing)")
-        self._openai_link_cb.setChecked(True)
+        self._openai_link_cb.setChecked(False)
         self._openai_link_cb.setStyleSheet("font-size: 13px; color: #e4e4e7; padding: 4px 0;")
         self._openai_link_cb.toggled.connect(self._on_openai_link_toggled)
         form.addWidget(self._openai_link_cb)
@@ -1182,8 +1182,8 @@ class OpenAICompatiblePage(QWizardPage):
         self._fast_model_combo.currentTextChanged.connect(
             lambda *_: self.completeChanged.emit())
         form.addWidget(self._fast_model_combo)
-        self._fast_label.setVisible(False)
-        self._fast_model_combo.setVisible(False)
+        self._fast_label.setVisible(True)
+        self._fast_model_combo.setVisible(True)
 
         # Shown only when the probe finds the server can't embed: a one-click
         # way to keep full semantic memory by routing embeddings to Ollama.
@@ -1270,6 +1270,15 @@ class OpenAICompatiblePage(QWizardPage):
         embed = [m for m in models if "embed" in m.lower()]
         chat = [m for m in models if "embed" not in m.lower()]
         return chat, embed
+
+    @staticmethod
+    def _preferred_fast_default(models: list) -> str:
+        """Return ``gemma4:e2b`` when it appears in the model list, otherwise
+        empty string (user picks or types)."""
+        for m in models:
+            if m == "gemma4:e2b":
+                return m
+        return ""
 
     def _on_preset_changed(self, idx: int):
         # idx 0 is the placeholder and the last item is "Other / custom"; the
@@ -1379,7 +1388,7 @@ class OpenAICompatiblePage(QWizardPage):
         self._fill_combo(self._embed_model_combo, embed_models or models, blank=True,
                          default=(embed_models[0] if embed_models else ""))
         self._fill_combo(self._fast_model_combo, models, blank=True,
-                         default="")
+                         default=self._preferred_fast_default(models))
 
     def _fill_combo(self, combo, items, *, blank: bool, default: str):
         current = (combo.currentText() or "").strip()
@@ -1494,7 +1503,13 @@ class OpenAICompatiblePage(QWizardPage):
                     config.pop("embedding_model", None)
 
             # Save fast model: when linked it's left empty (defaults to chat)
-            config["fast_model"] = fast_model if (not self._openai_linked and fast_model) else ""
+            # Save fast model: write only when unlinked and non-empty
+            is_linked = True  # safe default (backward compat for __new__)
+            try:
+                is_linked = self._openai_linked
+            except Exception:
+                pass
+            config["fast_model"] = fast_model if (not is_linked and fast_model) else ""
 
             config_path.parent.mkdir(parents=True, exist_ok=True)
             _save_json(config_path, config)
@@ -1851,8 +1866,31 @@ class OllamaServerPage(QWizardPage):
 class ModelsPage(QWizardPage):
     """Page for installing required AI models — dual-category (fast + chat)."""
 
-    _ALL_MODELS = SUPPORTED_CHAT_MODELS
+    MODEL_OPTIONS = SUPPORTED_CHAT_MODELS
+    _ALL_MODELS = MODEL_OPTIONS
     _FAST_MODEL_IDS = ["qwen3.5:0.8b", "gemma4:e2b"]
+
+    # VRAM overhead for always-running companion models (MB).
+    # nomic-embed-text: ~1 GB for ~1.5K dim semantic search.
+    # Whisper small: ~2 GB (the wizard balance default).
+    _EMBED_VRAM_MB = 1024
+    _WHISPER_VRAM_MB = 2048
+
+    def _whisper_vram_mb(self) -> int:
+        """VRAM in MB for the currently-configured whisper model.
+
+        Reads the saved whisper model from config (set by WhisperSetupPage
+        which now runs before this page).  Falls back to ``_WHISPER_VRAM_MB``
+        (2048 MB = whisper small) when unavailable.
+        """
+        try:
+            cfg = load_settings()
+            model_id = getattr(cfg, "whisper_model", None)
+            if model_id:
+                return WhisperSetupPage.get_whisper_vram_mb(model_id)
+        except Exception:
+            pass
+        return self._WHISPER_VRAM_MB
 
     _WIZARD_HEIGHT_BASE = 875
     _WIZARD_HEIGHT_WITH_BUTTONS = 955
@@ -1861,13 +1899,13 @@ class ModelsPage(QWizardPage):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setTitle("")
-        self._linked = True
+        self._linked = False
         self._chat_model = DEFAULT_CHAT_MODEL
-        self._fast_model = DEFAULT_CHAT_MODEL
+        self._fast_model = "gemma4:e2b"
         self._detected_vram_mb = None
 
         layout = QVBoxLayout()
-        layout.setSpacing(20)
+        layout.setSpacing(16)
         layout.setContentsMargins(40, 40, 40, 40)
 
         title = QLabel("🧠 Install AI Models")
@@ -1876,39 +1914,69 @@ class ModelsPage(QWizardPage):
 
         subtitle = QLabel(
             "Jarvis needs a chat model (conversations) and a fast model "
-            "(voice intent, tool routing). By default both use the same model."
+            "(voice intent, tool routing). Pick them separately for "
+            "best VRAM usage."
         )
         subtitle.setObjectName("subtitle")
         subtitle.setWordWrap(True)
         layout.addWidget(subtitle)
-        layout.addSpacing(12)
+        layout.addSpacing(8)
 
-        # Link toggle
-        self._link_cb = QCheckBox("⚙️ Link fast and chat models (recommended)")
-        self._link_cb.setChecked(True)
+        # Link toggle (off by default -- separate models recommended)
+        self._link_cb = QCheckBox("\u2699\ufe0f Use same model for both roles")
+        self._link_cb.setChecked(False)
         self._link_cb.setStyleSheet("font-size: 14px; color: #e4e4e7; padding: 4px 0;")
         self._link_cb.toggled.connect(self._on_link_toggled)
         layout.addWidget(self._link_cb)
 
         hint = QLabel(
-            "When linked, one model handles both roles (shares VRAM). "
-            "Unlink to pick separate models."
+            "When linked, one model handles both chat and fast tasks "
+            "(shares VRAM). Separate models let you pick a lightweight "
+            "fast model."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("font-size: 11px; color: #71717a; padding: 0 0 0 24px;")
         layout.addWidget(hint)
         layout.addSpacing(8)
 
-        # Stack: linked vs unlinked view
-        self._stack = QStackedWidget()
-        self._stack.setMinimumHeight(300)
-        self._linked_page = QWidget()
-        self._build_linked_view()
-        self._stack.addWidget(self._linked_page)
-        self._unlinked_page = QWidget()
-        self._build_unlinked_view()
-        self._stack.addWidget(self._unlinked_page)
-        layout.addWidget(self._stack)
+        # Model selection card with dropdowns
+        selection_card = QFrame()
+        selection_card.setObjectName("card")
+        card_layout = QVBoxLayout(selection_card)
+        card_layout.setContentsMargins(24, 20, 24, 20)
+        card_layout.setSpacing(10)
+
+        # Chat model dropdown
+        chat_label = QLabel("\U0001f3af Chat Model (conversations)")
+        chat_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #fbbf24;")
+        card_layout.addWidget(chat_label)
+
+        self._chat_combo = QComboBox()
+        self._chat_combo.setMinimumHeight(36)
+        for mid in self._ALL_MODELS:
+            info = self._ALL_MODELS[mid]
+            self._chat_combo.addItem(f"{info['name']}  \u2022  VRAM: {info['vram']}", mid)
+        self._chat_combo.setCurrentIndex(self._chat_combo.findData(self._chat_model))
+        self._chat_combo.currentIndexChanged.connect(self._on_chat_combo_changed)
+        card_layout.addWidget(self._chat_combo)
+
+        card_layout.addSpacing(8)
+
+        # Fast model dropdown
+        fast_label = QLabel("\u26a1 Fast Model (voice intent, tool routing)")
+        fast_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #a78bfa;")
+        card_layout.addWidget(fast_label)
+
+        self._fast_combo = QComboBox()
+        self._fast_combo.setMinimumHeight(36)
+        for mid in self._FAST_MODEL_IDS:
+            info = self._ALL_MODELS[mid]
+            self._fast_combo.addItem(f"{info['name']}  \u2022  VRAM: {info['vram']}", mid)
+        self._fast_combo.setCurrentIndex(self._fast_combo.findData(self._fast_model))
+        self._fast_combo.currentIndexChanged.connect(self._on_fast_combo_changed)
+        card_layout.addWidget(self._fast_combo)
+
+        layout.addWidget(selection_card)
 
         # VRAM bar
         self._detected_vram_mb = detect_total_vram_mb()
@@ -1978,154 +2046,114 @@ class ModelsPage(QWizardPage):
         self._worker = None
 
         if self._detected_vram_mb is not None:
-            rec = get_recommended_model_id(self._detected_vram_mb)
+            # Account for companion-model overhead so the recommendation
+            # leaves room for embeddings + whisper alongside the chat model.
+            overhead = self._EMBED_VRAM_MB + self._whisper_vram_mb()
+            usable_mb = self._detected_vram_mb - overhead
+            rec = get_recommended_model_id(usable_mb if usable_mb > 0 else None)
             if rec in self._ALL_MODELS:
                 self._chat_model = rec
-                self._fast_model = rec
-                self._sync_button_states()
+                # Fast model stays gemma4:e2b unless VRAM constrains it
+                cv = required_vram_mb(rec) or 0
+                fv = required_vram_mb(self._fast_model) or 0
+                if cv + fv + overhead > self._detected_vram_mb:
+                    for c in self._FAST_MODEL_IDS:
+                        rc = required_vram_mb(c) or 0
+                        if rc <= cv and cv + rc + overhead <= self._detected_vram_mb:
+                            self._fast_model = c
+                            break
+                self._sync_combo_states()
         self._refresh_vram_display()
         self._update_models_display()
 
     def _build_linked_view(self):
-        layout = QVBoxLayout(self._linked_page)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(12)
-        card = QFrame()
-        card.setObjectName("card")
-        card.setStyleSheet(card.styleSheet() + "QFrame#card { padding: 0px; }")
-        cl = QVBoxLayout(card)
-        cl.setContentsMargins(24, 24, 24, 24)
-        cl.setSpacing(12)
-        st = QLabel("🎯 Model (used for chat + fast)")
-        st.setStyleSheet("font-size: 16px; font-weight: bold; color: #fbbf24;")
-        cl.addWidget(st)
-        self._linked_buttons = {}
-        for mid, info in self._ALL_MODELS.items():
-            btn = self._make_button(info)
-            btn.clicked.connect(lambda ch, m=mid: self._on_linked_selected(m))
-            self._linked_buttons[mid] = btn
-            cl.addWidget(btn)
-        layout.addWidget(card)
-        layout.addStretch()
+        """No-op -- kept for backward compat. Selection uses dropdowns."""
+        pass
 
     def _build_unlinked_view(self):
-        layout = QVBoxLayout(self._unlinked_page)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(12)
-        # Fast card
-        fc = QFrame()
-        fc.setObjectName("card")
-        fc.setStyleSheet(fc.styleSheet() + "QFrame#card { padding: 0px; }")
-        fcl = QVBoxLayout(fc)
-        fcl.setContentsMargins(24, 20, 24, 20)
-        fcl.setSpacing(10)
-        ft = QLabel("⚡ Fast Model (voice intent, tool routing)")
-        ft.setStyleSheet("font-size: 15px; font-weight: bold; color: #a78bfa;")
-        fcl.addWidget(ft)
-        self._fast_buttons = {}
-        for mid in self._FAST_MODEL_IDS:
-            if mid not in self._ALL_MODELS:
-                continue
-            info = self._ALL_MODELS[mid]
-            btn = self._make_button(info, compact=True)
-            btn.clicked.connect(lambda ch, m=mid: self._on_fast_selected(m))
-            self._fast_buttons[mid] = btn
-            fcl.addWidget(btn)
-        layout.addWidget(fc)
-        # Chat card
-        cc = QFrame()
-        cc.setObjectName("card")
-        cc.setStyleSheet(cc.styleSheet() + "QFrame#card { padding: 0px; }")
-        ccl = QVBoxLayout(cc)
-        ccl.setContentsMargins(24, 20, 24, 20)
-        ccl.setSpacing(10)
-        ct = QLabel("🎯 Chat Model (conversations)")
-        ct.setStyleSheet("font-size: 15px; font-weight: bold; color: #fbbf24;")
-        ccl.addWidget(ct)
-        self._chat_buttons = {}
-        for mid, info in self._ALL_MODELS.items():
-            btn = self._make_button(info, compact=True)
-            btn.clicked.connect(lambda ch, m=mid: self._on_chat_selected(m))
-            self._chat_buttons[mid] = btn
-            ccl.addWidget(btn)
-        layout.addWidget(cc)
-        layout.addStretch()
+        """No-op -- kept for backward compat. Selection uses dropdowns."""
+        pass
 
     def _make_button(self, info, compact=False):
-        btn = QPushButton()
-        btn.setCheckable(True)
-        h = 56 if compact else 72
-        btn.setMinimumHeight(h)
-        btn.setMaximumHeight(h)
-        btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        btn.setText(f"{info['name']}  •  VRAM: {info['vram']}")
-        btn.setStyleSheet("""
-            QPushButton { text-align: left; padding: 10px 16px;
-                border: 2px solid #27272a; border-radius: 8px;
-                background: #1a1d26; color: #e4e4e7;
-                font-size: 13px; line-height: 1.4; }
-            QPushButton:hover { border-color: #f59e0b; background: #1e222c; }
-            QPushButton:checked { border-color: #f59e0b; background: rgba(245,158,11,0.1); }
-        """)
-        return btn
+        """No-op -- kept for backward compat. Selection uses dropdowns."""
+        pass
 
     def _on_link_toggled(self, linked):
         self._linked = linked
-        self._stack.setCurrentIndex(0 if linked else 1)
-        self._sync_button_states()
+        if linked:
+            self._fast_model = self._chat_model
+        self._sync_combo_states()
         self._refresh_vram_display()
         self._update_models_display()
 
     def _on_linked_selected(self, mid):
+        """No-op -- selection uses dropdowns."""
+        pass
+
+    def _on_fast_combo_changed(self, idx):
+        """Handle fast model combo change."""
+        mid = self._fast_combo.itemData(idx)
+        if mid:
+            self._fast_model = mid
+            if self._linked:
+                self._chat_model = mid
+                self._chat_combo.setCurrentIndex(self._chat_combo.findData(mid))
+            self._refresh_vram_display()
+            self._update_models_display()
+
+    def _on_chat_combo_changed(self, idx):
+        """Handle chat model combo change with auto-downgrade for fast model."""
+        mid = self._chat_combo.itemData(idx)
+        if not mid:
+            return
         self._chat_model = mid
-        self._fast_model = mid
-        for m, b in self._linked_buttons.items():
-            b.setChecked(m == mid)
-        self._refresh_vram_display()
-        self._update_models_display()
-
-    def _on_fast_selected(self, mid):
-        self._fast_model = mid
-        for m, b in self._fast_buttons.items():
-            b.setChecked(m == mid)
-        self._refresh_vram_display()
-        self._update_models_display()
-
-    def _on_chat_selected(self, mid):
-        self._chat_model = mid
-        cv = required_vram_mb(mid) or 0
-        fv = required_vram_mb(self._fast_model) or 0
-        if fv > cv:
-            for c in self._FAST_MODEL_IDS:
-                if (required_vram_mb(c) or 0) <= cv:
-                    self._fast_model = c
-                    break
-        for m, b in self._chat_buttons.items():
-            b.setChecked(m == mid)
-        for m, b in self._fast_buttons.items():
-            b.setChecked(m == self._fast_model)
-        self._refresh_vram_display()
-        self._update_models_display()
-
-    def _sync_button_states(self):
         if self._linked:
-            for m, b in self._linked_buttons.items():
-                b.setChecked(m == self._chat_model)
+            self._fast_model = mid
+            self._fast_combo.setCurrentIndex(self._fast_combo.findData(mid))
         else:
-            for m, b in self._chat_buttons.items():
-                b.setChecked(m == self._chat_model)
-            for m, b in self._fast_buttons.items():
-                b.setChecked(m == self._fast_model)
+            overhead = self._EMBED_VRAM_MB + self._whisper_vram_mb()
+            cv = required_vram_mb(mid) or 0
+            fv = required_vram_mb(self._fast_model) or 0
+            exceeds_vram = (
+                self._detected_vram_mb is not None
+                and cv + fv + overhead > self._detected_vram_mb
+            )
+            if fv > cv or exceeds_vram:
+                for c in self._FAST_MODEL_IDS:
+                    rc = required_vram_mb(c) or 0
+                    fits_vram = (
+                        self._detected_vram_mb is None
+                        or cv + rc + overhead <= self._detected_vram_mb
+                    )
+                    if rc <= cv and fits_vram:
+                        self._fast_model = c
+                        self._fast_combo.setCurrentIndex(self._fast_combo.findData(c))
+                        break
+        self._refresh_vram_display()
+        self._update_models_display()
+
+    def _sync_combo_states(self):
+        """Sync combo selections to reflect current model choices."""
+        ci = self._chat_combo.findData(self._chat_model)
+        if ci >= 0:
+            self._chat_combo.setCurrentIndex(ci)
+        fi = self._fast_combo.findData(self._fast_model)
+        if fi >= 0:
+            self._fast_combo.setCurrentIndex(fi)
+        self._refresh_vram_display()
+        self._update_models_display()
 
     def _refresh_vram_display(self):
+        overhead = self._EMBED_VRAM_MB + self._whisper_vram_mb()
         fv = required_vram_mb(self._fast_model) or 0
         cv = required_vram_mb(self._chat_model) or 0
         if self._linked or self._fast_model == self._chat_model:
-            total = cv
-            detail = "(same model -- shared VRAM)"
+            total = cv + overhead
+            detail = f"(chat {cv // 1024} GB + embed+whisper {overhead // 1024} GB -- shared VRAM)"
         else:
-            total = fv + cv
-            detail = f"(fast {fv // 1024} GB + chat {cv // 1024} GB)"
+            total = fv + cv + overhead
+            detail = (f"(fast {fv // 1024} GB + chat {cv // 1024} GB "
+                      f"+ embed+whisper {overhead // 1024} GB)")
         tg = total / 1024
         if self._detected_vram_mb is not None:
             dg = self._detected_vram_mb / 1024
@@ -2203,30 +2231,36 @@ class ModelsPage(QWizardPage):
 
     def initializePage(self):
         cc = DEFAULT_CHAT_MODEL
-        fc = DEFAULT_CHAT_MODEL
+        fc = "gemma4:e2b"
         try:
             c = load_settings()
             cc = c.ollama_chat_model
-            fc = getattr(c, "fast_model", DEFAULT_CHAT_MODEL)
+            fc = getattr(c, "fast_model", "gemma4:e2b")
         except Exception:
             pass
         self._chat_model = cc if cc in self._ALL_MODELS else DEFAULT_CHAT_MODEL
-        self._fast_model = fc if fc in self._ALL_MODELS else DEFAULT_CHAT_MODEL
+        self._fast_model = fc if fc in self._ALL_MODELS else "gemma4:e2b"
+        overhead = self._EMBED_VRAM_MB + self._whisper_vram_mb()
         cv = required_vram_mb(self._chat_model) or 0
         fv = required_vram_mb(self._fast_model) or 0
-        if fv > cv:
+        exceeds_vram = (
+            self._detected_vram_mb is not None
+            and cv + fv + overhead > self._detected_vram_mb
+        )
+        if fv > cv or exceeds_vram:
             for c in self._FAST_MODEL_IDS:
-                if (required_vram_mb(c) or 0) <= cv:
+                rc = required_vram_mb(c) or 0
+                fits_vram = (
+                    self._detected_vram_mb is None
+                    or cv + rc + overhead <= self._detected_vram_mb
+                )
+                if rc <= cv and fits_vram:
                     self._fast_model = c
                     break
-        if self._fast_model != self._chat_model:
-            self._linked = False
-            self._link_cb.setChecked(False)
-        else:
-            self._linked = True
-            self._link_cb.setChecked(True)
-        self._stack.setCurrentIndex(0 if self._linked else 1)
-        self._sync_button_states()
+        # Default to unlinked
+        self._linked = False
+        self._link_cb.setChecked(False)
+        self._sync_combo_states()
         self._refresh_vram_display()
         self._update_models_display()
 
@@ -2344,6 +2378,25 @@ class WhisperSetupPage(QWizardPage):
         ("small.en", "Small", "~465MB", "~2GB VRAM", "Good balance of speed and accuracy"),
         ("medium.en", "Medium", "~1.5GB", "~5GB VRAM", "Best balance (Recommended)"),
     ]
+
+    # VRAM in MB per whisper model ID (used by ModelsPage for total VRAM budget).
+    _WHISPER_VRAM_MAP: dict[str, int] = {
+        "tiny": 1024,
+        "base": 1024,
+        "small": 2048,
+        "medium": 5120,
+        "large-v3-turbo": 6144,
+    }
+
+    @staticmethod
+    def get_whisper_vram_mb(model_id: str) -> int:
+        """Return VRAM in MB for a given whisper model ID.
+
+        Strips the ``.en`` suffix for lookup so ``small.en`` maps to the same
+        VRAM as ``small``.  Returns 2048 (small default) for unknown IDs.
+        """
+        base = model_id.replace(".en", "")
+        return WhisperSetupPage._WHISPER_VRAM_MAP.get(base, 2048)
 
     def __init__(self, parent=None):
         super().__init__(parent)
