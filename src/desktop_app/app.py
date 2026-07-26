@@ -2286,18 +2286,34 @@ def _check_openai_compat_reachable(cfg, timeout_sec: float = 4.0) -> bool:
         return False
 
 
-def _openai_compat_unreachable_message(cfg) -> str:
-    """Friendly heads-up shown when the OpenAI-compatible server isn't ready at
-    startup (unreachable, or reachable with no model loaded: the model listing
-    is empty in both cases). Names the address but never the API key."""
+def _build_unreachable_message(cfg) -> str:
+    """Build the message text for the unreachable server dialog,
+    without Qt dependencies so tests can verify it directly."""
     base = (getattr(cfg, "llm_base_url", "") or "").strip() or "your configured server"
     return (
         f"⚠️ Jarvis couldn't reach a ready LLM server at {base}.\n\n"
         "Make sure your local server (for example LM Studio, Ollama, llama.cpp, "
         "vLLM) is running with a model loaded, and Jarvis will connect "
         "automatically.\n\n"
-        "You can change the server any time in Settings → LLM Provider."
+        "You can open the Setup Wizard to change your server, or close and "
+        "adjust Settings later via the tray menu \u2192 LLM Provider."
     )
+
+
+def _show_openai_unreachable_dialog(cfg) -> None:
+    """Show a warning dialog with an option to open the Setup Wizard."""
+    from PyQt6.QtWidgets import QMessageBox
+
+    dialog = QMessageBox()
+    dialog.setWindowTitle("Jarvis")
+    dialog.setText(_build_unreachable_message(cfg))
+    dialog.setIcon(QMessageBox.Icon.Warning)
+    open_wizard_btn = dialog.addButton("🔧 Open Setup Wizard", QMessageBox.ButtonRole.ActionRole)
+    dialog.addButton("Close", QMessageBox.ButtonRole.RejectRole)
+    dialog.exec()
+
+    if dialog.clickedButton() == open_wizard_btn:
+        _run_setup_wizard()
 
 
 def _run_setup_wizard() -> bool:
@@ -2569,8 +2585,7 @@ def main() -> int:
 
             if not _reach[0]:
                 print("⚠️ LLM server not reachable at startup", flush=True)
-                from PyQt6.QtWidgets import QMessageBox
-                QMessageBox.warning(None, "Jarvis", _openai_compat_unreachable_message(_provider_cfg))
+                _show_openai_unreachable_dialog(_provider_cfg)
 
         if _ollama_needed:
             # Even if setup was completed before, verify Ollama server is actually running
