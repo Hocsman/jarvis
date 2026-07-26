@@ -126,6 +126,10 @@ If you're touching every legacy call site, finish the job. Don't leave compat sh
 
 The exception is genuinely external boundaries the codebase does not own: on-disk config files written by a previous release, third-party API shapes, persisted database rows. Those need migration paths because users depend on them. Internal function signatures, helper modules, and call patterns inside `src/` are ours to change cleanly.
 
+## Qt Layout: showing hidden widgets compresses existing ones
+
+When toggling widget visibility in a `QFormLayout` or `QVBoxLayout` inside a constrained parent (e.g. a `QWizardPage`), Qt does **not** automatically grow the parent window — it compresses existing widgets to make room instead. Always call `parent.adjustSize()` (or `wizard.adjustSize()` for `QWizard`) after `setVisible()` to force a proper layout recalculation. Without it, combo boxes and other form fields end up visibly squished.
+
 ## Prompt-engineering: denial-template mirroring
 
 When a small model keeps producing a canonical denial ("I only have access to the information you have shared in our current conversation", "I don't have any personal information about you", etc.), don't argue against the denial in the system prompt — that rarely wins against strong priors. Instead, phrase the injected context so it literally occupies the semantic slot the denial refers to. If the model denies having "information the user has shared in prior conversations", label the block exactly that. The denial stops triggering because the thing it claims to lack is now visibly present in the prompt. Arguing with the model's priors is expensive; feeding the denial its own words with the data pre-filled is cheap.
