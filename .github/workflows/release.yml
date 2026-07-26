@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Semantic versioning analysis (main only)
+  # ── Semantic versioning analysis (main only) ────────────────────────────
   semantic-release:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -45,13 +45,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Run semantic-release and capture output
           npx semantic-release --debug > release_output.log 2>&1 || true
 
-          # Check if a release was created
           if grep -q "Published release" release_output.log; then
             echo "new_release_published=true" >> $GITHUB_OUTPUT
-            # Extract version from the log
             VERSION=$(grep "Published release" release_output.log | sed -n 's/.*Published release \([0-9]\+\.[0-9]\+\.[0-9]\+\).*/\1/p')
             echo "new_release_version=$VERSION" >> $GITHUB_OUTPUT
             echo "new_release_git_tag=v$VERSION" >> $GITHUB_OUTPUT
@@ -61,61 +58,46 @@ jobs:
             echo "ℹ️ No release created (no releasable changes found)"
           fi
 
-          # Show the full log for debugging
           cat release_output.log
 
-  # Compute version string from branch context + semantic-release outcome
-  generate-version:
-    needs: [semantic-release]
-    # Run even when semantic-release is skipped (develop branch) or on main
-    # without a publish, but not when it failed outright.
-    if: always() && (needs.semantic-release.result == 'success' || needs.semantic-release.result == 'skipped')
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.compute.outputs.version }}
-      channel: ${{ steps.compute.outputs.channel }}
-
-    steps:
-      - name: 📝 Compute version and channel
-        id: compute
-        run: |
-          if [ "${{ github.ref }}" = "refs/heads/main" ] && [ "${{ needs.semantic-release.outputs.new_release_published }}" = "true" ]; then
-            echo "version=${{ needs.semantic-release.outputs.new_release_version }}" >> "$GITHUB_OUTPUT"
-            echo "channel=stable" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=dev-${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
-            echo "channel=develop" >> "$GITHUB_OUTPUT"
-          fi
-
-  # Build desktop apps for all platforms using the reusable workflow
+  # ── Build desktop apps (develop only — main reuses smoke-test artifacts) ─
   build-desktop:
-    needs: [generate-version]
+    if: github.ref == 'refs/heads/develop'
     uses: ./.github/workflows/build-desktop.yml
     with:
-      version: ${{ needs.generate-version.outputs.version }}
-      channel: ${{ needs.generate-version.outputs.channel }}
+      version: dev-${{ github.sha }}
+      channel: develop
       smoke_test: false
 
-  # Create versioned release (main only, if semantic-release published)
+  # ── Create versioned GitHub release (main only, from smoke-tested builds) ─
   release-main:
-    needs: [semantic-release, build-desktop]
+    needs: [semantic-release]
     runs-on: ubuntu-latest
-    # Run even if some builds failed — upload whatever succeeded
     if: always() && needs.semantic-release.result == 'success' && needs.semantic-release.outputs.new_release_published == 'true'
 
     permissions:
       contents: write
 
     steps:
-      - name: 📥 Download all artifacts
-        uses: actions/download-artifact@v8
-        with:
-          path: artifacts
+      - name: 📥 Download artifacts from release-smoke.yml
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Download every platform artifact that release-smoke.yml produced
+          # for this exact commit (the fast-forwarded develop tip).
+          for name in Jarvis-Windows Jarvis-macOS-arm64 Jarvis-macOS-x64 Jarvis-Linux; do
+            echo "Downloading $name..."
+            gh run download --repo ${{ github.repository }} \
+              --name "$name" \
+              --workflow release-smoke.yml \
+              --commit ${{ github.sha }} \
+              --dir artifacts || echo "⚠️  $name not found (may have expired or build failed)"
+          done
 
       - name: 📋 List available artifacts
         run: |
           echo "Available artifacts:"
-          find artifacts -type f \( -name "*.zip" -o -name "*.tar.gz" \) | sort
+          find artifacts -type f \( -name "*.zip" -o -name "*.tar.gz" \) | sort || echo "(none)"
 
       - name: 📎 Attach binaries to release
         uses: softprops/action-gh-release@v3
@@ -143,11 +125,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # Create/update latest pre-release (develop only)
+  # ── Create/update "latest" pre-release (develop only) ──────────────────
   release-develop:
     needs: [build-desktop]
     runs-on: ubuntu-latest
-    # Run even if some builds failed — upload whatever succeeded
     if: always() && github.ref == 'refs/heads/develop'
 
     permissions:
@@ -237,7 +218,7 @@ jobs:
       - name: 📋 List available artifacts
         run: |
           echo "Available artifacts:"
-          find artifacts -type f \( -name "*.zip" -o -name "*.tar.gz" \) | sort
+          find artifacts -type f \( -name "*.zip" -o -name "*.tar.gz" \) | sort || echo "(none)"
 
       - name: 📝 Create/Update Latest Release
         uses: softprops/action-gh-release@v3
@@ -276,4 +257,3 @@ jobs:
             **Date**: ${{ github.event.head_commit.timestamp }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
