@@ -213,3 +213,46 @@ def test_a_write_announces_itself_so_caches_can_drop(tool, context):
         core_module.unregister_core_mutation_listener(_listener)
 
     assert ("remember", SECTION_PROFILE) in seen
+
+
+# ── Refusing to store what redaction already removed ──────────────────
+
+
+def test_a_redacted_value_is_not_stored(tool, context, core):
+    """The model only ever sees redacted text, so "remember my email"
+    reaches the tool as a placeholder. Writing that keeps nothing useful
+    and leaves the user believing their email was saved."""
+    result = tool.run({"text": "Son email est [REDACTED_EMAIL]."}, context)
+
+    assert result.success is False
+    assert core.active(SECTION_PROFILE) == []
+
+
+def test_the_refusal_tells_the_model_what_to_say(tool, context):
+    result = tool.run({"text": "Son email est [REDACTED_EMAIL]."}, context)
+
+    assert "[REDACTED_EMAIL]" not in (result.reply_text or "")
+    assert "sensitive" in (result.reply_text or "").lower()
+
+
+def test_a_bare_placeholder_is_refused_too(tool, context, core):
+    result = tool.run({"text": "Son mot de passe est password=[REDACTED]."}, context)
+
+    assert result.success is False
+    assert core.active(SECTION_PROFILE) == []
+
+
+def test_a_rule_carrying_a_placeholder_is_refused(tool, context, core):
+    result = tool.run(
+        {"text": "Se connecter avec [REDACTED_TOKEN].", "kind": "rule"}, context,
+    )
+
+    assert result.success is False
+    assert core.active(SECTION_RULES) == []
+
+
+def test_ordinary_text_is_unaffected(tool, context, core):
+    result = tool.run({"text": "Il vit à Lyon."}, context)
+
+    assert result.success is True
+    assert [e.text for e in core.active(SECTION_PROFILE)] == ["Il vit à Lyon."]

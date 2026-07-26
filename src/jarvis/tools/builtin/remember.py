@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional
 
 from ...debug import debug_log
 from ...memory.core import SECTION_PROFILE, SECTION_RULES, MemoryCore
+from ...utils.redact import contains_redaction_placeholder
 from ..base import Tool, ToolContext
 from ..types import ToolExecutionResult
 
@@ -95,6 +96,25 @@ class RememberTool(Tool):
                 reply_text=(
                     "Nothing was saved: the text was empty. Ask the user what "
                     "they want you to remember."
+                ),
+            )
+
+        # The model only ever sees redacted text, so "remember my email
+        # is x@y.com" arrives here as "[REDACTED_EMAIL]". Storing that
+        # keeps nothing worth having and tells the user their email was
+        # saved, which is the one answer worse than refusing.
+        if contains_redaction_placeholder(text):
+            debug_log("    ⚠️ remember refused a redacted value", "tools")
+            context.user_print("🪨 Non enregistré : donnée sensible.")
+            return ToolExecutionResult(
+                success=False,
+                reply_text=(
+                    "Nothing was saved. That statement's substance was a "
+                    "sensitive value (an address, a card, a key, a password) "
+                    "which is removed before it ever reaches you, so storing "
+                    "it would keep only a placeholder. Tell the user plainly "
+                    "that you do not keep sensitive values in memory, and "
+                    "offer to remember the part that is not sensitive."
                 ),
             )
 
