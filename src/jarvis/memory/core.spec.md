@@ -61,7 +61,7 @@ Each file opens with a heading and an HTML comment explaining the format, so a u
 
 Entry text is injected without its date and source prefix — the metadata is for the user reading the file, not for the model, which only needs the fact.
 
-Injection is unconditional and query-agnostic, at Step 3.5 of `reply()`. No LLM call is involved: it is two file reads. The result is cached in `DialogueMemory` under `WARM_PROFILE_CACHE_KEY` for the life of the conversation and invalidated when the core is written, so a fact remembered mid-conversation is in the prompt on the very next turn.
+Injection is unconditional and query-agnostic, at Step 3.5 of `reply()`. No LLM call is involved: it is two file reads. The result is cached in `DialogueMemory` under `WARM_PROFILE_CACHE_KEY` for the life of the conversation, alongside a `fingerprint()` of the two files. It is dropped when the core is written in the same process, so a fact remembered mid-conversation is in the prompt on the very next turn, and rebuilt when the fingerprint no longer matches, which is what catches an edit made from the memory viewer or a text editor. Hand-editing is the point of the core, and those edits happen in another process where no listener fires.
 
 ## Relationship to the knowledge graph
 

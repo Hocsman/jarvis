@@ -1105,10 +1105,16 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
     # invalidated on:
     #   - new conversation entry (cleared above with the full hot cache),
     #   - the stop signal (also clears the full hot cache),
-    #   - any core write (via the listener registered in daemon.py, which
-    #     calls ``invalidate_warm_profile`` on the active DialogueMemory),
-    #     so a fact remembered mid-conversation is in the prompt on the
-    #     very next turn.
+    #   - any core write in this process (via the listener registered in
+    #     daemon.py, which calls ``invalidate_warm_profile`` on the active
+    #     DialogueMemory), so a fact remembered mid-conversation is in the
+    #     prompt on the very next turn,
+    #   - the files changing on disk, checked below. The listener only
+    #     fires in the process that wrote, and editing the files by hand
+    #     is the headline feature of the core: the memory viewer and the
+    #     user's own editor are other processes. Without this check a
+    #     correction made there would sit unread until the conversation
+    #     ended, which reads exactly like being ignored.
     _wp_cache_key = getattr(
         type(dialogue_memory),
         "WARM_PROFILE_CACHE_KEY",
@@ -1118,9 +1124,23 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         dialogue_memory.hot_cache_get(_wp_cache_key)
         if dialogue_memory and hasattr(dialogue_memory, "hot_cache_get") else None
     )
-    if isinstance(_wp_cached, str):
-        warm_profile_block = _wp_cached
-        debug_log("warm profile served from conversation cache", "memory")
+    try:
+        from ..memory.core import MemoryCore as _MemoryCore
+        _core_now = _MemoryCore.for_config(cfg)
+        _core_stamp = _core_now.fingerprint()
+    except Exception as e:
+        debug_log(f"core fingerprint failed (non-fatal): {e}", "memory")
+        _core_now = None
+        _core_stamp = None
+
+    _wp_fresh = (
+        isinstance(_wp_cached, tuple)
+        and len(_wp_cached) == 2
+        and _wp_cached[0] == _core_stamp
+    )
+    if _wp_fresh:
+        warm_profile_block = _wp_cached[1]
+        debug_log("core profile served from conversation cache", "memory")
     else:
         try:
             from ..memory.core import (
@@ -1128,7 +1148,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 build_core_profile,
                 format_warm_profile_block,
             )
-            _warm_profile = build_core_profile(MemoryCore.for_config(cfg))
+            _warm_profile = build_core_profile(_core_now or MemoryCore.for_config(cfg))
             warm_profile_block = format_warm_profile_block(_warm_profile)
             if warm_profile_block:
                 _user_len = len(_warm_profile.get("user", ""))
@@ -1143,9 +1163,11 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                     "memory",
                 )
             if dialogue_memory and hasattr(dialogue_memory, "hot_cache_put"):
-                dialogue_memory.hot_cache_put(_wp_cache_key, warm_profile_block)
+                dialogue_memory.hot_cache_put(
+                    _wp_cache_key, (_core_stamp, warm_profile_block),
+                )
         except Exception as e:
-            debug_log(f"warm profile load failed (non-fatal): {e}", "memory")
+            debug_log(f"core profile load failed (non-fatal): {e}", "memory")
 
     # Step 4: Memory enrichment — controlled by cfg.memory_enrichment_source
     # "all" = diary + graph, "diary" = diary only, "graph" = graph only
