@@ -119,6 +119,28 @@ class ToolSpec:
     name: str  # canonical tool identifier (camelCase)
     description: str  # Human-readable description (matches MCP format)
     inputSchema: Optional[Dict[str, Any]] = None  # JSON Schema for arguments (matches MCP format)
+    # What the server says the tool does to the world: ``readOnlyHint``,
+    # ``destructiveHint``. Optional because every existing construction
+    # site passes three arguments, and because a server may send none —
+    # which the policy gate reads as "unclassified", not as "harmless".
+    annotations: Optional[Dict[str, Any]] = None
+
+
+def _spec_from_tool_info(server_name: str, tool_info: Dict[str, Any]) -> ToolSpec:
+    """Build the catalogue entry for one discovered MCP tool.
+
+    Namespaced ``server__tool`` so two servers can expose the same name,
+    and carrying the server's own annotations through: they are what lets
+    the policy gate tell a snapshot from a click without the user
+    classifying dozens of tools by hand.
+    """
+    name = tool_info.get("name")
+    return ToolSpec(
+        name=f"{server_name}__{name}",
+        description=tool_info.get("description") or f"Tool from {server_name} MCP server",
+        inputSchema=tool_info.get("inputSchema") or {"type": "object", "properties": {}, "required": []},
+        annotations=tool_info.get("annotations"),
+    )
 
 
 def discover_mcp_tools(mcps_config: Dict[str, Any]) -> Tuple[Dict[str, ToolSpec], Dict[str, str]]:
@@ -146,13 +168,8 @@ def discover_mcp_tools(mcps_config: Dict[str, Any]) -> Tuple[Dict[str, ToolSpec]
                     # Create a unique tool name: server__toolname
                     full_tool_name = f"{server_name}__{tool_name}"
 
-                    # Create a ToolSpec for this MCP tool
-                    description = tool_info.get("description", f"Tool from {server_name} MCP server")
-                    input_schema = tool_info.get("inputSchema", {"type": "object", "properties": {}, "required": []})
-                    discovered_tools[full_tool_name] = ToolSpec(
-                        name=full_tool_name,
-                        description=description,
-                        inputSchema=input_schema
+                    discovered_tools[full_tool_name] = _spec_from_tool_info(
+                        server_name, tool_info,
                     )
 
             except BaseException as e:

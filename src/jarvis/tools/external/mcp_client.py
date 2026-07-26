@@ -137,6 +137,47 @@ class _StdioConnection:
                 pass
 
 
+def _normalise_annotations(raw: Any) -> Optional[Dict[str, Any]]:
+    """Return MCP tool annotations as a plain mapping, or None.
+
+    The SDK may hand back a pydantic model rather than a dict depending
+    on its version. The gate reads keys off this, so anything that is not
+    a mapping has to be flattened or the hints are lost exactly as
+    silently as when they were dropped altogether.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return dict(raw)
+    dumped = getattr(raw, "model_dump", None)
+    if callable(dumped):
+        try:
+            return dict(dumped())
+        except Exception:
+            pass
+    out = {
+        key: getattr(raw, key)
+        for key in ("readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint")
+        if hasattr(raw, key)
+    }
+    return out or None
+
+
+def tool_to_dict(tool: Any) -> Dict[str, Any]:
+    """Flatten one MCP tool into the shape the catalogue stores.
+
+    Single source of truth for both discovery paths: the async session
+    listing and the persistent-runtime listing built the same dict
+    independently, and the annotations were dropped from both.
+    """
+    return {
+        "name": getattr(tool, "name", None),
+        "description": getattr(tool, "description", None),
+        "inputSchema": getattr(tool, "inputSchema", None),
+        "annotations": _normalise_annotations(getattr(tool, "annotations", None)),
+    }
+
+
 class MCPClient:
     """Lightweight manager to connect to external MCP servers and call tools."""
 
@@ -215,16 +256,7 @@ class MCPClient:
             # Extract tools from the ListToolsResult object
             tools_list = getattr(tools_result, "tools", tools_result) if hasattr(tools_result, "tools") else tools_result
             
-            result = []
-            for t in tools_list:
-                # Handle Tool objects with attributes
-                tool_info = {
-                    "name": getattr(t, "name", None),
-                    "description": getattr(t, "description", None),
-                    "inputSchema": getattr(t, "inputSchema", None),
-                }
-                result.append(tool_info)
-            return result
+            return [tool_to_dict(t) for t in tools_list]
 
     async def invoke_tool_async(self, server_name: str, tool_name: str, arguments: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         async with self._session(server_name) as session:
@@ -249,16 +281,7 @@ class MCPClient:
             raise MCPServerSessionError(str(e)) from e
 
         tools_list = getattr(res, "tools", res) if hasattr(res, "tools") else res
-        result: List[Dict[str, Any]] = []
-        for t in tools_list:
-            result.append(
-                {
-                    "name": getattr(t, "name", None),
-                    "description": getattr(t, "description", None),
-                    "inputSchema": getattr(t, "inputSchema", None),
-                }
-            )
-        return result
+        return [tool_to_dict(t) for t in tools_list]
 
     def invoke_tool(self, server_name: str, tool_name: str, arguments: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Invoke a tool against the named server.
