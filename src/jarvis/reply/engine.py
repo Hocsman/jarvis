@@ -1346,9 +1346,12 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 if graph_parts:
                     raw_graph_parts = list(graph_parts)
                     graph_context = (
-                        "Information the user has shared with you in prior conversations "
-                        "(you have access to this — it is part of what the user has told "
-                        "you, just not in the current session):\n" + "\n".join(graph_parts)
+                        "Things you looked up in earlier conversations and kept "
+                        "(films, places, businesses, techniques, events — you have "
+                        "access to this, it just is not in the current session). "
+                        "It describes the world, not the user: what is true about "
+                        "the user is in the sections above, and those win if this "
+                        "disagrees with them:\n" + "\n".join(graph_parts)
                     )
                     names_str = ", ".join(name for name, _ in node_annotations[:4] if name)
                     print(f"  🧠 Knowledge: {len(graph_parts)} nodes — {names_str}", flush=True)
