@@ -54,6 +54,10 @@ The entries are in the model's context, so it can quote the one the user means. 
 
 Parsing is forgiving by design. A `- ` line that does not match the grammar is still an entry with unknown date and source; its text is whatever follows the bullet. Date and attribution are read off a struck line when present and simply absent when not. A file the user has rewritten in their own shape still works.
 
+A bullet may be indented: lining up with the prose around it is what a person does by hand, and refusing those would mean silently ignoring what they wrote.
+
+Nothing inside an HTML comment is ever an entry. That is not pedantry about Markdown, it is where people actually type: the header is one long comment explaining the format, and the natural place to start writing is directly under the instruction you just read, which is still inside it. Observed on the first real use of the core, where six hand-written lines sat dead in the comment with nothing to indicate it. Reading them instead would mean the assistant believing its own examples, so the comment stays a comment and the header now says in as many words where entries go, with a `<!-- ↓ écris tes lignes ici ↓ -->` marker to sit under. An unclosed comment swallows the rest of the file, per Markdown's own rule: guessing where it was meant to end would read prose as facts.
+
 Each file opens with a heading and an HTML comment explaining the format, so a user who opens `profil.md` cold understands what they are looking at and how to edit it.
 
 ## Injection into the prompt
