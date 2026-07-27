@@ -248,8 +248,10 @@ def test_the_yes_runs_what_was_shown_not_what_the_model_says_next(scene):
 
 
 def test_the_model_cannot_slip_a_second_call_past_the_grant(scene):
-    """Having spent the approval, the model's own proposal is asked about
-    from scratch rather than riding the yes that was just given."""
+    """A resume turn does one thing: run the approved call and say what
+    happened. The model gets no tools at all, which is stronger than
+    asking about whatever it proposes — one approval, one action, and
+    nothing left over to answer."""
     tool, dm, cfg = scene
     _turn(cfg, dm, "lance sabotage sur /a", chat_responses=[
         _tool_call_response("sabotage", {"cible": "/a"}),
@@ -261,7 +263,5 @@ def test_the_model_cannot_slip_a_second_call_past_the_grant(scene):
             {"message": {"content": "ok"}},
         ])
 
-    assert {"cible": "/b"} not in tool.fired
-    # And the attempt is now the question waiting on the user.
-    waiting = dm.peek_pending()
-    assert waiting is not None and waiting.args == {"cible": "/b"}
+    assert tool.fired == [{"cible": "/a"}]
+    assert dm.peek_pending() is None

@@ -469,7 +469,17 @@ def handle_chat_decision_stdin_line(line: str) -> bool:
         debug_log("__CHAT_DECISION__ approved is not a boolean, ignored", "chat_ipc")
         return True
 
-    resolve_confirmation(request_id, approved)
+    outcome = resolve_confirmation(request_id, approved)
+    if outcome not in ("ok", "décliné"):
+        # The click did not take: busy, unknown, or shutting down. The
+        # question is NOT settled — the card must stay up with its
+        # buttons live and its deadline running. Silently dropping a
+        # decision the user correctly made is the failure this whole
+        # channel exists to avoid, and it looks to them exactly like the
+        # button not working.
+        _emit_chat_event("confirm_nack", {
+            "request_id": request_id, "outcome": outcome,
+        })
     return True
 
 

@@ -361,7 +361,13 @@ def load_tool_policy(cfg: Settings):
 
     try:
         policy = ToolPolicy.parse(path.read_text(encoding="utf-8"))
-    except OSError as e:
+    except Exception as e:
+        # Not just OSError. `read_text` raises UnicodeDecodeError — a
+        # ValueError — for a file that is not UTF-8, which a user reaches
+        # by reopening their own generated policy in a Windows editor and
+        # saving it as ANSI. Escaping here would break every tool call on
+        # every turn until the file was repaired, which is the opposite of
+        # what the spec promises: a malformed file yields the defaults.
         debug_log(f"tool policy unreadable, falling back to defaults: {e}", "tools")
         return ToolPolicy.empty()
 
@@ -466,11 +472,11 @@ def _ask(db, cfg, confirmation, *, name, args, risk, verdict, origin,
     answer rather than delaying it, because the audio queue overflows
     into a swallowed exception.
     """
-    from .confirmation import PendingAction, channel_for
-    from .policy import OUTCOME_ASKED
+    from .confirmation import PendingAction, channel_for_call
+    from .policy import OUTCOME_ASKED, OUTCOME_REFUSED
 
     store = confirmation.store
-    channel = channel_for(risk, _known_tool(name))
+    channel = channel_for_call(risk, _known_tool(name), name, args)
 
     action = PendingAction.create(
         tool=name, args=args, risk=risk, channel=channel, origin=origin,
@@ -483,8 +489,27 @@ def _ask(db, cfg, confirmation, *, name, args, risk, verdict, origin,
         # A different question is already waiting. One card at a time, so
         # a three-step plan asks about its first step rather than
         # stacking questions the user has to disentangle.
-        debug_log(f"    🚪 {name} not asked: another question is waiting", "tools")
-        return _refusal(name, verdict, risk)
+        #
+        # Not `_refusal`: its text tells the model there is no way to ask
+        # and to send the user to `## Libre`, which here would advise
+        # weakening the policy to work around a question they are in the
+        # middle of answering. The truth is a queue, not a wall.
+        waiting = store.peek_pending()
+        other = getattr(waiting, "tool", None) or "another action"
+        debug_log(f"    🚪 {name} not asked: {other} is still waiting", "tools")
+        _log_action(
+            db, tool=name, args=args, risk=risk, verdict=verdict,
+            outcome=OUTCOME_REFUSED, query=redacted_text, origin=origin,
+        )
+        return ToolExecutionResult(
+            success=False, refused=True, error_message=None,
+            reply_text=(
+                f'The tool "{name}" was not run because the user is still '
+                f'being asked about "{other}". Tell them that, and that you '
+                f"can come back to this once they have answered. Do not "
+                f"suggest changing any settings."
+            ),
+        )
 
     if held.request_id == action.request_id:
         # A re-ask keeps the original id and writes no second row: one

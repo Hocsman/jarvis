@@ -252,12 +252,15 @@ def settle_pending_confirmation(*, cfg, dialogue_memory, utterance, origin) -> _
         # the cost of a round trip and of sending the utterance somewhere.
         return _Settled()
 
-    action = dialogue_memory.take_pending_for_utterance(origin, seq)
-    if action is None:
+    if not utterance_channel_available(cfg):
+        # Checked before claiming, or a missing judge would swallow the
+        # question: the record would be gone and the card dead, with
+        # nothing having read anything.
+        debug_log("no model can read an approval; question left for a click", "tools")
         return _Settled()
 
-    if not utterance_channel_available(cfg):
-        debug_log("no model can read an approval; question left unanswered", "tools")
+    action = dialogue_memory.take_pending_for_utterance(origin, seq)
+    if action is None:
         return _Settled()
 
     verdict = read_approval(cfg, utterance)
@@ -1690,6 +1693,21 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
     )
     allowed_tools = list(routed_tools)
     _selection_source = strategy.value
+
+    if _settled.approval is not None:
+        # A resume turn does one thing: run the call the user approved and
+        # say what happened. It gets no tools and no plan.
+        #
+        # The click path replays the original query, so the planner
+        # produces the same first step and the model re-proposes the same
+        # call. Left alone, she runs the approved call, throws its result
+        # away, and asks the identical question again — the user says yes
+        # twice for one action, and the second yes runs it a second time.
+        # One approval, one action.
+        action_plan = []
+        allowed_tools = []
+        mcp_tools = {}
+        debug_log("resume turn: no tools, no plan — narrate the approved call", "tools")
     if action_plan and not _plan_under_specified:
         for _plan_name in tool_names_in_plan(action_plan, _full_catalog_names):
             if _plan_name not in allowed_tools:

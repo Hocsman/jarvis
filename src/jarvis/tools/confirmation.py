@@ -200,16 +200,46 @@ def channel_for(risk: str, tool: Any) -> str:
     return CHANNEL_PAROLE if risk_is_declared(tool) else CHANNEL_GESTE
 
 
+def channel_for_call(risk: str, tool: Any, name: str,
+                     args: Optional[Dict[str, Any]]) -> str:
+    """The door for this particular call, arguments included.
+
+    Same rule as ``channel_for``, plus one: an action she cannot read out
+    honestly is not offered the voice door. If the arguments carry
+    characters that hide what they do, the only way to consent to it is
+    to look at the card — an approval given to a sentence that conceals
+    its own meaning is not consent.
+    """
+    channel = channel_for(risk, tool)
+    if channel == CHANNEL_PAROLE and not describe_action(name, args, risk).speakable:
+        return CHANNEL_GESTE
+    return channel
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # What the user is shown
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Characters that can make a string read as something other than what it
-# is: bidirectional overrides, zero-width joiners and spaces, and the
-# other formatting controls.
-_INVISIBLE = re.compile(r"[​-‏‪-‮⁠-⁤⁪-⁯﻿]")
+def _is_invisible(ch: str) -> bool:
+    """Whether this character can show nothing of itself, or lie.
 
-_LATIN = re.compile(r"[A-Za-z]")
+    Tested by Unicode category rather than by enumerated ranges, because
+    a range list is always one Unicode revision behind. An earlier
+    enumeration here already missed U+2066..U+2069 — the *isolate* half
+    of the Trojan Source set, and the half now recommended over the
+    overrides it did cover — plus the line and paragraph separators, the
+    soft hyphen, and the whole Tags block used as a standard hiding
+    channel.
+
+    Cc/Cf are controls and formatting, Cs surrogates, Co private use, and
+    Zl/Zp the line and paragraph separators. Ordinary space (Zs) is not
+    included: it is visible enough, and flagging every space would make
+    the hazard strip fire on everything.
+    """
+    if ch in "\t\n\r":
+        # Real whitespace in an argument, shown as JSON escapes already.
+        return False
+    return unicodedata.category(ch) in {"Cc", "Cf", "Co", "Cs", "Zl", "Zp"}
 
 
 def _script_of(ch: str) -> Optional[str]:
@@ -223,15 +253,29 @@ def _script_of(ch: str) -> Optional[str]:
     return name.split(" ")[0]
 
 
+def _escape_one(ch: str) -> str:
+    """A JSON-valid escape for one character.
+
+    Above the BMP that means a surrogate pair: a bare ``\\uXXXXX`` would
+    be five hex digits, which is not valid JSON, and the card's copy has
+    to keep parsing back to exactly what would run.
+    """
+    code = ord(ch)
+    if code <= 0xFFFF:
+        return f"\\u{code:04x}"
+    code -= 0x10000
+    return f"\\u{0xD800 + (code >> 10):04x}\\u{0xDC00 + (code & 0x3FF):04x}"
+
+
 def _escape_invisibles(text: str) -> str:
     """Make characters that show nothing of themselves visible as escapes."""
-    return _INVISIBLE.sub(lambda m: f"\\u{ord(m.group()):04x}", text)
+    return "".join(_escape_one(c) if _is_invisible(c) else c for c in text)
 
 
 def _hazards_in(text: str) -> list:
     """Ways this string could read as something it is not."""
     found = []
-    if _INVISIBLE.search(text):
+    if any(_is_invisible(c) for c in text):
         found.append("caractères invisibles")
 
     scripts = {s for s in (_script_of(c) for c in text) if s}
@@ -264,6 +308,47 @@ def _hazards_in(text: str) -> list:
 # answering in any — named in policy.spec.md rather than hidden.
 SPOKEN_TEMPLATE = "Je m'apprête à lancer {tool}. Tu valides ?"
 
+# The half of the sentence we do not write. A tool name comes from a
+# third-party MCP server verbatim, and dropping it into the spoken
+# question can push a likely answer over the echo threshold on its own:
+# any name containing "ok" — `okta__list_users`, `bookmarks__search`,
+# `webhookSend` — makes a spoken "ok" score 100 and be deleted before
+# anything reads it. When that happens she asks without naming the tool.
+# The card still carries the exact name, so nothing load-bearing is lost.
+SPOKEN_TEMPLATE_ANONYME = "Je m'apprête à lancer quelque chose. Tu valides ?"
+
+# What a French speaker plausibly says when answering a request for
+# permission. Never matched against in production — the judge reads the
+# sentence — but the corpus the spoken wording is measured against, both
+# here and in tests/test_confirmation_voice_echo.py.
+LIKELY_ANSWERS = (
+    "oui", "non", "ouais", "vas-y", "vas-y fais-le", "ok", "d'accord",
+    "oui vas-y", "non merci", "surtout pas", "laisse tomber", "annule",
+    "fais-le", "ne fais pas ça", "attends", "plus tard", "non non non",
+    "oui bien sûr", "évidemment", "certainement pas",
+)
+
+# A tool name we would be comfortable reading aloud and printing as a
+# card heading. Anything else is still shown, escaped, and flagged.
+_PLAIN_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
+
+def _would_swallow_the_answer(spoken: str) -> bool:
+    """Whether saying this would delete the reply to it.
+
+    The listener drops a hot-window transcript scoring at or above
+    `PURE_ECHO_THRESHOLD` against the last thing spoken, and the
+    word-count guard beside it never fires for a one-word reply. Ten
+    points of margin, because Whisper varies the transcription.
+    """
+    from rapidfuzz import fuzz
+
+    from ..listening.echo_detection import EchoDetector
+
+    limit = EchoDetector.PURE_ECHO_THRESHOLD - 10
+    low = spoken.lower()
+    return any(fuzz.partial_ratio(a, low) >= limit for a in LIKELY_ANSWERS)
+
 
 @dataclass(frozen=True)
 class ActionDescription:
@@ -294,7 +379,18 @@ def describe_action(
     except Exception:
         rendered = repr(args)
 
+    # The tool name is third-party text as well: for MCP it is whatever a
+    # server put in its `tools/list` reply, with no character class, no
+    # length bound and no normalisation between the wire and here. A
+    # newline in it forges a second line of the card's heading.
+    plain_name = bool(_PLAIN_NAME.match(tool or ""))
+    safe_tool = (
+        _escape_invisibles(tool or "").replace("\r", "\\r").replace("\n", "\\n")
+    )
+
     hazards = _hazards_in(rendered)
+    if not plain_name:
+        hazards = hazards + ["nom d'outil inhabituel"]
 
     # Lossless and unambiguous, which is stronger than raw. Nothing is
     # truncated, no whitespace is collapsed and no Unicode is folded —
@@ -307,10 +403,12 @@ def describe_action(
     # are escaped so the user sees that something is there. Accented
     # French stays readable, and `\uXXXX` is valid JSON, so the card's
     # copy still parses back to exactly what would run.
-    shown = f"{tool} · {risk}\n{_escape_invisibles(rendered)}"
+    shown = f"{safe_tool} · {risk}\n{_escape_invisibles(rendered)}"
     speakable = not hazards
 
-    spoken = SPOKEN_TEMPLATE.format(tool=tool)
+    spoken = SPOKEN_TEMPLATE.format(tool=tool) if plain_name else SPOKEN_TEMPLATE_ANONYME
+    if _would_swallow_the_answer(spoken):
+        spoken = SPOKEN_TEMPLATE_ANONYME
 
     return ActionDescription(
         tool=tool, risk=risk, shown=shown, spoken=spoken,
@@ -405,8 +503,13 @@ def read_approval(cfg, utterance: str) -> str:
     a word rather than a decision — breadth here is a way of saying yes
     on the user's behalf.
 
-    Never raises: a timeout, a refused connection or a malformed reply
-    all come back DENIED.
+    Never raises. A timeout, a refused connection or a reply nobody can
+    read come back UNCLEAR, not DENIED: UNCLEAR grants nothing either, so
+    the safety is identical, but DENIED is spoken aloud as "understood, I
+    won't" and written to the ledger as `décliné` — putting the user's
+    name on a decision they never made. "I could not read the answer" and
+    "they said no" are different facts, and the ledger keeps them apart
+    on purpose.
     """
     from ..debug import debug_log
 
@@ -423,16 +526,16 @@ def read_approval(cfg, utterance: str) -> str:
             float(getattr(cfg, "confirmation_timeout_sec", 8.0)),
         )
     except Exception as e:
-        debug_log(f"approval judge unavailable, denying: {e}", "tools")
-        return DENIED
+        debug_log(f"approval judge unavailable, treating as unclear: {e}", "tools")
+        return UNCLEAR
 
-    answer = (raw or "").strip().lower()
+    # Trailing punctuation is the model formatting itself, not reasoning:
+    # the prompt asks for none, and "Oui." is still a bare yes.
+    answer = (raw or "").strip().lower().strip(".!?;:,\"'«»…")
     if answer == GRANTED:
         return GRANTED
     if answer == DENIED:
         return DENIED
-    if answer == UNCLEAR:
-        return UNCLEAR
 
-    debug_log(f"approval judge answered {answer!r}, denying", "tools")
-    return DENIED
+    debug_log(f"approval judge answered {answer!r}, treating as unclear", "tools")
+    return UNCLEAR

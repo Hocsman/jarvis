@@ -107,18 +107,55 @@ def test_a_conditional_grant_does_not_grant():
 
 def test_a_timeout_does_not_grant():
     with patch("src.jarvis.tools.confirmation._ask_model", side_effect=TimeoutError):
-        assert read_approval(_Cfg(), "vas-y") == DENIED
+        assert read_approval(_Cfg(), "vas-y") != GRANTED
 
 
 def test_an_exception_does_not_grant():
     with patch("src.jarvis.tools.confirmation._ask_model",
                side_effect=RuntimeError("connexion refusée")):
-        assert read_approval(_Cfg(), "vas-y") == DENIED
+        assert read_approval(_Cfg(), "vas-y") != GRANTED
 
 
 def test_no_reply_at_all_does_not_grant():
     with _answering(None):
-        assert read_approval(_Cfg(), "vas-y") == DENIED
+        assert read_approval(_Cfg(), "vas-y") != GRANTED
+
+
+# ── "I could not read it" is not "they said no" ───────────────────────
+
+
+@pytest.mark.parametrize("failure", [
+    patch("src.jarvis.tools.confirmation._ask_model", side_effect=TimeoutError),
+    patch("src.jarvis.tools.confirmation._ask_model",
+          side_effect=RuntimeError("connexion refusée")),
+    patch("src.jarvis.tools.confirmation._ask_model", return_value=None),
+    patch("src.jarvis.tools.confirmation._ask_model", return_value="???"),
+])
+def test_a_judge_that_cannot_answer_is_unclear_not_a_refusal(failure):
+    """Both grant nothing, so the safety is identical. But DENIED is
+    spoken aloud as "understood, I won't" and written to the ledger as
+    `décliné` — which puts the user's name on a decision they never made.
+    A dropped network packet is not a refusal."""
+    with failure:
+        assert read_approval(_Cfg(), "vas-y") == UNCLEAR
+
+
+def test_a_real_refusal_is_still_a_refusal():
+    with _answering("non"):
+        assert read_approval(_Cfg(), "surtout pas") == DENIED
+
+
+def test_a_yes_with_a_full_stop_is_still_a_yes():
+    """The prompt asks for no punctuation, but a model adding one has
+    formatted itself, not reasoned. Discarding that answer costs the user
+    a turn for nothing."""
+    with _answering("Oui."):
+        assert read_approval(_Cfg(), "vas-y") == GRANTED
+
+
+def test_a_no_with_a_full_stop_is_still_a_no():
+    with _answering("Non."):
+        assert read_approval(_Cfg(), "surtout pas") == DENIED
 
 
 def test_an_empty_utterance_does_not_grant():
