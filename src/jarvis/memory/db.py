@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from ..debug import debug_log
 
 # Bumped whenever the shape changes, so a later version can migrate.
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 _SCHEMA_SQL = """
 PRAGMA journal_mode=WAL;
@@ -47,9 +47,10 @@ CREATE TABLE IF NOT EXISTS action_log (
   args        TEXT,           -- redacted JSON
   risk        TEXT NOT NULL,  -- lecture / action / destructif
   verdict     TEXT NOT NULL,  -- libre / demande / jamais
-  outcome     TEXT NOT NULL,  -- ok / échec / refusé
+  outcome     TEXT NOT NULL,  -- ok / échec / refusé / demandé / décliné / expiré
   duration_ms INTEGER,
-  query       TEXT            -- redacted, so a row can be placed in context
+  query       TEXT,           -- redacted, so a row can be placed in context
+  request_id  TEXT            -- ties a question to whatever settled it
 );
 
 CREATE INDEX IF NOT EXISTS idx_action_log_ts ON action_log(ts_utc DESC);
@@ -153,6 +154,7 @@ class Database:
             cur.executescript(_SCHEMA_SQL)
             if self.is_vss_enabled:
                 cur.executescript(_VSS_SCHEMA_SQL)
+            self._migrate(cur)
             # Stamp the shape so a later change can migrate rather than
             # guess. The only migration precedent in this project wipes
             # its table when the shape surprises it, which is not an
@@ -161,6 +163,31 @@ class Database:
             if cur.execute("PRAGMA user_version").fetchone()[0] < _SCHEMA_VERSION:
                 cur.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             self.conn.commit()
+
+    def _migrate(self, cur) -> None:
+        """Bring an existing database up to the current shape.
+
+        Additive only, and idempotent: startup runs this every time, not
+        once. `CREATE TABLE IF NOT EXISTS` leaves a table that already
+        exists untouched, so a column added to the DDL above reaches an
+        existing install only through here.
+
+        Columns are added, never dropped, and no row is ever deleted. The
+        Activity tab presents this table as a record of what Yuba did; a
+        migration that discarded rows when the shape surprised it would
+        make that claim false the first time the shape changed.
+        """
+        try:
+            existing = {
+                row[1] for row in cur.execute("PRAGMA table_info(action_log)").fetchall()
+            }
+        except Exception as e:  # table absent on a database we cannot read
+            debug_log(f"schema inspection skipped: {e}", "jarvis")
+            return
+
+        if existing and "request_id" not in existing:
+            cur.execute("ALTER TABLE action_log ADD COLUMN request_id TEXT")
+            debug_log("action_log migrated: request_id added", "jarvis")
 
     # ── Action ledger ─────────────────────────────────────────────────
 
@@ -175,11 +202,16 @@ class Database:
         duration_ms: Optional[int] = None,
         origin: Optional[str] = None,
         query: Optional[str] = None,
+        request_id: Optional[str] = None,
     ) -> None:
         """Record one tool call. Bookkeeping: never raises into the caller.
 
         Arguments and the originating query are redacted on the way in,
         because a tool call carries whatever the user just said.
+
+        ``request_id`` ties a question to whatever settled it: the gate
+        writes one row when it asks and one when the answer arrives, and
+        nothing but this id says they are the same episode.
         """
         import json
         from ..utils.redact import redact
@@ -192,12 +224,14 @@ class Database:
             with self._lock:
                 self.conn.execute(
                     "INSERT INTO action_log "
-                    "(ts_utc, origin, tool, args, risk, verdict, outcome, duration_ms, query) "
-                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    "(ts_utc, origin, tool, args, risk, verdict, outcome, "
+                    "duration_ms, query, request_id) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
                     (
                         datetime.now(timezone.utc).isoformat(),
                         origin, tool, args_text, risk, verdict, outcome,
                         duration_ms, redact(query) if query else None,
+                        request_id,
                     ),
                 )
                 self.conn.commit()

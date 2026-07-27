@@ -32,6 +32,17 @@ FREE = "libre"
 ASK = "demande"
 NEVER = "jamais"
 
+# How a call ended, as written to the action ledger. `refusé` means the
+# policy said no and nothing was asked of anyone; `décliné` means the
+# user was asked and said no. Keeping those apart is the difference
+# between "she would not" and "I would not".
+OUTCOME_OK = "ok"
+OUTCOME_FAILED = "échec"
+OUTCOME_REFUSED = "refusé"
+OUTCOME_ASKED = "demandé"
+OUTCOME_DECLINED = "décliné"
+OUTCOME_EXPIRED = "expiré"
+
 _SECTIONS = {
     "libre": FREE,
     "demande": ASK,

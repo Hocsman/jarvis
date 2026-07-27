@@ -451,7 +451,8 @@ def _refusal(name: str, verdict: str, risk: str) -> ToolExecutionResult:
 
 
 def _log_action(
-    db, *, tool, args, risk, verdict, outcome, query, origin, duration_ms=None,
+    db, *, tool, args, risk, verdict, outcome, query, origin,
+    duration_ms=None, request_id=None,
 ):
     """Write one ledger row. Never lets bookkeeping break a tool call."""
     recorder = getattr(db, "record_action", None)
@@ -461,6 +462,7 @@ def _log_action(
         recorder(
             tool=tool, args=args, risk=risk, verdict=verdict, outcome=outcome,
             duration_ms=duration_ms, origin=origin, query=query,
+            request_id=request_id,
         )
     except Exception as e:
         debug_log(f"action log write skipped: {e}", "tools")
@@ -494,14 +496,14 @@ def run_tool_with_retries(
     # The gate, before anything runs. Placed here and not at the call
     # sites because this is the only funnel: both the planner's direct
     # execution and the agentic loop arrive through it.
-    from .policy import FREE, resolve_risk
+    from .policy import FREE, OUTCOME_FAILED, OUTCOME_OK, OUTCOME_REFUSED, resolve_risk
 
     risk = resolve_risk(name, _known_tool(name), tool_args)
     verdict = load_tool_policy(cfg).verdict(name, risk)
     if verdict != FREE:
         _log_action(
             db, tool=name, args=tool_args, risk=risk, verdict=verdict,
-            outcome="refusé", query=redacted_text, origin=origin,
+            outcome=OUTCOME_REFUSED, query=redacted_text, origin=origin,
         )
         return _refusal(name, verdict, risk)
 
@@ -513,7 +515,7 @@ def run_tool_with_retries(
     def _finish(result: ToolExecutionResult) -> ToolExecutionResult:
         _log_action(
             db, tool=name, args=tool_args, risk=risk, verdict=verdict,
-            outcome=("ok" if getattr(result, "success", False) else "échec"),
+            outcome=(OUTCOME_OK if getattr(result, "success", False) else OUTCOME_FAILED),
             query=redacted_text, origin=origin,
             duration_ms=int((time.monotonic() - _started) * 1000),
         )
