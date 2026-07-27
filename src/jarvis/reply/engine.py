@@ -1005,7 +1005,9 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                     language: Optional[str] = None,
                     on_token: Optional[Any] = None,
                     on_stage: Optional[Any] = None,
-                    origin: Optional[str] = None) -> Optional[str]:
+                    origin: Optional[str] = None,
+                    granted: Optional[Any] = None,
+                    granted_action: Optional[Any] = None) -> Optional[str]:
     """
     Main entry point for reply generation.
 
@@ -1038,6 +1040,12 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
             later the routines that run unattended. Recorded against every
             tool call in the action ledger, so the user can tell an action
             they asked for from one that happened while they were away.
+        granted / granted_action: a decision already taken by a
+            deliberate gesture, so this turn runs the approved call and
+            narrates it. The click has already claimed the question from
+            the store, so there is nothing left to read an answer from —
+            passing it in is what lets the same execution path serve both
+            doors.
 
     Returns:
         Generated reply text or None
@@ -1115,7 +1123,13 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
     # answer turns out to be.
     _settled = _Settled()
     _turn_seq = 0
-    if dialogue_memory is not None and hasattr(dialogue_memory, "begin_turn"):
+    if granted is not None and granted_action is not None:
+        # A click already settled it, on another thread, and already
+        # claimed the question from the store. Nothing to read.
+        _settled = _Settled(approval=granted, action=granted_action)
+        if dialogue_memory is not None and hasattr(dialogue_memory, "begin_turn"):
+            _turn_seq = dialogue_memory.begin_turn()
+    elif dialogue_memory is not None and hasattr(dialogue_memory, "begin_turn"):
         try:
             _turn_seq = dialogue_memory.begin_turn()
             _settled = settle_pending_confirmation(

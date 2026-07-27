@@ -53,6 +53,17 @@ _global_dictation_engine = None  # Dictation engine reference for history UI
 # submission path so voice and text are one conversation against one store.
 _global_cfg = None
 _global_db = None
+# The voice listener, so a reply produced on another thread can be handed
+# to it rather than spoken from that thread — it speaks outside the query
+# lock, and two speakers would interleave their echo bookkeeping.
+_global_listener = None
+
+# Surfaces the desktop app wires in bundled mode, where stdout IPC is not
+# how the two halves talk.
+_confirmation_callbacks: dict = {
+    "on_confirm": None,        # Callable[[PendingAction], None]
+    "on_confirm_settled": None,  # Callable[[str, str], None] — id, outcome
+}
 
 # Shutdown timeout for diary update (shorter than normal to allow reasonable quit time)
 # Desktop app's stop_daemon() should wait at least this long + buffer
@@ -84,6 +95,9 @@ _chat_cancel_event: Optional[threading.Event] = None
 # __CHAT_QUERY__:  desktop -> daemon (query submission, read from stdin)
 CHAT_IPC_PREFIX = "__CHAT__:"
 CHAT_QUERY_IPC_PREFIX = "__CHAT_QUERY__:"
+# __CHAT_DECISION__: desktop -> daemon. The one line on this bus that
+# authorises an irreversible action, and validated accordingly.
+CHAT_DECISION_IPC_PREFIX = "__CHAT_DECISION__:"
 SHUTDOWN_SKIP_DIARY_COMMAND = "SHUTDOWN_SKIP_DIARY"
 
 
@@ -98,6 +112,12 @@ def request_stop(skip_diary_update: bool = False) -> None:
     _global_stop_requested = True
     if skip_diary_update:
         _global_skip_shutdown_diary_update = True
+    # Before the diary pass, so a question nobody answered is closed with
+    # the machine rather than coming back with it.
+    try:
+        revoke_pending_confirmation()
+    except Exception as e:
+        debug_log(f"pending confirmation not revoked: {e}", "tools")
 
 
 def is_shutdown_diary_update_skipped() -> bool:
@@ -413,6 +433,239 @@ def handle_chat_query_stdin_line(line: str) -> bool:
     return True
 
 
+def handle_chat_decision_stdin_line(line: str) -> bool:
+    """Parse a stdin line as a confirmation decision (subprocess mode).
+
+    Returns True if the line was a ``__CHAT_DECISION__:`` line and was
+    handled, whether or not the decision was acted on.
+
+    Validated harder than the query line beside it, because this is the
+    one message on the bus that authorises an irreversible action.
+    ``approved`` must be an actual boolean: a truthy ``1`` or ``"true"``
+    from a buggy writer must not run a deletion. ``isinstance(True, int)``
+    is True in Python, so the check is on ``bool`` explicitly.
+    """
+    line = line.strip()
+    if not line.startswith(CHAT_DECISION_IPC_PREFIX):
+        return False
+
+    import json
+    try:
+        payload = json.loads(line[len(CHAT_DECISION_IPC_PREFIX):])
+    except Exception:
+        debug_log("malformed __CHAT_DECISION__ line ignored", "chat_ipc")
+        return True
+
+    if not isinstance(payload, dict):
+        debug_log("__CHAT_DECISION__ payload is not an object, ignored", "chat_ipc")
+        return True
+
+    request_id = payload.get("request_id")
+    approved = payload.get("approved")
+    if not isinstance(request_id, str) or not request_id:
+        debug_log("__CHAT_DECISION__ request_id is not a string, ignored", "chat_ipc")
+        return True
+    if not isinstance(approved, bool):
+        debug_log("__CHAT_DECISION__ approved is not a boolean, ignored", "chat_ipc")
+        return True
+
+    resolve_confirmation(request_id, approved)
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Confirmation
+# ─────────────────────────────────────────────────────────────────────────────
+
+def announce_confirmation(action, *, origin: Optional[str] = None) -> None:
+    """Show a question on every surface that can display one.
+
+    Emitted on the chat bus whatever the question's origin: the chat
+    window is the surface with buttons, and a spoken question that never
+    reached it would be a destructive action nobody can approve.
+
+    The payload is what the card must show, rendered by
+    ``describe_action`` rather than by the model, and the query rides
+    along already redacted — these lines get logged.
+    """
+    from .tools.confirmation import describe_action
+
+    try:
+        described = describe_action(action.tool, action.args, action.risk)
+        _emit_chat_event("confirm", {
+            "request_id": action.request_id,
+            "tool": action.tool,
+            "risk": action.risk,
+            "channel": action.channel,
+            "origin": origin or action.origin,
+            "shown": described.shown,
+            "hazards": described.hazards,
+            "ttl_sec": action.ttl_sec,
+        })
+        for cb in (_confirmation_callbacks.get("on_confirm"),):
+            if cb is not None:
+                cb(action)
+    except Exception as e:
+        debug_log(f"confirmation announce failed: {e}", "chat_ipc")
+
+
+def _settle(action, outcome: str) -> None:
+    """Close a question's ledger episode."""
+    db = _global_db
+    if db is None or not hasattr(db, "record_action"):
+        return
+    try:
+        db.record_action(
+            tool=action.tool, args=action.args, risk=action.risk,
+            verdict="demande", outcome=outcome, duration_ms=None,
+            origin=action.origin, query=action.query_redacted,
+            request_id=action.request_id,
+        )
+    except Exception as e:
+        debug_log(f"confirmation outcome not recorded: {e}", "tools")
+
+
+def _announce_settled(action, outcome: str) -> None:
+    try:
+        _emit_chat_event("confirm_settled", {
+            "request_id": action.request_id, "outcome": outcome,
+        })
+        cb = _confirmation_callbacks.get("on_confirm_settled")
+        if cb is not None:
+            cb(action.request_id, outcome)
+    except Exception as e:
+        debug_log(f"confirmation settle not announced: {e}", "chat_ipc")
+
+
+def resolve_confirmation(request_id: str, approved: bool) -> str:
+    """Settle a waiting question by a deliberate gesture.
+
+    Returns what happened, for the caller to show: ``ok`` (running now),
+    ``décliné``, ``occupée`` (a turn is in flight — the card stays up and
+    its deadline keeps running, because a decision the user correctly
+    made must not vanish without a word), ``arrêt``, or ``inconnue``.
+
+    The lock is taken without blocking. A blocking or timed acquire would
+    be a third semantic on a lock that already has two — voice blocks,
+    text rejects with ``busy`` — and it would hold a UI thread on a lock
+    a reply engine can own for a minute.
+    """
+    dm = _global_dialogue_memory
+    if dm is None or not hasattr(dm, "take_pending_by_id"):
+        return "inconnue"
+
+    if is_stop_requested():
+        debug_log("confirmation decision arrived during shutdown, ignored", "tools")
+        return "arrêt"
+
+    if not approved:
+        action = dm.take_pending_by_id(request_id)
+        if action is None:
+            return "inconnue"
+        _settle(action, "décliné")
+        _announce_settled(action, "décliné")
+        debug_log(f"    🙋 declined {action.tool} ({request_id})", "tools")
+        return "décliné"
+
+    # Approved. Claim the lock before the question, so a failure to run
+    # leaves the card exactly as it was rather than consuming a decision
+    # that then goes nowhere.
+    if not _chat_query_lock.acquire(blocking=False):
+        debug_log("confirmation decision rejected: another query is running", "tools")
+        return "occupée"
+
+    action = dm.take_pending_by_id(request_id)
+    if action is None:
+        _chat_query_lock.release()
+        return "inconnue"
+
+    _announce_settled(action, "accordé")
+    try:
+        threading.Thread(
+            target=_resume_after_confirmation, args=(action,),
+            name="jarvis-confirmation-resume", daemon=True,
+        ).start()
+    except Exception as e:
+        # The worker owns the lock's release. If it never starts, nothing
+        # ever releases it and every later query is rejected as busy for
+        # the life of the process.
+        debug_log(f"confirmation resume thread failed to start: {e}", "tools")
+        _chat_query_lock.release()
+        _settle(action, "expiré")
+        _announce_settled(action, "expiré")
+        return "arrêt"
+    return "ok"
+
+
+def _resume_after_confirmation(action) -> None:
+    """Run the approved call and narrate it, holding the query lock.
+
+    The lock is already held by ``resolve_confirmation``; this thread
+    owns it now and releases it when the turn is done.
+    """
+    from .reply.engine import run_reply_engine
+    from .tools.confirmation import Approval
+
+    try:
+        reply = run_reply_engine(
+            db=_global_db, cfg=_global_cfg, tts=None,
+            text=action.query_redacted, dialogue_memory=_global_dialogue_memory,
+            origin=action.origin,
+            granted=Approval(
+                request_id=action.request_id, fingerprint=action.fingerprint,
+            ),
+            granted_action=action,
+        )
+        _notify_chat("complete", reply, callbacks={}, use_ipc=True)
+        if reply:
+            _speak_from_worker(reply)
+    except Exception as e:
+        debug_log(f"confirmation resume failed: {e}", "tools")
+    finally:
+        _chat_query_lock.release()
+
+
+def _speak_from_worker(text: str) -> None:
+    """Hand a reply to the listener so it, and only it, speaks.
+
+    Speaking from this thread would race the listener: it speaks outside
+    the lock block, so two ``track_tts_start`` writes and two hot-window
+    activations could interleave.
+    """
+    listener = _global_listener
+    if listener is None or not hasattr(listener, "enqueue_reply"):
+        return
+    try:
+        listener.enqueue_reply(text)
+    except Exception as e:
+        debug_log(f"reply not queued for speaking: {e}", "voice")
+
+
+def revoke_pending_confirmation() -> None:
+    """Drop a waiting question on shutdown.
+
+    A question nobody answered before the machine went down does not come
+    back when it comes up: the approval would be given without the
+    context that produced it.
+    """
+    dm = _global_dialogue_memory
+    if dm is None or not hasattr(dm, "peek_pending"):
+        return
+    action = dm.peek_pending()
+    if action is None:
+        return
+    dm.clear_pending()
+    _settle(action, "expiré")
+    _announce_settled(action, "expiré")
+    debug_log(f"    🙋 revoked {action.tool} on shutdown", "tools")
+
+
+def set_confirmation_callbacks(*, on_confirm=None, on_confirm_settled=None) -> None:
+    """Wire the desktop app's surfaces in bundled mode."""
+    _confirmation_callbacks["on_confirm"] = on_confirm
+    _confirmation_callbacks["on_confirm_settled"] = on_confirm_settled
+
+
 def is_stop_requested() -> bool:
     """Check if a stop has been requested."""
     return _global_stop_requested
@@ -581,7 +834,7 @@ def _check_and_update_diary(
 
 def main() -> None:
     """Main daemon entry point."""
-    global _global_dialogue_memory, _global_stop_requested, _global_tts_engine, _global_dictation_engine
+    global _global_dialogue_memory, _global_stop_requested, _global_tts_engine, _global_dictation_engine, _global_listener
     global _warm_profile_core_listener
     global _global_skip_shutdown_diary_update
 
@@ -784,6 +1037,10 @@ def main() -> None:
     print("🎤 Initializing voice listener (this may take a moment to load Whisper model)...", flush=True)
     voice_thread: Optional[threading.Thread] = None
     voice_thread = VoiceListener(db, cfg, tts, _global_dialogue_memory)
+    # So a reply produced on another thread — a click-approved action —
+    # can be handed to the listener to speak, rather than spoken from
+    # that thread and racing the listener's echo bookkeeping.
+    _global_listener = voice_thread
     voice_thread.start()
     print("✓ Voice listener thread started (loading Whisper model in background)", flush=True)
 
@@ -883,6 +1140,9 @@ def main() -> None:
                 # line, which we silently ignore.
                 if stripped.startswith(CHAT_QUERY_IPC_PREFIX):
                     handle_chat_query_stdin_line(stripped)
+                # A decision on a waiting confirmation.
+                if stripped.startswith(CHAT_DECISION_IPC_PREFIX):
+                    handle_chat_decision_stdin_line(stripped)
         except Exception:
             pass  # stdin might not be available
 
