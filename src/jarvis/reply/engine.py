@@ -171,13 +171,20 @@ def _spend(confirmation):
 
 
 def _end_turn_with_question(result, dialogue_memory, redacted, *, tts, cfg,
-                            record_carryover):
+                            record_carryover, messages=None):
     """End the whole turn on the question the gate raised.
 
     Modelled on the `stop` short-circuit: the turn is over, both messages
     go to dialogue memory so the next one has the context, and the reply
     is the sentence the code wrote.
     """
+    # The assistant message carrying the tool_calls array is the last
+    # thing appended before the gate was called, and nothing ran. Left in
+    # place it becomes carryover: a call with no result, offered to the
+    # next turn as if it had happened.
+    if messages and messages[-1].get("tool_calls") and not messages[-1].get("content"):
+        messages.pop()
+
     action = None
     if dialogue_memory is not None and hasattr(dialogue_memory, "peek_pending"):
         action = dialogue_memory.peek_pending()
@@ -244,7 +251,7 @@ def settle_pending_confirmation(*, cfg, dialogue_memory, utterance, origin) -> _
     if dialogue_memory is None or not hasattr(dialogue_memory, "take_pending_for_utterance"):
         return _Settled()
 
-    seq = dialogue_memory.current_turn()
+    seq = dialogue_memory.current_turn(origin)
     waiting = dialogue_memory.peek_pending()
     if waiting is None or waiting.channel != CHANNEL_PAROLE:
         # A gesture-only question is not settled by anything said. Asking
@@ -1131,10 +1138,10 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         # claimed the question from the store. Nothing to read.
         _settled = _Settled(approval=granted, action=granted_action)
         if dialogue_memory is not None and hasattr(dialogue_memory, "begin_turn"):
-            _turn_seq = dialogue_memory.begin_turn()
+            _turn_seq = dialogue_memory.begin_turn(origin)
     elif dialogue_memory is not None and hasattr(dialogue_memory, "begin_turn"):
         try:
-            _turn_seq = dialogue_memory.begin_turn()
+            _turn_seq = dialogue_memory.begin_turn(origin)
             _settled = settle_pending_confirmation(
                 cfg=cfg, dialogue_memory=dialogue_memory,
                 utterance=redacted, origin=origin,
@@ -2276,6 +2283,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                                     _plan_result, dialogue_memory, redacted,
                                     tts=tts, cfg=cfg,
                                     record_carryover=_maybe_record_tool_carryover,
+                                    messages=messages,
                                 )
                             _confirmation = _spend(_confirmation)
                             if _plan_result.reply_text:
@@ -2578,6 +2586,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 return _end_turn_with_question(
                     result, dialogue_memory, redacted, tts=tts, cfg=cfg,
                     record_carryover=_maybe_record_tool_carryover,
+                    messages=messages,
                 )
             _confirmation = _spend(_confirmation)
 

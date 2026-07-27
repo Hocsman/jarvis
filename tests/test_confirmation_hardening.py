@@ -246,3 +246,79 @@ def test_a_collision_does_not_displace_the_waiting_question(collided):
     dm, _, _ = collided
 
     assert dm.peek_pending().args == {"cible": "/a"}
+
+
+# ── Turns are counted per channel ─────────────────────────────────────
+
+
+def test_a_turn_on_the_other_channel_does_not_expire_a_spoken_yes():
+    """One global counter would let a chat turn — or the resume worker's
+    own turn — advance the number past a voice question nobody had a
+    chance to answer, disqualifying a perfectly timely yes."""
+    from src.jarvis.tools.confirmation import PendingAction
+
+    dm = DialogueMemory()
+    dm.begin_turn("voix")
+    dm.raise_pending(PendingAction.create(
+        tool="fake", args={}, risk=RISK_ACTION, channel=CHANNEL_PAROLE,
+        origin="voix", query_redacted="", raised_at_turn=dm.current_turn("voix"),
+        ttl_sec=180.0,
+    ))
+
+    dm.begin_turn("chat")  # someone typed something meanwhile
+    seq = dm.begin_turn("voix")
+
+    assert dm.take_pending_for_utterance("voix", seq) is not None
+
+
+# ── A re-ask belongs to whoever just asked ────────────────────────────
+
+
+def test_a_re_ask_from_the_other_surface_can_be_answered_there():
+    """Recognised as the same call by its digest, which carries only the
+    tool and arguments — so without moving the origin, the surface that
+    just asked could not accept the answer it is about to get."""
+    from src.jarvis.tools.confirmation import PendingAction
+
+    dm = DialogueMemory()
+    dm.begin_turn("voix")
+    dm.raise_pending(PendingAction.create(
+        tool="fake", args={"x": 1}, risk=RISK_ACTION, channel=CHANNEL_PAROLE,
+        origin="voix", query_redacted="", raised_at_turn=dm.current_turn("voix"),
+        ttl_sec=180.0,
+    ))
+
+    seq = dm.begin_turn("chat")
+    dm.raise_pending(PendingAction.create(
+        tool="fake", args={"x": 1}, risk=RISK_ACTION, channel=CHANNEL_PAROLE,
+        origin="chat", query_redacted="", raised_at_turn=seq, ttl_sec=180.0,
+    ))
+
+    assert dm.take_pending_for_utterance("chat", seq + 1) is not None
+
+
+# ── An unanswered call is not offered as carryover ────────────────────
+
+
+def test_a_question_leaves_no_orphan_tool_call_behind():
+    """The assistant message carrying the tool_calls array is appended
+    before the gate runs. Left in place when nothing ran, it becomes
+    carryover: a call with no result, offered to the next turn as if it
+    had happened."""
+    from src.jarvis.reply.engine import _end_turn_with_question
+
+    messages = [
+        {"role": "user", "content": "fais-le"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"function": {"name": "fake", "arguments": {}}},
+        ]},
+    ]
+    result = ToolExecutionResult(success=False, reply_text=None,
+                                 pending_id="cf_x")
+
+    _end_turn_with_question(
+        result, None, "fais-le", tts=None, cfg=MagicMock(voice_debug=False),
+        record_carryover=lambda: None, messages=messages,
+    )
+
+    assert not any(m.get("tool_calls") for m in messages)

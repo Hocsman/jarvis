@@ -286,26 +286,30 @@ def test_the_turn_counter_advances(dm):
 # ── Never on disk ─────────────────────────────────────────────────────
 
 
-def test_nothing_pending_is_written_to_the_database(dm, tmp_path):
-    """Structural: a pending request holds tool arguments the model wrote
-    from the user's words, and an approval that outlives the process is
-    an approval given without the context that produced it."""
+def test_a_restart_drops_the_waiting_question(dm):
+    """The property, stated as what a restart does rather than as a
+    database scan the store was never connected to.
+
+    A deletion proposed before a crash and approved after it is an
+    approval given without the context that produced it. The store holds
+    nothing across processes because it holds nothing anywhere but here.
+    """
+    dm.begin_turn()
+    dm.raise_pending(_action(dm, args={"path": "/secret"}))
+
+    # The process came back.
+    revived = DialogueMemory()
+
+    assert revived.peek_pending() is None
+
+
+def test_the_store_owns_no_database_handle(dm):
+    """Structural: it cannot write what it cannot reach."""
+    dm.begin_turn()
+    dm.raise_pending(_action(dm, args={"path": "/secret"}))
+
     from src.jarvis.memory.db import Database
 
-    db = Database(str(tmp_path / "t.db"), sqlite_vss_path=None)
-    try:
-        dm.begin_turn()
-        dm.raise_pending(_action(dm, args={"path": "/secret"}))
-
-        tables = [
-            r[0] for r in db.conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
-        ]
-        for table in tables:
-            if table.startswith("sqlite_"):
-                continue
-            rows = db.conn.execute(f'SELECT * FROM "{table}"').fetchall()
-            assert not any("/secret" in str(tuple(r)) for r in rows)
-    finally:
-        db.close()
+    assert not any(
+        isinstance(v, Database) for v in vars(dm).values()
+    )

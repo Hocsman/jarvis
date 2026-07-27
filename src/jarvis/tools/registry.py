@@ -481,7 +481,7 @@ def _ask(db, cfg, confirmation, *, name, args, risk, verdict, origin,
     action = PendingAction.create(
         tool=name, args=args, risk=risk, channel=channel, origin=origin,
         query_redacted=redacted_text,
-        raised_at_turn=store.current_turn(),
+        raised_at_turn=store.current_turn(origin),
         ttl_sec=confirmation.ttl_sec,
     )
     held = store.raise_pending(action)
@@ -664,7 +664,7 @@ def run_tool_with_retries(
         if mcps_config and server_name in mcps_config:
             try:
                 if MCPClient is None:
-                    return ToolExecutionResult(success=False, reply_text=None, error_message="MCP client not available. Install 'mcp' package.")
+                    return _finish(ToolExecutionResult(success=False, reply_text=None, error_message="MCP client not available. Install 'mcp' package."))
 
                 client = MCPClient(mcps_config)
                 result = client.invoke_tool(server_name=server_name, tool_name=mcp_tool_name, arguments=tool_args or {})
@@ -708,6 +708,9 @@ def run_tool_with_retries(
 
     # Unknown tool
     debug_log(f"unknown tool requested: {tool_name}", "tools")
-    return ToolExecutionResult(success=False, reply_text=None, error_message=f"Unknown tool: {tool_name}")
+    # Through `_finish` like every other exit past the gate: a call the
+    # gate allowed and that then went nowhere still happened, and a
+    # ledger silent about it claims she never tried.
+    return _finish(ToolExecutionResult(success=False, reply_text=None, error_message=f"Unknown tool: {tool_name}"))
 
 

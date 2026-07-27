@@ -242,6 +242,16 @@ def _is_invisible(ch: str) -> bool:
     return unicodedata.category(ch) in {"Cc", "Cf", "Co", "Cs", "Zl", "Zp"}
 
 
+# A word, in any script. `\w` minus the underscore, so `a_b` is two
+# tokens rather than one — an underscore is not evidence of anything.
+_TOKEN = re.compile(r"[^\W_]+", re.UNICODE)
+
+# Scripts that normally mix inside one word. Japanese runs kanji, kana
+# and Latin together; flagging that would make every Japanese argument a
+# permanent hazard.
+_COMPATIBLE = frozenset({"CJK", "HIRAGANA", "KATAKANA", "LATIN", "DIGIT"})
+
+
 def _script_of(ch: str) -> Optional[str]:
     """A coarse script name for a letter, or None for anything else."""
     if not ch.isalpha():
@@ -278,11 +288,21 @@ def _hazards_in(text: str) -> list:
     if any(_is_invisible(c) for c in text):
         found.append("caractères invisibles")
 
-    scripts = {s for s in (_script_of(c) for c in text) if s}
-    # Accented French is LATIN throughout; a Cyrillic а among Latin
-    # letters is the classic homoglyph and shows up as a second script.
-    if len(scripts) > 1:
-        found.append(f"écritures mélangées ({', '.join(sorted(scripts))})")
+    # Mixed scripts *within one word*, not across the whole blob. The
+    # rendered JSON always contains the argument keys, which are ASCII
+    # (`path`, `query`, `operation`), so a blob-wide check reports LATIN
+    # against every non-Latin value — a Japanese search term would be
+    # flagged as a homoglyph attack on every single call.
+    #
+    # What is actually suspicious is one token drawing on two scripts:
+    # a Cyrillic а sitting inside an otherwise Latin path. Languages that
+    # natively mix within a word are excluded, or Japanese would be
+    # permanently suspect.
+    for token in _TOKEN.findall(text):
+        scripts = {s for s in (_script_of(c) for c in token) if s}
+        if len(scripts) > 1 and not scripts <= _COMPATIBLE:
+            found.append(f"écritures mélangées ({', '.join(sorted(scripts))})")
+            break
     return found
 
 

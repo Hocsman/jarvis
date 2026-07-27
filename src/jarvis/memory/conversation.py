@@ -760,6 +760,7 @@ class DialogueMemory:
         # In memory only: see raise_pending.
         self._pending: Optional[object] = None
         self._turn_seq: int = 0
+        self._turn_seq_by_origin: dict = {}
 
     # ── The action waiting on the user ────────────────────────────────
     #
@@ -770,19 +771,25 @@ class DialogueMemory:
     # deletion proposed before a crash and approved after it is an
     # approval given without the context that produced it.
 
-    def begin_turn(self) -> int:
-        """Open a turn and return its number.
+    def begin_turn(self, origin: Optional[str] = None) -> int:
+        """Open a turn on ``origin`` and return its number.
 
-        A spoken answer is only accepted on the turn immediately after
-        the question, so this counter is what bounds the window.
+        Counted per origin, because "the turn immediately after" has to
+        mean the next turn *on the channel the question was asked on*. A
+        single global counter would let a chat turn — or the resume
+        worker's own turn — advance the number past a voice question that
+        nobody had a chance to answer yet, disqualifying a perfectly
+        timely spoken yes.
         """
         with self._lock:
             self._turn_seq += 1
-            return self._turn_seq
+            nxt = self._turn_seq_by_origin.get(origin, 0) + 1
+            self._turn_seq_by_origin[origin] = nxt
+            return nxt
 
-    def current_turn(self) -> int:
+    def current_turn(self, origin: Optional[str] = None) -> int:
         with self._lock:
-            return self._turn_seq
+            return self._turn_seq_by_origin.get(origin, 0)
 
     def raise_pending(self, action):
         """Hold ``action`` as the question awaiting an answer.
@@ -808,9 +815,17 @@ class DialogueMemory:
                 # every turn cannot hold a card open indefinitely. The
                 # deadline belongs to the moment the user was first
                 # asked.
+                # The origin moves with it. A question first raised by
+                # voice and re-raised from the chat window belongs to the
+                # chat window now, or the surface that just asked cannot
+                # accept the answer it is about to get.
                 from dataclasses import replace
 
-                self._pending = replace(held, raised_at_turn=action.raised_at_turn)
+                self._pending = replace(
+                    held,
+                    raised_at_turn=action.raised_at_turn,
+                    origin=action.origin,
+                )
                 return self._pending
 
             self._pending = action
