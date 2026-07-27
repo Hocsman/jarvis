@@ -13,6 +13,7 @@ from src.jarvis.memory.conversation import (
     update_diary_from_dialogue_memory,
 )
 from src.jarvis.reply.engine import run_reply_engine
+from src.jarvis.tools.types import ToolExecutionResult
 from src.jarvis.utils.redact import redact
 
 
@@ -134,7 +135,7 @@ class TestReplyEngineDialogueMemory:
     def test_dialogue_memory_filters_tool_calls(self, mock_tool, mock_extract, mock_chat):
         """Test that JSON tool calls are filtered from dialogue memory."""
         # Mock dependencies
-        mock_tool.return_value = Mock(reply_text="Weather data", error_message=None)
+        mock_tool.return_value = ToolExecutionResult(success=True, reply_text="Weather data", error_message=None)
         
         # Mock multi-turn conversation: structured tool call then final response
         mock_chat.side_effect = [

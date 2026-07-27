@@ -11,6 +11,16 @@ from ..utils.redact import redact
 from ..system_prompt import build_system_prompt
 from ..tools.registry import run_tool_with_retries, generate_tools_description, generate_tools_json_schema, BUILTIN_TOOLS
 from ..tools.builtin.stop import STOP_SIGNAL
+from ..tools.confirmation import (
+    Approval,
+    CHANNEL_PAROLE,
+    Confirmation,
+    GRANTED,
+    UNCLEAR,
+    describe_action,
+    read_approval,
+    utterance_channel_available,
+)
 from ..debug import debug_log
 from ..llm import (
     extract_text_from_response,
@@ -82,6 +92,189 @@ if TYPE_CHECKING:
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
+
+
+# ── Confirmation ─────────────────────────────────────────────────────────
+#
+# A turn that hits a `demande` tool ends by asking, and the answer arrives
+# on a later turn. Nothing here blocks: for voice the engine runs on the
+# listener's own audio thread, so waiting would silence the microphone
+# that has to hear the answer.
+
+# What she says when the user declines. Deterministic, because handing a
+# refusal back to the model invites it to re-propose the thing just
+# refused, and because acknowledging "no" does not need a language model.
+DECLINED_REPLY = "Entendu, je ne le fais pas."
+
+
+class _Settled:
+    """What the top of a turn concluded about a waiting question.
+
+    ``approval`` grants the pinned call for this turn and this turn only.
+    ``reply`` short-circuits the turn with a fixed sentence. ``action`` is
+    the claimed request, for the ledger. All three absent means there was
+    nothing to settle, or the answer settled nothing — the utterance is
+    then an ordinary query, so a question the user ignored never locks
+    them out.
+    """
+
+    __slots__ = ("approval", "action", "reply", "declined")
+
+    def __init__(self, approval=None, action=None, reply=None, declined=False):
+        self.approval = approval
+        self.action = action
+        self.reply = reply
+        self.declined = declined
+
+
+def _reply_for_pending(action) -> str:
+    """The words the turn ends on. Authored here, never by the model."""
+    return describe_action(action.tool, action.args, action.risk).spoken
+
+
+def _publish_confirmation(action, *, origin) -> None:
+    """Show a raised question on every surface that can display one.
+
+    Fire and forget: the daemon owns the surfaces, and a UI that cannot
+    be reached must not stop the turn from ending with the question
+    spoken.
+    """
+    try:
+        from ..daemon import announce_confirmation
+
+        announce_confirmation(action, origin=origin)
+    except Exception as e:
+        debug_log(f"confirmation not announced: {e}", "tools")
+
+
+def _float_setting(cfg, name: str, default: float) -> float:
+    """A numeric setting, or the default when cfg cannot supply one.
+
+    Config reaches the engine from the loader, from evals and from test
+    doubles. A deadline is not worth raising over: an unreadable one
+    means the shipped default, which is a shorter life for a pending
+    question rather than a longer one.
+    """
+    try:
+        return float(getattr(cfg, name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _spend(confirmation):
+    """Use up the approval, keeping the channel.
+
+    An approval covers one execution. A model that emits the same tool
+    twice in one turn gets one run and one fresh question.
+    """
+    return confirmation.spent() if confirmation is not None else None
+
+
+def _end_turn_with_question(result, dialogue_memory, redacted, *, tts, cfg,
+                            record_carryover):
+    """End the whole turn on the question the gate raised.
+
+    Modelled on the `stop` short-circuit: the turn is over, both messages
+    go to dialogue memory so the next one has the context, and the reply
+    is the sentence the code wrote.
+    """
+    action = None
+    if dialogue_memory is not None and hasattr(dialogue_memory, "peek_pending"):
+        action = dialogue_memory.peek_pending()
+
+    reply = _reply_for_pending(action) if action is not None else None
+    if not reply:
+        # The question vanished between being raised and being read —
+        # expired, or settled by a click on another thread. Nothing ran,
+        # and saying nothing is the honest outcome.
+        debug_log("pending question gone before it could be spoken", "tools")
+        return None
+
+    try:
+        if not getattr(cfg, "voice_debug", False):
+            print(f"\n🙋 Jarvis\n  {_indent_text(reply)}\n", flush=True)
+        else:
+            print(f"\n[jarvis:demande]\n  {_indent_text(reply)}\n", flush=True)
+    except Exception as e:
+        debug_log(f"question formatting failed: {e}", "planning")
+
+    if tts is not None and getattr(tts, "enabled", False):
+        tts.speak(reply)
+
+    if dialogue_memory is not None:
+        try:
+            dialogue_memory.add_message("user", redacted)
+            record_carryover()
+            dialogue_memory.add_message("assistant", reply)
+        except Exception as e:
+            debug_log(f"dialogue memory error: {e}", "memory")
+
+    return reply
+
+
+def _record_settled_action(db, cfg, settled, *, origin, redacted) -> None:
+    """Close a question's ledger episode when the user declined it."""
+    if settled.action is None or not settled.declined:
+        return
+    try:
+        from ..tools.policy import OUTCOME_DECLINED
+        from ..tools.registry import _log_action
+
+        action = settled.action
+        _log_action(
+            db, tool=action.tool, args=action.args, risk=action.risk,
+            verdict="demande", outcome=OUTCOME_DECLINED, query=redacted,
+            origin=origin, request_id=action.request_id,
+        )
+    except Exception as e:
+        debug_log(f"decline not recorded: {e}", "tools")
+
+
+def settle_pending_confirmation(*, cfg, dialogue_memory, utterance, origin) -> _Settled:
+    """Read this turn's utterance as the answer to a waiting question.
+
+    Called at the very top of a turn, before the planner, the router and
+    enrichment, so a granted call runs against the state the user was
+    looking at rather than a re-planned version of it.
+
+    The record is claimed *before* the judge runs. Whatever it answers,
+    the question is already gone — an unclear answer cannot leave a live
+    question behind to be granted later by accident.
+    """
+    if dialogue_memory is None or not hasattr(dialogue_memory, "take_pending_for_utterance"):
+        return _Settled()
+
+    seq = dialogue_memory.current_turn()
+    waiting = dialogue_memory.peek_pending()
+    if waiting is None or waiting.channel != CHANNEL_PAROLE:
+        # A gesture-only question is not settled by anything said. Asking
+        # the judge could only produce a grant that must be discarded, at
+        # the cost of a round trip and of sending the utterance somewhere.
+        return _Settled()
+
+    action = dialogue_memory.take_pending_for_utterance(origin, seq)
+    if action is None:
+        return _Settled()
+
+    if not utterance_channel_available(cfg):
+        debug_log("no model can read an approval; question left unanswered", "tools")
+        return _Settled()
+
+    verdict = read_approval(cfg, utterance)
+    debug_log(f"    🙋 approval read as {verdict} for {action.tool}", "tools")
+
+    if verdict == GRANTED:
+        return _Settled(
+            approval=Approval(
+                request_id=action.request_id, fingerprint=action.fingerprint,
+            ),
+            action=action,
+        )
+    if verdict == UNCLEAR:
+        # Answered as an ordinary turn. If it re-proposes the same tool,
+        # the gate asks again with the same request id.
+        return _Settled(action=action)
+    return _Settled(action=action, reply=DECLINED_REPLY, declined=True)
 
 
 def _indent_text(text: str, prefix: str = "  ") -> str:
@@ -914,6 +1107,53 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         except Exception as e:
             debug_log(f"MCP refresh on new conversation failed: {e}", "mcp")
 
+    # Step 2b: Is this utterance the answer to a question from last turn?
+    #
+    # Before the planner, the router and enrichment, so a granted call runs
+    # against the state the user was looking at rather than a re-planned
+    # version of it. The waiting question is claimed here whatever the
+    # answer turns out to be.
+    _settled = _Settled()
+    _turn_seq = 0
+    if dialogue_memory is not None and hasattr(dialogue_memory, "begin_turn"):
+        try:
+            _turn_seq = dialogue_memory.begin_turn()
+            _settled = settle_pending_confirmation(
+                cfg=cfg, dialogue_memory=dialogue_memory,
+                utterance=redacted, origin=origin,
+            )
+        except Exception as e:
+            debug_log(f"confirmation settle failed, treating as unanswered: {e}", "tools")
+            _settled = _Settled()
+
+    if _settled.reply is not None:
+        # Declined. Fixed words, no model: handing a refusal back to it
+        # invites it to re-propose the thing just refused.
+        _record_settled_action(db, cfg, _settled, origin=origin, redacted=redacted)
+        try:
+            print(f"\n🤖 Jarvis\n  {_indent_text(_settled.reply)}\n", flush=True)
+        except Exception:
+            pass
+        if dialogue_memory is not None:
+            try:
+                dialogue_memory.add_message("user", redacted)
+                dialogue_memory.add_message("assistant", _settled.reply)
+            except Exception as e:
+                debug_log(f"dialogue memory error: {e}", "memory")
+        return _settled.reply
+
+    # The channel the gate raises questions on, and the answer to the one
+    # it raised last turn. One approval, good for one execution: the
+    # second call in the same turn arrives with none.
+    _confirmation = None
+    if dialogue_memory is not None and hasattr(dialogue_memory, "raise_pending"):
+        _confirmation = Confirmation(
+            store=dialogue_memory,
+            publish=lambda action: _publish_confirmation(action, origin=origin),
+            ttl_sec=_float_setting(cfg, "confirmation_ttl_sec", 180.0),
+            approval=_settled.approval,
+        )
+
     # Load MCP tools cache now so the planner sees the full catalog.
     mcp_tools: dict = {}
     if getattr(cfg, "mcps", {}):
@@ -1641,6 +1881,45 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
     user_msg_index = len(messages)
     messages.append({"role": "user", "content": redacted})
 
+    # The user said yes. Run the call they were shown, here, rather than
+    # waiting for the model to propose it again — it might propose
+    # something else, or nothing, and the grant was for this call. The
+    # model's only remaining job this turn is to say what happened, so it
+    # gets the result and no tools.
+    if _settled.approval is not None:
+        _granted = _settled.action
+        _stage("tool", _granted.tool)
+        _granted_result = run_tool_with_retries(
+            db=db, cfg=cfg, tool_name=_granted.tool, tool_args=_granted.args,
+            system_prompt="", original_prompt="", redacted_text=redacted,
+            max_retries=1, language=language, origin=origin,
+            confirmation=_confirmation,
+        )
+        _confirmation = _spend(_confirmation)
+        _granted_text = (
+            _granted_result.reply_text
+            or f"Error: {_granted_result.error_message or '(no result)'}"
+        )
+        try:
+            print(f"    🙋 Approved → {_granted.tool}", flush=True)
+        except Exception:
+            pass
+        messages.append({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": f"call_grant_{uuid.uuid4().hex[:8]}",
+                "type": "function",
+                "function": {"name": _granted.tool, "arguments": _granted.args},
+            }],
+        })
+        messages.append({
+            "role": "user",
+            "content": f"[Tool result: {_granted.tool}]\n{_granted_text}",
+            "tool_name": _granted.tool,
+            "tool_failed": not _granted_result.success,
+        })
+
     # Idempotent flag — once carryover capture runs (success, error, or stop),
     # don't run it again. Lets us call _maybe_record_tool_carryover from any
     # exit path safely.
@@ -1958,7 +2237,15 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                                 max_retries=1,
                                 language=language,
                                 origin=origin,
+                                confirmation=_confirmation,
                             )
+                            if _plan_result.pending_id:
+                                return _end_turn_with_question(
+                                    _plan_result, dialogue_memory, redacted,
+                                    tts=tts, cfg=cfg,
+                                    record_carryover=_maybe_record_tool_carryover,
+                                )
+                            _confirmation = _spend(_confirmation)
                             if _plan_result.reply_text:
                                 _plan_text = _maybe_digest_tool_result(
                                     cfg=cfg,
@@ -2246,7 +2533,21 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 max_retries=1,
                 language=language,
                 origin=origin,
+                confirmation=_confirmation,
             )
+
+            # The gate asked instead of running. Checked before everything
+            # below it: past this point a result over 400 characters is
+            # rewritten by `_maybe_digest_tool_result`, and the loop then
+            # instructs the model to keep calling tools ("You MUST emit
+            # another tool_calls block now"). Either would turn the
+            # question the code wrote into something the model wrote.
+            if result.pending_id:
+                return _end_turn_with_question(
+                    result, dialogue_memory, redacted, tts=tts, cfg=cfg,
+                    record_carryover=_maybe_record_tool_carryover,
+                )
+            _confirmation = _spend(_confirmation)
 
             # Handle stop tool - end conversation without response
             if result.reply_text == STOP_SIGNAL:
