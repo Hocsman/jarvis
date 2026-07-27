@@ -450,6 +450,63 @@ def _refusal(name: str, verdict: str, risk: str) -> ToolExecutionResult:
     )
 
 
+def _fingerprint(name, args):
+    from .confirmation import fingerprint
+
+    return fingerprint(name, args)
+
+
+def _ask(db, cfg, confirmation, *, name, args, risk, verdict, origin,
+         redacted_text) -> ToolExecutionResult:
+    """Raise a question and end the turn. Nothing runs.
+
+    The gate never waits here. For voice, ``run_reply_engine`` runs on
+    the listener's own audio thread, so blocking would silence the
+    microphone that has to hear the answer — and blocking destroys the
+    answer rather than delaying it, because the audio queue overflows
+    into a swallowed exception.
+    """
+    from .confirmation import PendingAction, channel_for
+    from .policy import OUTCOME_ASKED
+
+    store = confirmation.store
+    channel = channel_for(risk, _known_tool(name))
+
+    action = PendingAction.create(
+        tool=name, args=args, risk=risk, channel=channel, origin=origin,
+        query_redacted=redacted_text,
+        raised_at_turn=store.current_turn(),
+        ttl_sec=confirmation.ttl_sec,
+    )
+    held = store.raise_pending(action)
+    if held is None:
+        # A different question is already waiting. One card at a time, so
+        # a three-step plan asks about its first step rather than
+        # stacking questions the user has to disentangle.
+        debug_log(f"    🚪 {name} not asked: another question is waiting", "tools")
+        return _refusal(name, verdict, risk)
+
+    if held.request_id == action.request_id:
+        # A re-ask keeps the original id and writes no second row: one
+        # episode in the ledger, not a queue of duplicates.
+        _log_action(
+            db, tool=name, args=args, risk=risk, verdict=verdict,
+            outcome=OUTCOME_ASKED, query=redacted_text, origin=origin,
+            request_id=held.request_id,
+        )
+
+    try:
+        confirmation.publish(held)
+    except Exception as e:
+        debug_log(f"confirmation not published: {e}", "tools")
+
+    debug_log(f"    🚪 asked about {name} ({risk} → {channel})", "tools")
+    return ToolExecutionResult(
+        success=False, reply_text=None, error_message=None,
+        pending_id=held.request_id,
+    )
+
+
 def _log_action(
     db, *, tool, args, risk, verdict, outcome, query, origin,
     duration_ms=None, request_id=None,
@@ -479,6 +536,7 @@ def run_tool_with_retries(
     max_retries: int = 1,
     language: Optional[str] = None,
     origin: Optional[str] = None,
+    confirmation: Optional["Confirmation"] = None,
 ) -> ToolExecutionResult:
     """Run one tool, subject to the user's policy, and record what happened.
 
@@ -488,6 +546,12 @@ def run_tool_with_retries(
     on their own threads while the user is mid-conversation, and a shared
     slot would label their rows with whoever spoke last. None is the
     honest value when nothing said.
+
+    ``confirmation`` is a channel the gate can raise a question on, and
+    the user's answer to a question raised on an earlier turn. Threaded
+    in rather than reached for: without one the gate refuses exactly as
+    it does today, because a gate that found a channel lying around
+    would ask on behalf of code with no way to show the question.
     """
     # Normalize tool name to canonical camelCase
     raw_name = (tool_name or "").strip()
@@ -496,16 +560,63 @@ def run_tool_with_retries(
     # The gate, before anything runs. Placed here and not at the call
     # sites because this is the only funnel: both the planner's direct
     # execution and the agentic loop arrive through it.
-    from .policy import FREE, OUTCOME_FAILED, OUTCOME_OK, OUTCOME_REFUSED, resolve_risk
+    from .policy import (
+        FREE, NEVER, OUTCOME_ASKED, OUTCOME_FAILED, OUTCOME_OK, OUTCOME_REFUSED,
+        resolve_risk,
+    )
 
     risk = resolve_risk(name, _known_tool(name), tool_args)
     verdict = load_tool_policy(cfg).verdict(name, risk)
+    request_id: Optional[str] = None
+
     if verdict != FREE:
-        _log_action(
-            db, tool=name, args=tool_args, risk=risk, verdict=verdict,
-            outcome=OUTCOME_REFUSED, query=redacted_text, origin=origin,
-        )
-        return _refusal(name, verdict, risk)
+        # Order is the design.
+        #
+        # `jamais` first, and before any approval, so a tool the user
+        # retired between the question and the answer is refused while a
+        # perfectly valid grant sits in hand. `load_tool_policy` re-reads
+        # on mtime, so the gate sees the newer decision, and the newer
+        # decision wins.
+        approval = getattr(confirmation, "approval", None) if confirmation else None
+
+        if verdict == NEVER:
+            _log_action(
+                db, tool=name, args=tool_args, risk=risk, verdict=verdict,
+                outcome=OUTCOME_REFUSED, query=redacted_text, origin=origin,
+            )
+            return _refusal(name, verdict, risk)
+
+        if approval is not None:
+            # The digest is recomputed here, now, against the call that is
+            # actually about to run. Between the question and the answer
+            # the model got to run again — the planner re-resolves steps,
+            # the loop re-emits tool calls — so a grant given for one path
+            # must not carry to whatever came back under the same name.
+            if approval.fingerprint != _fingerprint(name, tool_args):
+                debug_log(f"    🚪 approval does not match {name}", "tools")
+                _log_action(
+                    db, tool=name, args=tool_args, risk=risk, verdict=verdict,
+                    outcome=OUTCOME_REFUSED, query=redacted_text, origin=origin,
+                    request_id=approval.request_id,
+                )
+                return _refusal(name, verdict, risk)
+            request_id = approval.request_id
+            debug_log(f"    🚪 approved {name} ({request_id})", "tools")
+
+        elif confirmation is None:
+            # Nothing can ask. Today's refusal, which is what keeps every
+            # caller that predates this parameter safe by default.
+            _log_action(
+                db, tool=name, args=tool_args, risk=risk, verdict=verdict,
+                outcome=OUTCOME_REFUSED, query=redacted_text, origin=origin,
+            )
+            return _refusal(name, verdict, risk)
+
+        else:
+            return _ask(
+                db, cfg, confirmation, name=name, args=tool_args, risk=risk,
+                verdict=verdict, origin=origin, redacted_text=redacted_text,
+            )
 
     # Allowed. The ledger records the outcome once the call returns, so
     # both halves of the gate's decision leave a trace: what was let
@@ -516,7 +627,7 @@ def run_tool_with_retries(
         _log_action(
             db, tool=name, args=tool_args, risk=risk, verdict=verdict,
             outcome=(OUTCOME_OK if getattr(result, "success", False) else OUTCOME_FAILED),
-            query=redacted_text, origin=origin,
+            query=redacted_text, origin=origin, request_id=request_id,
             duration_ms=int((time.monotonic() - _started) * 1000),
         )
         return result

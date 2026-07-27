@@ -128,6 +128,33 @@ class Approval:
     fingerprint: str
 
 
+@dataclass(frozen=True)
+class Confirmation:
+    """What the gate is given so it can ask rather than refuse.
+
+    Threaded in, never reached for. A caller that knows nothing about
+    confirmation passes none and gets today's flat refusal, which is the
+    behaviour to default to: a gate that found a channel lying around
+    would ask on behalf of code that has no way to show the question.
+
+    ``approval`` is the answer to a question asked on a previous turn,
+    already claimed from the store by the engine. Carrying it here rather
+    than letting the gate look it up is what scopes it: it covers one
+    execution, and the second call in the same turn arrives with none.
+    """
+
+    store: Any                      # the DialogueMemory holding the question
+    publish: Any                    # called with the PendingAction, to show it
+    ttl_sec: float
+    approval: Optional[Approval] = None
+
+    def spent(self) -> "Confirmation":
+        """The same channel, with the grant used up."""
+        from dataclasses import replace
+
+        return replace(self, approval=None)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Which door
 # ─────────────────────────────────────────────────────────────────────────────

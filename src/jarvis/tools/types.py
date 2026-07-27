@@ -15,3 +15,9 @@ class ToolExecutionResult:
     # just denied is a loop the user watches and cannot stop. Callers
     # that decide whether to try again must check this first.
     refused: bool = False
+    # The gate asked the user instead, and this identifies the question
+    # now waiting on them. Nothing ran and nothing failed — the turn ends
+    # here and the answer arrives on a later one. Kept apart from
+    # ``refused`` because the two mean opposite things to a caller: a
+    # refusal closes the matter, a question is waiting on someone.
+    pending_id: Optional[str] = None

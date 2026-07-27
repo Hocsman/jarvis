@@ -25,7 +25,7 @@ MCP servers already ship `readOnlyHint` and `destructiveHint` in a standard `ann
 | Verdict | Behaviour |
 |---------|-----------|
 | `libre` | Runs, nothing asked |
-| `demande` | Needs the user's say-so |
+| `demande` | Yuba asks, and runs it only if the user says yes |
 | `jamais` | Refused whatever happens, no confirmation offered |
 
 Defaults, when the user's file says nothing: `lecture` → `libre`, `action` and `destructif` → `demande`. Acting and destroying land on the same verdict deliberately: the difference between them is what a confirmation shows, not whether one is needed. Nothing defaults to `jamais` — that section is the user's own decision, reachable only by them writing a name into it.
@@ -64,13 +64,56 @@ At the top of `run_tool_with_retries`, which is the only place a tool runs: the 
 
 Deterministic on purpose. Asking a model "is this dangerous?" would cover tools nobody annotated, but a gate whose answer varies between two identical calls is not a gate.
 
-**Refusing is not failing.** A refusal comes back as `ToolExecutionResult(refused=True)`, distinct from an error. Collapsing the two would tell the model its tool call failed, which invites a retry of the tool it was just denied — a loop the user watches and cannot stop. The refusal message names the tool and, for `demande`, points at `outils.md` so the user can act on it. A `jamais` refusal names no way out: that section is the user's own decision, and telling the model how to reverse it would invite it to argue.
+Four branches, and their order is the design:
+
+1. **`jamais` refuses**, before any approval is considered, so a tool the user retired between the question and the answer is refused while a perfectly valid grant sits in hand. `outils.md` is re-read on mtime, so the gate sees the newer decision, and the newer decision wins.
+2. **A matching approval runs it.** The digest is recomputed here, against the call actually about to run.
+3. **No channel refuses.** A caller that passes no `Confirmation` gets a flat refusal. Fail-closed by default: a gate that found a channel lying around would ask on behalf of code with no way to show the question.
+4. **Otherwise it asks** — pins the call, publishes it, writes one `demandé` row and ends the turn.
+
+**Refusing is not failing, and asking is neither.** A refusal comes back as `ToolExecutionResult(refused=True)`, distinct from an error, because telling the model its call failed invites a retry of the tool it was just denied — a loop the user watches and cannot stop. A question comes back as `pending_id`, distinct from both: a refusal closes the matter, a question is waiting on someone. The refusal message names the tool and, when nothing could ask, points at `outils.md`. A `jamais` refusal names no way out: that section is the user's own decision, and telling the model how to reverse it would invite it to argue.
+
+## Asking
+
+Nothing blocks. For voice, `run_reply_engine` runs on the listener's own audio thread while holding the shared query lock, so a gate that waited for a spoken answer would silence the microphone that has to hear it — and it would destroy the answer rather than delay it, because the audio queue overflows into a swallowed exception after about a second. So the gate raises a question, the turn ends with that question as its reply, and the answer arrives later through one of two doors.
+
+**Which door is decided by risk, and it is the whole trust boundary.**
+
+| Risk | Door |
+|------|------|
+| `destructif` | A gesture: a click on a card showing the call. No model, no transcription. |
+| `action` / `lecture`, risk declared | Either: a spoken or typed answer, read by the approval judge, or the card. |
+| `action` / `lecture`, risk undeclared | A gesture. |
+
+"Declared" means classified by a builtin of ours, or by an MCP tool shipping an explicit `readOnlyHint`/`destructiveHint`. It matters because `resolve_risk` hands `action` to any MCP tool whose annotations merely omit `destructiveHint` — without the distinction, a third-party server would decide by its own metadata what a mis-transcription is allowed to authorise.
+
+A false no costs a turn; a false yes costs a file. Whisper transcribing a room and a small model reading that transcription are two lossy layers, and for `destructif` the design does not tune them, it removes them.
+
+**One question at a time.** A three-step plan asks about its first step and never reaches the second, rather than stacking cards the user has to disentangle. The same call proposed again is a re-ask: it keeps its request id, writes no second ledger row, and keeps its original deadline, so a model re-proposing the same tool every turn cannot hold a card open indefinitely.
+
+**The pinned call.** A question holds the tool, its arguments, and a digest of both. The digest is recomputed when the approval comes back and compared: between the question and the answer the model got to run again, and a grant given for one path must not carry to whatever came back under the same name. An approval covers one execution — the second call in the same turn arrives with none.
+
+**Where the question waits.** One slot on `DialogueMemory`, the object voice and text already share. Never on disk: a deletion proposed before a crash and approved after it is an approval given without the context that produced it, so a restart erases every pending request. A spoken answer is accepted only on the turn immediately after the question, only from the same origin it was asked at, and never for a gesture-only action. The record is claimed *before* the answer is read — the judge runs on a question that is already gone.
+
+**What the user is shown** is authored by code, never by the model. Tool arguments are model output derived from text that may itself be attacker-influenced, and `webSearch` already fences web content as data, which is an admission that pages reach the model. The card shows the arguments losslessly: nothing truncated, no whitespace collapsed (the ledger's copy goes through `redact()`, which collapses it, and a path is not a sentence), and characters that show nothing of themselves escaped so they are visible and flagged.
+
+The spoken question is a fixed sentence with the tool name in it. Its wording is a contract with the echo detector, not decoration: the listener drops a hot-window transcript scoring at or above `EchoDetector.PURE_ECHO_THRESHOLD` against the last thing spoken, and the word-count guard beside it never fires for a one-word reply — so a question phrased "answer yes or no" makes both answers score 100 and deletes them before anything reads them. A corpus test fails the build if an edit pushes a likely answer over the line. The sentence is French, because this fork's user-facing artefacts are; she therefore asks in one language while accepting an answer in any.
 
 ## The ledger
 
 One row per tool call, written from the gate so it covers every route into execution, and both halves of the decision: what was stopped and what was let through.
 
-Each row holds the timestamp, the origin, the tool, its redacted arguments, the risk, the verdict, the outcome (`ok` / `échec` / `refusé`) and the duration. Kept 90 days, pruned on read, and erasable in one click from the Activity tab.
+Each row holds the timestamp, the origin, the tool, its redacted arguments, the risk, the verdict, the outcome, the duration, and the request id when the row belongs to a question. Kept 90 days, pruned on read, and erasable in one click from the Activity tab.
+
+| Outcome | Means |
+|---------|-------|
+| `ok` / `échec` | It ran, and this is how it went |
+| `refusé` | The policy said no. Nobody was asked. |
+| `demandé` | Yuba asked. Written when the question is raised, with no duration. |
+| `décliné` | The user was asked and said no. |
+| `expiré` | The question was never answered. |
+
+`refusé` and `décliné` are kept apart because they are different facts: "she would not" and "I would not". A confirmed action leaves two rows sharing a `request_id` — the question, and whatever settled it — and nothing but that id says they are the same episode. A question nobody answered still leaves its `demandé` row, which is the only shape that records a decision never taken.
 
 **It records what was done, never what was seen.** There is no column for tool output — structurally, not as a promise. A ledger that captured results would accumulate the contents of every page fetched and every file read, which is a different and far larger thing than a list of actions. Arguments and the originating query are stored redacted, because a tool call carries whatever the user just said.
 
