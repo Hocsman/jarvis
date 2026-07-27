@@ -165,3 +165,35 @@ def qapp():
         app = QApplication([])
     yield app
 
+@pytest.fixture
+def tools_unrestricted(monkeypatch):
+    """Run tool calls with the policy gate standing aside.
+
+    For tests that exercise what a tool DOES, not whether it is allowed
+    to. Every call goes through ``run_tool_with_retries``, which now
+    consults the user's policy first, so a test about `localFiles`
+    deleting a file would otherwise be a test about the gate refusing it.
+
+    The gate has its own suite in ``test_tool_gate.py``; this fixture
+    makes the separation explicit at each call site rather than hiding
+    the gate from the whole suite with an autouse override.
+    """
+    class _AllowAll:
+        def verdict(self, name, risk):
+            return "libre"
+
+    # The suite imports the registry both as ``jarvis.tools.registry`` and
+    # as ``src.jarvis.tools.registry``, which are two distinct module
+    # objects. Patching one leaves the other gated, so the fixture would
+    # appear to do nothing in half the tests that ask for it.
+    import importlib
+
+    patched = 0
+    for path in ("jarvis.tools.registry", "src.jarvis.tools.registry"):
+        try:
+            module = importlib.import_module(path)
+        except ImportError:
+            continue
+        monkeypatch.setattr(module, "load_tool_policy", lambda cfg: _AllowAll())
+        patched += 1
+    assert patched, "neither registry module could be imported"

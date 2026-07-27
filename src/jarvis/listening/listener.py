@@ -1199,6 +1199,7 @@ class VoiceListener(threading.Thread):
                 reply = run_reply_engine(
                     self.db, self.cfg, None, query, self.dialogue_memory,
                     language=self._last_detected_language,
+                    origin="voix",
                 )
         except Exception as e:
             # Log the error visibly - this should never happen silently

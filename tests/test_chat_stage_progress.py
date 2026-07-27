@@ -103,7 +103,7 @@ class TestStageIPC:
         _install_memory()
         monkeypatch.setattr(
             "src.jarvis.reply.engine.run_reply_engine",
-            lambda db, cfg, tts, text, dialogue_memory, language=None: "ok",
+            lambda db, cfg, tts, text, dialogue_memory, language=None, origin=None: "ok",
         )
         daemon.submit_text_query("salut", use_ipc=True)
         complete = [e for e in _events(capsys) if e["type"] == "complete"]

@@ -49,7 +49,7 @@ def test_mcp_tools_integrated_with_reply_engine():
 
 
 @pytest.mark.integration 
-def test_mcp_tool_execution_in_context():
+def test_mcp_tool_execution_in_context(tools_unrestricted):
     """Test MCP tool execution with proper context and error handling."""
     from jarvis.tools.registry import run_tool_with_retries, ToolExecutionResult
     
@@ -86,7 +86,7 @@ def test_mcp_tool_execution_in_context():
 
 
 @pytest.mark.integration
-def test_mcp_error_handling_in_context():
+def test_mcp_error_handling_in_context(tools_unrestricted):
     """Test that MCP errors are properly handled in execution context."""
     from jarvis.tools.registry import run_tool_with_retries
     

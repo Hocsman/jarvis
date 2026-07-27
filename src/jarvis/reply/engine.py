@@ -811,7 +811,8 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                     text: str, dialogue_memory: "DialogueMemory",
                     language: Optional[str] = None,
                     on_token: Optional[Any] = None,
-                    on_stage: Optional[Any] = None) -> Optional[str]:
+                    on_stage: Optional[Any] = None,
+                    origin: Optional[str] = None) -> Optional[str]:
     """
     Main entry point for reply generation.
 
@@ -840,6 +841,10 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
             web_search can pick locale-appropriate resources (e.g. the
             right Wikipedia host). None when invoked outside the voice
             path — tools then fall back to their own default.
+        origin: What set this turn going — ``"voix"``, ``"chat"``, and
+            later the routines that run unattended. Recorded against every
+            tool call in the action ledger, so the user can tell an action
+            they asked for from one that happened while they were away.
 
     Returns:
         Generated reply text or None
@@ -1943,6 +1948,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                                 redacted_text=redacted,
                                 max_retries=1,
                                 language=language,
+                                origin=origin,
                             )
                             if _plan_result.reply_text:
                                 _plan_text = _maybe_digest_tool_result(
@@ -2230,6 +2236,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 redacted_text=redacted,
                 max_retries=1,
                 language=language,
+                origin=origin,
             )
 
             # Handle stop tool - end conversation without response

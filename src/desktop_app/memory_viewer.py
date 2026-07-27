@@ -27,6 +27,7 @@ app = Flask(__name__)
 _db_conn: Optional[sqlite3.Connection] = None
 _graph_store: Optional[GraphMemoryStore] = None
 _core: Optional[MemoryCore] = None
+_activity_db = None
 
 
 def _get_db_path() -> str:
@@ -359,6 +360,56 @@ def get_graph_store() -> GraphMemoryStore:
     if _graph_store is None:
         _graph_store = GraphMemoryStore(_get_db_path())
     return _graph_store
+
+
+def get_activity_db():
+    """Open the database the action ledger lives in."""
+    global _activity_db
+    if _activity_db is None:
+        from jarvis.memory.db import Database
+
+        _activity_db = Database(_get_db_path(), sqlite_vss_path=None)
+    return _activity_db
+
+
+@app.route("/api/activity")
+def activity_get() -> Response:
+    """What the assistant has done, newest first.
+
+    Note what is absent: no tool output. The ledger does not store it,
+    so this cannot leak it. The tab shows actions, not their contents.
+    """
+    try:
+        db = get_activity_db()
+        db.prune_actions(max_age_days=90)
+        return jsonify({
+            "actions": [
+                {
+                    "ts_utc": r["ts_utc"],
+                    "origin": r["origin"],
+                    "tool": r["tool"],
+                    "args": r["args"],
+                    "risk": r["risk"],
+                    "verdict": r["verdict"],
+                    "outcome": r["outcome"],
+                    "duration_ms": r["duration_ms"],
+                    "query": r["query"],
+                }
+                for r in db.recent_actions(limit=300)
+            ],
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/activity", methods=["DELETE"])
+def activity_clear() -> Response:
+    """Erase the ledger. The user's to keep and the user's to drop."""
+    try:
+        get_activity_db().clear_actions()
+        return jsonify({"cleared": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/core")
@@ -1152,6 +1203,54 @@ def index() -> str:
             min-height: 0;
         }
 
+        .activity-clear {
+            align-self: flex-start;
+            padding: 6px 12px;
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-sm);
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 0.8rem;
+            transition: all 0.1s ease;
+        }
+
+        .activity-clear:hover {
+            background: var(--bg-hover);
+            border-color: var(--error);
+            color: var(--text-primary);
+        }
+
+        .activity-row {
+            display: flex;
+            gap: 12px;
+            align-items: baseline;
+            padding: 9px 14px;
+            border-bottom: 1px solid rgba(128, 128, 128, 0.12);
+            font-size: 13px;
+        }
+        .activity-row:last-child { border-bottom: none; }
+        .activity-when {
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 11px; opacity: 0.5; white-space: nowrap;
+        }
+        .activity-origin {
+            font-size: 11px; opacity: 0.45; white-space: nowrap;
+            min-width: 34px;
+        }
+        .activity-tool { font-weight: 600; min-width: 210px; overflow-wrap: anywhere; }
+        .activity-args {
+            flex: 1; opacity: 0.6; font-size: 12px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            overflow-wrap: anywhere;
+        }
+        .activity-badge {
+            font-size: 11px; padding: 2px 8px; border-radius: 999px;
+            white-space: nowrap; border: 1px solid var(--border-color);
+        }
+        .activity-ok       { color: var(--success); border-color: var(--success); }
+        .activity-refusé   { color: var(--warning); border-color: var(--warning); }
+        .activity-échec    { color: var(--error);   border-color: var(--error); }
         .core-intro {
             background: var(--bg-card);
             border: 1px solid var(--border-color);
@@ -2276,6 +2375,9 @@ def index() -> str:
             <button class="tab" data-tab="core">
                 <span>🪨</span> Core
             </button>
+            <button class="tab" data-tab="activity">
+                <span>📋</span> Activity
+            </button>
             <button class="tab" data-tab="graph">
                 <span>🧠</span> Knowledge
             </button>
@@ -2382,6 +2484,21 @@ def index() -> str:
                 </div>
             </div>
 
+            <div id="activity-content" class="tab-pane" style="display: none;">
+                <div class="core-intro">
+                    <p>
+                        📋 Ce que Yuba a <strong>fait</strong> : un appel d'outil par ligne, avec
+                        son niveau de risque, le verdict de <code>outils.md</code> et le résultat.
+                        Ce qu'elle a <em>vu</em> n'est jamais enregistré : aucun contenu de page,
+                        de fichier ou de réponse d'outil. Conservé 90 jours.
+                    </p>
+                    <button class="activity-clear" id="btn-clear-activity">🗑️ Effacer le registre</button>
+                </div>
+                <div class="core-files" id="activity-list">
+                    <div class="loading"><div class="spinner"></div></div>
+                </div>
+            </div>
+
             <div id="meals-content" class="tab-pane" style="display: none;">
                 <div class="inline-filters">
                     <span class="inline-filter-label">📅</span>
@@ -2423,6 +2540,7 @@ def index() -> str:
         const mealsPane = document.getElementById('meals-content');
         const graphContent = document.getElementById('graph-content');
         const corePane = document.getElementById('core-content');
+        const activityPane = document.getElementById('activity-content');
         const memoriesContent = memoriesPane.querySelector('.memory-list');
         const mealsContent = mealsPane.querySelector('.memory-list');
         const tabs = document.querySelectorAll('.tab');
@@ -2865,6 +2983,47 @@ def index() -> str:
             }
         });
 
+        // ── Activity tab ────────────────────────────────────────────
+        //
+        // One row per tool call. There is no expand-to-see-the-result,
+        // because the result was never stored: the ledger records what
+        // was done, not what was seen.
+
+        async function loadActivity() {
+            const container = document.getElementById('activity-list');
+            let actions = [];
+            try {
+                actions = (await (await fetch('/api/activity')).json()).actions || [];
+            } catch (e) {
+                container.innerHTML = '<div class="core-empty">Registre illisible.</div>';
+                return;
+            }
+            if (!actions.length) {
+                container.innerHTML = "<div class='core-empty'>Rien pour l'instant. Chaque outil appelé apparaîtra ici.</div>";
+                return;
+            }
+            container.innerHTML = '<div class="core-file">' + actions.map(a => {
+                const when = (a.ts_utc || '').replace('T', ' ').slice(0, 19);
+                const ms = a.duration_ms != null ? ` ${a.duration_ms} ms` : '';
+                const origin = a.origin ? escapeHtml(a.origin) : '—';
+                return `<div class="activity-row">
+                    <span class="activity-when">${escapeHtml(when)}</span>
+                    <span class="activity-origin" title="D'où venait la demande">${origin}</span>
+                    <span class="activity-tool">${escapeHtml(a.tool)}</span>
+                    <span class="activity-args" title="${escapeHtml(a.query || '')}">${escapeHtml(a.args || '')}</span>
+                    <span class="activity-badge">${escapeHtml(a.risk)}</span>
+                    <span class="activity-badge">${escapeHtml(a.verdict)}</span>
+                    <span class="activity-badge activity-${escapeHtml(a.outcome)}">${escapeHtml(a.outcome)}${ms}</span>
+                </div>`;
+            }).join('') + '</div>';
+        }
+
+        document.getElementById('btn-clear-activity').addEventListener('click', async () => {
+            if (!confirm("Effacer tout le registre d'activité ?")) return;
+            await fetch('/api/activity', { method: 'DELETE' });
+            loadActivity();
+        });
+
         function switchTab(tabName) {
             tabs.forEach(t => t.classList.remove('active'));
             document.querySelector(`.tab[data-tab="${tabName}"]`).classList.add('active');
@@ -2875,6 +3034,7 @@ def index() -> str:
             graphContent.style.display = 'none';
             mealsPane.style.display = 'none';
             corePane.style.display = 'none';
+            activityPane.style.display = 'none';
 
             if (currentTab === 'memories') {
                 memoriesPane.style.display = '';
@@ -2882,6 +3042,9 @@ def index() -> str:
             } else if (currentTab === 'core') {
                 corePane.style.display = '';
                 loadCore();
+            } else if (currentTab === 'activity') {
+                activityPane.style.display = '';
+                loadActivity();
             } else if (currentTab === 'graph') {
                 graphContent.style.display = '';
                 initGraph();

@@ -106,11 +106,13 @@ class TestSubmitTextQueryContract:
         dm = _install_dialogue_memory(cfg=object(), db=object())
         captured = {}
 
-        def fake_engine(db, cfg, tts, text, dialogue_memory, language=None):
+        def fake_engine(db, cfg, tts, text, dialogue_memory, language=None,
+                        origin=None):
             captured["tts"] = tts
             captured["dialogue_memory"] = dialogue_memory
             captured["text"] = text
             captured["language"] = language
+            captured["origin"] = origin
             return "hello from the engine"
 
         monkeypatch.setattr("jarvis.reply.engine.run_reply_engine", fake_engine)
@@ -127,6 +129,9 @@ class TestSubmitTextQueryContract:
         assert captured["dialogue_memory"] is dm
         assert captured["language"] is None
         assert captured["text"] == "hi there"
+        # And it says so, so the action ledger can tell a typed request
+        # from a spoken one or from something that ran unattended.
+        assert captured["origin"] == "chat"
 
     def test_fires_on_start_with_query_then_on_complete_with_reply(self, monkeypatch):
         """on_start fires first with the query, on_complete fires last with

@@ -196,3 +196,60 @@ class TestKnowledgeTabHidesInertBranches:
         )
 
         assert "user" in self._branch_names()
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(not _HAS_FLASK, reason="Flask not available")
+class TestActivityApi:
+    """The ledger has to be readable, or it is just a table nobody opens.
+
+    What it must never expose is the same thing it never stores: what a
+    tool returned. The tab shows actions, not their contents."""
+
+    @pytest.fixture(autouse=True)
+    def setup_app(self, tmp_path):
+        from src.desktop_app import memory_viewer
+        from src.jarvis.memory.db import Database
+
+        self.db = Database(str(tmp_path / "test.db"), sqlite_vss_path=None)
+        memory_viewer._activity_db = self.db
+        memory_viewer.app.config["TESTING"] = True
+        self.client = memory_viewer.app.test_client()
+        yield
+        self.db.close()
+        memory_viewer._activity_db = None
+
+    def _record(self, **kw):
+        payload = dict(
+            tool="webSearch", args={"query": "météo"}, risk="lecture",
+            verdict="libre", outcome="ok", duration_ms=12, origin="chat",
+            query="quel temps fait-il",
+        )
+        payload.update(kw)
+        self.db.record_action(**payload)
+
+    def test_an_empty_ledger_reads_as_no_actions(self):
+        assert self.client.get("/api/activity").get_json()["actions"] == []
+
+    def test_a_recorded_call_comes_back(self):
+        self._record()
+
+        actions = self.client.get("/api/activity").get_json()["actions"]
+
+        assert actions[0]["tool"] == "webSearch"
+        assert actions[0]["verdict"] == "libre"
+
+    def test_a_refusal_is_visible(self):
+        self._record(tool="localFiles", verdict="demande", outcome="refusé")
+
+        actions = self.client.get("/api/activity").get_json()["actions"]
+
+        assert actions[0]["outcome"] == "refusé"
+
+    def test_the_user_can_clear_the_ledger(self):
+        self._record()
+
+        resp = self.client.delete("/api/activity")
+
+        assert resp.status_code == 200
+        assert self.db.recent_actions() == []

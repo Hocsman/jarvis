@@ -5,6 +5,7 @@ import sys
 import re
 import requests
 import threading
+import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 import os
@@ -325,6 +326,146 @@ def _normalize_time_range(args: Optional[Dict[str, Any]]) -> Tuple[str, str]:
     return since or (now - timedelta(days=1)).isoformat(), until or now.isoformat()
 
 
+# ── Policy gate ──────────────────────────────────────────────────────
+#
+# Every tool call in the process passes through ``run_tool_with_retries``:
+# the planner's direct execution and the agentic loop both land here. The
+# gate lives at that single point rather than at either call site, so a
+# future third caller cannot bypass it by construction.
+
+_POLICY_CACHE: Dict[str, Any] = {"stamp": None, "policy": None}
+
+
+def load_tool_policy(cfg: Settings):
+    """Read the user's tool policy, cached on the file's mtime.
+
+    Re-read when the file changes so an edit takes effect on the next
+    call rather than the next restart: the file is the control surface,
+    and a control surface with a restart delay is one people stop
+    trusting.
+    """
+    from .policy import ToolPolicy
+
+    try:
+        from ..memory.core import MemoryCore
+
+        path = MemoryCore.for_config(cfg).directory / "outils.md"
+        stamp = path.stat().st_mtime_ns if path.exists() else None
+    except Exception:
+        return ToolPolicy.empty()
+
+    if stamp is None:
+        return ToolPolicy.empty()
+    if _POLICY_CACHE["stamp"] == stamp and _POLICY_CACHE["policy"] is not None:
+        return _POLICY_CACHE["policy"]
+
+    try:
+        policy = ToolPolicy.parse(path.read_text(encoding="utf-8"))
+    except OSError as e:
+        debug_log(f"tool policy unreadable, falling back to defaults: {e}", "tools")
+        return ToolPolicy.empty()
+
+    _POLICY_CACHE["stamp"], _POLICY_CACHE["policy"] = stamp, policy
+    return policy
+
+
+def ensure_policy_file(cfg: Settings) -> None:
+    """Write ``outils.md`` from the installed catalogue, once.
+
+    Generated rather than shipped so the user opens it and finds their
+    own tools by name. Written only when absent: once it exists it is
+    theirs, and a file regenerated on startup would quietly undo every
+    decision they made in it.
+
+    Call after MCP discovery, so the servers' tools are in the cache and
+    land in the file alongside the builtins.
+
+    Never raises. This runs during daemon boot, and one unwritable file
+    must not stop Yuba starting.
+    """
+    from .policy import render_policy_file, resolve_risk
+
+    try:
+        from ..memory.core import MemoryCore
+
+        path = MemoryCore.for_config(cfg).directory / "outils.md"
+        if path.exists():
+            return
+
+        builtin_risks = {
+            name: resolve_risk(name, tool, {})
+            for name, tool in BUILTIN_TOOLS.items()
+        }
+        mcp_risks = {
+            name: resolve_risk(name, spec, {})
+            for name, spec in get_cached_mcp_tools().items()
+        }
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            render_policy_file(builtin_risks, mcp_risks), encoding="utf-8",
+        )
+        debug_log(
+            f"policy file written: {len(builtin_risks)} builtins, "
+            f"{len(mcp_risks)} MCP tools",
+            "tools",
+        )
+    except Exception as e:
+        debug_log(f"policy file not written: {e}", "tools")
+
+
+def _known_tool(name: str):
+    """The builtin or discovered spec for ``name``, or None.
+
+    None is the honest answer for a tool the catalogue has never heard
+    of, and the risk resolver treats it as destructive rather than
+    guessing it is harmless.
+    """
+    if name in BUILTIN_TOOLS:
+        return BUILTIN_TOOLS[name]
+    return get_cached_mcp_tools().get(name)
+
+
+def _refusal(name: str, verdict: str, risk: str) -> ToolExecutionResult:
+    from .policy import NEVER
+
+    if verdict == NEVER:
+        text = (
+            f'The tool "{name}" is in the user\'s never list and cannot be '
+            f"run under any circumstance. Tell them plainly that you are not "
+            f"allowed to do this, and do not offer to try again or suggest a "
+            f"way around it."
+        )
+    else:
+        text = (
+            f'The tool "{name}" needs the user\'s confirmation before it can '
+            f"run ({risk}), and there is no way to ask them yet. Nothing was "
+            f"done. Tell them what you wanted to do and that they can allow it "
+            f'by moving "{name}" into the ## Libre section of their outils.md '
+            f"file."
+        )
+    debug_log(f"    🚪 refused {name} ({risk} → {verdict})", "tools")
+    return ToolExecutionResult(
+        success=False, reply_text=text, error_message=None, refused=True,
+    )
+
+
+def _log_action(
+    db, *, tool, args, risk, verdict, outcome, query, origin, duration_ms=None,
+):
+    """Write one ledger row. Never lets bookkeeping break a tool call."""
+    recorder = getattr(db, "record_action", None)
+    if not callable(recorder):
+        return
+    try:
+        recorder(
+            tool=tool, args=args, risk=risk, verdict=verdict, outcome=outcome,
+            duration_ms=duration_ms, origin=origin, query=query,
+        )
+    except Exception as e:
+        debug_log(f"action log write skipped: {e}", "tools")
+
+
 def run_tool_with_retries(
     db,
     cfg: Settings,
@@ -335,10 +476,48 @@ def run_tool_with_retries(
     redacted_text: str,
     max_retries: int = 1,
     language: Optional[str] = None,
+    origin: Optional[str] = None,
 ) -> ToolExecutionResult:
+    """Run one tool, subject to the user's policy, and record what happened.
+
+    ``origin`` labels the ledger row with what set this call going —
+    ``"voix"``, ``"chat"``, and later the routines that run unattended.
+    Passed rather than read from ambient state because those routines run
+    on their own threads while the user is mid-conversation, and a shared
+    slot would label their rows with whoever spoke last. None is the
+    honest value when nothing said.
+    """
     # Normalize tool name to canonical camelCase
     raw_name = (tool_name or "").strip()
     name = raw_name
+
+    # The gate, before anything runs. Placed here and not at the call
+    # sites because this is the only funnel: both the planner's direct
+    # execution and the agentic loop arrive through it.
+    from .policy import FREE, resolve_risk
+
+    risk = resolve_risk(name, _known_tool(name), tool_args)
+    verdict = load_tool_policy(cfg).verdict(name, risk)
+    if verdict != FREE:
+        _log_action(
+            db, tool=name, args=tool_args, risk=risk, verdict=verdict,
+            outcome="refusé", query=redacted_text, origin=origin,
+        )
+        return _refusal(name, verdict, risk)
+
+    # Allowed. The ledger records the outcome once the call returns, so
+    # both halves of the gate's decision leave a trace: what was let
+    # through and what it did, not only what was stopped.
+    _started = time.monotonic()
+
+    def _finish(result: ToolExecutionResult) -> ToolExecutionResult:
+        _log_action(
+            db, tool=name, args=tool_args, risk=risk, verdict=verdict,
+            outcome=("ok" if getattr(result, "success", False) else "échec"),
+            query=redacted_text, origin=origin,
+            duration_ms=int((time.monotonic() - _started) * 1000),
+        )
+        return result
 
     # Check if tool name is a discovered MCP tool (server__toolname format)
     if "__" in raw_name:
@@ -353,9 +532,15 @@ def run_tool_with_retries(
                 result = client.invoke_tool(server_name=server_name, tool_name=mcp_tool_name, arguments=tool_args or {})
                 is_error = bool(result.get("isError", False))
                 text = result.get("text") or None
-                return ToolExecutionResult(success=(not is_error), reply_text=text, error_message=(text if is_error else None))
+                return _finish(ToolExecutionResult(
+                    success=(not is_error), reply_text=text,
+                    error_message=(text if is_error else None),
+                ))
             except Exception as e:
-                return ToolExecutionResult(success=False, reply_text=None, error_message=f"MCP tool '{raw_name}' error: {e}")
+                return _finish(ToolExecutionResult(
+                    success=False, reply_text=None,
+                    error_message=f"MCP tool '{raw_name}' error: {e}",
+                ))
 
     # Friendly user print helper (non-debug only)
     def _user_print(message: str) -> None:
@@ -371,7 +556,7 @@ def run_tool_with_retries(
     # Check builtin tools first
     if name in BUILTIN_TOOLS:
         tool = BUILTIN_TOOLS[name]
-        return tool.execute(
+        return _finish(tool.execute(
             db=db,
             cfg=cfg,
             tool_args=tool_args,
@@ -381,7 +566,7 @@ def run_tool_with_retries(
             max_retries=max_retries,
             user_print=_user_print,
             language=language,
-        )
+        ))
 
     # Unknown tool
     debug_log(f"unknown tool requested: {tool_name}", "tools")

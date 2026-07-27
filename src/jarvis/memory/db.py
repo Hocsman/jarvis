@@ -4,9 +4,12 @@ import re
 from typing import Sequence, Optional
 from pathlib import Path
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from ..debug import debug_log
+
+# Bumped whenever the shape changes, so a later version can migrate.
+_SCHEMA_VERSION = 1
 
 _SCHEMA_SQL = """
 PRAGMA journal_mode=WAL;
@@ -29,6 +32,27 @@ CREATE TABLE IF NOT EXISTS meals (
   micros_json   TEXT,
   confidence    REAL
 );
+
+-- What the assistant DID, one row per tool call. Never what it SAW:
+-- there is deliberately no column for tool output. A ledger that kept
+-- results would accumulate the contents of every page fetched and every
+-- file read, which is a different and far larger thing than a list of
+-- actions, and it would put that content somewhere the user reads
+-- casually.
+CREATE TABLE IF NOT EXISTS action_log (
+  id          INTEGER PRIMARY KEY,
+  ts_utc      TEXT NOT NULL,
+  origin      TEXT,           -- chat, voice, or an unattended runner later
+  tool        TEXT NOT NULL,
+  args        TEXT,           -- redacted JSON
+  risk        TEXT NOT NULL,  -- lecture / action / destructif
+  verdict     TEXT NOT NULL,  -- libre / demande / jamais
+  outcome     TEXT NOT NULL,  -- ok / échec / refusé
+  duration_ms INTEGER,
+  query       TEXT            -- redacted, so a row can be placed in context
+);
+
+CREATE INDEX IF NOT EXISTS idx_action_log_ts ON action_log(ts_utc DESC);
 
 -- Conversation summaries for diary/memory system
 CREATE TABLE IF NOT EXISTS conversation_summaries (
@@ -129,6 +153,78 @@ class Database:
             cur.executescript(_SCHEMA_SQL)
             if self.is_vss_enabled:
                 cur.executescript(_VSS_SCHEMA_SQL)
+            # Stamp the shape so a later change can migrate rather than
+            # guess. The only migration precedent in this project wipes
+            # its table when the shape surprises it, which is not an
+            # acceptable inheritance for tables that will hold things the
+            # user asked to keep.
+            if cur.execute("PRAGMA user_version").fetchone()[0] < _SCHEMA_VERSION:
+                cur.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+            self.conn.commit()
+
+    # ── Action ledger ─────────────────────────────────────────────────
+
+    def record_action(
+        self,
+        *,
+        tool: str,
+        args: Optional[dict],
+        risk: str,
+        verdict: str,
+        outcome: str,
+        duration_ms: Optional[int] = None,
+        origin: Optional[str] = None,
+        query: Optional[str] = None,
+    ) -> None:
+        """Record one tool call. Bookkeeping: never raises into the caller.
+
+        Arguments and the originating query are redacted on the way in,
+        because a tool call carries whatever the user just said.
+        """
+        import json
+        from ..utils.redact import redact
+
+        try:
+            try:
+                args_text = redact(json.dumps(args or {}, ensure_ascii=False, default=str))
+            except Exception:
+                args_text = "<non sérialisable>"
+            with self._lock:
+                self.conn.execute(
+                    "INSERT INTO action_log "
+                    "(ts_utc, origin, tool, args, risk, verdict, outcome, duration_ms, query) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    (
+                        datetime.now(timezone.utc).isoformat(),
+                        origin, tool, args_text, risk, verdict, outcome,
+                        duration_ms, redact(query) if query else None,
+                    ),
+                )
+                self.conn.commit()
+        except Exception as e:
+            debug_log(f"action log write failed (non-fatal): {e}", "tools")
+
+    def recent_actions(self, limit: int = 200) -> list:
+        """The most recent calls, newest first."""
+        with self._lock:
+            cur = self.conn.execute(
+                "SELECT * FROM action_log ORDER BY ts_utc DESC, id DESC LIMIT ?",
+                (int(limit),),
+            )
+            return cur.fetchall()
+
+    def prune_actions(self, max_age_days: int = 90) -> int:
+        """Drop entries older than the retention window."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+        with self._lock:
+            cur = self.conn.execute("DELETE FROM action_log WHERE ts_utc < ?", (cutoff,))
+            self.conn.commit()
+            return cur.rowcount
+
+    def clear_actions(self) -> None:
+        """Erase the ledger at the user's request."""
+        with self._lock:
+            self.conn.execute("DELETE FROM action_log")
             self.conn.commit()
 
     

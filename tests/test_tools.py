@@ -27,7 +27,7 @@ class DummyDB:
 
 
 @pytest.mark.unit
-def test_delete_meal_success(monkeypatch):
+def test_delete_meal_success(monkeypatch, tools_unrestricted):
     db = DummyDB()
     cfg = DummyCfg()
     res = run_tool_with_retries(
@@ -116,7 +116,7 @@ def test_local_files_list_and_read(tmp_path):
 
 
 @pytest.mark.unit
-def test_local_files_write_append_delete(tmp_path):
+def test_local_files_write_append_delete(tmp_path, tools_unrestricted):
     db = DummyDB()
     cfg = DummyCfg()
     import jarvis.tools.registry as tools_mod

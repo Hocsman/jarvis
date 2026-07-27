@@ -102,7 +102,7 @@ class TestStreamedChatIPC:
         _install_memory()
         monkeypatch.setattr(
             "src.jarvis.reply.engine.run_reply_engine",
-            lambda db, cfg, tts, text, dialogue_memory, language=None: "ok",
+            lambda db, cfg, tts, text, dialogue_memory, language=None, origin=None: "ok",
         )
         daemon.submit_text_query("salut", use_ipc=True)
         events = _chat_events(capsys)

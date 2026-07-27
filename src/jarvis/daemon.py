@@ -350,6 +350,7 @@ def submit_text_query(
                 text=text,
                 dialogue_memory=dm,
                 language=None,
+                origin="chat",
             )
             try:
                 reply = run_reply_engine(
@@ -634,6 +635,12 @@ def main() -> None:
             print(f"  ⚠️ MCP discovery failed: {e}", flush=True)
     else:
         print("📡 No MCP servers configured", flush=True)
+
+    # The user's control surface over what Yuba may do on her own. Written
+    # here rather than earlier so the servers' tools are already in the
+    # cache and land in the file next to the builtins.
+    from .tools.registry import ensure_policy_file
+    ensure_policy_file(cfg)
 
     # Initialize dialogue memory with timeout
     print("💾 Initializing dialogue memory...", flush=True)
