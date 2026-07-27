@@ -17,6 +17,7 @@ from typing import Optional
 from PyQt6.QtCore import Qt, pyqtSignal, QObject
 from PyQt6.QtGui import QCloseEvent, QTextCursor
 from PyQt6.QtWidgets import (
+    QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -37,6 +38,37 @@ _ORB_HERO_HEIGHT = 150
 # ---------------------------------------------------------------------------
 # Thread-safe signal bridge
 # ---------------------------------------------------------------------------
+
+
+def send_confirmation_decision(request_id: str, approved: bool) -> None:
+    """Send one decision to the daemon, in whichever mode it is running.
+
+    Bundled mode calls it directly — the daemon runs in-process, and
+    ``cancel_active_chat_query`` is already called this way. Subprocess
+    mode writes the one line on stdin that authorises an irreversible
+    action; the daemon validates it there rather than trusting this side.
+
+    Module-level so a test can replace it without reaching into a widget,
+    and so both modes have one entry point rather than two that drift.
+    """
+    from jarvis import daemon
+
+    writer = _decision_writer
+    if writer is not None:
+        writer(request_id, approved)
+        return
+    daemon.resolve_confirmation(request_id, approved)
+
+
+# Set by the desktop app in subprocess mode, where the daemon is another
+# process and decisions travel on its stdin.
+_decision_writer = None
+
+
+def set_decision_writer(writer) -> None:
+    """Route decisions through the daemon's stdin (subprocess mode)."""
+    global _decision_writer
+    _decision_writer = writer
 
 
 class ChatSignals(QObject):
@@ -94,6 +126,93 @@ _INPUT_STYLE = f"""
     }}
     QPlainTextEdit:focus {{
         border-color: {COLORS['accent_primary']};
+    }}
+"""
+
+_CONFIRM_CARD_STYLE = f"""
+    QFrame {{
+        background-color: {COLORS['bg_tertiary']};
+        border: 1px solid {COLORS['warning']};
+        border-radius: 8px;
+    }}
+"""
+
+_CONFIRM_TITLE_STYLE = f"""
+    QLabel {{
+        color: {COLORS['warning']};
+        font-size: 13px;
+        font-weight: 600;
+        background: transparent;
+        border: none;
+    }}
+"""
+
+# Neither button is the attractive one. The card's own amber border
+# already says "attention"; a filled call-to-action next to it would make
+# approving the easy reflex, which is precisely backwards when approving
+# is the irreversible half. Declining is quiet and neutral because it is
+# the safe answer, not an alarming one; approving is outlined rather than
+# filled, so it takes a deliberate look to find.
+_CONFIRM_DECLINE_STYLE = f"""
+    QPushButton {{
+        background-color: {COLORS['bg_secondary']};
+        color: {COLORS['text_primary']};
+        border: 1px solid {COLORS['border']};
+        border-radius: 6px;
+        padding: 6px 16px;
+        font-size: 13px;
+    }}
+    QPushButton:hover {{
+        border-color: {COLORS['text_muted']};
+    }}
+    QPushButton:disabled {{
+        color: {COLORS['text_muted']};
+    }}
+"""
+
+_CONFIRM_APPROVE_STYLE = f"""
+    QPushButton {{
+        background-color: transparent;
+        color: {COLORS['warning']};
+        border: 1px solid {COLORS['warning']};
+        border-radius: 6px;
+        padding: 6px 16px;
+        font-size: 13px;
+    }}
+    QPushButton:hover {{
+        background-color: {COLORS['bg_secondary']};
+    }}
+    QPushButton:disabled {{
+        color: {COLORS['text_muted']};
+        border-color: {COLORS['border']};
+    }}
+"""
+
+_CONFIRM_DETAIL_STYLE = f"""
+    QLabel {{
+        color: {COLORS['text_primary']};
+        font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+        font-size: 12px;
+        background: transparent;
+        border: none;
+    }}
+"""
+
+_CONFIRM_HAZARD_STYLE = f"""
+    QLabel {{
+        color: {COLORS['error']};
+        font-size: 12px;
+        background: transparent;
+        border: none;
+    }}
+"""
+
+_CONFIRM_STATUS_STYLE = f"""
+    QLabel {{
+        color: {COLORS['text_muted']};
+        font-size: 12px;
+        background: transparent;
+        border: none;
     }}
 """
 
@@ -202,6 +321,13 @@ class ChatWindow(QMainWindow):
         self.transcript_widget.setStyleSheet(_TRANSCRIPT_STYLE)
         layout.addWidget(self.transcript_widget, stretch=1)
 
+        # Confirmation card. The only way a destructive action can be
+        # approved — voice cannot grant one — so if this does not appear,
+        # or its buttons do not work, such an action has no route to
+        # happening and the user is left listening to an unanswerable
+        # question.
+        layout.addWidget(self._build_confirmation_card())
+
         # Status indicator (display-only label)
         self._status_label = QLabel("")
         self._status_label.setStyleSheet(_STATUS_STYLE)
@@ -234,6 +360,158 @@ class ChatWindow(QMainWindow):
 
         self._query_in_flight = False
         self.set_daemon_available(daemon_available)
+
+    # --- Confirmation ---------------------------------------------------
+
+    def _build_confirmation_card(self) -> QFrame:
+        """The card that asks permission for one action.
+
+        Hidden until there is a question. Never modal: a user who wants
+        to ask something else, or to say why they are hesitating, must
+        not be stranded by a card.
+        """
+        card = QFrame()
+        card.setStyleSheet(_CONFIRM_CARD_STYLE)
+        card.setVisible(False)
+
+        inner = QVBoxLayout(card)
+        inner.setContentsMargins(12, 10, 12, 10)
+        inner.setSpacing(6)
+
+        self.confirmation_title = QLabel("🙋 Yuba demande ta permission")
+        self.confirmation_title.setStyleSheet(_CONFIRM_TITLE_STYLE)
+        inner.addWidget(self.confirmation_title)
+
+        # The call, verbatim. This is the copy the user decides on: the
+        # arguments are model output, and the ledger's copy is redacted
+        # and whitespace-collapsed, so it cannot serve here.
+        self.confirmation_detail = QLabel("")
+        self.confirmation_detail.setStyleSheet(_CONFIRM_DETAIL_STYLE)
+        self.confirmation_detail.setWordWrap(True)
+        self.confirmation_detail.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        inner.addWidget(self.confirmation_detail)
+
+        self.confirmation_hazards = QLabel("")
+        self.confirmation_hazards.setStyleSheet(_CONFIRM_HAZARD_STYLE)
+        self.confirmation_hazards.setWordWrap(True)
+        self.confirmation_hazards.setVisible(False)
+        inner.addWidget(self.confirmation_hazards)
+
+        self.confirmation_status = QLabel("")
+        self.confirmation_status.setStyleSheet(_CONFIRM_STATUS_STYLE)
+        self.confirmation_status.setVisible(False)
+        inner.addWidget(self.confirmation_status)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(8)
+        buttons.addStretch(1)
+
+        # Declining is the default, so an absent-minded return key can
+        # only ever be a no.
+        self.confirmation_decline_button = QPushButton("Refuser")
+        self.confirmation_decline_button.setStyleSheet(_CONFIRM_DECLINE_STYLE)
+        self.confirmation_decline_button.setDefault(True)
+        self.confirmation_decline_button.setAutoDefault(True)
+        self.confirmation_decline_button.clicked.connect(
+            lambda: self._decide_confirmation(False)
+        )
+        buttons.addWidget(self.confirmation_decline_button)
+
+        self.confirmation_approve_button = QPushButton("Autoriser")
+        self.confirmation_approve_button.setStyleSheet(_CONFIRM_APPROVE_STYLE)
+        self.confirmation_approve_button.setDefault(False)
+        self.confirmation_approve_button.setAutoDefault(False)
+        self.confirmation_approve_button.clicked.connect(
+            lambda: self._decide_confirmation(True)
+        )
+        buttons.addWidget(self.confirmation_approve_button)
+
+        inner.addLayout(buttons)
+
+        self.confirmation_card = card
+        self._pending_request_id: Optional[str] = None
+        return card
+
+    def _show_confirmation(self, data: dict) -> None:
+        """Put one question on screen."""
+        request_id = data.get("request_id")
+        if not isinstance(request_id, str) or not request_id:
+            debug_log("confirm event without a request id ignored", "chat")
+            return
+
+        self._pending_request_id = request_id
+        self.confirmation_detail.setText(str(data.get("shown") or ""))
+
+        hazards = data.get("hazards") or []
+        self.confirmation_hazards.setText("⚠️ " + " · ".join(str(h) for h in hazards))
+        self.confirmation_hazards.setVisible(bool(hazards))
+
+        self.confirmation_status.setVisible(False)
+        self._set_confirmation_buttons(True)
+        self.confirmation_card.setVisible(True)
+        self.confirmation_decline_button.setFocus()
+
+    def _set_confirmation_buttons(self, live: bool) -> None:
+        self.confirmation_approve_button.setEnabled(live)
+        self.confirmation_decline_button.setEnabled(live)
+
+    def _decide_confirmation(self, approved: bool) -> None:
+        """Send one decision, once."""
+        request_id = self._pending_request_id
+        if not request_id:
+            return
+        # Locked immediately: a second click before the daemon answers
+        # would look to the user like the first one failed.
+        self._set_confirmation_buttons(False)
+        self.confirmation_status.setText("⏳ Transmission…")
+        self.confirmation_status.setVisible(True)
+        try:
+            send_confirmation_decision(request_id, approved)
+        except Exception as exc:
+            debug_log(f"confirmation decision not sent: {exc}", "chat")
+            self.confirmation_status.setText("⚠️ Décision non transmise. Réessaie.")
+            self._set_confirmation_buttons(True)
+
+    def _settle_confirmation(self, data: dict) -> None:
+        """The question is over, one way or another."""
+        if data.get("request_id") != self._pending_request_id:
+            return
+        outcome = str(data.get("outcome") or "")
+        self._pending_request_id = None
+        self.confirmation_card.setVisible(False)
+        if outcome == "expiré":
+            # Being told a decision was waiting and never told what became
+            # of it is worse than being told it lapsed.
+            self._append_line("⌛ La demande a expiré sans réponse.")
+        elif outcome == "décliné":
+            self._append_line("🚫 Refusé.")
+
+    def _confirmation_not_taken(self, data: dict) -> None:
+        """The click did not land. The question is still open."""
+        if data.get("request_id") != self._pending_request_id:
+            return
+        outcome = str(data.get("outcome") or "")
+        reasons = {
+            "occupée": "⏳ Yuba est occupée. Réessaie dans un instant.",
+            "arrêt": "🛑 Yuba s'arrête. Rien n'a été fait.",
+            "inconnue": "❔ Cette demande n'est plus en attente.",
+        }
+        self.confirmation_status.setText(reasons.get(outcome, "⚠️ Décision non prise."))
+        self.confirmation_status.setVisible(True)
+        # Live again: the question is not settled, so the user must be
+        # able to try. A correct decision that looks like a broken button
+        # is the failure this whole channel exists to avoid.
+        self._set_confirmation_buttons(outcome != "inconnue")
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        if (event.key() == Qt.Key.Key_Escape
+                and self._pending_request_id
+                and self.confirmation_approve_button.isEnabled()):
+            self._decide_confirmation(False)
+            return
+        super().keyPressEvent(event)
 
     # --- Orb hero -------------------------------------------------------
 
@@ -405,6 +683,12 @@ class ChatWindow(QMainWindow):
             self.signals.completed.emit(data)
         elif kind == "busy":
             self.signals.busy.emit()
+        elif kind == "confirm":
+            self._show_confirmation(data if isinstance(data, dict) else {})
+        elif kind == "confirm_settled":
+            self._settle_confirmation(data if isinstance(data, dict) else {})
+        elif kind == "confirm_nack":
+            self._confirmation_not_taken(data if isinstance(data, dict) else {})
         return True
 
     # --- Rendering helpers ----------------------------------------------

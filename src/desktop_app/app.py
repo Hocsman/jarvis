@@ -2331,6 +2331,24 @@ class JarvisSystemTray:
                             self.chat_window.set_daemon_status("crashed")
                             self.chat_window.signals.completed.emit(None)
 
+                # Decisions on a waiting confirmation travel the same way.
+                # This is the one line on the bus that authorises an
+                # irreversible action; the daemon validates it on arrival
+                # rather than trusting this side.
+                from jarvis.daemon import CHAT_DECISION_IPC_PREFIX
+
+                def _send_decision_subprocess(request_id: str, approved: bool) -> None:
+                    import json as _json
+                    payload = {"request_id": request_id, "approved": bool(approved)}
+                    _proc.stdin.write(
+                        f"{CHAT_DECISION_IPC_PREFIX}{_json.dumps(payload)}\n"
+                    )
+                    _proc.stdin.flush()
+
+                from desktop_app.chat_window import set_decision_writer
+
+                set_decision_writer(_send_decision_subprocess)
+
                 self._chat_submit_fn = _submit_chat_subprocess
                 # If the chat window already exists (daemon restarted while
                 # the window was open), refresh its submit fn so it doesn't
