@@ -210,6 +210,12 @@ class Settings:
     echo_energy_threshold: float
     echo_tolerance: float
 
+    # Confirmation — how long a question waits, and who reads the answer
+    confirmation_ttl_sec: float
+    confirmation_hot_window_sec: float
+    confirmation_model: str
+    confirmation_timeout_sec: float
+
     # Intent Judge (LLM-based intent classification)
     # Always used when available, falls back to simple wake word detection
     intent_judge_model: str
@@ -601,6 +607,19 @@ def get_default_config() -> Dict[str, Any]:
         "echo_energy_threshold": 2.0,
         "echo_tolerance": 0.3,  # Time tolerance for echo detection timing
 
+        # Confirmation. The click window is generous because walking to
+        # the machine takes longer than answering aloud. The spoken window
+        # is wider than `hot_window_seconds`, which is tuned for
+        # follow-ups rather than for consent — a person weighing whether
+        # to let something happen pauses before answering.
+        "confirmation_ttl_sec": 180.0,
+        "confirmation_hot_window_sec": 12.0,
+        # Empty = reuse the small warm chain (tool_router_model →
+        # intent_judge_model → chat model). Pin a local model here to keep
+        # the reading of a spoken approval off the network.
+        "confirmation_model": "",
+        "confirmation_timeout_sec": 8.0,
+
         # Audio Wake Word Detection
         # Intent Judge (LLM-based intent classification)
         # Always used when available, falls back to simple wake word detection
@@ -859,6 +878,14 @@ def load_settings() -> Settings:
     echo_energy_threshold = float(merged.get("echo_energy_threshold", 2.0))
     echo_tolerance = float(merged.get("echo_tolerance", 0.3))
 
+    # Confirmation. Clamped rather than trusted: a TTL of zero would
+    # expire every question before it could be read, and an unbounded one
+    # would leave a destructive action answerable days later.
+    confirmation_ttl_sec = min(max(float(merged.get("confirmation_ttl_sec", 180.0)), 15.0), 900.0)
+    confirmation_hot_window_sec = min(max(float(merged.get("confirmation_hot_window_sec", 12.0)), 3.0), 60.0)
+    confirmation_model = str(merged.get("confirmation_model", ""))
+    confirmation_timeout_sec = min(max(float(merged.get("confirmation_timeout_sec", 8.0)), 2.0), 30.0)
+
     # Intent Judge - always used when available
     intent_judge_model = str(merged.get("intent_judge_model", "gemma4:e2b"))
     intent_judge_model = _cloud_safe_model(intent_judge_model, llm_provider, llm_chat_model)
@@ -1059,6 +1086,11 @@ def load_settings() -> Settings:
         low_power_mode=low_power_mode,
         echo_energy_threshold=echo_energy_threshold,
         echo_tolerance=echo_tolerance,
+        # Confirmation
+        confirmation_ttl_sec=confirmation_ttl_sec,
+        confirmation_hot_window_sec=confirmation_hot_window_sec,
+        confirmation_model=confirmation_model,
+        confirmation_timeout_sec=confirmation_timeout_sec,
         # Intent Judge - always used when available
         intent_judge_model=intent_judge_model,
         intent_judge_timeout_sec=intent_judge_timeout_sec,
