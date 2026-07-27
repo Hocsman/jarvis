@@ -502,6 +502,11 @@ class VoiceListener(threading.Thread):
         # Track TTS finish time for echo detection
         self.echo_detector.track_tts_finish()
 
+        # A waiting spoken question buys more listening time than a
+        # follow-up does. Set per window rather than at construction,
+        # because it depends on what is pending right now.
+        self.state_manager.hot_window_seconds = self.hot_window_duration()
+
         # Schedule delayed hot window activation
         debug_log(f"scheduling hot window activation (echo_tolerance={self.state_manager.echo_tolerance}s, hot_window={self.state_manager.hot_window_seconds}s)", "voice")
         self.state_manager.schedule_hot_window_activation(self.cfg.voice_debug)
@@ -1211,7 +1216,15 @@ class VoiceListener(threading.Thread):
                 self.tts.speak("Sorry, I encountered an error processing your request.")
             return
 
-        # Handle TTS with proper callbacks
+        self._speak_reply(reply)
+
+    def _speak_reply(self, reply: Optional[str]) -> None:
+        """Say one reply, and do the echo bookkeeping that goes with it.
+
+        The only place anything is spoken. A sentence said without being
+        recorded here is one the echo detector will not recognise coming
+        back, so she answers herself.
+        """
         if reply and self.tts and self.tts.enabled:
             # Stop thinking tune when TTS starts
             self._stop_thinking_tune()
@@ -1238,6 +1251,68 @@ class VoiceListener(threading.Thread):
             debug_log(f"no TTS output: reply={bool(reply)}, tts={bool(self.tts)}, enabled={getattr(self.tts, 'enabled', False) if self.tts else False}", "voice")
             # Stop thinking tune if no TTS response
             self._stop_thinking_tune()
+
+    # ── Replies produced elsewhere ────────────────────────────────────
+    #
+    # A click-approved action runs on a resume worker. If that worker
+    # spoke directly it would race this thread, which speaks outside the
+    # block holding the query lock: two writes to the echo detector's
+    # record of what was last said, and two hot-window activations. The
+    # detector would then compare the next transcript against the wrong
+    # sentence, which is how a user's answer gets deleted as an echo.
+
+    def enqueue_reply(self, text: Optional[str]) -> None:
+        """Hand a reply to this thread to speak. Safe from any thread."""
+        if not text or not text.strip():
+            return
+        if not self.tts or not getattr(self.tts, "enabled", False):
+            # Queueing into a dead engine would hold the reply forever and
+            # say it at some unrelated later moment.
+            debug_log("reply not queued: TTS unavailable", "voice")
+            return
+        if getattr(self, "_reply_queue", None) is None:
+            import queue as _queue
+
+            self._reply_queue = _queue.Queue()
+        self._reply_queue.put(text)
+        debug_log(f"reply queued for speaking ({len(text)} chars)", "voice")
+
+    def drain_reply_queue(self) -> None:
+        """Say anything handed over since the last drain. This thread only."""
+        q = getattr(self, "_reply_queue", None)
+        if q is None:
+            return
+        import queue as _queue
+
+        while True:
+            try:
+                text = q.get_nowait()
+            except _queue.Empty:
+                return
+            self._speak_reply(text)
+
+    def hot_window_duration(self) -> float:
+        """How long to keep listening after she finishes speaking.
+
+        The configured default is tuned for a follow-up ("tell me more").
+        A person weighing whether to let something happen pauses first, so
+        a waiting spoken question widens it. A gesture-only question does
+        not: nothing said can settle one, and the extra listening would
+        only collect an answer that has to be thrown away.
+        """
+        default = float(getattr(self.cfg, "hot_window_seconds", 3.0))
+        dm = getattr(self, "dialogue_memory", None)
+        if dm is None or not hasattr(dm, "peek_pending"):
+            return default
+        try:
+            from ..tools.confirmation import CHANNEL_PAROLE
+
+            waiting = dm.peek_pending()
+            if waiting is not None and waiting.channel == CHANNEL_PAROLE:
+                return float(getattr(self.cfg, "confirmation_hot_window_sec", 12.0))
+        except Exception as e:
+            debug_log(f"hot window duration fell back to default: {e}", "voice")
+        return default
 
     def _calculate_audio_energy(self, frames: list) -> float:
         """Calculate RMS energy from audio frames."""
@@ -2203,6 +2278,10 @@ class VoiceListener(threading.Thread):
                     # Critical: Check timeouts even when no audio is being received
                     # This ensures hot window expiry fires reliably
                     self._check_query_timeout()
+                    # Say anything another thread handed over — a
+                    # click-approved action's narration. Here rather than
+                    # on that thread, so only one thread ever speaks.
+                    self.drain_reply_queue()
                     continue
 
                 if item is None:
