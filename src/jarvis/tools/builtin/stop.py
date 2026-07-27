@@ -18,6 +18,12 @@ STOP_SIGNAL = "__JARVIS_STOP_CONVERSATION__"
 class StopTool(Tool):
     """Tool to end a conversation without generating a response."""
 
+    def risk_for(self, args):
+        """Looks at the world without changing it."""
+        from ..policy import RISK_READ
+
+        return RISK_READ
+
     @property
     def name(self) -> str:
         return "stop"

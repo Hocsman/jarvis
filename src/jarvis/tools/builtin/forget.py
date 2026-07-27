@@ -104,6 +104,14 @@ def _held_entries(core: MemoryCore) -> List[str]:
 class ForgetTool(Tool):
     """Drop something the user no longer wants the assistant to hold."""
 
+    def risk_for(self, args):
+        """Writes, but only into Yuba's own files and database: text the
+        user can reopen and correct by hand, never their machine and
+        never anything outward."""
+        from ..policy import RISK_READ
+
+        return RISK_READ
+
     @property
     def name(self) -> str:
         return "forget"

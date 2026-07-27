@@ -70,6 +70,23 @@ class Tool(ABC):
         """JSON Schema for tool arguments (matches MCP format)."""
         pass
 
+    def risk_for(self, args: Optional[Dict[str, Any]]) -> str:
+        """What running this tool with these arguments does to the world.
+
+        One of ``RISK_READ`` / ``RISK_ACTION`` / ``RISK_DESTRUCTIVE``
+        (see ``tools/policy.py``). Takes the arguments because one tool
+        can span the range: ``localFiles`` reads, writes and deletes
+        under a single name, and a risk fixed at the class level would
+        make reading a file need permission.
+
+        The default is destructive, deliberately. A tool added later by
+        someone who never read this docstring will ask before it acts
+        instead of sliding through the gate unclassified.
+        """
+        from .policy import RISK_DESTRUCTIVE
+
+        return RISK_DESTRUCTIVE
+
     @abstractmethod
     def run(self, args: Optional[Dict[str, Any]], context: ToolContext) -> ToolExecutionResult:
         """Execute the tool with the given arguments and context.

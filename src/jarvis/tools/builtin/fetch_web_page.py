@@ -10,6 +10,12 @@ from ..types import ToolExecutionResult
 class FetchWebPageTool(Tool):
     """Tool for fetching and extracting content from web pages."""
 
+    def risk_for(self, args):
+        """Looks at the world without changing it."""
+        from ..policy import RISK_READ
+
+        return RISK_READ
+
     @property
     def name(self) -> str:
         return "fetchWebPage"

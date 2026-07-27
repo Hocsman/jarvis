@@ -30,6 +30,12 @@ def _resolve_router_model(cfg) -> str:
 class ToolSearchTool(Tool):
     """Re-run tool routing mid-loop to widen the allow-list."""
 
+    def risk_for(self, args):
+        """Looks at the world without changing it."""
+        from ..policy import RISK_READ
+
+        return RISK_READ
+
     @property
     def name(self) -> str:
         return "toolSearchTool"

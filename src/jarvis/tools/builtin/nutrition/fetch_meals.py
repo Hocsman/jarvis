@@ -79,6 +79,12 @@ def summarize_meals(meals: List[Any]) -> str:
 class FetchMealsTool(Tool):
     """Tool for fetching meals from the nutrition database."""
     
+    def risk_for(self, args):
+        """Looks at the world without changing it."""
+        from ...policy import RISK_READ
+
+        return RISK_READ
+
     @property
     def name(self) -> str:
         return "fetchMeals"

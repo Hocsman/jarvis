@@ -10,6 +10,23 @@ from ..types import ToolExecutionResult
 class LocalFilesTool(Tool):
     """Tool for safe local file operations within user's home directory."""
 
+    # Operations that leave the filesystem exactly as they found it.
+    # Anything absent from this set — including a missing or misspelt
+    # operation — is treated as destructive: the tool itself defaults to
+    # a read, but the gate cannot assume the tool will agree with it.
+    _READ_ONLY_OPERATIONS = frozenset({"list", "read"})
+
+    def risk_for(self, args):
+        """Reading a file changes nothing; writing one can overwrite the
+        config Yuba runs on or the memory files she believes, both of
+        which live under $HOME."""
+        from ..policy import RISK_DESTRUCTIVE, RISK_READ
+
+        operation = str((args or {}).get("operation") or "").strip().lower()
+        if operation in self._READ_ONLY_OPERATIONS:
+            return RISK_READ
+        return RISK_DESTRUCTIVE
+
     @property
     def name(self) -> str:
         return "localFiles"

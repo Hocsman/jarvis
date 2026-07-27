@@ -17,6 +17,14 @@ from ..types import ToolExecutionResult
 class RememberTool(Tool):
     """Record a fact about the user, or a rule they want followed."""
 
+    def risk_for(self, args):
+        """Writes, but only into Yuba's own files and database: text the
+        user can reopen and correct by hand, never their machine and
+        never anything outward."""
+        from ..policy import RISK_READ
+
+        return RISK_READ
+
     @property
     def name(self) -> str:
         return "remember"
