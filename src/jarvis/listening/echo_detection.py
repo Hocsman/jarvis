@@ -11,7 +11,14 @@ from rapidfuzz import fuzz
 
 class EchoDetector:
     """Handles echo detection to prevent TTS feedback loops."""
-    
+
+    # A hot-window transcript scoring at or above this against the last
+    # thing spoken is her own voice coming back, and is dropped before
+    # the intent judge sees it. Named because it is a contract with
+    # anything Yuba says: a reply whose wording pushes a likely answer
+    # over this line silently deletes that answer.
+    PURE_ECHO_THRESHOLD: int = 70
+
     def __init__(self, echo_tolerance: float = 0.3, energy_spike_threshold: float = 2.0):
         """
         Initialize echo detector.

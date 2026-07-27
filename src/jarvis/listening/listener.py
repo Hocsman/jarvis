@@ -562,7 +562,7 @@ class VoiceListener(threading.Thread):
                     tts_words = len(last_tts_text.split())
                     text_words = len(text_lower.split())
                     is_pure_echo = (
-                        echo_score >= 70
+                        echo_score >= self.echo_detector.PURE_ECHO_THRESHOLD
                         and text_words <= max(tts_words * 1.3, tts_words + 3)
                     )
                     if is_pure_echo:

@@ -175,6 +175,16 @@ Every distinct LLM call in Jarvis, what feeds it, what consumes it, and how it i
 - **Weather** ([src/jarvis/tools/builtin/weather.py](src/jarvis/tools/builtin/weather.py), ~line 60) — factory-dispatched. Place extractor model resolution: `tool_router_model → intent_judge_model → cfg.llm_chat_model` so small/warm models handle the parse without paging in the chat model. Parses location/time/unit from the query.
 - **Nutrition log_meal** ([src/jarvis/tools/builtin/nutrition/log_meal.py](src/jarvis/tools/builtin/nutrition/log_meal.py), lines 48 & 136) — factory-dispatched. Both the nutrition extractor and the follow-up generator use `cfg.llm_chat_model`. Extracts nutrients, confirms logging.
 
+## 15. Approval judge (reads a spoken or typed yes/no)
+
+- **File**: [src/jarvis/tools/confirmation.py](src/jarvis/tools/confirmation.py) — `read_approval()`.
+- **Trigger**: the turn immediately after the gate raised a `demande` question **and** that question invited a spoken answer (`channel == parole`). `destructif` never reaches this call: it is settled by a click or not at all.
+- **Model**: `confirmation_model → tool_router_model → intent_judge_model → cfg.llm_chat_model`. The pin exists so this one reading can be kept on a local model when the rest of the small chain points at a remote endpoint.
+- **Inputs**: the user's utterance, and nothing else. The pinned action is deliberately **not** in the prompt — the judge does not need to know what is being approved in order to read whether the sentence approves, and the blindness keeps injected page text out of this context and keeps the action off the network.
+- **System prompt**: `_JUDGE_SYSTEM` in the same file. Names no language, because the user may answer in any. Ternary output, one bare token.
+- **Output**: `oui` / `non` / `flou`. Only the exact token grants; a conditional yes is `flou`, because the judge cannot see what the condition refers to.
+- **Limits**: `confirmation_timeout_sec` (default 8 s, clamped 2–30). **Fails closed**, unlike every other judge here: a timeout, an exception, an empty body, a model that explains itself, or an unrecognised word all deny. A false no costs a turn; a false yes runs something.
+
 ---
 
 ## Frequency / Size Summary
@@ -196,6 +206,7 @@ Every distinct LLM call in Jarvis, what feeds it, what consumes it, and how it i
 | 12 | Planner (plan_query) | 1 | yes (planner_enabled) | LARGE/SMALL (tracks chat model) |
 | 13 | Plan step resolver | 0-N (SMALL only) | auto by size + plan | SMALL (via router chain) |
 | 14 | Tool-specific | per-tool | n/a | LARGE |
+| 15 | Approval judge | 0-1 | only after a `parole` question | SMALL (via router chain) |
 
 ## Size-aware auto switches
 
