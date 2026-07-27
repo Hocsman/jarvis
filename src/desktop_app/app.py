@@ -1462,6 +1462,38 @@ class MemoryViewerWindow(QMainWindow):
         event.accept()
 
 
+def _confirmation_payload(action) -> dict:
+    """The wire shape of a question, built once for both modes.
+
+    Same fields the daemon puts on the chat bus in subprocess mode, so
+    the card and the tray see one shape whichever half is running.
+    """
+    from jarvis.tools.confirmation import describe_action
+
+    described = describe_action(action.tool, action.args, action.risk)
+    return {
+        "request_id": action.request_id,
+        "tool": action.tool,
+        "risk": action.risk,
+        "channel": action.channel,
+        "origin": action.origin,
+        "shown": described.shown,
+        "hazards": described.hazards,
+        "ttl_sec": action.ttl_sec,
+    }
+
+
+class ConfirmationSignals(QObject):
+    """Marshals confirmation callbacks onto the Qt main thread.
+
+    The daemon fires them from a reply-engine worker; touching widgets
+    from there would be a crash waiting for the right moment.
+    """
+
+    raised = pyqtSignal(dict)
+    settled = pyqtSignal(str, str)
+
+
 class JarvisSystemTray:
     """System tray application for Jarvis voice assistant."""
 
@@ -1544,6 +1576,13 @@ class JarvisSystemTray:
 
         # Create context menu
         self.create_menu()
+
+        # A confirmation notification is the one the user must be able to
+        # act on: clicking it opens the card.
+        self.tray_icon.messageClicked.connect(self.on_notification_clicked)
+        self._confirm_signals = ConfirmationSignals()
+        self._confirm_signals.raised.connect(self.on_confirmation_raised)
+        self._confirm_signals.settled.connect(self.on_confirmation_settled)
 
         # Set up status checking timer
         self.status_timer = QTimer()
@@ -1638,6 +1677,12 @@ class JarvisSystemTray:
         self.quick_stop_action.setEnabled(False)
         self.quick_stop_action.triggered.connect(self.quick_stop_daemon)
         self.menu.addAction(self.quick_stop_action)
+
+        # A waiting question, above everything else: it is the only entry
+        # here that something is blocked on, and for a destructive action
+        # it is the only way to answer at all.
+        self._build_confirmation_action()
+        self.menu.addAction(self.confirmation_action)
 
         self.menu.addSeparator()
 
@@ -1951,6 +1996,109 @@ class JarvisSystemTray:
         self.dictation_history_window.show()
         self.dictation_history_window.raise_()
         self.dictation_history_window.activateWindow()
+
+    # --- Confirmation -----------------------------------------------------
+    #
+    # A destructive action can be approved by a click and by nothing else.
+    # If the user is across the room with every window closed, they hear
+    # the question and — without the tray — have no way to answer it: it
+    # expires, the thing they asked for never happens, and nothing says
+    # why. The tray is the only surface that is always there.
+
+    def _route_confirmation_line(self, line: str) -> None:
+        """Feed a ``__CHAT__:`` confirmation event to the tray.
+
+        Subprocess mode only: bundled mode reaches the tray through the
+        daemon's callbacks instead. Already on the Qt main thread — the
+        log reader marshals through a signal before getting here.
+        """
+        try:
+            from jarvis.daemon import CHAT_IPC_PREFIX
+
+            if not line.startswith(CHAT_IPC_PREFIX):
+                return
+            import json as _json
+
+            event = _json.loads(line[len(CHAT_IPC_PREFIX):])
+            data = event.get("data") or {}
+            if event.get("type") == "confirm":
+                self.on_confirmation_raised(data)
+            elif event.get("type") == "confirm_settled":
+                self.on_confirmation_settled(
+                    str(data.get("request_id") or ""), str(data.get("outcome") or ""),
+                )
+        except Exception as exc:
+            debug_log(f"confirmation line not routed to tray: {exc}", "desktop")
+
+    def _build_confirmation_action(self) -> None:
+        """The menu entry for a waiting question. Hidden until there is one."""
+        from PyQt6.QtGui import QAction
+
+        self.confirmation_action = QAction("🙋 Permission demandée")
+        self.confirmation_action.setVisible(False)
+        # Resolved at click time rather than bound now, so the entry
+        # always opens whatever `show_chat` currently is.
+        self.confirmation_action.triggered.connect(lambda *_: self.show_chat())
+        self._pending_confirmation = None
+
+    def on_confirmation_raised(self, data: dict) -> None:
+        """A question is waiting. Make it reachable from anywhere."""
+        request_id = (data or {}).get("request_id")
+        if not isinstance(request_id, str) or not request_id:
+            return
+        tool = str((data or {}).get("tool") or "")
+        self._pending_confirmation = data
+
+        self.confirmation_action.setText(f"🙋 Autoriser {tool} ?")
+        self.confirmation_action.setVisible(True)
+
+        try:
+            from PyQt6.QtWidgets import QSystemTrayIcon
+
+            # The tool name and nothing else: a notification lands on a
+            # lock screen and in a system log, and the arguments belong on
+            # the card where the decision is made.
+            self.tray_icon.showMessage(
+                "Yuba demande ta permission",
+                f"{tool} attend ta décision.",
+                QSystemTrayIcon.MessageIcon.Warning,
+                10000,
+            )
+        except Exception as exc:
+            debug_log(f"confirmation notification failed: {exc}", "desktop")
+
+        # Bundled mode has no stdout bus between the two halves, so an
+        # open window is fed directly. In subprocess mode the same line
+        # already reached it through `process_ipc_line`, so this is
+        # skipped rather than re-rendering the card it is already showing.
+        window = self.chat_window
+        if window is not None and getattr(window, "_pending_request_id", None) != request_id:
+            try:
+                window._show_confirmation(data)
+            except Exception as exc:
+                debug_log(f"confirmation not shown in chat: {exc}", "desktop")
+
+    def on_confirmation_settled(self, request_id: str, outcome: str) -> None:
+        """The question is over. A menu entry offering to answer one
+        nobody is asking is worse than none."""
+        pending = self._pending_confirmation or {}
+        if pending.get("request_id") != request_id:
+            return
+        self._pending_confirmation = None
+        self.confirmation_action.setVisible(False)
+        if self.chat_window is not None:
+            try:
+                self.chat_window._settle_confirmation(
+                    {"request_id": request_id, "outcome": outcome}
+                )
+            except Exception as exc:
+                debug_log(f"confirmation settle not shown: {exc}", "desktop")
+
+    def on_notification_clicked(self) -> None:
+        """Open the card when the user acts on the notification."""
+        if self._pending_confirmation is None:
+            return
+        self.show_chat()
 
     def show_chat(self) -> None:
         """Show the text chat window (created lazily on first open)."""
@@ -2266,6 +2414,22 @@ class JarvisSystemTray:
                                 # If we can't emit, at least try stdout
                                 print(error_msg, file=old_stderr)
 
+                # Bundled mode: the daemon runs in-process, so there is no
+                # stdout bus. It calls these directly, from a worker
+                # thread — hence the marshalling onto the Qt main thread.
+                try:
+                    from jarvis.daemon import set_confirmation_callbacks
+
+                    set_confirmation_callbacks(
+                        on_confirm=lambda action: self._confirm_signals.raised.emit(
+                            _confirmation_payload(action)
+                        ),
+                        on_confirm_settled=lambda rid, outcome:
+                            self._confirm_signals.settled.emit(rid, outcome),
+                    )
+                except Exception as exc:
+                    debug_log(f"confirmation callbacks not wired: {exc}", "desktop")
+
                 self.daemon_thread = DaemonThread(self.log_signals)
                 # Connect finished signal to reset UI state
                 self.daemon_thread.finished.connect(lambda: self._on_daemon_finished())
@@ -2466,6 +2630,10 @@ class JarvisSystemTray:
                 daemon_available=self.is_listening,
             )
         self.chat_window.process_ipc_line(line)
+        # The tray needs the same events: it is the only surface always
+        # present, and for a destructive action it is the only route to a
+        # decision when every window is closed.
+        self._route_confirmation_line(line)
         # Fan the same daemon event out to the dashboard if it's open, so
         # its conversation panel + orb stay in sync with the chat window.
         # getattr: the attribute is absent on builds without WebEngine (and on
