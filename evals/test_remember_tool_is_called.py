@@ -130,17 +130,23 @@ DO_NOT_REMEMBER_CASES = [
         ),
         marks=pytest.mark.xfail(
             reason=(
-                "Known open defect. The assistant has no reminder feature, so "
-                "faced with 'remind me to X' it reaches for the one tool that "
-                "looks close and files the task as a durable fact about the "
-                "user. Three prompt-level attempts were measured on "
-                "gpt-oss-120b and none moved it: a restraint clause in the "
-                "system prompt, an explicit reminder-is-not-a-memory clause "
-                "in the tool description, and both together. Arguing against "
-                "a strong prior in the prompt rarely wins (see CLAUDE.md); "
-                "the fix is most likely to give the model somewhere else to "
-                "put it. Left failing rather than deleted so the gap stays "
-                "visible and flips to XPASS the day it is closed."
+                "Known open defect, now partly moved. The assistant has no "
+                "reminder feature, so faced with 'remind me to X' it reaches "
+                "for the one tool that looks close and files the task as a "
+                "durable fact about the user. Three prompt-level attempts "
+                "were measured on gpt-oss-120b and none moved it: a "
+                "restraint clause in the system prompt, an explicit "
+                "reminder-is-not-a-memory clause in the tool description, "
+                "and both together. What did move it was structural rather "
+                "than rhetorical — the router had only ever seen the first "
+                "120 characters of each description, cut mid-word, so "
+                "`remember`'s restriction was invisible to the layer that "
+                "decides whether the tool is offered at all. Whole "
+                "sentences plus a restriction-first opening measured 2/6 on "
+                "deepseek-v4-flash, against 0 before. Still not a fix: the "
+                "real one is giving the model somewhere else to put a "
+                "reminder. Left non-strict so the improvement shows as "
+                "XPASS without the flakiness failing a run."
             ),
             strict=False,
         ),
@@ -149,27 +155,77 @@ DO_NOT_REMEMBER_CASES = [
 ]
 
 
+# Observed in production on 2026-07-27. The user asked her, by voice, to
+# write the capital of France in the chat; she said it aloud instead;
+# he complained that she had not written it. She read "write" as "write
+# it down", took HER OWN previous answer, and filed it as a durable fact
+# about him.
+#
+# It is the worst shape this subsystem has: the entry was never his
+# statement, it is invisible until he opens a file, and until then it is
+# injected into every prompt she ever builds.
+#
+# `prior` is what makes it reproducible — she cannot copy her own
+# sentence unless she has said one.
+ECHO_CASES = [
+    pytest.param(
+        RememberCase(
+            text="Tu peux pas m'écrire dans la conversation ?",
+            should_call=False,
+        ),
+        ("Allo Yuba, écris-moi la capitale de la France dans la conversation.",
+         "La capitale de la France est Paris."),
+        id="FR: the production sequence, verbatim",
+    ),
+    pytest.param(
+        RememberCase(
+            text="Can't you write it out for me?",
+            should_call=False,
+        ),
+        ("Write me the capital of France.",
+         "The capital of France is Paris."),
+        id="EN: the same complaint",
+    ),
+    pytest.param(
+        RememberCase(
+            text="Répète-le moi, s'il te plaît.",
+            should_call=False,
+        ),
+        ("Yuba, quelle est la capitale de la France ?",
+         "La capitale de la France est Paris."),
+        id="Asking her to repeat something is not asking her to keep it",
+    ),
+]
+
+
 def _make_runner(capture: ToolCallCapture):
+    """Run the real tool against the real core.
+
+    Stubbing it would measure only whether the model emitted a call —
+    which is not the question. What matters is whether anything ends up
+    in the files the user reads, and a stub can neither show a bad write
+    landing nor show the tool refusing one. `capture` still records every
+    call, so "the model asked and the tool said no" stays visible as a
+    distinct outcome from "the model never asked".
+    """
+    from jarvis.tools.registry import BUILTIN_TOOLS
     from jarvis.tools.types import ToolExecutionResult
 
     def _runner(db, cfg, tool_name, tool_args, **kwargs):
         capture.record(tool_name, tool_args or {})
         if tool_name == "remember":
-            text = ((tool_args or {}).get("text") or "").strip()
-            if not text:
-                return ToolExecutionResult(
-                    success=False, reply_text="Nothing was saved: no text was given.",
-                )
-            return ToolExecutionResult(
-                success=True,
-                reply_text=f'Saved to long-term memory: "{text}".',
+            return BUILTIN_TOOLS["remember"].execute(
+                db=db, cfg=cfg, tool_args=tool_args, system_prompt="",
+                original_prompt="", redacted_text=kwargs.get("redacted_text", ""),
+                max_retries=1, user_print=lambda _m: None,
             )
         return ToolExecutionResult(success=True, reply_text="OK")
 
     return _runner
 
 
-def _run(case: RememberCase, mock_config, eval_db, eval_dialogue_memory, tmp_path):
+def _run(case: RememberCase, mock_config, eval_db, eval_dialogue_memory, tmp_path,
+         prior=None):
     from jarvis.reply.engine import run_reply_engine
 
     mock_config.ollama_base_url = "http://localhost:11434"
@@ -177,6 +233,13 @@ def _run(case: RememberCase, mock_config, eval_db, eval_dialogue_memory, tmp_pat
     # A fresh core per case: nothing pre-loaded, so a call is the model
     # acting on the utterance rather than echoing an existing entry.
     mock_config.db_path = str(tmp_path / "jarvis.db")
+
+    # Some failures only exist mid-conversation: she cannot copy her own
+    # sentence into the core unless she has said one. `prior` replays the
+    # turn before, so the answer she is about to steal is in context.
+    if prior is not None:
+        eval_dialogue_memory.add_message("user", prior[0])
+        eval_dialogue_memory.add_message("assistant", prior[1])
 
     capture = ToolCallCapture()
     with patch(
@@ -189,6 +252,16 @@ def _run(case: RememberCase, mock_config, eval_db, eval_dialogue_memory, tmp_pat
             dialogue_memory=eval_dialogue_memory,
         )
     return capture, response
+
+
+def _written(mock_config):
+    """Everything the core actually believes, both sections."""
+    from jarvis.memory.core import SECTION_PROFILE, SECTION_RULES, MemoryCore
+
+    core = MemoryCore.for_config(mock_config)
+    return [e.text for e in core.active(SECTION_PROFILE)] + [
+        e.text for e in core.active(SECTION_RULES)
+    ]
 
 
 @pytest.mark.eval
@@ -252,4 +325,38 @@ class TestRememberToolIsCalled:
             "forbids: it is invisible, it rides in every later prompt, and "
             f"the user cannot trace it. Call made: {capture.get_args('remember')!r}. "
             f"Utterance: {case.text!r}"
+        )
+
+    @pytest.mark.parametrize("case,prior", ECHO_CASES)
+    def test_she_does_not_file_her_own_answer_as_a_fact(
+        self, mock_config, eval_db, eval_dialogue_memory, tmp_path,
+        case: RememberCase, prior,
+    ):
+        """The assertion is on the FILES, not on the call.
+
+        Whether the model emits a call is its business; whether anything
+        lands in the two files the user reads is the contract. A tool that
+        is asked and refuses is a pass here, and that distinction is the
+        whole reason this eval runs the real tool instead of a stub.
+        """
+        capture, response = _run(
+            case, mock_config, eval_db, eval_dialogue_memory, tmp_path, prior=prior,
+        )
+        written = _written(mock_config)
+
+        print(f"\n  Self-echo ({JUDGE_MODEL})")
+        print(f"  She had just said: {prior[1]!r}")
+        print(f"  User then said:    {case.text!r}")
+        print(f"  Tools called: {capture.tool_names()}")
+        for c in capture.calls:
+            print(f"    - {c['name']}({c['args']})")
+        print(f"  Core now believes: {written}")
+
+        assert written == [], (
+            "She filed something the user never said. The entry is his "
+            "memory now: invisible until he opens a file, and injected "
+            "into every prompt she builds until he finds it.\n"
+            f"  Written: {written!r}\n"
+            f"  Her own prior words: {prior[1]!r}\n"
+            f"  What he actually said: {case.text!r}"
         )

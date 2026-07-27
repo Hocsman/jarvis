@@ -31,16 +31,23 @@ class RememberTool(Tool):
 
     @property
     def description(self) -> str:
+        # The router is shown whole sentences, within a budget — so the
+        # opening ones have to carry the restriction. An earlier wording
+        # led with "Save something to long-term memory so it survives
+        # this conversation", and that is all the router saw: an
+        # unrestricted invitation, matching a user who had said
+        # "conversation" while complaining about something else entirely.
         return (
-            "Save something to long-term memory so it survives this "
-            "conversation. Call this ONLY when the user explicitly asks you "
-            "to remember something ('remember that...', 'from now on...', "
-            "'note that I...'), or when they CORRECT something you got "
-            "wrong about them. Never call it on your own initiative: do not "
-            "save conclusions you drew, advice you gave, what was discussed, "
-            "or anything the user did not state about themselves. A wrong "
-            "memory is worse than no memory. Repeat the user's own statement "
-            "rather than paraphrasing it."
+            "Store a lasting fact about the user, or a standing "
+            "instruction, ONLY when they explicitly ask for it "
+            "('remember that...', 'from now on...', 'note that I...') or "
+            "when they CORRECT something you believe about them. Anything "
+            "they want right now — said, written out, shown, repeated, "
+            "looked up — is not this tool. Never call it on your own "
+            "initiative: do not save conclusions you drew, advice you "
+            "gave, what was discussed, or anything the user did not state "
+            "about themselves. A wrong memory is worse than no memory. "
+            "Repeat the user's own statement rather than paraphrasing it."
         )
 
     @property

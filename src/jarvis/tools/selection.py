@@ -239,6 +239,34 @@ def _select_embedding(
 # Strategy: llm
 # ---------------------------------------------------------------------------
 
+# How much of a description the router is shown. Whole sentences only:
+# a description cut mid-word tells the router something its author did
+# not write, and the half that survives is usually the invitation rather
+# than the restriction — "Call this ONLY when the user explicitly asks
+# you to" truncates to an unfinished clause whose meaning is the
+# opposite of the sentence it came from.
+_ROUTER_SUMMARY_CHARS = 200
+
+
+def _router_summary(description: str) -> str:
+    """The tool as the router reads it: complete sentences, within budget.
+
+    Falls back to the first sentence when even that is over budget — a
+    long first sentence read whole is still truthful, where the same
+    sentence cut is not.
+    """
+    text = (description or "").strip()
+    if len(text) <= _ROUTER_SUMMARY_CHARS:
+        return text
+
+    kept = ""
+    for sentence in re.findall(r"[^.!?]*[.!?]", text):
+        if kept and len(kept) + len(sentence) > _ROUTER_SUMMARY_CHARS:
+            break
+        kept += sentence
+    return (kept or text).strip()
+
+
 def _select_llm(
     query: str,
     builtin_tools: Dict[str, "Tool"],
@@ -264,9 +292,9 @@ def _select_llm(
     for name, tool in builtin_tools.items():
         if name in _ALWAYS_INCLUDED:
             continue
-        catalogue_lines.append(f"- {name}: {tool.description[:120]}")
+        catalogue_lines.append(f"- {name}: {_router_summary(tool.description)}")
     for name, spec in mcp_tools.items():
-        catalogue_lines.append(f"- {name}: {spec.description[:120]}")
+        catalogue_lines.append(f"- {name}: {_router_summary(spec.description)}")
     catalogue = "\n".join(catalogue_lines)
 
     sys_prompt = (
