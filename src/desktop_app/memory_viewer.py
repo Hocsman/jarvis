@@ -394,6 +394,7 @@ def activity_get() -> Response:
                     "outcome": r["outcome"],
                     "duration_ms": r["duration_ms"],
                     "query": r["query"],
+                    "request_id": r["request_id"],
                 }
                 for r in db.recent_actions(limit=300)
             ],
@@ -1249,8 +1250,17 @@ def index() -> str:
             white-space: nowrap; border: 1px solid var(--border-color);
         }
         .activity-ok       { color: var(--success); border-color: var(--success); }
-        .activity-refusé   { color: var(--warning); border-color: var(--warning); }
         .activity-échec    { color: var(--error);   border-color: var(--error); }
+        /* The policy said no, and nobody was asked. */
+        .activity-refusé   { color: var(--warning); border-color: var(--warning); }
+        /* You were asked, and you said no. A different fact, and it should
+           not look like the machine's own refusal. */
+        .activity-décliné  { color: var(--text-secondary); border-color: var(--text-secondary); }
+        /* Asked and never answered. */
+        .activity-expiré   { color: var(--text-muted); border-color: var(--text-muted);
+                             border-style: dashed; }
+        .activity-demandé  { color: var(--accent-primary); border-color: var(--accent-primary); }
+        .activity-asked    { opacity: 0.65; }
         .core-intro {
             background: var(--bg-card);
             border: 1px solid var(--border-color);
@@ -2491,6 +2501,10 @@ def index() -> str:
                         son niveau de risque, le verdict de <code>outils.md</code> et le résultat.
                         Ce qu'elle a <em>vu</em> n'est jamais enregistré : aucun contenu de page,
                         de fichier ou de réponse d'outil. Conservé 90 jours.
+                        <br>
+                        <code>refusé</code> : la politique a dit non, on ne t'a rien demandé.
+                        <code>décliné</code> : on t'a demandé, tu as dit non.
+                        <code>demandé</code> seul : personne n'a répondu.
                     </p>
                     <button class="activity-clear" id="btn-clear-activity">🗑️ Effacer le registre</button>
                 </div>
@@ -3002,10 +3016,30 @@ def index() -> str:
                 container.innerHTML = "<div class='core-empty'>Rien pour l'instant. Chaque outil appelé apparaîtra ici.</div>";
                 return;
             }
+            // A confirmed action is two rows sharing a request id: the
+            // question, and whatever settled it. Shown as one episode,
+            // because "she asked" and "you said no" are one event to the
+            // person reading this, not two.
+            const settledIds = new Set(
+                actions.filter(a => a.request_id && a.outcome !== 'demandé')
+                       .map(a => a.request_id)
+            );
+
             container.innerHTML = '<div class="core-file">' + actions.map(a => {
+                // The ask is folded into its outcome, unless nobody ever
+                // answered — an unanswered question is the only trace a
+                // decision never taken leaves, so it keeps its own row.
+                if (a.outcome === 'demandé' && settledIds.has(a.request_id)) return '';
+
                 const when = (a.ts_utc || '').replace('T', ' ').slice(0, 19);
                 const ms = a.duration_ms != null ? ` ${a.duration_ms} ms` : '';
                 const origin = a.origin ? escapeHtml(a.origin) : '—';
+                // On an outcome row, the badge says the episode began with
+                // a question. On the ask row itself it would just repeat
+                // the outcome beside it.
+                const asked = (a.request_id && a.outcome !== 'demandé')
+                    ? '<span class="activity-badge activity-asked" title="Yuba a demandé ta permission">demandé</span>'
+                    : '';
                 return `<div class="activity-row">
                     <span class="activity-when">${escapeHtml(when)}</span>
                     <span class="activity-origin" title="D'où venait la demande">${origin}</span>
@@ -3013,6 +3047,7 @@ def index() -> str:
                     <span class="activity-args" title="${escapeHtml(a.query || '')}">${escapeHtml(a.args || '')}</span>
                     <span class="activity-badge">${escapeHtml(a.risk)}</span>
                     <span class="activity-badge">${escapeHtml(a.verdict)}</span>
+                    ${asked}
                     <span class="activity-badge activity-${escapeHtml(a.outcome)}">${escapeHtml(a.outcome)}${ms}</span>
                 </div>`;
             }).join('') + '</div>';
