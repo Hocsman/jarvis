@@ -49,13 +49,32 @@ run `run_reply_engine` concurrently against the shared dialogue memory.
 
 ### Cancellation
 
-`cancel_active_chat_query` sets a per-query `threading.Event`. The chat
-worker checks it after `run_reply_engine` returns and, if set, drops the
-reply (delivering `complete(None)`). The Stop button calls this, not
-`request_stop` (which is the daemon lifecycle shutdown signal and would tear
-down the whole voice assistant). Cancellation does not abort the in-flight
-LLM compute — `run_reply_engine` has no mid-loop abort hook — it discards the
-result so it is not displayed.
+Stop never calls `request_stop`, which is the daemon lifecycle shutdown
+signal and would tear down the whole voice assistant. It cancels the one
+query in flight, and does so in three places because no single one of them
+is sufficient.
+
+**In the window.** Pressing Stop marks the exchange abandoned and resets the
+thinking indicator at once. `_on_complete` then declines the reply for that
+exchange and clears the mark, so the next send is unaffected. This is the
+part that actually keeps the answer out of the transcript: cancellation
+cannot unwind a request already inside the engine, so the reply arrives
+regardless.
+
+**In the daemon.** `cancel_active_chat_query` sets a per-query
+`threading.Event`; the chat worker checks it after `run_reply_engine` returns
+and drops the reply, delivering `complete(None)`.
+
+**Across the process boundary.** In subprocess mode the query runs in the
+daemon, whose module globals are a different instance from the desktop app's,
+so calling the cancel function locally would set a flag nobody reads. The app
+writes `__CHAT_CANCEL__` to the daemon's stdin, the same pipe submissions use,
+and `handle_chat_cancel_stdin_line` applies it there. A broken pipe is not
+surfaced: the window has already refused the reply, and a dead daemon has no
+query to cancel.
+
+Cancellation does not abort the in-flight LLM compute — `run_reply_engine`
+has no mid-loop abort hook — it discards the result so it is never shown.
 
 ### Callbacks (bundled mode, same process)
 
@@ -107,9 +126,17 @@ __CHAT_QUERY__:{"text":"<user input>"}
 
 The daemon's stdin monitor (extended from the existing ``SHUTDOWN`` handler)
 parses these lines and calls ``submit_text_query(text, use_ipc=True)`` so the
-reply comes back via the ``__CHAT__:`` event stream above. Lines that don't
-match either prefix are ignored (the monitor still treats bare ``SHUTDOWN``
-and EOF as shutdown signals, unchanged).
+reply comes back via the ``__CHAT__:`` event stream above. A bare
+``__CHAT_CANCEL__`` line cancels the query in flight, travelling the same pipe
+for the same reason: the query runs in this process, so the flag has to be set
+in it. Lines that don't match any prefix are ignored (the monitor still treats
+bare ``SHUTDOWN`` and EOF as shutdown signals, unchanged).
+
+Chat IPC lines are routed to the chat window and then **not** emitted to the
+general log viewer. The ``complete`` event carries the whole assistant reply,
+which can echo back whatever the user typed, and the log window is outside the
+redaction invariant the chat path maintains. Diary IPC still reaches the log
+viewer, which is what it is for.
 
 ## Desktop window
 
@@ -121,10 +148,9 @@ A `QMainWindow` with:
   colours from `themes.py`).
 - A multi-line input box with send button. Enter sends; Shift+Enter inserts a
   newline (multi-line input).
-- A "Stop" button that calls `jarvis.daemon.cancel_active_chat_query()`. This
-  sets a per-query cancellation flag; the chat worker drops the reply when
-  `run_reply_engine` returns (delivering `complete(None)`) and the thinking
-  indicator resets immediately. It is distinct from `request_stop` (full
+- A "Stop" button. It marks the exchange abandoned locally, routes the
+  cancellation to whichever process is running the query (see Cancellation),
+  and resets the thinking indicator immediately. It is distinct from `request_stop` (full
   daemon shutdown) and never tears down the voice listener. Visible only
   while a query is in flight.
 - A status indicator label that shows "Jarvis is thinking…" while a query is

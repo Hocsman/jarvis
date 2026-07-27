@@ -173,12 +173,22 @@ class ChatWindow(QMainWindow):
     as callbacks.
     """
 
-    def __init__(self, submit_fn=None, daemon_available: bool = True) -> None:
+    def __init__(
+        self, submit_fn=None, daemon_available: bool = True, cancel_fn=None,
+    ) -> None:
         super().__init__()
         self.setWindowTitle("Jarvis Chat")
         self.setMinimumSize(520, 560)
         self.setStyleSheet(JARVIS_THEME_STYLESHEET)
         self._submit_fn = submit_fn
+        # Subprocess mode routes cancellation to the daemon the same way it
+        # routes a submission. Without it, Stop sets a flag in this
+        # process while the query runs in the other one.
+        self._cancel_fn = cancel_fn
+        # Set by Stop, cleared by the next send. The engine keeps running
+        # after a cancel and its reply still arrives, so the window has to
+        # decline the answer to an exchange the user walked away from.
+        self._query_cancelled = False
         self._daemon_available = daemon_available
         self._daemon_status = "running" if daemon_available else "stopped"
 
@@ -251,6 +261,7 @@ class ChatWindow(QMainWindow):
         self._append_user(text)
         self.input_widget.setPlainText("")
 
+        self._query_cancelled = False
         self._set_thinking(True)
 
         if self._submit_fn is not None:
@@ -269,13 +280,23 @@ class ChatWindow(QMainWindow):
             )
 
     def _stop(self) -> None:
-        from jarvis import daemon
+        """Abandon the in-flight query. Never request_stop, which would
+        tear down the whole voice assistant."""
+        # Refuse the reply locally first: cancellation cannot unwind a
+        # request already inside the engine, so the answer arrives either
+        # way and this is what keeps it out of the transcript.
+        self._query_cancelled = True
 
-        # Cancel the in-flight chat query (drop the reply), NOT request_stop
-        # which would tear down the whole voice assistant.
-        daemon.cancel_active_chat_query()
-        # Reset the thinking indicator immediately so the user sees feedback
-        # without waiting for the engine to finish.
+        if self._cancel_fn is not None:
+            # Subprocess mode: the query lives in the daemon process.
+            self._cancel_fn()
+        else:
+            from jarvis import daemon
+
+            daemon.cancel_active_chat_query()
+
+        # Reset the thinking indicator immediately so the user sees
+        # feedback without waiting for the engine to finish.
         self._set_thinking(False)
 
     def set_daemon_available(self, available: bool) -> None:
@@ -312,6 +333,10 @@ class ChatWindow(QMainWindow):
 
     def _on_complete(self, reply: Optional[str]) -> None:
         self._set_thinking(False)
+        if self._query_cancelled:
+            debug_log("chat reply dropped: the query was cancelled", "chat")
+            self._query_cancelled = False
+            return
         if reply:
             self._append_assistant(reply)
 

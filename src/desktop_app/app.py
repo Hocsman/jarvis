@@ -99,6 +99,26 @@ class RuntimeStatusSnapshot:
     mcp_count: int
 
 
+class RuntimeStatusSignals(QObject):
+    """Carries a collected runtime snapshot back to the GUI thread."""
+
+    ready = pyqtSignal(object)
+
+
+def _should_emit_as_log(line: str) -> bool:
+    """Whether a daemon output line belongs in the general log viewer.
+
+    Chat IPC is carved out. Its ``complete`` event carries the whole
+    assistant reply, which can echo back whatever the user typed, and the
+    log window is not covered by the redaction invariant the chat path
+    maintains. Diary IPC stays: it carries progress and token deltas the
+    log window exists to show.
+    """
+    from jarvis.daemon import CHAT_IPC_PREFIX
+
+    return not line.startswith(CHAT_IPC_PREFIX)
+
+
 def _collect_runtime_status_snapshot(
     *,
     is_listening: bool,
@@ -1523,6 +1543,12 @@ class JarvisSystemTray:
         self._chat_ipc_signals = ChatIpcSignals()
         self._chat_ipc_signals.line_received.connect(self._on_chat_ipc_line)
 
+        # Same bridge for the runtime-status dialog: the snapshot is
+        # gathered on a worker thread because it makes a blocking network
+        # call, and only the rendering belongs on the GUI thread.
+        self._runtime_status_signals = RuntimeStatusSignals()
+        self._runtime_status_signals.ready.connect(self._show_runtime_status_dialog)
+
         # Log reader threads
         self.log_reader_threads = []
 
@@ -1813,10 +1839,33 @@ class JarvisSystemTray:
         )
 
     def show_runtime_status(self) -> None:
-        """Show a compact diagnostic summary of Jarvis' active runtime."""
+        """Show a compact diagnostic summary of Jarvis' active runtime.
+
+        The snapshot is collected on a worker thread and delivered back
+        through a signal, the same marshalling this app already uses for
+        chat events. Collecting it inline would run ``check_ollama_server``
+        — a blocking request with a five second timeout — on the Qt main
+        thread, freezing every menu in the app at precisely the moment the
+        user reached for diagnostics because something looked wrong.
+        """
+        import threading
+
+        def _collect():
+            try:
+                snapshot = self.collect_runtime_status()
+            except Exception as exc:
+                debug_log(f"runtime status collection failed: {exc}", "desktop")
+                return
+            self._runtime_status_signals.ready.emit(snapshot)
+
+        threading.Thread(
+            target=_collect, name="runtime-status", daemon=True,
+        ).start()
+
+    def _show_runtime_status_dialog(self, snapshot) -> None:
+        """Render the collected snapshot. Runs on the Qt main thread."""
         from PyQt6.QtWidgets import QMessageBox
 
-        snapshot = self.collect_runtime_status()
         msg = QMessageBox()
         msg.setIcon(QMessageBox.Icon.Information)
         msg.setWindowTitle("Runtime Status")
@@ -1916,9 +1965,11 @@ class JarvisSystemTray:
             self.chat_window = ChatWindow(
                 submit_fn=self._chat_submit_fn,
                 daemon_available=self.is_listening,
+                cancel_fn=getattr(self, "_chat_cancel_fn", None),
             )
         else:
             self.chat_window._submit_fn = self._chat_submit_fn
+            self.chat_window._cancel_fn = getattr(self, "_chat_cancel_fn", None)
             self.chat_window.set_daemon_status(
                 "running" if self.is_listening else "stopped"
             )
@@ -2204,7 +2255,7 @@ class JarvisSystemTray:
                 # directly, so it writes a __CHAT_QUERY__: line to stdin.
                 # The reply comes back as __CHAT__: events on stdout, parsed
                 # in _read_daemon_logs and routed to the chat window's signals.
-                from jarvis.daemon import CHAT_QUERY_IPC_PREFIX
+                from jarvis.daemon import CHAT_CANCEL_IPC_PREFIX, CHAT_QUERY_IPC_PREFIX
                 _proc = self.daemon_process
 
                 def _submit_chat_subprocess(text: str) -> None:
@@ -2222,12 +2273,29 @@ class JarvisSystemTray:
                             self.chat_window.set_daemon_status("crashed")
                             self.chat_window.signals.completed.emit(None)
 
+                def _cancel_chat_subprocess() -> None:
+                    """Ask the daemon to drop the query it is running.
+
+                    Same pipe as submission, for the same reason: the
+                    query lives in the daemon process, so the flag has to
+                    be set there. A broken pipe here is not worth
+                    surfacing — the window has already refused the reply
+                    locally, and a dead daemon has no query to cancel.
+                    """
+                    try:
+                        _proc.stdin.write(f"{CHAT_CANCEL_IPC_PREFIX}\n")
+                        _proc.stdin.flush()
+                    except Exception as exc:
+                        debug_log(f"chat stdin cancel failed: {exc}", "desktop")
+
                 self._chat_submit_fn = _submit_chat_subprocess
+                self._chat_cancel_fn = _cancel_chat_subprocess
                 # If the chat window already exists (daemon restarted while
                 # the window was open), refresh its submit fn so it doesn't
                 # keep writing to the old (dead) subprocess stdin.
                 if self.chat_window is not None:
                     self.chat_window._submit_fn = self._chat_submit_fn
+                    self.chat_window._cancel_fn = self._chat_cancel_fn
                     self.chat_window.set_daemon_status("running")
 
                 # Start log reader thread
@@ -2321,7 +2389,8 @@ class JarvisSystemTray:
                 # (Qt widgets must be created on the GUI thread).
                 if line.startswith(CHAT_IPC_PREFIX):
                     self._chat_ipc_signals.line_received.emit(line)
-                self.log_signals.new_log.emit(line)
+                if _should_emit_as_log(line):
+                    self.log_signals.new_log.emit(line)
         except Exception as e:
             debug_log(f"log reader error: {e}", "desktop")
             self.log_signals.new_log.emit(f"⚠️ Log reader error: {e}\n")
@@ -2337,6 +2406,7 @@ class JarvisSystemTray:
             self.chat_window = ChatWindow(
                 submit_fn=self._chat_submit_fn,
                 daemon_available=self.is_listening,
+                cancel_fn=getattr(self, "_chat_cancel_fn", None),
             )
         self.chat_window.process_ipc_line(line)
 

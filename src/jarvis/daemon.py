@@ -84,6 +84,11 @@ _chat_cancel_event: Optional[threading.Event] = None
 # __CHAT_QUERY__:  desktop -> daemon (query submission, read from stdin)
 CHAT_IPC_PREFIX = "__CHAT__:"
 CHAT_QUERY_IPC_PREFIX = "__CHAT_QUERY__:"
+# Cancellation travels the same way a submission does. In subprocess
+# mode the query runs here, in the daemon, whose module globals are a
+# different instance from the desktop app's: calling the cancel
+# function over there sets a flag nobody in this process reads.
+CHAT_CANCEL_IPC_PREFIX = "__CHAT_CANCEL__"
 SHUTDOWN_SKIP_DIARY_COMMAND = "SHUTDOWN_SKIP_DIARY"
 
 
@@ -392,6 +397,44 @@ def handle_chat_query_stdin_line(line: str) -> bool:
     # In subprocess mode the reply comes back via __CHAT__: events on stdout.
     submit_text_query(text, use_ipc=True)
     return True
+
+
+def handle_chat_cancel_stdin_line(line: str) -> bool:
+    """Parse a stdin line as a chat-query cancellation (subprocess mode).
+
+    Returns True when the line was a cancel instruction and was handled,
+    False for anything else so the caller can apply its own semantics.
+    Cancelling with nothing in flight is a no-op, not an error: the user
+    can press Stop after the engine has already returned.
+    """
+    if line.strip() != CHAT_CANCEL_IPC_PREFIX:
+        return False
+    cancel_active_chat_query()
+    return True
+
+
+def wait_for_chat_worker(timeout_sec: float = 5.0) -> bool:
+    """Wait for an in-flight chat worker to finish, bounded.
+
+    Shutdown runs the final diary pass and closes the database. A worker
+    that started just before the stop request is still inside
+    ``run_reply_engine`` with that connection open, so closing it under
+    them raises on a closed SQLite handle, and the diary pass races their
+    writes to dialogue memory.
+
+    Returns True when the worker finished (or none was running), False on
+    timeout — in which case the caller proceeds anyway rather than
+    hanging the quit, which is the lesser of the two failures.
+    """
+    acquired = _chat_query_lock.acquire(timeout=timeout_sec)
+    if acquired:
+        _chat_query_lock.release()
+        return True
+    debug_log(
+        f"chat worker still running after {timeout_sec}s, shutting down anyway",
+        "chat",
+    )
+    return False
 
 
 def is_stop_requested() -> bool:
@@ -896,6 +939,8 @@ def main(smoke_test: bool = False) -> None:
                     break
                 # Chat query-in (subprocess mode). Returns False for any other
                 # line, which we silently ignore.
+                if handle_chat_cancel_stdin_line(stripped):
+                    continue
                 if stripped.startswith(CHAT_QUERY_IPC_PREFIX):
                     handle_chat_query_stdin_line(stripped)
         except Exception:
@@ -955,6 +1000,13 @@ def main(smoke_test: bool = False) -> None:
             except Exception:
                 pass
             debug_log("voice thread stopped", "jarvis")
+
+        # A chat worker that started just before the stop request is still
+        # inside run_reply_engine, holding the database connection the
+        # diary pass below is about to use and the one db.close() will
+        # shut. Wait for it, bounded: quitting a moment late beats a
+        # closed-handle raise or a diary pass racing its writes.
+        wait_for_chat_worker(timeout_sec=5.0)
 
         if _global_skip_shutdown_diary_update:
             debug_log("shutdown diary update skipped by fast stop request", "jarvis")
