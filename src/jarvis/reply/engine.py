@@ -894,6 +894,15 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 dialogue_memory.clear_tool_carryover()
             except Exception:
                 pass
+        # A question raised before the gap does not survive it. Whatever
+        # the user was doing when she asked, they are doing something
+        # else now, and an approval given to a forgotten question is not
+        # an approval.
+        if hasattr(dialogue_memory, "clear_pending"):
+            try:
+                dialogue_memory.clear_pending()
+            except Exception:
+                pass
 
     # Refresh MCP tools on new conversation (memory expired)
     if is_new_conversation and getattr(cfg, "mcps", {}):

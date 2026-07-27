@@ -754,6 +754,125 @@ class DialogueMemory:
         self._lock = threading.RLock()  # Reentrant lock for thread safety
         # Track the last profile used for follow-up detection
         self._last_profile: Optional[str] = None
+        # The one action waiting on the user's say-so, and the turn
+        # counter that bounds how long a spoken answer stays valid. Held
+        # here because this is the object voice and text already share.
+        # In memory only: see raise_pending.
+        self._pending: Optional[object] = None
+        self._turn_seq: int = 0
+
+    # ── The action waiting on the user ────────────────────────────────
+    #
+    # One slot, in memory, cleared by a restart. Not the hot cache, which
+    # evicts under load and would let a busy router discard a destructive
+    # action mid-question; not a module global, which unattended routines
+    # on their own threads would trample; and not the database, because a
+    # deletion proposed before a crash and approved after it is an
+    # approval given without the context that produced it.
+
+    def begin_turn(self) -> int:
+        """Open a turn and return its number.
+
+        A spoken answer is only accepted on the turn immediately after
+        the question, so this counter is what bounds the window.
+        """
+        with self._lock:
+            self._turn_seq += 1
+            return self._turn_seq
+
+    def current_turn(self) -> int:
+        with self._lock:
+            return self._turn_seq
+
+    def raise_pending(self, action):
+        """Hold ``action`` as the question awaiting an answer.
+
+        Returns the held request, which is ``action`` itself unless the
+        same call is already waiting — the model re-proposing a tool it
+        was just asked about is a re-ask, not a second question, and it
+        keeps the original id so the ledger records one episode rather
+        than a queue of duplicates. Returns None when a *different*
+        question is already waiting: one card at a time, so a three-step
+        plan asks about its first step instead of stacking questions the
+        user has to disentangle.
+        """
+        with self._lock:
+            held = self._pending
+            if held is not None and not held.has_expired():
+                if held.fingerprint != action.fingerprint:
+                    return None
+                # A re-ask moves into the current turn, or the answer to
+                # it would arrive one turn too late to be accepted. It
+                # does NOT restart the deadline: `created_monotonic`
+                # carries over, so a model that re-proposes the same tool
+                # every turn cannot hold a card open indefinitely. The
+                # deadline belongs to the moment the user was first
+                # asked.
+                from dataclasses import replace
+
+                self._pending = replace(held, raised_at_turn=action.raised_at_turn)
+                return self._pending
+
+            self._pending = action
+            return action
+
+    def peek_pending(self):
+        """The waiting question, without consuming it."""
+        with self._lock:
+            return self._pending
+
+    def take_pending_for_utterance(self, origin: Optional[str], turn_seq: int):
+        """Claim the question if this utterance is entitled to answer it.
+
+        Entitled means: the question invited a spoken answer, it came
+        from the same place this utterance did, and this is the turn
+        immediately after it was asked. Anything else leaves the record
+        alone — the card is still on screen and the click door is still
+        the right way to settle it.
+
+        Consuming here rather than after the answer is read is the whole
+        safety story: the record is gone before the judge runs, before
+        the digest is compared and before anything executes.
+        """
+        from ..tools.confirmation import CHANNEL_PAROLE
+
+        with self._lock:
+            held = self._pending
+            if held is None:
+                return None
+            if held.channel != CHANNEL_PAROLE:
+                return None
+            if held.origin != origin:
+                return None
+            if held.raised_at_turn != turn_seq - 1:
+                return None
+            if held.has_expired():
+                return None
+
+            self._pending = None
+            return held
+
+    def take_pending_by_id(self, request_id: str):
+        """Claim the question named by a deliberate gesture.
+
+        Atomic, and good exactly once: a double-click, or a click racing
+        the expiry sweep, must produce one execution or the gate is not a
+        gate.
+        """
+        with self._lock:
+            held = self._pending
+            if held is None or held.request_id != request_id:
+                return None
+            if held.has_expired():
+                return None
+
+            self._pending = None
+            return held
+
+    def clear_pending(self) -> None:
+        """Drop the waiting question, unanswered."""
+        with self._lock:
+            self._pending = None
 
     def _next_ts(self) -> float:
         """Return a strictly-monotonic timestamp.
