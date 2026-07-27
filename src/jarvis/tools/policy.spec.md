@@ -120,3 +120,9 @@ Each row holds the timestamp, the origin, the tool, its redacted arguments, the 
 **Origin** is `voix`, `chat`, or whatever later runs unattended, and it is passed down from `run_reply_engine` rather than read from ambient state. It answers the question a user actually asks on finding a row they do not recognise: *did I ask for this?* Unattended routines will run on their own threads while the user is mid-conversation, so a shared module-level slot would label their rows with whoever spoke last. A call that states no origin records none — an honest blank beats a plausible guess.
 
 Bookkeeping never breaks a tool call: a ledger write that raises is logged and swallowed.
+
+## What the evals hold
+
+`evals/test_she_asks_before_acting.py` and `evals/test_she_honours_the_answer.py` run the real gate against a real `outils.md` and a tool whose having-run is a list anyone can inspect — so "it did not run" is a fact about the world rather than about a mock's call count. Both directions are pinned: a tool under `## Demande` is announced and does not run, and a tool under `## Libre` still runs without ceremony, because a gate that asks about everything gets switched off and then protects nothing.
+
+The language cases live there and nowhere else. There is no word list anywhere in this feature, so an eval is the only thing that can show the spoken door works outside French: a grant in French, English, Turkish and Japanese each runs the call exactly once, and a refusal in each runs nothing. So do the sentences that are not answers — a conditional yes, an instruction to answer yes, an unrelated question, and "not now" — none of which may be read as permission.
