@@ -67,6 +67,7 @@ CATEGORIES = [
     ("memory", "🧠 Memory & Dialogue"),
     ("location", "📍 Location"),
     ("features", "✨ Features"),
+    ("confirmation", "🙋 Permissions"),
     ("mcps", "🔌 MCP Servers"),
     ("advanced", "🔧 Advanced"),
 ]
@@ -376,6 +377,29 @@ def _build_field_metadata() -> List[FieldMeta]:
     f("dictation_custom_dictionary", "Custom Dictionary",
       "Correction rules for dictation. Use 'wrong -> right' format (e.g. 'Jarvice -> Jarvis')",
       "features", "list")
+
+    # --- Permissions ---
+    #
+    # Which tools Yuba may run on her own lives in yuba/outils.md, which
+    # she generates from your own catalogue and never rewrites. These are
+    # only the timings and the model that reads a spoken answer. There is
+    # deliberately no setting that lets a spoken answer approve a
+    # destructive action: a false no costs a turn, a false yes costs a
+    # file.
+    f("confirmation_ttl_sec", "Délai de décision",
+      "Combien de temps une carte reste répondable avant d'expirer",
+      "confirmation", "float", min_val=15, max_val=900, step=15, suffix="s")
+    f("confirmation_hot_window_sec", "Écoute après la question",
+      "Combien de temps elle écoute ta réponse parlée, sans mot-clé",
+      "confirmation", "float", min_val=3, max_val=60, step=1, suffix="s")
+    f("confirmation_model", "Modèle qui lit ta réponse",
+      "Vide = le petit modèle déjà chaud. Mets-en un local pour garder "
+      "cette lecture hors du réseau",
+      "confirmation", "str")
+    f("confirmation_timeout_sec", "Délai de ce modèle",
+      "Passé ce délai, la réponse est traitée comme illisible — jamais "
+      "comme un accord",
+      "confirmation", "float", min_val=2, max_val=30, step=1, suffix="s")
 
     # --- Advanced ---
     f("echo_energy_threshold", "Echo Energy Threshold",

@@ -167,6 +167,9 @@ Jarvis starts listening automatically — just say "Jarvis" and talk!
 - **Smart Tool Selection** - Embedding-based relevance filtering picks only the tools needed per query — add unlimited MCP tools without performance degradation
 - **Built-in Tools** - Screenshot OCR, web search (DuckDuckGo → Brave → Wikipedia fallback chain with auto-fetch), weather, file access, nutrition tracking, location awareness, remembering things you ask it to, plus a tool-discovery escape hatch the agent uses to widen its own toolset mid-reply
 - **Memory You Can Read** - Say "remember that…" or correct a mistake, and it goes into two plain Markdown files you can open, edit, and back up. Nothing is written by inference: only what you actually said, dated and attributed, and a correction strikes the old line through instead of erasing it
+- **Asks Before It Acts** - Every tool declares what it does to the world, and a plain-text file you own decides which ones run freely and which need your say-so. It is generated once from the tools you actually have installed, then belongs to you. A tool nobody classified is treated as destructive, so it asks
+- **Destructive Actions Need a Click** - Reads and recoverable changes can be approved by answering out loud, in any language. Anything that may not come back is approved on a card showing the exact call, or not at all — a mis-heard word must never be able to delete a file
+- **A Record of What It Did** - One line per tool call: what ran, what it cost, what you allowed and what you refused. Deliberately no record of what it *saw* — no page contents, no file contents, no tool output
 - **Knowledge Graph Memory** - Self-organising memory of what it has looked up for you, which auto-splits by topic and surfaces relevant knowledge automatically
 - **Natural Voice** - Say "Jarvis" anywhere in your sentence, interrupt with "stop", follow up without repeating the wake word
 - **Fast Stop** - Use the tray action `⚡ Stop Now (Skip Diary)` to release local model resources quickly when you need your machine back immediately.
@@ -193,6 +196,40 @@ Most users won't need to change anything. Open **⚙️ Settings** from the tray
   <img src="docs/img/settings-window.png" alt="Settings Window" width="500">
   <img src="docs/img/settings-mcp.png" alt="Settings - MCP Servers" width="500">
 </p>
+
+<details>
+<summary><strong>Permissions — what it may do on its own</strong></summary>
+
+Jarvis reads and writes files, drives your browser through MCP servers, and can run scripts. Which of those it does without asking is your decision, taken in a file you can read:
+
+`~/.local/share/jarvis/yuba/outils.md`
+
+It is generated at first start from the tools you actually have installed — your own catalogue, by name — and then never rewritten. Three sections, and you move lines between them:
+
+```markdown
+## Libre
+- webSearch
+- chrome-devtools__take_snapshot
+
+## Demande
+- localFiles
+- chrome-devtools__*
+
+## Jamais
+- macos__execute_script
+```
+
+- `## Libre` runs without asking. `## Demande` asks first. `## Jamais` is refused whatever happens, with no way to override.
+- `- server__*` covers a whole MCP server; an exact name beats a wildcard, so you can free a server and pull one tool back out of it.
+- A tool that appears after the file was written is absent from it, therefore unclassified, therefore treated as destructive — so it asks.
+
+**How it asks.** Reads and recoverable changes can be answered out loud, in whatever language you speak; a small model reads the answer, and anything it cannot read plainly is treated as "not an answer" rather than as a yes. Anything destructive is different: it shows a card with the exact call — full path, nothing truncated — and needs a click. No setting relaxes that. A false no costs you a turn; a false yes costs you a file, and speech recognition plus a language model are two lossy layers to put in front of that.
+
+**What it records.** Every tool call leaves one line in the **📋 Activity** tab of the Memory Viewer: what ran, its risk, what you allowed, what you refused, and how long it took. There is deliberately no record of what it *saw*.
+
+Timings and the model that reads a spoken answer live under **⚙️ Settings → 🙋 Permissions**. Set `confirmation_model` to a local model if you want that reading kept off the network.
+
+</details>
 
 <details>
 <summary><strong>LLM Provider (Ollama or OpenAI-compatible)</strong></summary>
@@ -657,6 +694,8 @@ provider can't run out the voice-assistant latency budget.
 - **100% offline** - No cloud services required
 - **Auto-redaction** - Emails, tokens, passwords automatically removed
 - **Local storage** - Everything in `~/.local/share/jarvis`
+- **No record of what it read** - The action log has no column for tool output, structurally. A log that kept results would accumulate the contents of every page fetched and every file opened, somewhere you read casually
+- **Permissions are yours to set** - `~/.local/share/jarvis/yuba/outils.md` lists your own tools by name, in three sections you move lines between. Written once, never rewritten. A tool that appears later is unclassified, and therefore asked about
 
 ## License
 
