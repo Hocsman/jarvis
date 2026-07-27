@@ -1131,10 +1131,27 @@ class VoiceListener(threading.Thread):
                                 pass
                             return
 
-                        # Outside hot window — trust rejection
-                        debug_log(f"🚫 Intent judge rejected (not directed, high confidence): \"{text_lower}\"", "voice")
-                        self._stop_thinking_tune()
-                        return
+                        # Outside hot window — check if wake word is actually present
+                        # before trusting the rejection. Small models sometimes
+                        # classify wake-worded statements ("the light is bright,
+                        # Jarvis") as "not directed" despite the prompt instructing
+                        # otherwise. When the wake word is present, fall through to
+                        # Priority 4 wake word detection as a safety net.
+                        ww_wake = getattr(self.cfg, "wake_word", "jarvis")
+                        ww_aliases = set(getattr(self.cfg, "wake_aliases", [])) | {ww_wake}
+                        has_real_wake = is_wake_word_detected(text_lower, ww_wake, list(ww_aliases))
+                        if has_real_wake:
+                            debug_log(
+                                f"⚠️ Intent judge rejected wake-worded utterance "
+                                f"(reasoning: {intent_judgment.reasoning}) — "
+                                f"falling through to wake word detection",
+                                "voice"
+                            )
+                            # Fall through to Priority 4: wake word detection
+                        else:
+                            debug_log(f"🚫 Intent judge rejected (not directed, high confidence): \"{text_lower}\"", "voice")
+                            self._stop_thinking_tune()
+                            return
                 else:
                     # For inconclusive results, fall through to wake word detection
                     debug_log(f"⏭️ Intent judge inconclusive ({intent_judgment.confidence}), checking wake word", "voice")
@@ -1946,12 +1963,13 @@ class VoiceListener(threading.Thread):
                             except Exception as retry_e:
                                 debug_log(f"retry after cache clear also failed: {retry_e}", "voice")
                                 print(f"  ❌ Failed to load Whisper model after cache recovery: {retry_e}", flush=True)
-                                return
+                                debug_log("trying next device/compute fallback config", "voice")
+                                continue
                         else:
                             debug_log("could not clear corrupted cache automatically", "voice")
                             print(f"  ❌ Failed to load Whisper model: {e}", flush=True)
                             print("  💡 Try manually deleting the Whisper model cache directory and restarting", flush=True)
-                            return
+                            continue
                     # Check for rate limiting (HTTP 429) — check string and response status code
                     # (HfHubHTTPError may carry the status on .response without "429" in str(e))
                     is_rate_limited = (

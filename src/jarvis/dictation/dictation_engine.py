@@ -574,8 +574,6 @@ def _close_stream(stream: Any) -> None:
 # Main engine
 # ---------------------------------------------------------------------------
 
-MAX_RECORD_SECONDS = 60
-
 
 class DictationEngine:
     """Hold-to-dictate engine.
@@ -659,7 +657,6 @@ class DictationEngine:
         self._listener: Optional[Any] = None
         self._pressed_modifiers: set = set()
         self._record_start_time: float = 0.0
-        self._max_frames = MAX_RECORD_SECONDS * sample_rate
         self._lock = threading.Lock()
         self._started = False
         # Monotonic recording-session token. Each press increments it; the
@@ -671,6 +668,11 @@ class DictationEngine:
         # Double-tap detection for hands-free mode
         self._last_hotkey_release_time: float = 0.0
         self._double_tap_window: float = 0.4  # seconds
+
+        # Suppress recording activation during clipboard paste (the pynput
+        # Controller used for paste sends synthetic key events that the
+        # listener would otherwise interpret as a fresh hotkey press).
+        self._paste_in_progress = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -798,7 +800,7 @@ class DictationEngine:
                 return
 
         # Check activation condition
-        if not self._recording:
+        if not self._recording and not self._paste_in_progress:
             mods_held = self._all_modifiers_held()
 
             if self._trigger is not None:
@@ -983,13 +985,8 @@ class DictationEngine:
         # or one missed frame just after start — both benign.
         if not self._recording:
             return
-        # Enforce max duration
-        total_samples = sum(len(f) for f in self._audio_frames)
-        if total_samples >= self._max_frames:
-            debug_log("max dictation duration reached (60s)", "dictation")
-            # Schedule stop on a separate thread to avoid deadlock in callback
-            threading.Thread(target=self._stop_recording, daemon=True).start()
-            return
+        # No max duration cap — the user controls when to stop (release hotkey).
+        # A cap would paste prematurely mid-dictation and restart recording.
         self._audio_frames.append(indata[:, 0].copy())
 
     def _stop_recording(self, discard: bool = False) -> None:
@@ -1106,7 +1103,11 @@ class DictationEngine:
             if text:
                 duration = len(audio) / self._target_sample_rate
                 debug_log(f"dictation result: {text!r}", "dictation")
-                _clipboard_paste(text)
+                self._paste_in_progress = True
+                try:
+                    _clipboard_paste(text)
+                finally:
+                    self._paste_in_progress = False
                 # Persist to history
                 entry = self.history.add(text, duration=duration)
                 if self._on_dictation_result:

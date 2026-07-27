@@ -119,9 +119,11 @@ class WeatherTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Weather only (current + forecast). NOT for time-of-day, date, or "
+            "Weather data (current + forecast). NOT for time-of-day, date, or "
             "location questions — those are already in the assistant's context. "
-            "Use for ANY weather question: now, later today, tomorrow, this week. "
+            "Call this for ANY mention of weather, climate, temperature, or "
+            "conditions — whether a question, a statement, or a casual remark. "
+            "Covers now, later today, tomorrow, this week. "
             "Call with {} — user location is auto-detected. Do NOT ask the user "
             "where they are or request a city; just call this tool with empty args."
         )

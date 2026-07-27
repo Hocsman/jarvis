@@ -27,7 +27,7 @@ _SMALL_MODEL_PATTERNS = (
     ":1b", ":3b", ":7b",
     "-1b", "-3b", "-7b",
     "_1b", "_3b", "_7b",
-    "gemma4",  # Gemma 4 - always small regardless of tag
+    "gemma4", "gemma-4",  # Gemma 4 - always small regardless of tag
 )
 
 
@@ -138,10 +138,15 @@ TOOL_CONSTRAINTS_LARGE = (
 # =============================================================================
 
 TOOL_INCENTIVES_SMALL = (
-    "Use tools when they can provide better, more accurate responses. "
-    "Follow each tool's description to decide when to use it. "
-    "For current information, real-time data, or external lookups - use tools confidently. "
-    "For greetings and small talk - respond directly without tools."
+    "You MUST call the right tool whenever one is available for what the user "
+    "is talking about. Your training knowledge is stale — tools give you "
+    "current, accurate data for weather, news, recent events, named-entity "
+    "facts, and any information that changes over time. Never answer a "
+    "question or make an observation about a topic a tool covers without "
+    "having called that tool first. "
+    "The only case where you respond without tools is when the user is "
+    "greeting you, giving you behavioural instructions, or making casual "
+    "chat with no information need — everything else demands a tool call."
 )
 
 TOOL_GUIDANCE_SMALL = (
@@ -189,6 +194,9 @@ When the user asks for an action (open something, navigate somewhere, send a mes
 
 GREETING HANDLING:
 When the user's message is a greeting or casual social phrase (whatever language), respond directly and warmly WITHOUT calling any tools. Greetings do not require external data.
+
+WEATHER AND CURRENT CONDITIONS:
+When the user brings up weather, climate, temperature, or current conditions — whether as a question ("what is the weather like"), a statement ("it is nice today", "it is cold out there"), a contextual remark ("I am in London" after a prior weather exchange), or otherwise — call getWeather immediately with no arguments. Do NOT offer an opinion, an observation, or a generic pleasantry about the weather before calling the tool. The tool provides the actual readings; your training data does not know today's temperature anywhere. Even a casual weather remark is a trigger for getWeather.
 
 USER INSTRUCTIONS:
 When the user gives you instructions about how to behave or respond (units, brevity, language, tone), acknowledge and respond directly WITHOUT calling tools. These are behavioural instructions, not data requests.

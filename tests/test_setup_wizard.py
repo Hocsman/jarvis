@@ -543,7 +543,6 @@ class TestProviderChoicePage:
         wizard = MagicMock()
         wizard.openai_compat_page_id = 42
         page.wizard = MagicMock(return_value=wizard)
-        # isinstance check in nextId: make wizard look like SetupWizard
         with patch("desktop_app.setup_wizard.SetupWizard", MagicMock):
             assert page.nextId() == 42
 
@@ -622,9 +621,8 @@ class TestProviderChoicePage:
         finally:
             cfg_path.unlink(missing_ok=True)
 
-    def test_nextid_ollama_routes_through_welcome_status(self):
-        """Ollama selection goes to the Welcome/status page (which surfaces
-        Ollama readiness only after the user has chosen Ollama)."""
+    def test_nextid_ollama_routes_to_welcome(self):
+        """Ollama selection goes to the Welcome/status page."""
         page = ProviderChoicePage.__new__(ProviderChoicePage)
         page._selected = "ollama"
         wizard = MagicMock()
@@ -633,9 +631,9 @@ class TestProviderChoicePage:
         with patch("desktop_app.setup_wizard.SetupWizard", MagicMock):
             assert page.nextId() == 5
 
-    def test_wizard_starts_on_provider_choice(self, qapp):
-        """Ollama is optional, so the wizard's first step is the provider
-        choice — not the Ollama-centric Welcome/status page."""
+    def test_wizard_starts_on_whisper(self, qapp):
+        """Whisper setup is the first step — it has no LLM dependencies
+        and informs VRAM calculations on the Models page."""
         import tempfile
         from pathlib import Path
         from desktop_app.setup_wizard import SetupWizard
@@ -645,7 +643,7 @@ class TestProviderChoicePage:
         try:
             with patch("jarvis.config.default_config_path", return_value=cfg_path):
                 wiz = SetupWizard()
-            assert wiz.startId() == wiz.provider_choice_page_id
+            assert wiz.startId() == wiz.mlx_whisper_page_id
         finally:
             cfg_path.unlink(missing_ok=True)
 
@@ -687,7 +685,7 @@ class TestOpenAICompatiblePage:
         try:
             with patch("jarvis.config.default_config_path", return_value=cfg_path):
                 page._read_inputs = MagicMock(return_value=(
-                    "http://localhost:1234/v1", "sk-secret", "lmstudio/gemma", "text-embed-3",
+                    "http://localhost:1234/v1", "sk-secret", "lmstudio/gemma", "text-embed-3", "",
                 ))
                 assert page.validatePage() is True
             saved = json.loads(cfg_path.read_text())
@@ -713,7 +711,7 @@ class TestOpenAICompatiblePage:
         try:
             with patch("jarvis.config.default_config_path", return_value=cfg_path):
                 page._read_inputs = MagicMock(return_value=(
-                    "http://localhost:1234/v1", "", "lmstudio/gemma", "",
+                    "http://localhost:1234/v1", "", "lmstudio/gemma", "", "",
                 ))
                 assert page.validatePage() is True
             saved = json.loads(cfg_path.read_text())
@@ -724,14 +722,14 @@ class TestOpenAICompatiblePage:
 
     def test_nextid_skips_ollama_pages(self):
         """After configuring the remote provider, the wizard jumps straight
-        to Whisper setup — the Ollama install/server/models pages are
+        to dictation — the Ollama install/server/models pages are
         irrelevant."""
         page = OpenAICompatiblePage.__new__(OpenAICompatiblePage)
         wizard = MagicMock()
-        wizard.mlx_whisper_page_id = 7
+        wizard.dictation_page_id = 8
         page.wizard = MagicMock(return_value=wizard)
         with patch("desktop_app.setup_wizard.SetupWizard", MagicMock):
-            assert page.nextId() == 7
+            assert page.nextId() == 8
 
     def test_initialize_page_prefills_from_existing_config(self, qapp):
         """Re-running the wizard restores the user's saved connection
@@ -914,7 +912,7 @@ class TestOpenAICompatiblePage:
         try:
             with patch("jarvis.config.default_config_path", return_value=cfg_path):
                 page._read_inputs = MagicMock(return_value=(
-                    "http://localhost:9876/v1", "", "qwen-27b", "some-embed",
+                    "http://localhost:9876/v1", "", "qwen-27b", "some-embed", "",
                 ))
                 assert page.validatePage() is True
             saved = json.loads(cfg_path.read_text())
@@ -1118,6 +1116,124 @@ class TestModelOptions:
 
         # Verify they're the same object (not just equal values)
         assert ModelsPage.MODEL_OPTIONS is SUPPORTED_CHAT_MODELS
+
+
+class TestModelsPageUI:
+    """Tests for the dropdown-based model selection UI in ModelsPage."""
+
+    def test_uses_combobox_for_chat_model(self, qapp):
+        from desktop_app.setup_wizard import ModelsPage
+        from PyQt6.QtWidgets import QComboBox
+        page = ModelsPage()
+        assert isinstance(page._chat_combo, QComboBox)
+        assert page._chat_combo.count() == len(ModelsPage.MODEL_OPTIONS)
+
+    def test_uses_combobox_for_fast_model(self, qapp):
+        from desktop_app.setup_wizard import ModelsPage
+        from PyQt6.QtWidgets import QComboBox
+        page = ModelsPage()
+        assert isinstance(page._fast_combo, QComboBox)
+        assert page._fast_combo.count() == len(ModelsPage._FAST_MODEL_IDS)
+
+    def test_defaults_to_unlinked(self, qapp):
+        from desktop_app.setup_wizard import ModelsPage
+        page = ModelsPage()
+        assert page._linked is False
+        assert page._link_cb.isChecked() is False
+
+    def test_default_fast_model_is_gemma4_e2b(self, qapp):
+        from desktop_app.setup_wizard import ModelsPage
+        with patch("desktop_app.setup_wizard.detect_total_vram_mb", return_value=None):
+            page = ModelsPage()
+        assert page._fast_model == "gemma4:e2b"
+        assert page._fast_combo.currentData() == "gemma4:e2b"
+
+    def test_default_chat_model_is_default_config_model(self, qapp):
+        from desktop_app.setup_wizard import ModelsPage
+        from jarvis.config import DEFAULT_CHAT_MODEL
+        page = ModelsPage()
+        assert page._chat_model == DEFAULT_CHAT_MODEL
+        assert page._chat_combo.currentData() == DEFAULT_CHAT_MODEL
+
+    def test_initialize_page_stays_unlinked(self, qapp):
+        from desktop_app.setup_wizard import ModelsPage
+        page = ModelsPage()
+        page.initializePage()
+        assert page._linked is False
+        assert page._link_cb.isChecked() is False
+
+    def test_linked_mode_syncs_both_combos(self, qapp):
+        from desktop_app.setup_wizard import ModelsPage
+        page = ModelsPage()
+        page._link_cb.setChecked(True)
+        assert page._linked is True
+        idx = page._chat_combo.findData("qwen3.5:0.8b")
+        assert idx >= 0
+        page._chat_combo.setCurrentIndex(idx)
+        assert page._fast_model == "qwen3.5:0.8b"
+        assert page._fast_combo.currentData() == "qwen3.5:0.8b"
+
+    def test_unlinked_mode_allows_independent_selection(self, qapp):
+        from desktop_app.setup_wizard import ModelsPage
+        page = ModelsPage()
+        assert page._linked is False
+        idx = page._fast_combo.findData("qwen3.5:0.8b")
+        assert idx >= 0
+        page._fast_combo.setCurrentIndex(idx)
+        assert page._fast_model == "qwen3.5:0.8b"
+        assert page._chat_model != "qwen3.5:0.8b"
+
+    def test_auto_downgrades_fast_model_when_smaller_chat_selected(self, qapp):
+        from desktop_app.setup_wizard import ModelsPage
+        page = ModelsPage()
+        idx = page._chat_combo.findData("qwen3.5:0.8b")
+        assert idx >= 0
+        page._chat_combo.setCurrentIndex(idx)
+        assert page._fast_model == "qwen3.5:0.8b"
+
+    def test_fast_combo_uses_data_keys_for_fast_suitable_models(self, qapp):
+        from desktop_app.setup_wizard import ModelsPage
+        page = ModelsPage()
+        datas = [page._fast_combo.itemData(i) for i in range(page._fast_combo.count())]
+        for d in datas:
+            assert d in ModelsPage._FAST_MODEL_IDS
+
+
+class TestOpenAICompatiblePageDefaults:
+    """Tests for default link state and fast model in OpenAI compatible page."""
+
+    def test_defaults_to_unlinked(self, qapp):
+        from desktop_app.setup_wizard import OpenAICompatiblePage
+        page = OpenAICompatiblePage()
+        assert page._openai_linked is False
+        assert page._openai_link_cb.isChecked() is False
+
+    def test_fast_model_selector_visible_by_default(self, qapp):
+        from desktop_app.setup_wizard import OpenAICompatiblePage
+        page = OpenAICompatiblePage()
+        assert page._openai_linked is False
+        assert page._fast_label.isHidden() is False
+        assert page._fast_model_combo.isHidden() is False
+
+    def test_fast_model_defaults_to_gemma4_e2b_when_in_model_list(self, qapp):
+        from desktop_app.setup_wizard import OpenAICompatiblePage
+        page = OpenAICompatiblePage()
+        page._populate_models(["gemma4:e2b", "llama-3-8b", "nomic-embed-text"])
+        assert page._fast_model_combo.currentText() == "gemma4:e2b"
+
+    def test_fast_model_stays_empty_when_gemma4_not_available(self, qapp):
+        from desktop_app.setup_wizard import OpenAICompatiblePage
+        page = OpenAICompatiblePage()
+        page._populate_models(["llama-3-8b", "phi-3", "nomic-embed-text"])
+        assert page._fast_model_combo.currentText() == ""
+
+    def test_link_toggle_shows_hides_fast_selector(self, qapp):
+        from desktop_app.setup_wizard import OpenAICompatiblePage
+        page = OpenAICompatiblePage()
+        assert page._fast_label.isHidden() is False
+        page._openai_link_cb.setChecked(True)
+        assert page._fast_label.isHidden() is True
+        assert page._fast_model_combo.isHidden() is True
 
 
 class TestDefaultModelDetection:

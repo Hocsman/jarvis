@@ -22,25 +22,25 @@ An OpenAI-compatible user has opted out of the local Ollama stack, so `should_sh
 ## Page Flow
 
 ```
-Provider Choice ─┬─ Ollama ───────→ Welcome/Status → [Ollama Install] → [Ollama Server] → Models ─┐
-                 └─ OpenAI-compat → OpenAI-compatible config ───────────────────────────────────────┤
-                                                                                                      ▼
-       [Whisper] → Dictation → MCP Servers → Search Providers → [Location] → Complete
+Whisper Setup (start) → Provider Choice ─┬─ Ollama → Welcome/Status → [Ollama Install] → [Ollama Server] → Models ─┐
+                                          └─ OpenAI-compat → OpenAI-compatible config ───────────────────────────────────────┤
+                                                                                                                              ▼
+                                            Dictation → MCP Servers → Search Providers → [Location] → Complete
 ```
 
-The **Provider Choice page is the wizard's first step** (`setStartId`): Ollama is optional (recommended, not required), so the wizard asks which runtime the user wants before running any Ollama-specific checks. Pages in brackets are conditional — skipped when their prerequisite is already satisfied. The Ollama branch goes through the Welcome/Status dashboard (which surfaces Ollama readiness only after Ollama is chosen) and into install/server/models; the OpenAI-compatible branch replaces all of those with a single connection-config page.
+The **Provider Choice page is the wizard's first step** (`setStartId`). After the provider is chosen, **Whisper Setup** runs next (it has no dependencies and its model choice informs the VRAM budget calculated on the Models/LLM page). Then the flow branches: the Ollama path goes through the Welcome/Status dashboard (which surfaces Ollama readiness only after Ollama is chosen) and into install/server/models; the OpenAI-compatible branch replaces all of those with a single connection-config page. Pages in brackets are conditional — skipped when their prerequisite is already satisfied.
 
 ### Pages
 
 | # | Page | Condition to show | Config written |
 |---|------|-------------------|----------------|
 | 1 | **Provider Choice** (start) | Always | `llm_provider` (Ollama clears the OpenAI-compatible overrides) |
-| 2 | **OpenAI-compatible** | Provider Choice = OpenAI-compatible | `llm_provider`, `llm_base_url`, `llm_chat_model`, `llm_api_key`?, `embedding_model`?, `embedding_provider` (set to `ollama` when the embeddings-fallback box is ticked, else cleared) |
-| 3 | **Welcome / Status** | Ollama path | — |
-| 4 | **Ollama Install** | Ollama path + CLI not found | — |
-| 5 | **Ollama Server** | Ollama path + server not running | — |
-| 6 | **Models** | Ollama path | `ollama_chat_model` |
-| 7 | **Whisper Setup** | Always (user selects Whisper model) | `whisper_model` |
+| 2 | **Whisper Setup** | Always | `whisper_model` |
+| 3 | **OpenAI-compatible** | Provider Choice = OpenAI-compatible | `llm_provider`, `llm_base_url`, `llm_chat_model`, `llm_api_key`?, `embedding_model`?, `embedding_provider` (set to `ollama` when the embeddings-fallback box is ticked, else cleared), `fast_model` |
+| 4 | **Welcome / Status** | Ollama path | — |
+| 5 | **Ollama Install** | Ollama path + CLI not found | — |
+| 6 | **Ollama Server** | Ollama path + server not running | — |
+| 7 | **Models** | Ollama path | `ollama_chat_model`, `fast_model` |
 | 8 | **Dictation** | Always | `dictation_enabled`, `dictation_hotkey`, `dictation_filler_removal` |
 | 9 | **MCP Servers** | Always | `mcps` |
 | 10 | **Search Providers** | Always | `brave_search_api_key`, `wikipedia_fallback_enabled` |
@@ -51,7 +51,7 @@ Fields suffixed `?` are written only when non-empty (minimal-config invariant).
 
 ### Page Details
 
-**ProviderChoicePage** (start page) — Two cards (radio buttons in a shared `QButtonGroup` so they are mutually exclusive across the separate card frames): Ollama (recommended) and OpenAI-compatible server. The copy makes clear both options are local: the OpenAI-compatible card describes pointing at another local app (LM Studio, oMLX, llama.cpp, vLLM, LocalAI) on your own machine or network, not a cloud service. Preselects from the current `llm_provider`. On validate, writes `llm_provider`; selecting Ollama omits the key and clears the OpenAI-compatible overrides (`llm_base_url`, `llm_api_key`, `llm_chat_model`, `embedding_*`) so the Ollama settings become authoritative again. `nextId` routes to the OpenAI-compatible page, or (Ollama) to the Welcome/Status page.
+**ProviderChoicePage** (start page) — Two cards (radio buttons in a shared `QButtonGroup` so they are mutually exclusive across the separate card frames): Ollama (recommended) and OpenAI-compatible server. The copy makes clear both options are local: the OpenAI-compatible card describes pointing at another local app (LM Studio, oMLX, llama.cpp, vLLM, LocalAI) on your own machine or network, not a cloud service. Preselects from the current `llm_provider`. On validate, writes `llm_provider`; selecting Ollama omits the key and clears the OpenAI-compatible overrides (`llm_base_url`, `llm_api_key`, `llm_chat_model`, `embedding_*`) so the Ollama settings become authoritative again. `nextId` routes to Whisper Setup (both branches) since it has no dependencies and its model choice informs the VRAM budget on the Models page.
 
 **WelcomePage / Status** — Reached only on the Ollama branch. Status dashboard showing CLI, server, models, location, and MLX Whisper (Apple Silicon) readiness; a background `StatusCheckWorker` populates `wizard.ollama_status`. Leads into the first applicable Ollama page via `SetupWizard.ollama_entry_page_id()` (install if the CLI is missing, server if it is not running, else models).
 
@@ -68,9 +68,9 @@ Fields suffixed `?` are written only when non-empty (minimal-config invariant).
 
 **OllamaServerPage** — Start button auto-starts Ollama (macOS: `open -a Ollama`, Windows: hidden `ollama serve`, Linux: terminal `ollama serve`). Verify button re-checks `check_ollama_server()`.
 
-**ModelsPage** — Displays `SUPPORTED_CHAT_MODELS` as selectable cards with VRAM requirements (including always-loaded intent judge overhead). Installs: selected chat model + embedding model (`nomic-embed-text`) + intent judge (`gemma4:e2b`). Progress bar and log output during `ollama pull`. User can skip if models are already present.
+**ModelsPage** — Uses two `QComboBox` dropdowns for model selection (chat + fast) instead of checkable buttons, eliminating layout compression. A link checkbox (default unchecked) lets the user optionally lock both models to the same ID. The chat dropdown lists all `SUPPORTED_CHAT_MODELS`; the fast dropdown lists only the fast-suitable subset (`qwen3.5:0.8b`, `gemma4:e2b`). Defaults: chat = `DEFAULT_CHAT_MODEL`, fast = `gemma4:e2b`. On open, runs VRAM detection via `detect_total_vram_mb()` (DXGI on Windows, `nvidia-smi` elsewhere). The VRAM budget includes the chat model, fast model, the embedding model (`nomic-embed-text`, 1 GB), and the whisper model (read from config after WhisperSetupPage runs — ranges from 1 GB for tiny to 6 GB for large-v3-turbo). If VRAM is below the default model's 8 GB requirement (including overhead), a warning banner appears with a recommendation to switch to `qwen3.5:0.8b`, and the chat model auto-switches. When the user selects a smaller chat model than the current fast model, or the total (chat + fast + embed + whisper) exceeds the detected VRAM, the fast model auto-downgrades to the largest fast-suitable model that fits the budget. Installs: selected chat model + embedding model (`nomic-embed-text`) + fast model (when it differs from chat). Progress bar and log output during `ollama pull`. User can skip if models are already present.
 
-**WhisperSetupPage** — Language mode toggle (multilingual vs English-only), then model size selection from hardcoded options. Apple Silicon: additional FFmpeg and MLX Whisper installation buttons.
+**WhisperSetupPage** — Always shown, right after Provider Choice (it has no LLM dependencies and its model selection informs the VRAM budget on the Models page). Language mode toggle (multilingual vs English-only), then model size selection from hardcoded options via a slider. Apple Silicon: additional FFmpeg and MLX Whisper installation buttons. Exposes a `get_whisper_vram_mb()` static method used by `ModelsPage` for accurate total VRAM calculation. `nextId` routes to the Welcome/Status page (Ollama) or the OpenAI-compatible config page, based on the provider choice made earlier.
 
 **DictationPage** — Enable/disable dictation, hotkey selection dropdown (4 presets), filler word removal toggle with delay warning. Reads current config values on open so re-running the wizard preserves user choices.
 
@@ -93,6 +93,8 @@ Fields suffixed `?` are written only when non-empty (minimal-config invariant).
 | `check_installed_models()` | `list[str]` | Models already pulled |
 | `check_ollama_status()` | `OllamaStatus` | Combined CLI + server + models |
 | `check_mlx_whisper_status()` | `MLXWhisperStatus` | Apple Silicon Whisper readiness |
+| `detect_total_vram_mb()` | `Optional[int]` | GPU VRAM in MB via DXGI (Windows) or `nvidia-smi` |
+| `get_recommended_model_id(vram_mb)` | `str` | Best model ID for the given VRAM (low-VRAM models win below 8 GB) |
 
 ## Threading
 

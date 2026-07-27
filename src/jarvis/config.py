@@ -33,6 +33,12 @@ SUPPORTED_CHAT_MODELS: Dict[str, Dict[str, str]] = {
         "size": "~12GB",
         "vram": "24GB+",
     },
+    "qwen3.5:0.8b": {
+        "name": "Qwen 3.5 0.8B (Low-VRAM)",
+        "description": "Tiny agentic model, strong reasoning for its size, built for tool-use flows; ~1.0GB download",
+        "size": "~1.0GB",
+        "vram": "2GB+",
+    },
 }
 
 # The default chat model (first in the supported list)

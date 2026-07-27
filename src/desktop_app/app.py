@@ -1775,11 +1775,11 @@ class JarvisSystemTray:
         wizard = SetupWizard()
         result = wizard.exec()
 
-        # Restart daemon after wizard completes (finished or cancelled)
-        # This ensures any config changes (model selection, etc.) are applied
-        # For first-time users: daemon wasn't running, so we start it
-        # For existing users: restart to apply changes
-        if result == QWizard.DialogCode.Accepted or was_listening:
+        # Restart daemon only when the wizard was completed.
+        # Cancelling means the user didn't finalise their setup, so
+        # we leave the daemon stopped rather than starting with a
+        # potentially incomplete configuration.
+        if result == QWizard.DialogCode.Accepted:
             self.start_daemon()
 
     def show_settings(self) -> None:
@@ -2712,18 +2712,34 @@ def _check_openai_compat_reachable(cfg, timeout_sec: float = 4.0) -> bool:
         return False
 
 
-def _openai_compat_unreachable_message(cfg) -> str:
-    """Friendly heads-up shown when the OpenAI-compatible server isn't ready at
-    startup (unreachable, or reachable with no model loaded: the model listing
-    is empty in both cases). Names the address but never the API key."""
+def _build_unreachable_message(cfg) -> str:
+    """Build the message text for the unreachable server dialog,
+    without Qt dependencies so tests can verify it directly."""
     base = (getattr(cfg, "llm_base_url", "") or "").strip() or "your configured server"
     return (
         f"⚠️ Jarvis couldn't reach a ready LLM server at {base}.\n\n"
         "Make sure your local server (for example LM Studio, Ollama, llama.cpp, "
         "vLLM) is running with a model loaded, and Jarvis will connect "
         "automatically.\n\n"
-        "You can change the server any time in Settings → LLM Provider."
+        "You can open the Setup Wizard to change your server, or close and "
+        "adjust Settings later via the tray menu \u2192 LLM Provider."
     )
+
+
+def _show_openai_unreachable_dialog(cfg) -> None:
+    """Show a warning dialog with an option to open the Setup Wizard."""
+    from PyQt6.QtWidgets import QMessageBox
+
+    dialog = QMessageBox()
+    dialog.setWindowTitle("Jarvis")
+    dialog.setText(_build_unreachable_message(cfg))
+    dialog.setIcon(QMessageBox.Icon.Warning)
+    open_wizard_btn = dialog.addButton("🔧 Open Setup Wizard", QMessageBox.ButtonRole.ActionRole)
+    dialog.addButton("Close", QMessageBox.ButtonRole.RejectRole)
+    dialog.exec()
+
+    if dialog.clickedButton() == open_wizard_btn:
+        _run_setup_wizard()
 
 
 def _run_setup_wizard() -> bool:
@@ -2740,8 +2756,59 @@ def _run_setup_wizard() -> bool:
         return False
 
 
+def _smoke_test_main() -> int:
+    """Smoke-test entry point for CI: verify Qt + daemon initialise without crashing.
+
+    Creates a minimal QApplication, runs the daemon init, and exits.
+    Returns 0 on success, 1 on failure.
+    """
+    import multiprocessing
+    multiprocessing.freeze_support()
+
+    # Ensure stdout/stderr use UTF-8.  PyInstaller GUI-subsystem executables
+    # (console=False) on Windows default to the ANSI code page when stdout is
+    # redirected, which cannot encode emoji and crashes on the first ✅ print.
+    if sys.platform == 'win32':
+        try:
+            import io
+            if hasattr(sys.stdout, 'buffer') and hasattr(sys.stdout.buffer, 'write'):
+                sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+            if hasattr(sys.stderr, 'buffer') and hasattr(sys.stderr.buffer, 'write'):
+                sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+        except Exception:
+            pass
+
+    # Offscreen rendering when no display is available (Linux CI).
+    if sys.platform == 'linux' and not os.environ.get('DISPLAY'):
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+
+    from PyQt6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)
+
+    print("✅ Qt initialised successfully", flush=True)
+
+    from jarvis.daemon import main as daemon_main
+    try:
+        daemon_main(smoke_test=True)
+    except Exception as exc:
+        print(f"❌ Daemon initialisation failed: {exc}", flush=True)
+        traceback.print_exc()
+        return 1
+
+    print("SMOKE_TEST_PASSED", flush=True)
+    return 0
+
+
 def main() -> int:
     """Main entry point for the desktop app."""
+    # Smoke-test fast path: runs before any UI, crash logging, or setup checks.
+    if "--smoke-test" in set(sys.argv[1:]):
+        return _smoke_test_main()
+
     # Fix Windows console encoding for Unicode/emoji characters
     # Only for non-frozen apps - frozen apps redirect stdout to crash log
     if sys.platform == 'win32' and not getattr(sys, 'frozen', False):
@@ -2957,8 +3024,7 @@ def main() -> int:
 
             if not _reach[0]:
                 print("⚠️ LLM server not reachable at startup", flush=True)
-                from PyQt6.QtWidgets import QMessageBox
-                QMessageBox.warning(None, "Jarvis", _openai_compat_unreachable_message(_provider_cfg))
+                _show_openai_unreachable_dialog(_provider_cfg)
 
         # Default ownership: not started by us. Re-assigned below if Jarvis
         # launches its own Ollama server process.
@@ -3181,6 +3247,24 @@ def main() -> int:
                 )
             else:
                 print("✅ All required models are installed", flush=True)
+
+        # VRAM check: warn if the configured chat model exceeds available GPU memory.
+        # Runs on Windows (DXGI) and any platform with nvidia-smi.
+        if _chat_on_ollama:
+            try:
+                from jarvis.utils.vram import detect_total_vram_mb, format_vram_warning
+                _vram_mb = detect_total_vram_mb()
+                if _vram_mb is not None:
+                    _chat_model = getattr(_provider_cfg, "llm_chat_model", "") if _provider_cfg else ""
+                    if not _chat_model:
+                        _chat_model = getattr(cfg, "ollama_chat_model", "gemma4:e2b")
+                    _warn = format_vram_warning(_vram_mb, _chat_model)
+                    if _warn:
+                        print(f"  {_warn}", flush=True)
+                        splash.set_status("⚠️ Low VRAM detected — consider a smaller model")
+                        app.processEvents()
+            except Exception as exc:
+                debug_log(f"Startup VRAM check failed: {exc}", "vram")
 
         if _chat_on_ollama:
             # Check if the user is on an unsupported chat model. Only meaningful
