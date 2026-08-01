@@ -358,6 +358,30 @@ If judge rejects but in hot window and non-echo:
     → Override rejection, dispatch as query
 ```
 
+## Speaking Something Produced Elsewhere
+
+Some replies are not answers to an utterance: a tool approved by a click
+on a card runs on its own worker, and the sentence describing what
+happened has to be said out loud.
+
+That worker never speaks. It calls `enqueue_reply(text)`, and the
+listener says it on its own thread, through the same `_speak_reply` path
+it uses for its own replies. Two speakers would both write the echo
+detector's record of what was last said, and the next transcript would
+then be compared against the wrong sentence — which is how a user's
+answer gets deleted as an echo.
+
+**The drain runs at the top of the consumer loop**, before the audio
+`get`, not in its `queue.Empty` branch. The audio callback delivers a
+frame every `vad_frame_ms`, so on a live microphone the queue is never
+empty and an idle-only drain never runs at all.
+
+**One reply per pass, and none while she is already speaking.** `TTS.speak`
+holds its completion callback in a single engine-level slot, so a second
+call before the first finishes overwrites the first's callback — and that
+callback is what reopens the listening window. Anything still queued
+waits for the next pass, at most one frame away.
+
 ## Fallback Behaviour
 
 When components are unavailable, the system degrades gracefully:

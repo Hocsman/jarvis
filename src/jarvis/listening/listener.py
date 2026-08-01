@@ -1278,18 +1278,29 @@ class VoiceListener(threading.Thread):
         debug_log(f"reply queued for speaking ({len(text)} chars)", "voice")
 
     def drain_reply_queue(self) -> None:
-        """Say anything handed over since the last drain. This thread only."""
+        """Say at most one queued reply. This thread only.
+
+        One at a time, and only while nothing is already being said.
+        ``TTS.speak`` keeps its completion callback in a single
+        engine-level slot (output/tts.py:369, set at :469, cleared at
+        :579), so a second call before the first finishes overwrites the
+        first's callback — and that callback is what reopens the
+        listening window. Whatever is left waits for the next pass, which
+        is at most one audio frame away.
+        """
         q = getattr(self, "_reply_queue", None)
         if q is None:
             return
+        if self.tts is not None and self.tts.is_speaking():
+            return
+
         import queue as _queue
 
-        while True:
-            try:
-                text = q.get_nowait()
-            except _queue.Empty:
-                return
-            self._speak_reply(text)
+        try:
+            text = q.get_nowait()
+        except _queue.Empty:
+            return
+        self._speak_reply(text)
 
     def hot_window_duration(self) -> float:
         """How long to keep listening after she finishes speaking.
@@ -2272,16 +2283,20 @@ class VoiceListener(threading.Thread):
                         print(f"     Check: {_get_mic_permission_hint()}", flush=True)
                         print("     Also check that your microphone is not muted", flush=True)
 
+                # Say anything another thread handed over — a
+                # click-approved action's narration. Here rather than on
+                # that thread, so only one thread ever speaks, and here
+                # rather than in the idle branch below: the audio callback
+                # delivers a frame every 20 ms, so on a live microphone
+                # the queue is never empty and that branch never runs.
+                self.drain_reply_queue()
+
                 try:
                     item = self._audio_q.get(timeout=0.2)
                 except queue.Empty:
                     # Critical: Check timeouts even when no audio is being received
                     # This ensures hot window expiry fires reliably
                     self._check_query_timeout()
-                    # Say anything another thread handed over — a
-                    # click-approved action's narration. Here rather than
-                    # on that thread, so only one thread ever speaks.
-                    self.drain_reply_queue()
                     continue
 
                 if item is None:
