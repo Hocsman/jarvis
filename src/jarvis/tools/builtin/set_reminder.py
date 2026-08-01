@@ -96,7 +96,7 @@ class SetReminderTool(Tool):
 
     def run(self, args: Optional[Dict[str, Any]],
             context: ToolContext) -> ToolExecutionResult:
-        from ...utils.time_context import local_timezone_name
+        from ...utils.time_context import local_timezone_name, to_utc_iso
 
         cfg = context.cfg
         utterance = str((args or {}).get("rappel") or "").strip()
@@ -118,7 +118,7 @@ class SetReminderTool(Tool):
 
         tz = local_timezone_name()
         try:
-            due_utc = _to_utc(reading.due_local, tz)
+            due_utc = to_utc_iso(reading.due_local, tz)
         except Exception as e:
             return self._refuse(f"je n'ai pas su placer ce moment : {e}")
 
@@ -173,25 +173,6 @@ class SetReminderTool(Tool):
                 f"was missing. Do not claim a reminder was set."
             ),
         )
-
-
-def _to_utc(due_local: datetime, tz_name: str) -> str:
-    """The instant that fires it.
-
-    Through ZoneInfo when the zone is known, so a daylight-saving change
-    between now and then costs nothing. With no zone, the current local
-    offset is used and the result is naive about a far-off change — which
-    is documented rather than hidden.
-    """
-    from datetime import timezone
-
-    if tz_name:
-        from zoneinfo import ZoneInfo
-
-        return due_local.replace(tzinfo=ZoneInfo(tz_name)).astimezone(
-            timezone.utc
-        ).isoformat()
-    return due_local.astimezone().astimezone(timezone.utc).isoformat()
 
 
 def _read_back(db, rappel_id: str) -> Optional[dict]:

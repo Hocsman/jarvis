@@ -119,6 +119,24 @@ def _read_system_timezone() -> str:
     return ""
 
 
+def to_utc_iso(due_local: datetime, tz_name: str) -> str:
+    """The instant a wall-clock reading fires at.
+
+    Through ZoneInfo when the zone is known, so a daylight-saving change
+    between now and then costs nothing. With no zone, the current local
+    offset is used and the result is naive about a far-off change — which
+    is documented rather than hidden.
+    """
+    if tz_name and ZoneInfo is not None:
+        try:
+            return due_local.replace(tzinfo=ZoneInfo(tz_name)).astimezone(
+                timezone.utc
+            ).isoformat()
+        except Exception:
+            pass
+    return due_local.astimezone().astimezone(timezone.utc).isoformat()
+
+
 def local_timezone_name() -> str:
     """The zone a reminder is resolved and fired in, or empty.
 

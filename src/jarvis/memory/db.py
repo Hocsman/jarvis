@@ -434,6 +434,19 @@ class Database:
             (due_utc, due_local, tz, rappel_id, self.ETAT_PENDING),
         )
 
+    def set_rappel_payload(self, rappel_id: str, payload: dict) -> None:
+        """Replace the row's payload.
+
+        Guarded on `prévu` like `advance_rappel`, so bookkeeping written
+        after a cancellation cannot touch a row the user has stopped.
+        """
+        import json
+
+        self._write(
+            "UPDATE rappels SET payload = ? WHERE id = ? AND etat = ?",
+            (json.dumps(payload, ensure_ascii=False), rappel_id, self.ETAT_PENDING),
+        )
+
     def prune_rappels(self, max_age_days: int = 90) -> int:
         """Drop old settled and cancelled ones.
 

@@ -170,6 +170,62 @@ the attended one does. Unattended, that becomes a paragraph recommending
 the policy be loosened, written by a thread running while the user
 sleeps.
 
+## The runner
+
+`runner.py`.
+
+Takes one due `routine` row and turns it into a turn of the reply engine.
+Almost everything worth stating about it is a thing it refuses to touch.
+
+**It never takes the query lock.** Holding it would mean a routine that
+reached a slow server at 07:00 leaves Yuba unresponsive until it
+finishes: the user talks and nothing happens. The dispatcher *asks*
+whether a query is running and defers; the runner holds nothing the user
+needs.
+
+**It never uses the shared dialogue memory.** Each run builds its own.
+A routine is not a conversation: its turn must not land in the user's
+history, must not move the hot window, and must not disturb a
+confirmation card already waiting there. Going to bed with a question
+pending and waking to find it silently expired is the worst thing this
+feature could do to anyone.
+
+**It advances the row before the work**, which is the exact opposite of
+the reminder scheduler. A reminder that fails is still owed and stays
+owed. A routine that takes the process down with it and is still owed
+comes back on the next tick, does it again, and does that forever. Here a
+crash costs one morning.
+
+**It runs one at a time.** A submission while a run is in flight returns
+`False` and the row keeps its due time, so the dispatcher finds it again
+on the next tick. Refusing is not dropping. Two routines at 07:00 sharing
+one small model, one rate limit and one machine is not twice the work; it
+is two slower runs and a good chance neither finishes. The slot is
+released even when a run raises, or one bad morning would suspend every
+routine until the next restart.
+
+A routine whose block has gone is suspended: nothing runs, and the
+journal says so rather than staying silent, because silence reads as "it
+never fired" and sends the user to look at the schedule instead of at the
+block they deleted.
+
+Each run is bracketed in the action ledger under `routine:<nom>` — the
+tab lists tool calls and a run is not one, so a bare `matin` would invent
+a tool nobody can look up. The opening `démarré` row exists to be found
+*unclosed*: a run that took the process down with it leaves that row and
+nothing after it, which is the only trace of it that would exist
+anywhere.
+
+What the run reached for is read back out of the ledger rather than
+reported by the engine, which hands back text and nothing else. That also
+means the journal cannot claim a call the ledger never recorded.
+
+`payload["steriles"]` counts consecutive mornings that produced nothing
+at all. Not for its own sake: a routine that has failed every day for a
+week is broken and something has to notice. A quiet morning is not one of
+these — "rien à signaler" is the routine working, and counting it would
+switch off exactly the ones doing their job.
+
 ## The journal
 
 `journal.py`, and the folder at `yuba/journal/`.
