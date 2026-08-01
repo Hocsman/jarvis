@@ -403,6 +403,90 @@ def activity_get() -> Response:
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/rappels")
+def rappels_get() -> Response:
+    """What is still owed, soonest first.
+
+    The price of keeping reminders in a database. Every other artefact
+    the user owns here is a text file they open and correct by hand;
+    reminders could not be, because a promise needs a write on a clock
+    and the core is only safe because nothing writes to it in the
+    background. So the readability is rebuilt here.
+    """
+    try:
+        return jsonify({
+            "rappels": [
+                {
+                    "id": r["id"],
+                    "texte": r["texte"],
+                    "due_local": r["due_local"],
+                    "tz": r["tz"],
+                    "origin": r["origin"],
+                    "created_utc": r["created_utc"],
+                }
+                for r in get_activity_db().pending_rappels()
+            ],
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/rappels/<rappel_id>", methods=["DELETE"])
+def rappels_cancel(rappel_id: str) -> Response:
+    """Call one off.
+
+    Reports honestly: saying it was cancelled when it will still fire is
+    the worst answer available here.
+    """
+    try:
+        return jsonify({"cancelled": get_activity_db().cancel_rappel(rappel_id)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/rappels", methods=["POST"])
+def rappels_create() -> Response:
+    """Type one in directly.
+
+    Reaches no model. A date, a time and a sentence are already
+    unambiguous, and sending the user's own typed request through an
+    extractor would only add a way to be wrong.
+    """
+    from datetime import datetime, timezone
+
+    from jarvis.utils.time_context import local_timezone_name
+
+    try:
+        body = request.get_json(silent=True) or {}
+        texte = str(body.get("texte") or "").strip()
+        due_local = str(body.get("due_local") or "").strip()
+        if not texte:
+            return jsonify({"error": "il n'y a rien à rappeler"}), 400
+        try:
+            when = datetime.fromisoformat(due_local)
+        except Exception:
+            return jsonify({"error": "date ou heure illisible"}), 400
+
+        tz = local_timezone_name()
+        if tz:
+            from zoneinfo import ZoneInfo
+
+            due_utc = when.replace(tzinfo=ZoneInfo(tz)).astimezone(timezone.utc)
+        else:
+            due_utc = when.astimezone().astimezone(timezone.utc)
+        if due_utc <= datetime.now(timezone.utc):
+            return jsonify({"error": "ce moment est déjà passé"}), 400
+
+        rappel_id = get_activity_db().add_rappel(
+            texte=texte, due_utc=due_utc.isoformat(),
+            due_local=when.strftime("%Y-%m-%dT%H:%M"), tz=tz,
+            origin="fichier", query=None,
+        )
+        return jsonify({"id": rappel_id})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/activity", methods=["DELETE"])
 def activity_clear() -> Response:
     """Erase the ledger. The user's to keep and the user's to drop."""
@@ -1203,6 +1287,38 @@ def index() -> str:
             flex: 1;
             min-height: 0;
         }
+
+        .rappel-new {
+            display: flex; gap: 8px; align-items: center; margin-bottom: 14px;
+            flex-wrap: wrap;
+        }
+        .rappel-new input {
+            background: var(--bg-tertiary); color: var(--text-primary);
+            border: 1px solid var(--border-color); border-radius: 6px;
+            padding: 7px 10px; font-size: 13px;
+        }
+        .rappel-new input#rappel-texte { flex: 1; min-width: 220px; }
+        .rappel-new input:focus { border-color: var(--accent-primary); outline: none; }
+        .rappel-error { color: var(--error); font-size: 12px; }
+        .rappel-row {
+            display: flex; gap: 12px; align-items: baseline;
+            padding: 9px 14px; font-size: 13px;
+            border-bottom: 1px solid rgba(128, 128, 128, 0.12);
+        }
+        .rappel-row:last-child { border-bottom: none; }
+        .rappel-when {
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 12px; color: var(--accent-primary); white-space: nowrap;
+            min-width: 130px;
+        }
+        .rappel-texte { flex: 1; overflow-wrap: anywhere; }
+        .rappel-origin { font-size: 11px; opacity: 0.45; white-space: nowrap; }
+        .rappel-cancel {
+            background: transparent; border: 1px solid var(--border-color);
+            color: var(--text-muted); border-radius: 6px; cursor: pointer;
+            font-size: 12px; padding: 3px 10px; white-space: nowrap;
+        }
+        .rappel-cancel:hover { border-color: var(--error); color: var(--error); }
 
         .activity-clear {
             align-self: flex-start;
@@ -2388,6 +2504,9 @@ def index() -> str:
             <button class="tab" data-tab="activity">
                 <span>📋</span> Activity
             </button>
+            <button class="tab" data-tab="rappels">
+                <span>⏰</span> Rappels
+            </button>
             <button class="tab" data-tab="graph">
                 <span>🧠</span> Knowledge
             </button>
@@ -2513,6 +2632,29 @@ def index() -> str:
                 </div>
             </div>
 
+            <div id="rappels-content" class="tab-pane" style="display: none;">
+                <div class="core-intro">
+                    <p>
+                        ⏰ Ce que Yuba te dira plus tard. Un rappel survit à un
+                        redémarrage — c'est la seule chose ici qui doit y survivre.
+                        Tu peux en annuler un, ou en poser un directement : saisi
+                        ici, aucun modèle n'intervient.
+                    </p>
+                </div>
+
+                <div class="rappel-new">
+                    <input type="text" id="rappel-texte"
+                           placeholder="Ce qu'elle doit te dire…" />
+                    <input type="datetime-local" id="rappel-quand" />
+                    <button class="activity-clear" id="btn-rappel-add">＋ Poser</button>
+                    <span class="rappel-error" id="rappel-error"></span>
+                </div>
+
+                <div class="core-files" id="rappels-list">
+                    <div class="loading"><div class="spinner"></div></div>
+                </div>
+            </div>
+
             <div id="meals-content" class="tab-pane" style="display: none;">
                 <div class="inline-filters">
                     <span class="inline-filter-label">📅</span>
@@ -2555,6 +2697,7 @@ def index() -> str:
         const graphContent = document.getElementById('graph-content');
         const corePane = document.getElementById('core-content');
         const activityPane = document.getElementById('activity-content');
+        const rappelsPane = document.getElementById('rappels-content');
         const memoriesContent = memoriesPane.querySelector('.memory-list');
         const mealsContent = mealsPane.querySelector('.memory-list');
         const tabs = document.querySelectorAll('.tab');
@@ -3053,6 +3196,77 @@ def index() -> str:
             }).join('') + '</div>';
         }
 
+        // ── Reminders tab ───────────────────────────────────────────
+        //
+        // The price of keeping reminders in a database rather than in a
+        // file the user edits by hand. A scheduled thing you cannot see
+        // or call off is a thing you stop creating.
+
+        async function loadRappels() {
+            const container = document.getElementById('rappels-list');
+            let rappels = [];
+            try {
+                rappels = (await (await fetch('/api/rappels')).json()).rappels || [];
+            } catch (e) {
+                container.innerHTML = "<div class='core-empty'>Liste illisible.</div>";
+                return;
+            }
+            if (!rappels.length) {
+                container.innerHTML = "<div class='core-empty'>Rien de prévu. Dis-lui « rappelle-moi… », ou pose-en un ci-dessus.</div>";
+                return;
+            }
+            container.innerHTML = '<div class="core-file">' + rappels.map(r => {
+                const when = (r.due_local || '').replace('T', ' à ');
+                const origin = r.origin ? escapeHtml(r.origin) : '—';
+                return `<div class="rappel-row">
+                    <span class="rappel-when">${escapeHtml(when)}</span>
+                    <span class="rappel-texte">${escapeHtml(r.texte || '')}</span>
+                    <span class="rappel-origin" title="D'où venait la demande">${origin}</span>
+                    <button class="rappel-cancel" data-rappel="${escapeHtml(r.id)}">Annuler</button>
+                </div>`;
+            }).join('') + '</div>';
+
+            container.querySelectorAll('[data-rappel]').forEach(button => {
+                button.addEventListener('click', async () => {
+                    button.disabled = true;
+                    try {
+                        await fetch('/api/rappels/' + encodeURIComponent(button.dataset.rappel),
+                                    { method: 'DELETE' });
+                    } catch (e) {
+                        button.disabled = false;
+                        return;
+                    }
+                    loadRappels();
+                });
+            });
+        }
+
+        document.getElementById('btn-rappel-add').addEventListener('click', async () => {
+            const texte = document.getElementById('rappel-texte');
+            const quand = document.getElementById('rappel-quand');
+            const error = document.getElementById('rappel-error');
+            error.textContent = '';
+            let response;
+            try {
+                response = await fetch('/api/rappels', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ texte: texte.value, due_local: quand.value }),
+                });
+            } catch (e) {
+                error.textContent = "Yuba ne répond pas.";
+                return;
+            }
+            if (!response.ok) {
+                const body = await response.json().catch(() => ({}));
+                error.textContent = body.error || "Impossible de poser ce rappel.";
+                return;
+            }
+            texte.value = '';
+            quand.value = '';
+            loadRappels();
+        });
+
         document.getElementById('btn-clear-activity').addEventListener('click', async () => {
             if (!confirm("Effacer tout le registre d'activité ?")) return;
             await fetch('/api/activity', { method: 'DELETE' });
@@ -3070,6 +3284,7 @@ def index() -> str:
             mealsPane.style.display = 'none';
             corePane.style.display = 'none';
             activityPane.style.display = 'none';
+            rappelsPane.style.display = 'none';
 
             if (currentTab === 'memories') {
                 memoriesPane.style.display = '';
@@ -3080,6 +3295,9 @@ def index() -> str:
             } else if (currentTab === 'activity') {
                 activityPane.style.display = '';
                 loadActivity();
+            } else if (currentTab === 'rappels') {
+                rappelsPane.style.display = '';
+                loadRappels();
             } else if (currentTab === 'graph') {
                 graphContent.style.display = '';
                 initGraph();
