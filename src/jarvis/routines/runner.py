@@ -54,7 +54,7 @@ ORIGIN = "routine"
 
 # The ledger lists tool calls, and a run is not one. The prefix keeps a
 # row reading `matin` from inventing a tool the user cannot look up.
-_LEDGER_PREFIX = "routine:"
+LEDGER_PREFIX = "routine:"
 
 # What the ledger's outcome means, said in a sentence, because "refusé"
 # in a morning write-up tells the user nothing about which file to open.
@@ -128,7 +128,7 @@ class RoutineRunner:
             debug_log(f"routine {rid} no longer owed, skipping", "tools")
             return
 
-        payload = _payload(row)
+        payload = payload_of(row)
         nom = str(payload.get("nom") or "").strip()
         phrase = str(row.get("texte") or "").strip()
         started_at = datetime.now()
@@ -224,7 +224,7 @@ class RoutineRunner:
                 duration_ms: Optional[int] = None) -> None:
         try:
             self._db.record_action(
-                tool=f"{_LEDGER_PREFIX}{nom}", args=None, risk=RISK_READ,
+                tool=f"{LEDGER_PREFIX}{nom}", args=None, risk=RISK_READ,
                 verdict=FREE, outcome=outcome, duration_ms=duration_ms,
                 origin=ORIGIN, query=phrase, request_id=rid,
             )
@@ -247,7 +247,7 @@ class RoutineRunner:
                 if r.get("origin") != ORIGIN or r.get("ts_utc", "") < since:
                     continue
                 tool = str(r.get("tool") or "")
-                if tool.startswith(_LEDGER_PREFIX):
+                if tool.startswith(LEDGER_PREFIX):
                     continue
                 if r.get("outcome") == OUTCOME_OK:
                     if tool not in outils:
@@ -273,7 +273,7 @@ class RoutineRunner:
         self._count(rid, payload, productive=bool(texte))
 
 
-def _payload(row: dict) -> dict:
+def payload_of(row: dict) -> dict:
     try:
         raw = json.loads(row.get("payload") or "{}")
         return raw if isinstance(raw, dict) else {}

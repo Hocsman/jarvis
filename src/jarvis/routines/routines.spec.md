@@ -226,6 +226,45 @@ week is broken and something has to notice. A quiet morning is not one of
 these — "rien à signaler" is the routine working, and counting it would
 switch off exactly the ones doing their job.
 
+## The dispatcher
+
+`dispatcher.py`, on its own thread — deliberately not the reminder
+scheduler's. That one is the only thing keeping spoken promises and must
+not share a failure surface with this newer, more complicated feature.
+One tick is one indexed SELECT and a hand-off; `tick()` never raises, and
+a bad row costs that row rather than every routine after it.
+
+Three decisions live here, and each leans the same way.
+
+**Late is not missed.** `should_run` against `routine_late_grace_sec`
+(4 hours, bounded again by the period inside `staleness_window`). A
+digest two hours late is still the thing that was asked for; the same
+digest at 18:00 is not, and a routine that keeps arriving at the wrong
+time is one the user learns to ignore. A skipped occurrence still
+advances the row and still gets a journal line, because a missing page
+reads as "it never fired" and sends the user to look at the schedule.
+
+**A run it cannot start is not a run it drops.** A query in flight, or
+the runner's slot taken, leaves the row exactly where it was, so the next
+tick finds it again. What eventually ends that is the staleness window,
+not a counter: the question stays "is this still worth doing" rather than
+becoming "how many times have I tried".
+
+**A routine that has produced nothing for days stops.** At
+`routine_max_steriles` (5) consecutive runs that produced nothing at all,
+the row is cancelled, loudly, on a journal page — the failure being
+guarded against is a morning digest that silently stopped arriving in
+October and was noticed in December. Cancelled rather than suspended: the
+block stays in `routines.md`, so saying the sentence again costs one
+breath, while a row that keeps being reconsidered every tick costs
+forever. A row whose rule cannot be parsed is stopped the same way, since
+it can never be advanced and would otherwise be due on every tick for the
+life of the process.
+
+The daemon starts the dispatcher and the runner together and stops the
+dispatcher first, so nothing new is handed over while the run in flight
+is being waited on.
+
 ## The journal
 
 `journal.py`, and the folder at `yuba/journal/`.

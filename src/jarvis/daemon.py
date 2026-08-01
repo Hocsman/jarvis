@@ -60,6 +60,13 @@ _global_listener = None
 # The thread that keeps reminders. Stopped before the listener, because
 # a promise settled with nothing able to speak it is a broken one.
 _global_reminders = None
+# The pair that runs what nobody asked for this minute: the dispatcher
+# decides a morning has arrived, the runner turns it into a turn of the
+# reply engine. Their own thread, not the reminder scheduler's — that one
+# is the only thing keeping spoken promises and must not share a failure
+# surface with this.
+_global_routines = None
+_global_routine_runner = None
 
 # Surfaces the desktop app wires in bundled mode, where stdout IPC is not
 # how the two halves talk.
@@ -687,6 +694,16 @@ def nudge_reminders() -> None:
             debug_log(f"reminder nudge failed: {e}", "tools")
 
 
+def nudge_routines() -> None:
+    """Wake the dispatcher — a routine closer than a tick was just made."""
+    dispatcher = _global_routines
+    if dispatcher is not None:
+        try:
+            dispatcher.nudge()
+        except Exception as e:
+            debug_log(f"routine nudge failed: {e}", "tools")
+
+
 def revoke_pending_confirmation() -> None:
     """Drop a waiting question on shutdown.
 
@@ -1111,6 +1128,29 @@ def main() -> None:
     else:
         print("⏰ Reminders off", flush=True)
 
+    # Routines. Also its own thread, and deliberately not the reminder
+    # scheduler's: that one is the only thing keeping spoken promises,
+    # and a bug in this newer and more complicated feature must not be
+    # able to stop it.
+    global _global_routines, _global_routine_runner
+    if bool(getattr(cfg, "routines_enabled", True)):
+        from .routines.dispatcher import RoutineDispatcher
+        from .routines.runner import RoutineRunner
+        from .routines.scope import ensure_routines_file
+
+        ensure_routines_file(cfg)
+        _global_routine_runner = RoutineRunner(db=db, cfg=cfg)
+        _global_routines = RoutineDispatcher(
+            db=db, cfg=cfg, runner=_global_routine_runner,
+            # Inspected, never taken. A routine must never make the user
+            # wait, which is also why the runner holds nothing.
+            busy=lambda: _chat_query_lock.locked(),
+        )
+        _global_routines.start()
+        print("🌅 Routines on", flush=True)
+    else:
+        print("🌅 Routines off", flush=True)
+
     # Initialize dictation engine (hold-to-dictate)
     dictation = None
     if bool(getattr(cfg, "dictation_enabled", True)):
@@ -1266,6 +1306,15 @@ def main() -> None:
         if _global_reminders is not None:
             debug_log("stopping reminder scheduler...", "jarvis")
             _global_reminders.stop()
+
+        # The dispatcher first, so nothing new is handed over while the
+        # runner is being waited on.
+        if _global_routines is not None:
+            debug_log("stopping routine dispatcher...", "jarvis")
+            _global_routines.stop()
+        if _global_routine_runner is not None:
+            debug_log("waiting for the routine in flight...", "jarvis")
+            _global_routine_runner.stop()
 
         if voice_thread is not None:
             debug_log("stopping voice thread...", "jarvis")

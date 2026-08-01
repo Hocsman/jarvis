@@ -219,6 +219,12 @@ class Settings:
     reminder_late_grace_sec: float
     reminder_max_attempts: int
 
+    # Routines — what she does at a fixed hour with nobody in the room
+    routines_enabled: bool
+    routine_tick_sec: float
+    routine_late_grace_sec: float
+    routine_max_steriles: int
+
     # Confirmation — how long a question waits, and who reads the answer
     confirmation_ttl_sec: float
     confirmation_hot_window_sec: float
@@ -631,6 +637,20 @@ def get_default_config() -> Dict[str, Any]:
         "reminder_late_grace_sec": 900.0,
         "reminder_max_attempts": 60,
 
+        # Routines. The grace window is what separates "the laptop was
+        # shut" from "this morning has passed": a digest two hours late
+        # is still the thing that was asked for, one at 18:00 is not.
+        # Bounded again by the period inside `staleness_window`, so a
+        # daily routine can never fire for yesterday while today's slot
+        # is approaching.
+        "routines_enabled": True,
+        "routine_tick_sec": 30.0,
+        "routine_late_grace_sec": 14400.0,
+        # Consecutive runs that produced nothing at all before she stops
+        # trying. Errors and empty write-ups count; "rien à signaler"
+        # does not, since that is the routine working.
+        "routine_max_steriles": 5,
+
         # Confirmation. The click window is generous because walking to
         # the machine takes longer than answering aloud. The spoken window
         # is wider than `hot_window_seconds`, which is tuned for
@@ -918,6 +938,10 @@ def load_settings() -> Settings:
     reminder_tick_sec = min(max(float(merged.get("reminder_tick_sec", 5.0)), 1.0), 60.0)
     reminder_late_grace_sec = min(max(float(merged.get("reminder_late_grace_sec", 900.0)), 0.0), 86400.0)
     reminder_max_attempts = min(max(int(merged.get("reminder_max_attempts", 60)), 1), 600)
+    routines_enabled = bool(merged.get("routines_enabled", True))
+    routine_tick_sec = min(max(float(merged.get("routine_tick_sec", 30.0)), 5.0), 300.0)
+    routine_late_grace_sec = min(max(float(merged.get("routine_late_grace_sec", 14400.0)), 0.0), 86400.0)
+    routine_max_steriles = min(max(int(merged.get("routine_max_steriles", 5)), 1), 100)
 
     # Confirmation. Clamped rather than trusted: a TTL of zero would
     # expire every question before it could be read, and an unbounded one
@@ -1135,6 +1159,10 @@ def load_settings() -> Settings:
         reminder_tick_sec=reminder_tick_sec,
         reminder_late_grace_sec=reminder_late_grace_sec,
         reminder_max_attempts=reminder_max_attempts,
+        routines_enabled=routines_enabled,
+        routine_tick_sec=routine_tick_sec,
+        routine_late_grace_sec=routine_late_grace_sec,
+        routine_max_steriles=routine_max_steriles,
         # Confirmation
         confirmation_ttl_sec=confirmation_ttl_sec,
         confirmation_hot_window_sec=confirmation_hot_window_sec,
