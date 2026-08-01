@@ -185,6 +185,16 @@ Every distinct LLM call in Jarvis, what feeds it, what consumes it, and how it i
 - **Output**: `oui` / `non` / `flou`. Only the exact token grants; a conditional yes is `flou`, because the judge cannot see what the condition refers to.
 - **Limits**: `confirmation_timeout_sec` (default 8 s, clamped 2–30). **Fails closed**, unlike every other judge here: a timeout, an exception, an empty body, a model that explains itself, or an unrecognised word all deny. A false no costs a turn; a false yes runs something.
 
+## 16. Reminder time extractor (turns a spoken time into an instant)
+
+- **File**: [src/jarvis/reminders/extract.py](src/jarvis/reminders/extract.py) — `extract_reminder_time()`.
+- **Trigger**: inside `setReminder`, once per call. Nowhere else.
+- **Model**: `reminder_model → tool_router_model → intent_judge_model → cfg.llm_chat_model`. Unlike the auxiliary models, `reminder_model` is deliberately **not** passed through `_cloud_safe_model`: this prompt carries the user's own sentence about their own life, and a pin is the only way to keep it off the network.
+- **Inputs**: the reference moment (weekday, date and wall clock — no timezone name, because `%Z` is ambiguous and carries no offset) and the user's utterance, fenced as data.
+- **System prompt**: `_EXTRACT_SYSTEM` in the same file. Names no day, no month, no temporal adverb, in any language, and carries no worked example — an example containing "tomorrow" is a hardcoded language pattern smuggled in by demonstration.
+- **Output**: one JSON object, three kinds. `relative` returns the units it was given (`{"minutes": 20}`) and never a timestamp — the caller does the arithmetic, because a small model that cannot add twenty minutes to 12:47 can still copy the number 20. `absolute` returns `date` and/or `time`, and an omitted field is the statement: a day with no hour means the caller applies `reminder_default_hour` and says so aloud. `none` means nothing was asked for.
+- **Limits**: `reminder_timeout_sec` (default 8 s, clamped 2–30). **Never invents**: a timeout, an exception, an unknown kind, an unparseable date, an instant in the past, one beyond 400 days, an empty subject or one carrying a redaction placeholder all raise with their reason, which is then spoken. That last guard is sharper here than on the core — a placeholder stored as a fact is merely useless, while one in a reminder is read aloud twenty minutes later.
+
 ---
 
 ## Frequency / Size Summary
@@ -207,6 +217,7 @@ Every distinct LLM call in Jarvis, what feeds it, what consumes it, and how it i
 | 13 | Plan step resolver | 0-N (SMALL only) | auto by size + plan | SMALL (via router chain) |
 | 14 | Tool-specific | per-tool | n/a | LARGE |
 | 15 | Approval judge | 0-1 | only after a `parole` question | SMALL (via router chain) |
+| 16 | Reminder time extractor | 0-1 | only inside setReminder | SMALL (via router chain) |
 
 ## Size-aware auto switches
 

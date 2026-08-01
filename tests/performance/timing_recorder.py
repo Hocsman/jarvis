@@ -66,6 +66,10 @@ _CALLER_TO_CONTEXT: dict[str, str] = {
     "_extract_place_from_user_text": "tool_weather",
     "extract_and_log_meal": "tool_nutrition",
     "generate_followups_for_meal": "tool_nutrition",
+    # Context 15 — reading a spoken approval
+    "read_approval": "confirmation_judge",
+    # Context 16 — turning a spoken time into an instant
+    "extract_reminder_time": "reminder_extract",
 }
 
 
