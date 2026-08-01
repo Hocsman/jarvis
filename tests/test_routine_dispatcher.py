@@ -361,3 +361,48 @@ def test_a_new_routine_wakes_it_early(db, cfg):
         dispatcher.stop()
 
     assert len(runner.submitted) == 1
+
+
+# ── What reaches the tray ─────────────────────────────────────────────
+
+
+def test_stopping_a_routine_reaches_the_user_not_only_the_journal(db, cfg):
+    """A journal page alone would be found weeks later, and by then the
+    digest has been missing the whole time."""
+    told = []
+    runner = _Runner()
+    _add(db, steriles=5)
+
+    RoutineDispatcher(
+        db=db, cfg=cfg, runner=runner, busy=lambda: False,
+        announce=lambda nom, pourquoi, stopped: told.append((nom, stopped)),
+    ).tick()
+
+    assert told == [("matin", True)]
+
+
+def test_a_skipped_morning_does_not_reach_the_tray(db, cfg):
+    """It is one occurrence, it is written down, and the routine is
+    fine. A balloon for it is a balloon people learn to dismiss."""
+    told = []
+    runner = _Runner()
+    _add(db, minutes_late=60 * 11)
+
+    RoutineDispatcher(
+        db=db, cfg=cfg, runner=runner, busy=lambda: False,
+        announce=lambda nom, pourquoi, stopped: told.append(nom),
+    ).tick()
+
+    assert told == []
+
+
+def test_an_announcer_that_raises_does_not_take_the_tick_down(db, cfg):
+    runner = _Runner()
+    _add(db, steriles=5)
+
+    def _boom(nom, pourquoi, stopped):
+        raise RuntimeError("pas de zone de notification")
+
+    RoutineDispatcher(
+        db=db, cfg=cfg, runner=runner, busy=lambda: False, announce=_boom,
+    ).tick()  # must not raise

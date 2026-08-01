@@ -322,6 +322,27 @@ The journal is on the same tab, served as the raw Markdown the files
 hold, because those files open in any editor and the two must not
 disagree.
 
+## The tray, and what does not reach it
+
+Only the mornings that did not work: a run that produced nothing, and a
+routine the dispatcher has stopped. A run that wrote its page is already
+delivered — the page *is* the delivery — and a balloon every day at 07:00
+is one people learn to dismiss unread, taking the one that mattered with
+it.
+
+The name and the reason, never the write-up. A notification lands on a
+lock screen and in a system log, which is the same reason the
+confirmation notification carries the tool name and nothing else.
+
+An announcer that raises never costs the run or the tick.
+
+## Settings
+
+`routines_enabled`, `routine_late_grace_sec`, `routine_max_steriles`.
+What each routine may reach is not settable from here: an envelope is a
+sentence about one routine, not a number that applies to all of them, and
+it lives in `routines.md` where the user can read it.
+
 ## Files
 
 | Path | What it is |

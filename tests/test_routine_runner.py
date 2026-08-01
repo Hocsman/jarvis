@@ -470,3 +470,48 @@ def test_a_run_that_raised_counts_as_nothing_produced(db, cfg):
     runner.stop()
 
     assert _steriles(db, rid) == 1
+
+
+# ── What reaches the tray ─────────────────────────────────────────────
+
+
+def test_a_morning_that_produced_nothing_reaches_the_user(db, cfg):
+    told = []
+    runner = RoutineRunner(
+        db=db, cfg=cfg, engine=MagicMock(side_effect=RuntimeError("pas de réseau")),
+        announce=lambda nom, pourquoi, stopped: told.append((nom, stopped)),
+    )
+
+    _run_now(runner, db, _add(db))
+    runner.stop()
+
+    assert told == [("matin", False)]
+
+
+def test_a_morning_that_worked_stays_quiet(db, cfg):
+    """The page is the delivery. A balloon every day at 07:00 is one
+    people learn to dismiss without reading, and then the one that
+    mattered goes with it."""
+    told = []
+    runner = RoutineRunner(
+        db=db, cfg=cfg, engine=lambda **kw: "Trois mails, rien d'urgent.",
+        announce=lambda nom, pourquoi, stopped: told.append(nom),
+    )
+
+    _run_now(runner, db, _add(db))
+    runner.stop()
+
+    assert told == []
+
+
+def test_an_announcer_that_raises_does_not_lose_the_run(db, cfg):
+    def _boom(nom, pourquoi, stopped):
+        raise RuntimeError("pas de zone de notification")
+
+    runner = RoutineRunner(db=db, cfg=cfg, engine=lambda **kw: "", announce=_boom)
+    rid = _add(db)
+
+    _run_now(runner, db, rid)
+    runner.stop()
+
+    assert _steriles(db, rid) == 1

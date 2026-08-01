@@ -694,6 +694,29 @@ def nudge_reminders() -> None:
             debug_log(f"reminder nudge failed: {e}", "tools")
 
 
+def announce_routine_trouble(nom: str, pourquoi: str, *, stopped: bool) -> None:
+    """Tell the user about a morning that did not work.
+
+    Only the ones that did not. A routine that ran and wrote its page is
+    already delivered — the page is the delivery — and a balloon every
+    day at 07:00 is a balloon people learn to dismiss without reading.
+    These two they would otherwise never learn: it failed, or it has
+    stopped trying.
+
+    The name and the reason, and never the write-up. A notification lands
+    on a lock screen and in a system log, which is the same reason the
+    confirmation one carries the tool name and nothing else.
+    """
+    try:
+        _emit_chat_event("routine_trouble", {
+            "nom": nom,
+            "raison": pourquoi,
+            "arretee": bool(stopped),
+        })
+    except Exception as e:
+        debug_log(f"routine trouble not announced: {e}", "tools")
+
+
 def nudge_routines() -> None:
     """Wake the dispatcher — a routine closer than a tick was just made."""
     dispatcher = _global_routines
@@ -1139,9 +1162,12 @@ def main() -> None:
         from .routines.scope import ensure_routines_file
 
         ensure_routines_file(cfg)
-        _global_routine_runner = RoutineRunner(db=db, cfg=cfg)
+        _global_routine_runner = RoutineRunner(
+            db=db, cfg=cfg, announce=announce_routine_trouble,
+        )
         _global_routines = RoutineDispatcher(
             db=db, cfg=cfg, runner=_global_routine_runner,
+            announce=announce_routine_trouble,
             # Inspected, never taken. A routine must never make the user
             # wait, which is also why the runner holds nothing.
             busy=lambda: _chat_query_lock.locked(),

@@ -2027,8 +2027,38 @@ class JarvisSystemTray:
                 self.on_confirmation_settled(
                     str(data.get("request_id") or ""), str(data.get("outcome") or ""),
                 )
+            elif event.get("type") == "routine_trouble":
+                self.on_routine_trouble(data)
         except Exception as exc:
             debug_log(f"confirmation line not routed to tray: {exc}", "desktop")
+
+    def on_routine_trouble(self, data: dict) -> None:
+        """A morning that did not work.
+
+        Only these reach the tray. One that ran and wrote its page is
+        already delivered — the page is the delivery — and a balloon
+        every day at 07:00 is one people learn to dismiss unread.
+
+        The name and the reason, never the write-up: a notification lands
+        on a lock screen and in a system log, which is the same reason
+        the confirmation one carries the tool name and nothing else.
+        """
+        from PyQt6.QtWidgets import QSystemTrayIcon
+
+        nom = str((data or {}).get("nom") or "?")
+        raison = str((data or {}).get("raison") or "")
+        arretee = bool((data or {}).get("arretee"))
+        try:
+            self.tray_icon.showMessage(
+                f"Routine « {nom} » arrêtée" if arretee
+                else f"Routine « {nom} » sans résultat",
+                raison,
+                QSystemTrayIcon.MessageIcon.Warning if arretee
+                else QSystemTrayIcon.MessageIcon.Information,
+                10000,
+            )
+        except Exception as exc:
+            debug_log(f"routine notification failed: {exc}", "desktop")
 
     def _build_confirmation_action(self) -> None:
         """The menu entry for a waiting question. Hidden until there is one."""

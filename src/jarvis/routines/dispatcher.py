@@ -42,11 +42,13 @@ class RoutineDispatcher:
     """Finds what is owed this minute and hands it over, one at a time."""
 
     def __init__(self, *, db, cfg, runner,
-                 busy: Optional[Callable[[], bool]] = None) -> None:
+                 busy: Optional[Callable[[], bool]] = None,
+                 announce: Optional[Callable[..., None]] = None) -> None:
         self._db = db
         self._cfg = cfg
         self._runner = runner
         self._busy = busy or (lambda: False)
+        self._announce = announce
         self._wake = threading.Event()
         self._stopping = False
         self._thread: Optional[threading.Thread] = None
@@ -172,6 +174,13 @@ class RoutineDispatcher:
             debug_log(f"routine not cancelled: {e}", "tools")
         debug_log(f"    🕰️ routine {nom} stopped: {pourquoi}", "tools")
         self._write(row, nom, f"routine arrêtée : {pourquoi}", outcome)
+        if self._announce is not None:
+            # A journal page alone would be found weeks later, and by
+            # then the digest has been missing the whole time.
+            try:
+                self._announce(nom, pourquoi, stopped=True)
+            except Exception as e:
+                debug_log(f"routine stop not announced: {e}", "tools")
 
     def _write(self, row: dict, nom: str, pourquoi: str, outcome: str) -> None:
         append_run(self._cfg, Entree(

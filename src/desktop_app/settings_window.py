@@ -68,6 +68,7 @@ CATEGORIES = [
     ("location", "📍 Location"),
     ("features", "✨ Features"),
     ("confirmation", "🙋 Permissions"),
+    ("routines", "🌅 Routines"),
     ("mcps", "🔌 MCP Servers"),
     ("advanced", "🔧 Advanced"),
 ]
@@ -400,6 +401,28 @@ def _build_field_metadata() -> List[FieldMeta]:
       "Passé ce délai, la réponse est traitée comme illisible — jamais "
       "comme un accord",
       "confirmation", "float", min_val=2, max_val=30, step=1, suffix="s")
+
+    # --- Routines ---
+    #
+    # What each routine may reach lives in yuba/routines.md, one block
+    # per routine, and is not settable from here: an envelope is a
+    # sentence about one routine, not a number that applies to all of
+    # them. These are the master switch and the two limits that decide
+    # when she gives up on an occurrence and when she gives up on a
+    # routine.
+    f("routines_enabled", "Routines",
+      "Ce qu'elle fait toute seule, à heure fixe. Coupé, aucune ne part, "
+      "et aucune n'est perdue",
+      "routines", "bool")
+    f("routine_late_grace_sec", "Retard acceptable",
+      "Au-delà, le passage est sauté plutôt que fait à contretemps. "
+      "Jamais plus que l'écart entre deux passages",
+      "routines", "float", min_val=0, max_val=86400, step=900, suffix="s")
+    f("routine_max_steriles", "Passages à vide avant arrêt",
+      "Combien de fois de suite elle peut ne rien produire avant de "
+      "s'arrêter. « Rien à signaler » ne compte pas : c'est elle qui "
+      "fonctionne",
+      "routines", "int", min_val=1, max_val=100, step=1)
 
     # --- Advanced ---
     f("echo_energy_threshold", "Echo Energy Threshold",

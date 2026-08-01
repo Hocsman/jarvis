@@ -69,10 +69,12 @@ _POURQUOI = {
 class RoutineRunner:
     """One routine at a time, on its own thread."""
 
-    def __init__(self, db, cfg, *, engine: Optional[Callable] = None) -> None:
+    def __init__(self, db, cfg, *, engine: Optional[Callable] = None,
+                 announce: Optional[Callable[..., None]] = None) -> None:
         self._db = db
         self._cfg = cfg
         self._engine = engine
+        self._announce = announce
         self._slot = threading.Lock()
         self._thread: Optional[threading.Thread] = None
         self._stopping = threading.Event()
@@ -271,6 +273,14 @@ class RoutineRunner:
         self._record(nom, outcome, rid, phrase,
                      duration_ms=int((time.monotonic() - began) * 1000))
         self._count(rid, payload, productive=bool(texte))
+        if not texte and self._announce is not None:
+            # Only the mornings that did not work. One that ran and wrote
+            # its page is already delivered.
+            try:
+                self._announce(nom or "?", erreur or "elle n'a rien produit",
+                               stopped=False)
+            except Exception as e:
+                debug_log(f"routine trouble not announced: {e}", "tools")
 
 
 def payload_of(row: dict) -> dict:
