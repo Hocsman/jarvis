@@ -1218,12 +1218,16 @@ class VoiceListener(threading.Thread):
 
         self._speak_reply(reply)
 
-    def _speak_reply(self, reply: Optional[str]) -> None:
+    def _speak_reply(self, reply: Optional[str], on_spoken=None) -> None:
         """Say one reply, and do the echo bookkeeping that goes with it.
 
         The only place anything is spoken. A sentence said without being
         recorded here is one the echo detector will not recognise coming
         back, so she answers herself.
+
+        ``on_spoken`` fires when the speech finished — not when it
+        started, and not at all when it was interrupted, because
+        interrupted means unheard.
         """
         if reply and self.tts and self.tts.enabled:
             # Stop thinking tune when TTS starts
@@ -1234,6 +1238,15 @@ class VoiceListener(threading.Thread):
                 import time as _time
                 debug_log(f"TTS completion callback triggered at {_time.time():.3f}", "voice")
                 self.activate_hot_window()
+                # After the window, so a slow or raising caller cannot
+                # cost the user their chance to reply. This runs on the
+                # audio thread: whatever it is doing, it is not worth the
+                # microphone.
+                if on_spoken is not None:
+                    try:
+                        on_spoken()
+                    except Exception as e:
+                        debug_log(f"delivery callback raised, ignoring: {e}", "voice")
 
             # Duration callback to update echo detector with exact timing (Piper only)
             def _on_duration_known(duration: float):
@@ -1261,21 +1274,32 @@ class VoiceListener(threading.Thread):
     # detector would then compare the next transcript against the wrong
     # sentence, which is how a user's answer gets deleted as an echo.
 
-    def enqueue_reply(self, text: Optional[str]) -> None:
-        """Hand a reply to this thread to speak. Safe from any thread."""
+    def enqueue_reply(self, text: Optional[str], on_spoken=None) -> bool:
+        """Hand a reply to this thread to speak. Safe from any thread.
+
+        Returns whether it was taken. False is a *definitive* refusal —
+        there is no engine that will ever say this — so the caller deals
+        with it now rather than waiting for a delivery that cannot come.
+        Queueing into a dead engine would hold the text forever and say
+        it at some unrelated later moment.
+
+        ``on_spoken`` fires once the speech actually finished, which is
+        not the same thing as it being queued. Anything holding a promise
+        needs that distinction: interrupted speech never reports, so it
+        can be tried again.
+        """
         if not text or not text.strip():
-            return
+            return False
         if not self.tts or not getattr(self.tts, "enabled", False):
-            # Queueing into a dead engine would hold the reply forever and
-            # say it at some unrelated later moment.
             debug_log("reply not queued: TTS unavailable", "voice")
-            return
+            return False
         if getattr(self, "_reply_queue", None) is None:
             import queue as _queue
 
             self._reply_queue = _queue.Queue()
-        self._reply_queue.put(text)
+        self._reply_queue.put((text, on_spoken))
         debug_log(f"reply queued for speaking ({len(text)} chars)", "voice")
+        return True
 
     def drain_reply_queue(self) -> None:
         """Say at most one queued reply. This thread only.
@@ -1297,10 +1321,10 @@ class VoiceListener(threading.Thread):
         import queue as _queue
 
         try:
-            text = q.get_nowait()
+            text, on_spoken = q.get_nowait()
         except _queue.Empty:
             return
-        self._speak_reply(text)
+        self._speak_reply(text, on_spoken=on_spoken)
 
     def hot_window_duration(self) -> float:
         """How long to keep listening after she finishes speaking.

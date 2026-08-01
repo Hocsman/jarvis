@@ -635,8 +635,12 @@ def _resume_after_confirmation(action) -> None:
         _chat_query_lock.release()
 
 
-def _speak_from_worker(text: str) -> None:
+def _speak_from_worker(text: str, on_spoken=None) -> bool:
     """Hand a reply to the listener so it, and only it, speaks.
+
+    Returns whether anything took it. False means no engine will ever say
+    this, which a caller holding a promise has to act on rather than
+    assume away.
 
     Speaking from this thread would race the listener: it speaks outside
     the lock block, so two ``track_tts_start`` writes and two hot-window
@@ -644,11 +648,13 @@ def _speak_from_worker(text: str) -> None:
     """
     listener = _global_listener
     if listener is None or not hasattr(listener, "enqueue_reply"):
-        return
+        debug_log("nothing can speak: no listener", "voice")
+        return False
     try:
-        listener.enqueue_reply(text)
+        return bool(listener.enqueue_reply(text, on_spoken=on_spoken))
     except Exception as e:
         debug_log(f"reply not queued for speaking: {e}", "voice")
+        return False
 
 
 def revoke_pending_confirmation() -> None:

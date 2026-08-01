@@ -154,6 +154,88 @@ def test_nothing_is_spoken_over_a_reply_already_in_progress(listener):
     assert listener.tts.speak.called is False
 
 
+# ── Queued is not the same as delivered ───────────────────────────────
+#
+# A reminder is a promise, and nothing built on this queue can keep one
+# while handing back nothing. These distinguish "I could not take it at
+# all", which the caller must handle now, from "it was said", which is
+# the only thing that settles a promise.
+
+
+def _finish_speaking(listener):
+    """Fire the completion callback the way TTS does when speech ends."""
+    listener.tts.speak.call_args.kwargs["completion_callback"]()
+
+
+def test_taking_a_reply_reports_that_it_was_taken(listener):
+    assert listener.enqueue_reply("c'est fait") is True
+
+
+def test_a_dead_tts_engine_refuses_rather_than_swallowing(listener):
+    """A definitive failure, not a transient one: queueing into an engine
+    that will never speak holds the text forever and says it at some
+    unrelated later moment."""
+    listener.tts.enabled = False
+
+    assert listener.enqueue_reply("c'est fait") is False
+
+
+def test_an_empty_reply_is_refused(listener):
+    assert listener.enqueue_reply("") is False
+    assert listener.enqueue_reply(None) is False
+
+
+def test_nothing_is_reported_spoken_before_it_is_spoken(listener):
+    said = []
+    listener.enqueue_reply("c'est fait", on_spoken=lambda: said.append(1))
+
+    listener.drain_reply_queue()
+
+    assert said == []
+
+
+def test_speech_finishing_is_what_reports_delivery(listener):
+    said = []
+    listener.enqueue_reply("c'est fait", on_spoken=lambda: said.append(1))
+    listener.drain_reply_queue()
+
+    _finish_speaking(listener)
+
+    assert said == [1]
+
+
+def test_interrupted_speech_is_not_reported_as_delivered(listener):
+    """TTS skips the completion callback when speech was cut short. That
+    is the behaviour to want: interrupted means not heard, so whatever is
+    waiting on delivery gets to try again."""
+    said = []
+    listener.enqueue_reply("c'est fait", on_spoken=lambda: said.append(1))
+    listener.drain_reply_queue()
+
+    # No completion callback fires.
+
+    assert said == []
+
+
+def test_a_raising_delivery_callback_does_not_break_the_listener(listener):
+    """It runs on the audio thread. Whatever it is doing, it is not worth
+    the microphone."""
+    listener.enqueue_reply("c'est fait", on_spoken=lambda: 1 / 0)
+    listener.drain_reply_queue()
+
+    _finish_speaking(listener)  # must not raise
+
+
+def test_a_reply_with_no_callback_still_works(listener):
+    """Every existing caller passes none."""
+    listener.enqueue_reply("c'est fait")
+    listener.drain_reply_queue()
+
+    _finish_speaking(listener)
+
+    assert listener.tts.speak.call_args.args[0] == "c'est fait"
+
+
 # ── The queue ─────────────────────────────────────────────────────────
 
 
