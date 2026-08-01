@@ -210,6 +210,15 @@ class Settings:
     echo_energy_threshold: float
     echo_tolerance: float
 
+    # Reminders — the first thing she does while nobody is watching
+    reminders_enabled: bool
+    reminder_model: str
+    reminder_timeout_sec: float
+    reminder_default_hour: int
+    reminder_tick_sec: float
+    reminder_late_grace_sec: float
+    reminder_max_attempts: int
+
     # Confirmation — how long a question waits, and who reads the answer
     confirmation_ttl_sec: float
     confirmation_hot_window_sec: float
@@ -607,6 +616,21 @@ def get_default_config() -> Dict[str, Any]:
         "echo_energy_threshold": 2.0,
         "echo_tolerance": 0.3,  # Time tolerance for echo detection timing
 
+        # Reminders. The grace window is what separates "she is late"
+        # from "she was never going to say it": past it she still speaks,
+        # but says how late she is rather than pretending it is now.
+        "reminders_enabled": True,
+        # Empty = the warm small chain. Pin a local model to keep the
+        # user's own sentence about their own life off the network.
+        "reminder_model": "",
+        "reminder_timeout_sec": 8.0,
+        # Where a bare day lands when no hour was said: "jeudi" means
+        # jeudi morning to most people who say it.
+        "reminder_default_hour": 9,
+        "reminder_tick_sec": 5.0,
+        "reminder_late_grace_sec": 900.0,
+        "reminder_max_attempts": 60,
+
         # Confirmation. The click window is generous because walking to
         # the machine takes longer than answering aloud. The spoken window
         # is wider than `hot_window_seconds`, which is tuned for
@@ -878,6 +902,23 @@ def load_settings() -> Settings:
     echo_energy_threshold = float(merged.get("echo_energy_threshold", 2.0))
     echo_tolerance = float(merged.get("echo_tolerance", 0.3))
 
+    # Reminders. Clamped rather than trusted: a tick of zero spins a core
+    # and a timeout of zero makes every reminder unreadable, and both
+    # symptoms point nowhere near their cause.
+    reminders_enabled = bool(merged.get("reminders_enabled", True))
+    # Deliberately NOT passed through `_cloud_safe_model`, unlike the
+    # tool router and the intent judge. That filter rewrites a pinned
+    # local tag to the cloud chat model, and this prompt carries the
+    # user's own sentence about their own life — pinning a local model is
+    # the only way to keep it off the network, so rescuing it would
+    # silently undo the one thing the setting is for.
+    reminder_model = str(merged.get("reminder_model", ""))
+    reminder_timeout_sec = min(max(float(merged.get("reminder_timeout_sec", 8.0)), 2.0), 30.0)
+    reminder_default_hour = min(max(int(merged.get("reminder_default_hour", 9)), 0), 23)
+    reminder_tick_sec = min(max(float(merged.get("reminder_tick_sec", 5.0)), 1.0), 60.0)
+    reminder_late_grace_sec = min(max(float(merged.get("reminder_late_grace_sec", 900.0)), 0.0), 86400.0)
+    reminder_max_attempts = min(max(int(merged.get("reminder_max_attempts", 60)), 1), 600)
+
     # Confirmation. Clamped rather than trusted: a TTL of zero would
     # expire every question before it could be read, and an unbounded one
     # would leave a destructive action answerable days later.
@@ -1086,6 +1127,14 @@ def load_settings() -> Settings:
         low_power_mode=low_power_mode,
         echo_energy_threshold=echo_energy_threshold,
         echo_tolerance=echo_tolerance,
+        # Reminders
+        reminders_enabled=reminders_enabled,
+        reminder_model=reminder_model,
+        reminder_timeout_sec=reminder_timeout_sec,
+        reminder_default_hour=reminder_default_hour,
+        reminder_tick_sec=reminder_tick_sec,
+        reminder_late_grace_sec=reminder_late_grace_sec,
+        reminder_max_attempts=reminder_max_attempts,
         # Confirmation
         confirmation_ttl_sec=confirmation_ttl_sec,
         confirmation_hot_window_sec=confirmation_hot_window_sec,
