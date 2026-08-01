@@ -21,6 +21,7 @@ from .builtin.refresh_mcp_tools import RefreshMCPToolsTool
 from .builtin.weather import WeatherTool
 from .builtin.remember import RememberTool
 from .builtin.forget import ForgetTool
+from .builtin.set_reminder import SetReminderTool
 from .builtin.stop import StopTool
 from .builtin.tool_search import ToolSearchTool
 from .types import ToolExecutionResult
@@ -42,6 +43,7 @@ BUILTIN_TOOLS = {
     "getWeather": WeatherTool(),
     "remember": RememberTool(),
     "forget": ForgetTool(),
+    "setReminder": SetReminderTool(),
     "stop": StopTool(),
     "toolSearchTool": ToolSearchTool(),
 }
