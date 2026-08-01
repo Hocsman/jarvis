@@ -123,32 +123,27 @@ DO_NOT_REMEMBER_CASES = [
         ),
         id="Passing small talk is not a memory instruction",
     ),
+    # This one was an open defect for a long time, and how it closed is
+    # worth keeping. With no reminder feature, "remind me to call the
+    # dentist tomorrow" made the model reach for the nearest tool and
+    # file the task as a permanent fact about the user. Three prompt
+    # attempts were measured and none moved it — a restraint clause in
+    # the system prompt, a reminder-is-not-a-memory clause in the tool
+    # description, and both together.
+    #
+    # Neither of the two things that did move it was rhetorical. First,
+    # the router had only ever seen the first 120 characters of each
+    # description, cut mid-word, so `remember`'s restriction was
+    # invisible to the layer deciding whether to offer it at all: whole
+    # sentences took it from 0/6 to 2/6. Then `setReminder` gave the
+    # model somewhere else to put it: 6/6.
+    #
+    # Arguing with a model's priors is expensive. Giving it a better
+    # option is cheap.
     pytest.param(
         RememberCase(
             text="Jarvis, can you remind me to call the dentist tomorrow?",
             should_call=False,
-        ),
-        marks=pytest.mark.xfail(
-            reason=(
-                "Known open defect, now partly moved. The assistant has no "
-                "reminder feature, so faced with 'remind me to X' it reaches "
-                "for the one tool that looks close and files the task as a "
-                "durable fact about the user. Three prompt-level attempts "
-                "were measured on gpt-oss-120b and none moved it: a "
-                "restraint clause in the system prompt, an explicit "
-                "reminder-is-not-a-memory clause in the tool description, "
-                "and both together. What did move it was structural rather "
-                "than rhetorical — the router had only ever seen the first "
-                "120 characters of each description, cut mid-word, so "
-                "`remember`'s restriction was invisible to the layer that "
-                "decides whether the tool is offered at all. Whole "
-                "sentences plus a restriction-first opening measured 2/6 on "
-                "deepseek-v4-flash, against 0 before. Still not a fix: the "
-                "real one is giving the model somewhere else to put a "
-                "reminder. Left non-strict so the improvement shows as "
-                "XPASS without the flakiness failing a run."
-            ),
-            strict=False,
         ),
         id="A reminder request is not a request to store a fact",
     ),
