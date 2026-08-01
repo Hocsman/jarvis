@@ -145,6 +145,15 @@ class SetReminderTool(Tool):
             debug_log("    ⏰ reminder withdrawn: unreadable round trip", "tools")
             return self._refuse("je n'ai pas réussi à le relire correctement")
 
+        # A reminder closer than one tick must not wait for the next
+        # boundary to be noticed.
+        try:
+            from ...daemon import nudge_reminders
+
+            nudge_reminders()
+        except Exception as e:
+            debug_log(f"scheduler not nudged: {e}", "tools")
+
         said = _confirmation(when, stored["texte"], reading.hour_was_assumed)
         debug_log(f"    ⏰ reminder set for {stored['due_utc']}", "tools")
         return ToolExecutionResult(success=True, reply_text=said)

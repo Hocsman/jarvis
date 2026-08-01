@@ -57,6 +57,9 @@ _global_db = None
 # to it rather than spoken from that thread — it speaks outside the query
 # lock, and two speakers would interleave their echo bookkeeping.
 _global_listener = None
+# The thread that keeps reminders. Stopped before the listener, because
+# a promise settled with nothing able to speak it is a broken one.
+_global_reminders = None
 
 # Surfaces the desktop app wires in bundled mode, where stdout IPC is not
 # how the two halves talk.
@@ -657,6 +660,33 @@ def _speak_from_worker(text: str, on_spoken=None) -> bool:
         return False
 
 
+def announce_reminder_failure(row: dict, why: str) -> None:
+    """Tell the user a reminder could not be said.
+
+    The ledger alone is a tab nobody has a reason to open, and a promise
+    that quietly failed is the thing this subsystem exists to prevent.
+    """
+    try:
+        _emit_chat_event("reminder_failed", {
+            "id": row.get("id"),
+            "texte": row.get("texte"),
+            "due_local": row.get("due_local"),
+            "raison": why,
+        })
+    except Exception as e:
+        debug_log(f"reminder failure not announced: {e}", "tools")
+
+
+def nudge_reminders() -> None:
+    """Wake the scheduler — something closer than a tick was just set."""
+    scheduler = _global_reminders
+    if scheduler is not None:
+        try:
+            scheduler.nudge()
+        except Exception as e:
+            debug_log(f"reminder nudge failed: {e}", "tools")
+
+
 def revoke_pending_confirmation() -> None:
     """Drop a waiting question on shutdown.
 
@@ -1060,6 +1090,27 @@ def main() -> None:
     voice_thread.start()
     print("✓ Voice listener thread started (loading Whisper model in background)", flush=True)
 
+    # Reminders. Its own thread rather than the main loop, which calls
+    # the diary pass synchronously and can block for up to 45 seconds —
+    # a 09:00 reminder would land anywhere inside that.
+    global _global_reminders
+    if bool(getattr(cfg, "reminders_enabled", True)):
+        from .reminders.scheduler import ReminderScheduler
+
+        _global_reminders = ReminderScheduler(
+            db=db, cfg=cfg,
+            speak=_speak_from_worker,
+            # A reminder never cuts across a reply the user is waiting
+            # for. The lock is only inspected, never taken: taking it
+            # would give it a third meaning on top of the two it has.
+            busy=lambda: _chat_query_lock.locked(),
+            announce=announce_reminder_failure,
+        )
+        _global_reminders.start()
+        print("⏰ Reminders on", flush=True)
+    else:
+        print("⏰ Reminders off", flush=True)
+
     # Initialize dictation engine (hold-to-dictate)
     dictation = None
     if bool(getattr(cfg, "dictation_enabled", True)):
@@ -1207,6 +1258,14 @@ def main() -> None:
             debug_log("stopping dictation engine...", "jarvis")
             dictation.stop()
             debug_log("dictation engine stopped", "jarvis")
+
+        # Before the speaker dies. The shutdown diary pass can take 45
+        # seconds after this and the database outlives both, so a
+        # reminder firing in that window would be settled as said with
+        # nothing able to say it.
+        if _global_reminders is not None:
+            debug_log("stopping reminder scheduler...", "jarvis")
+            _global_reminders.stop()
 
         if voice_thread is not None:
             debug_log("stopping voice thread...", "jarvis")
