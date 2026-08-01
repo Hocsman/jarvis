@@ -351,22 +351,39 @@ class Database:
         )
         return rid
 
-    def due_rappels(self, now_utc: str, limit: int = 20) -> list:
-        """Promises owed at ``now_utc``, oldest first."""
+    def due_rappels(self, now_utc: str, limit: int = 20,
+                    kind: Optional[str] = None) -> list:
+        """Rows owed at ``now_utc``, oldest first.
+
+        ``kind`` separates the two things this table holds. A routine
+        read out by the reminder scheduler would be spoken as a sentence
+        — which is not what a routine is — and then settled, so it would
+        never run again.
+        """
+        clause = "etat = ? AND due_utc <= ?"
+        params: list = [self.ETAT_PENDING, now_utc]
+        if kind is not None:
+            clause += " AND kind = ?"
+            params.append(kind)
+        params.append(int(limit))
         with self._lock:
             cur = self.conn.execute(
-                "SELECT * FROM rappels WHERE etat = ? AND due_utc <= ? "
-                "ORDER BY due_utc ASC LIMIT ?",
-                (self.ETAT_PENDING, now_utc, int(limit)),
+                f"SELECT * FROM rappels WHERE {clause} ORDER BY due_utc ASC LIMIT ?",
+                tuple(params),
             )
             return [dict(row) for row in cur.fetchall()]
 
-    def pending_rappels(self) -> list:
+    def pending_rappels(self, kind: Optional[str] = None) -> list:
         """Everything still owed, soonest first — what the user is shown."""
+        clause = "etat = ?"
+        params: list = [self.ETAT_PENDING]
+        if kind is not None:
+            clause += " AND kind = ?"
+            params.append(kind)
         with self._lock:
             cur = self.conn.execute(
-                "SELECT * FROM rappels WHERE etat = ? ORDER BY due_utc ASC",
-                (self.ETAT_PENDING,),
+                f"SELECT * FROM rappels WHERE {clause} ORDER BY due_utc ASC",
+                tuple(params),
             )
             return [dict(row) for row in cur.fetchall()]
 
@@ -398,6 +415,24 @@ class Database:
             "UPDATE rappels SET etat = ? WHERE id = ? AND etat = ?",
             (self.ETAT_CANCELLED, rappel_id, self.ETAT_PENDING),
         ) > 0
+
+    def advance_rappel(self, rappel_id: str, *, due_utc: str,
+                       due_local: str, tz: str) -> None:
+        """Move a recurring row to its next occurrence.
+
+        Attempts reset, because they bound a *current* failure rather
+        than a lifetime: a routine that failed twice in March must not
+        arrive in December one failure from being switched off.
+
+        Guarded on `prévu`, so advancing something cancelled cannot
+        revive it — cancelling has to be final or the user cannot stop a
+        routine.
+        """
+        self._write(
+            "UPDATE rappels SET due_utc = ?, due_local = ?, tz = ?, "
+            "attempts = 0, last_try_utc = NULL WHERE id = ? AND etat = ?",
+            (due_utc, due_local, tz, rappel_id, self.ETAT_PENDING),
+        )
 
     def prune_rappels(self, max_age_days: int = 90) -> int:
         """Drop old settled and cancelled ones.

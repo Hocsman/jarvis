@@ -424,7 +424,9 @@ def rappels_get() -> Response:
                     "origin": r["origin"],
                     "created_utc": r["created_utc"],
                 }
-                for r in get_activity_db().pending_rappels()
+                # Reminders only: a routine listed here invites the user
+                # to cancel it and find it back the next morning.
+                for r in get_activity_db().pending_rappels(kind="rappel")
             ],
         })
     except Exception as e:

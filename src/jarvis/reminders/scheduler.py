@@ -110,7 +110,10 @@ class ReminderScheduler:
                 debug_log(f"reminder prune skipped: {e}", "tools")
 
         now = datetime.now(timezone.utc)
-        due = self._db.due_rappels(now.isoformat())
+        # Reminders only. A routine read out here would be spoken as a
+        # sentence — which is not what a routine is — and then settled,
+        # so it would never run again.
+        due = self._db.due_rappels(now.isoformat(), kind="rappel")
         if not due:
             return
 
