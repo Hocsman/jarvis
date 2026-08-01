@@ -458,6 +458,43 @@ def _refusal(name: str, verdict: str, risk: str) -> ToolExecutionResult:
     )
 
 
+def _out_of_scope(name, scope, risk, verdict):
+    """Whether an unattended call steps outside its routine's envelope.
+
+    Four checks, and the last three are re-run on every call because the
+    envelope was written weeks ago and the world moved.
+
+    Returns a refusal, or None to carry on. The refusal deliberately does
+    NOT point at `## Libre` the way the ordinary one does: unattended,
+    that becomes a paragraph recommending the policy be loosened for
+    every origin, written by a thread running while the user sleeps.
+    """
+    from .policy import FREE, RISK_READ
+
+    tool = _known_tool(name)
+    if not scope.allows(name):
+        why = "il n'est pas dans le périmètre de cette routine"
+    elif verdict != FREE:
+        why = "tu as demandé à être consulté pour cet outil"
+    elif risk != RISK_READ:
+        why = "il ne se contente pas de lire"
+    elif getattr(tool, "writes_own_state", False):
+        why = "il écrit la mémoire de Yuba, et personne n'est là pour relire"
+    else:
+        return None
+
+    debug_log(f"    🔁 {name} out of scope for {scope.nom}: {why}", "tools")
+    return ToolExecutionResult(
+        success=False, refused=True, error_message=None,
+        reply_text=(
+            f'The tool "{name}" is outside what the routine "{scope.nom}" '
+            f"may reach ({why}). Nothing was done. Carry on with the rest "
+            f"of the routine and say in your write-up what was missing. Do "
+            f"not suggest changing any settings."
+        ),
+    )
+
+
 def _fingerprint(name, args):
     from .confirmation import fingerprint
 
@@ -564,6 +601,7 @@ def run_tool_with_retries(
     language: Optional[str] = None,
     origin: Optional[str] = None,
     confirmation: Optional["Confirmation"] = None,
+    scope: Optional["RoutineScope"] = None,
 ) -> ToolExecutionResult:
     """Run one tool, subject to the user's policy, and record what happened.
 
@@ -579,6 +617,11 @@ def run_tool_with_retries(
     in rather than reached for: without one the gate refuses exactly as
     it does today, because a gate that found a channel lying around
     would ask on behalf of code with no way to show the question.
+
+    ``scope`` says this call is running unattended, inside one routine's
+    envelope. It narrows what is allowed and never widens it, and its
+    absence changes nothing at all — an attended turn sees exactly the
+    behaviour it saw before routines existed.
     """
     # Normalize tool name to canonical camelCase
     raw_name = (tool_name or "").strip()
@@ -588,13 +631,32 @@ def run_tool_with_retries(
     # sites because this is the only funnel: both the planner's direct
     # execution and the agentic loop arrive through it.
     from .policy import (
-        FREE, NEVER, OUTCOME_ASKED, OUTCOME_FAILED, OUTCOME_OK, OUTCOME_REFUSED,
-        resolve_risk,
+        FREE, NEVER, OUTCOME_ASKED, OUTCOME_FAILED, OUTCOME_OK,
+        OUTCOME_OUT_OF_SCOPE, OUTCOME_REFUSED, RISK_READ, resolve_risk,
     )
 
     risk = resolve_risk(name, _known_tool(name), tool_args)
     verdict = load_tool_policy(cfg).verdict(name, risk)
     request_id: Optional[str] = None
+
+    # Running unattended. `jamais` is checked first, below, because a tool
+    # the user retired is refused rather than reported out-of-scope —
+    # different facts, and their own retirement is the stronger one.
+    #
+    # Everything here is re-checked on the call rather than trusted from
+    # when the routine was written, because the things that change in
+    # between are exactly the ones that matter: the user edited
+    # `outils.md`, a server update added `destructiveHint`, or the model
+    # picked the same tool with different arguments — `localFiles`
+    # reading yesterday and deleting today, under one name.
+    if scope is not None and verdict != NEVER:
+        refusal = _out_of_scope(name, scope, risk, verdict)
+        if refusal is not None:
+            _log_action(
+                db, tool=name, args=tool_args, risk=risk, verdict=verdict,
+                outcome=OUTCOME_OUT_OF_SCOPE, query=redacted_text, origin=origin,
+            )
+            return refusal
 
     if verdict != FREE:
         # Order is the design.

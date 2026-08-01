@@ -42,6 +42,12 @@ OUTCOME_REFUSED = "refusé"
 OUTCOME_ASKED = "demandé"
 OUTCOME_DECLINED = "décliné"
 OUTCOME_EXPIRED = "expiré"
+# A routine reached past its own envelope. Kept apart from `refusé`
+# because the two point at different files: `refusé` is the user's policy
+# saying no to everyone, `hors-cadre` is one routine's own scope, which
+# they widen by adding a line to `routines.md` rather than by loosening
+# anything for every origin.
+OUTCOME_OUT_OF_SCOPE = "hors-cadre"
 
 _SECTIONS = {
     "libre": FREE,
