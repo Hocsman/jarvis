@@ -108,6 +108,16 @@ class ReminderScheduler:
                 self._db.prune_rappels(90)
             except Exception as e:
                 debug_log(f"reminder prune skipped: {e}", "tools")
+            # The journal keeps the same window as the ledger and the
+            # settled rows. One retention answer for everything Yuba
+            # writes down about herself is one thing to explain, and one
+            # thing to change.
+            try:
+                from ..routines.journal import prune_journal
+
+                prune_journal(self._cfg, 90)
+            except Exception as e:
+                debug_log(f"journal prune skipped: {e}", "tools")
 
         now = datetime.now(timezone.utc)
         # Reminders only. A routine read out here would be spoken as a

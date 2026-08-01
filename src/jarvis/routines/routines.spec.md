@@ -170,9 +170,42 @@ the attended one does. Unattended, that becomes a paragraph recommending
 the policy be loosened, written by a thread running while the user
 sleeps.
 
+## The journal
+
+`journal.py`, and the folder at `yuba/journal/`.
+
+One Markdown page per day, appended. `2026-08-02.md`, so a directory
+listing sorts the mornings and the whole history opens in anything.
+
+This is the delivery, not a log of it. There is no speech and no chat
+bubble at 07:00, so the write-up itself goes in the page — which is the
+one place this diverges from the action ledger, which records what was
+*done* and never what was *seen*. The ledger is an audit trail; this is
+the letter on the kitchen table. It never leaves the machine, sitting in
+the same directory as the user's own profile, so there is nothing here to
+redact.
+
+Each entry carries the hour it actually ran (not the hour it was due — a
+run deferred two hours because the machine was asleep is a different
+fact), what was asked for, the write-up, the tools it reached for, and
+anything the gate turned away with the reason. A run that produced
+nothing still leaves a line: a silent gap reads as "it never fired",
+which sends the user to look at the schedule instead of at the error.
+
+Nothing in it raises. By the time it runs the work is done, and losing
+the letter is bad while losing the letter *and* taking the runner down
+with it is worse.
+
+`prune_journal` drops pages past 90 days, from the same sweep that prunes
+settled reminders — one retention answer for everything Yuba writes down
+about herself. It only touches files whose names *are* dates and parse as
+one: the folder is in the user's own directory, and a sweep that eats
+their notes is a sweep that gets the feature turned off.
+
 ## Files
 
 | Path | What it is |
 |---|---|
 | `yuba/routines.md` | the envelopes, generated once then owned by the user |
+| `yuba/journal/AAAA-MM-JJ.md` | one page per day, 90-day window |
 | `rappels` rows with `kind='routine'` | when each one next fires |
