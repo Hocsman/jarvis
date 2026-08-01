@@ -152,6 +152,47 @@ def test_there_is_no_wildcard():
     assert scope.allows("chrome-devtools__take_snapshot") is False
 
 
+# ── Three names no envelope can hold ──────────────────────────────────
+
+
+@pytest.mark.parametrize("name", ["toolSearchTool", "refreshMCPTools", "stop"])
+def test_a_few_tools_are_refused_even_when_the_file_names_them(name):
+    """`toolSearchTool` appends any name in the registry to the running
+    turn's allow-list, so an envelope containing it can widen itself into
+    every tool there is. `refreshMCPTools` changes what tools exist
+    mid-run. `stop` ends a conversation, and a routine is not one.
+
+    Written into a block by hand, they still do not open."""
+    assert RoutineScope(nom="x", outils=[name]).allows(name) is False
+
+
+# ── The user's own life is opt-in ─────────────────────────────────────
+
+
+def test_a_routine_knows_nothing_about_the_user_by_default():
+    """The warm profile is their life. It does not need to leave the
+    machine at 7am for a routine to summarise their mail."""
+    blocks = parse_routines(SAMPLE)
+
+    assert blocks["matin"].scope().memoire is False
+
+
+def test_a_block_can_ask_for_the_profile():
+    blocks = parse_routines(SAMPLE + "\n## bilan\nmémoire: oui\noutils:\n- webSearch\n")
+
+    assert blocks["bilan"].scope().memoire is True
+
+
+@pytest.mark.parametrize("value", ["non", "", "yes", "true", "1", "peut-être"])
+def test_anything_it_does_not_recognise_leaves_the_profile_home(value):
+    """Failing shut in every direction beats a list of affirmatives that
+    would have to be right in every language the user might type. The
+    header states the one word that turns it on."""
+    blocks = parse_routines(f"## bilan\nmémoire: {value}\noutils:\n- webSearch\n")
+
+    assert blocks["bilan"].scope().memoire is False
+
+
 # ── Reading from disk, and noticing edits ─────────────────────────────
 
 

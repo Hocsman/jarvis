@@ -38,12 +38,34 @@ _ITEM_RE = re.compile(r"^\s*-\s+(?P<name>\S+)\s*$")
 _COMMENT_OPEN, _COMMENT_CLOSE = "<!--", "-->"
 
 
+# Three names an envelope can never contain, whatever the file says.
+#
+# `toolSearchTool` appends any name in the registry to the running turn's
+# allow-list and regenerates the schema — an envelope that can widen
+# itself is not an envelope. `refreshMCPTools` rediscovers servers
+# mid-run, so the catalogue would change underneath it. `stop` ends a
+# conversation, and a routine is not one.
+JAMAIS_EN_ROUTINE = frozenset({"toolSearchTool", "refreshMCPTools", "stop"})
+
+# The one value that turns the profile on. Anything else — absent,
+# empty, negated, a word from another language, a typo — leaves it off.
+# Failing shut in every direction beats a list of affirmatives that has
+# to be right in every language the user might type.
+_MEMOIRE_OUI = "oui"
+
+
 @dataclass(frozen=True)
 class RoutineScope:
-    """The tools one routine may reach, and nothing else."""
+    """The tools one routine may reach, and nothing else.
+
+    ``memoire`` is off unless the block asks for it. The warm profile is
+    the user's own life, and it does not need to leave the machine at 7am
+    for a routine to summarise their mail.
+    """
 
     nom: str
     outils: List[str]
+    memoire: bool = False
 
     def allows(self, tool_name: str) -> bool:
         """Exact names only.
@@ -53,6 +75,8 @@ class RoutineScope:
         `chrome-devtools__take_heapsnapshot`, and a server that grows a
         tool overnight must not grow the envelope with it.
         """
+        if tool_name in JAMAIS_EN_ROUTINE:
+            return False
         return tool_name in self.outils
 
 
@@ -67,7 +91,11 @@ class RoutineBlock:
     outils: List[str] = field(default_factory=list)
 
     def scope(self) -> RoutineScope:
-        return RoutineScope(nom=self.nom, outils=list(self.outils))
+        return RoutineScope(
+            nom=self.nom,
+            outils=list(self.outils),
+            memoire=self.memoire.strip().lower() == _MEMOIRE_OUI,
+        )
 
 
 def parse_routines(text: str) -> Dict[str, RoutineBlock]:
@@ -187,6 +215,10 @@ _HEADER = (
     "  Retire une ligne d'outil et la routine est resserrée.\n"
     "  Supprime le bloc et la routine est suspendue.\n"
     "  Une liste vide n'est pas « tous » : c'est aucun.\n"
+    "\n"
+    "  Par défaut une routine ne sait rien de toi : ton profil et tes\n"
+    "  règles ne partent pas avec elle. Écris « mémoire: oui » dans un\n"
+    "  bloc si cette routine-là en a besoin. Tout autre texte vaut non.\n"
     "\n"
     "  Pas de joker ici, contrairement à outils.md : là-bas tu es présent\n"
     "  pour voir le résultat, ici non, et un serveur qui gagne un outil\n"

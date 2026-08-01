@@ -215,7 +215,11 @@ def generate_tools_json_schema(allowed_tools: Optional[List[str]] = None, mcp_to
         }
     ]
     """
-    names = list(allowed_tools or list(BUILTIN_TOOLS.keys()))
+    # ``None`` asks for the whole catalogue; ``[]`` asks for nothing.
+    # Collapsing the two would hand every builtin to the two callers that
+    # deliberately narrow to nothing — a routine with an empty envelope,
+    # and the resume turn that runs one approved call and narrates it.
+    names = list(BUILTIN_TOOLS.keys()) if allowed_tools is None else list(allowed_tools)
     tools: List[Dict[str, Any]] = []
 
     # Add built-in tools
@@ -253,7 +257,8 @@ def generate_tools_json_schema(allowed_tools: Optional[List[str]] = None, mcp_to
 
 def generate_tools_description(allowed_tools: Optional[List[str]] = None, mcp_tools: Optional[Dict[str, ToolSpec]] = None) -> str:
     """Produce a compact tool help string for the system prompt using OpenAI standard format."""
-    names = list(allowed_tools or list(BUILTIN_TOOLS.keys()))
+    # Same rule as the schema: ``None`` is everything, ``[]`` is nothing.
+    names = list(BUILTIN_TOOLS.keys()) if allowed_tools is None else list(allowed_tools)
     lines: List[str] = []
     lines.append("Tool-use protocol: Use the tool_calls field in your response:")
     lines.append('tool_calls: [{"id": "call_<id>", "type": "function", "function": {"name": "<toolName>", "arguments": "<json_string>"}}]')
@@ -469,10 +474,16 @@ def _out_of_scope(name, scope, risk, verdict):
     that becomes a paragraph recommending the policy be loosened for
     every origin, written by a thread running while the user sleeps.
     """
+    from ..routines.scope import JAMAIS_EN_ROUTINE
     from .policy import FREE, RISK_READ
 
     tool = _known_tool(name)
-    if not scope.allows(name):
+    if name in JAMAIS_EN_ROUTINE:
+        # Distinct from the line below because the user may well have
+        # written this name in the block themselves, and "not in the
+        # perimeter" would read as a bug rather than a rule.
+        why = "aucune routine ne peut l'atteindre, quel que soit son périmètre"
+    elif not scope.allows(name):
         why = "il n'est pas dans le périmètre de cette routine"
     elif verdict != FREE:
         why = "tu as demandé à être consulté pour cet outil"

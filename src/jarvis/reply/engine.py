@@ -1017,7 +1017,8 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                     on_stage: Optional[Any] = None,
                     origin: Optional[str] = None,
                     granted: Optional[Any] = None,
-                    granted_action: Optional[Any] = None) -> Optional[str]:
+                    granted_action: Optional[Any] = None,
+                    scope: Optional[Any] = None) -> Optional[str]:
     """
     Main entry point for reply generation.
 
@@ -1056,6 +1057,14 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
             the store, so there is nothing left to read an answer from —
             passing it in is what lets the same execution path serve both
             doors.
+        scope: the envelope of the routine this turn belongs to, or None
+            for an attended turn. Present, it is the whole catalogue —
+            the tools it names and nothing else, no router, no escape
+            hatch, no `stop` — and the user's warm profile stays home
+            unless the routine's own block asks for it. It is also handed
+            to every tool call, where the gate re-checks it: the
+            catalogue is what she can reach for, the gate is what she can
+            reach.
 
     Returns:
         Generated reply text or None
@@ -1248,7 +1257,20 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         dialogue_memory.hot_cache_get(_router_cache_key)
         if dialogue_memory and hasattr(dialogue_memory, "hot_cache_get") else None
     )
-    if isinstance(_cached_routed, list):
+    if scope is not None:
+        # A routine's catalogue is the envelope it was given. The router
+        # is not consulted: it exists to narrow forty tools down for a
+        # small model, and an envelope is already a handful of names the
+        # user wrote by hand. Narrowing it further would spend an LLM
+        # call to maybe drop the one tool the routine needs, at 7am, with
+        # nobody watching.
+        routed_tools = [n for n in scope.outils if n in _full_catalog_names]
+        debug_log(
+            f"routine {scope.nom}: catalogue is its envelope "
+            f"({len(routed_tools)} of {len(scope.outils)} named tools exist)",
+            "planning",
+        )
+    elif isinstance(_cached_routed, list):
         routed_tools = list(_cached_routed)
         debug_log("tool router served from hot-window cache", "planning")
     else:
@@ -1446,7 +1468,13 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         and len(_wp_cached) == 2
         and _wp_cached[0] == _core_stamp
     )
-    if _wp_fresh:
+    if scope is not None and not scope.memoire:
+        # A routine does not need to know who the user is to summarise
+        # their mail, and every line of this block is a line of their
+        # private life leaving the machine while they sleep. Opt-in, per
+        # routine, in the block they can read.
+        debug_log(f"routine {scope.nom}: core profile withheld", "memory")
+    elif _wp_fresh:
         warm_profile_block = _wp_cached[1]
         debug_log("core profile served from conversation cache", "memory")
     else:
@@ -1722,14 +1750,24 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 _selection_source = f"{strategy.value}+plan"
     if _carryover_names:
         _selection_source = f"{_selection_source}+carryover"
-    # `stop` is the termination sentinel — always exposed so the chat
-    # model can emit it once it has enough to answer.
-    if "stop" not in allowed_tools:
-        allowed_tools.append("stop")
-    # Always expose the escape-hatch tool so the chat model can widen the
-    # allow-list mid-loop when the initial routing turned out too narrow.
-    if "toolSearchTool" not in allowed_tools:
-        allowed_tools.append("toolSearchTool")
+    if scope is not None:
+        # One filter, last, so nothing any branch above added survives
+        # outside the envelope — including `stop` and `toolSearchTool`,
+        # which `RoutineScope.allows` refuses whatever the file says.
+        # Handing a routine the tool that appends any registry name to
+        # this very list would make the envelope advisory.
+        allowed_tools = [n for n in allowed_tools if scope.allows(n)]
+        _selection_source = f"routine:{scope.nom}"
+    else:
+        # `stop` is the termination sentinel — always exposed so the chat
+        # model can emit it once it has enough to answer.
+        if "stop" not in allowed_tools:
+            allowed_tools.append("stop")
+        # Always expose the escape-hatch tool so the chat model can widen
+        # the allow-list mid-loop when the initial routing turned out too
+        # narrow.
+        if "toolSearchTool" not in allowed_tools:
+            allowed_tools.append("toolSearchTool")
     _selected_preview = ", ".join(allowed_tools[:8]) + (
         f" (+{len(allowed_tools) - 8} more)" if len(allowed_tools) > 8 else ""
     )
@@ -1932,7 +1970,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
             db=db, cfg=cfg, tool_name=_granted.tool, tool_args=_granted.args,
             system_prompt="", original_prompt="", redacted_text=redacted,
             max_retries=1, language=language, origin=origin,
-            confirmation=_confirmation,
+            confirmation=_confirmation, scope=scope,
         )
         _confirmation = _spend(_confirmation)
         _granted_text = (
@@ -2277,6 +2315,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                                 language=language,
                                 origin=origin,
                                 confirmation=_confirmation,
+                                scope=scope,
                             )
                             if _plan_result.pending_id:
                                 return _end_turn_with_question(
@@ -2574,6 +2613,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 language=language,
                 origin=origin,
                 confirmation=_confirmation,
+                scope=scope,
             )
 
             # The gate asked instead of running. Checked before everything
