@@ -90,6 +90,10 @@ def _render(entree: Entree) -> str:
     if entree.duree_sec:
         lines.append(f"*{entree.duree_sec:.1f} s.*")
 
+    # A blank line, not a newline. Two entries with only a line break
+    # between them run into each other both on screen and in whatever
+    # renders the Markdown, and this page is the delivery.
+    lines.append("")
     lines.append("")
     return "\n".join(lines)
 

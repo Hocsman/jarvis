@@ -112,6 +112,19 @@ def test_a_second_run_joins_the_first(tmp_path):
     assert "premier" in day and "deuxième" in day
 
 
+def test_two_runs_do_not_run_into_each_other(tmp_path):
+    """A line break is not a paragraph break. Without a blank line the
+    second entry's heading lands directly under the first one's timing
+    note, on screen and in anything that renders the Markdown, and this
+    page is the delivery rather than a log of it."""
+    cfg = _Cfg(tmp_path)
+
+    append_run(cfg, _entree(nom="matin", duree_sec=6.4))
+    append_run(cfg, _entree(nom="revue", moment=datetime(2026, 8, 2, 9, 0)))
+
+    assert "\n\n## 09:00 — revue" in read_day(cfg, datetime(2026, 8, 2))
+
+
 def test_the_day_heading_is_written_once(tmp_path):
     cfg = _Cfg(tmp_path)
 

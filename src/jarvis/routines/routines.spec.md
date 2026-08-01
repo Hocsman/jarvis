@@ -297,6 +297,31 @@ about herself. It only touches files whose names *are* dates and parse as
 one: the folder is in the user's own directory, and a sweep that eats
 their notes is a sweep that gets the feature turned off.
 
+## The Routines tab
+
+`src/desktop_app/memory_viewer.py`, served at `/api/routines`,
+`/api/routines/<id>` and `/api/journal`.
+
+Two questions, and neither artefact answers both: the row says when a
+routine fires, `routines.md` says what it may reach. They are shown on
+one line because a user should not have to open a text editor to find out
+whether the thing running at 07:00 can read their files — that is the
+moment they decide the feature is not worth having.
+
+Each row carries its envelope, and a flag for anything that changes what
+it means: `suspendue` when the block has gone (listed rather than hidden,
+since it still holds a slot in the table and returns the moment the block
+does), `périmètre vide`, `mémoire` when the user's own profile travels
+with it, and the count of consecutive runs that produced nothing — which
+is the only place that is visible before the routine switches itself off.
+Stopping one from here is the same cancel the dispatcher does, and the
+block stays in `routines.md` so the user can still read what it was
+allowed to do.
+
+The journal is on the same tab, served as the raw Markdown the files
+hold, because those files open in any editor and the two must not
+disagree.
+
 ## Files
 
 | Path | What it is |

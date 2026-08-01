@@ -446,6 +446,87 @@ def rappels_cancel(rappel_id: str) -> Response:
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/routines")
+def routines_get() -> Response:
+    """What runs while nobody is watching, and what it may reach.
+
+    The row says when; `routines.md` says what it is allowed to do. Both
+    are shown together because neither answers the question on its own,
+    and the user should not have to open a text editor to find out
+    whether the thing firing at 07:00 can read their files.
+
+    A routine whose block has gone is listed as suspended rather than
+    hidden: it still holds a slot in the table, and it comes back the
+    moment the block does.
+    """
+    from jarvis.routines.runner import payload_of
+    from jarvis.routines.scope import scope_for
+
+    try:
+        cfg = load_settings()
+        out = []
+        for r in get_activity_db().pending_rappels(kind="routine"):
+            payload = payload_of(r)
+            nom = str(payload.get("nom") or "")
+            scope = scope_for(cfg, nom) if nom else None
+            out.append({
+                "id": r["id"],
+                "nom": nom,
+                "texte": r["texte"],
+                "due_local": r["due_local"],
+                "tz": r["tz"],
+                "origin": r["origin"],
+                "outils": list(scope.outils) if scope else [],
+                "memoire": bool(scope.memoire) if scope else False,
+                "suspendue": scope is None,
+                "steriles": int(payload.get("steriles", 0) or 0),
+            })
+        return jsonify({"routines": out})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/routines/<routine_id>", methods=["DELETE"])
+def routines_cancel(routine_id: str) -> Response:
+    """Stop one for good.
+
+    The block stays in `routines.md`, so the user can read what it was
+    allowed to do afterwards and say the sentence again if they change
+    their mind.
+    """
+    try:
+        return jsonify({"cancelled": get_activity_db().cancel_rappel(routine_id)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/journal")
+def journal_get() -> Response:
+    """The mornings, newest first.
+
+    This is the delivery, not a log of it: a routine runs with nobody in
+    the room, so the write-up itself is here or it reached nobody. Served
+    as the raw Markdown the file holds, because that file is also
+    openable in any editor and the two must not disagree.
+    """
+    from datetime import datetime, timedelta
+
+    from jarvis.routines.journal import read_day
+
+    try:
+        cfg = load_settings()
+        days = max(1, min(int(request.args.get("days", 14)), 90))
+        pages = []
+        for back in range(days):
+            jour = datetime.now() - timedelta(days=back)
+            texte = read_day(cfg, jour)
+            if texte.strip():
+                pages.append({"date": jour.strftime("%Y-%m-%d"), "texte": texte})
+        return jsonify({"pages": pages})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/rappels", methods=["POST"])
 def rappels_create() -> Response:
     """Type one in directly.
@@ -1321,6 +1402,45 @@ def index() -> str:
             font-size: 12px; padding: 3px 10px; white-space: nowrap;
         }
         .rappel-cancel:hover { border-color: var(--error); color: var(--error); }
+
+        /* Routines: the row says when, routines.md says what it may
+           reach. Both on one line, because neither answers the question
+           on its own. */
+        .routine-row {
+            display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap;
+            padding: 11px 14px; font-size: 13px;
+            border-bottom: 1px solid rgba(128, 128, 128, 0.12);
+        }
+        .routine-row:last-child { border-bottom: none; }
+        .routine-nom {
+            font-weight: 600; min-width: 110px; white-space: nowrap;
+        }
+        .routine-quand {
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 12px; color: var(--accent-primary); white-space: nowrap;
+            min-width: 130px;
+        }
+        .routine-phrase { flex: 1; min-width: 200px; overflow-wrap: anywhere; }
+        .routine-outils {
+            flex-basis: 100%; font-size: 11px; opacity: 0.6;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        }
+        .routine-flag {
+            font-size: 11px; border-radius: 5px; padding: 1px 7px;
+            border: 1px solid var(--border-color); white-space: nowrap;
+        }
+        .routine-flag.warn { border-color: var(--error); color: var(--error); }
+
+        .journal-page { margin-bottom: 18px; }
+        .journal-date {
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 12px; color: var(--accent-primary); margin-bottom: 6px;
+        }
+        .journal-texte {
+            white-space: pre-wrap; overflow-wrap: anywhere;
+            font-size: 13px; line-height: 1.55;
+            background: var(--bg-tertiary); border-radius: 8px; padding: 12px 14px;
+        }
 
         .activity-clear {
             align-self: flex-start;
@@ -2509,6 +2629,9 @@ def index() -> str:
             <button class="tab" data-tab="rappels">
                 <span>⏰</span> Rappels
             </button>
+            <button class="tab" data-tab="routines">
+                <span>🌅</span> Routines
+            </button>
             <button class="tab" data-tab="graph">
                 <span>🧠</span> Knowledge
             </button>
@@ -2657,6 +2780,37 @@ def index() -> str:
                 </div>
             </div>
 
+            <div id="routines-content" class="tab-pane" style="display: none;">
+                <div class="core-intro">
+                    <p>
+                        🌅 Ce que Yuba fait toute seule, à heure fixe, sans que
+                        tu sois là. Chaque routine ne peut atteindre que les
+                        outils listés sous elle, et seulement pour lire. Le
+                        périmètre s'édite dans <code>yuba/routines.md</code> :
+                        retire une ligne et elle est resserrée, supprime le bloc
+                        et elle est suspendue.
+                    </p>
+                </div>
+
+                <div class="core-files" id="routines-list">
+                    <div class="loading"><div class="spinner"></div></div>
+                </div>
+
+                <div class="core-intro" style="margin-top: 22px;">
+                    <p>
+                        📓 Le journal. C'est la livraison, pas un compte rendu de
+                        la livraison : personne n'est là à 07:00, donc ce qu'elle
+                        a trouvé est écrit ici ou n'est arrivé à personne. Les
+                        pages sont dans <code>yuba/journal/</code> et se gardent
+                        90 jours.
+                    </p>
+                </div>
+
+                <div id="journal-list">
+                    <div class="loading"><div class="spinner"></div></div>
+                </div>
+            </div>
+
             <div id="meals-content" class="tab-pane" style="display: none;">
                 <div class="inline-filters">
                     <span class="inline-filter-label">📅</span>
@@ -2700,6 +2854,7 @@ def index() -> str:
         const corePane = document.getElementById('core-content');
         const activityPane = document.getElementById('activity-content');
         const rappelsPane = document.getElementById('rappels-content');
+        const routinesPane = document.getElementById('routines-content');
         const memoriesContent = memoriesPane.querySelector('.memory-list');
         const mealsContent = mealsPane.querySelector('.memory-list');
         const tabs = document.querySelectorAll('.tab');
@@ -3269,6 +3424,91 @@ def index() -> str:
             loadRappels();
         });
 
+        // ── Routines tab ────────────────────────────────────────────
+        //
+        // Two questions, and neither is answered by one artefact alone:
+        // the row says when it fires, routines.md says what it may
+        // reach. A user should not have to open a text editor to find
+        // out whether the thing running at 07:00 can read their files.
+
+        async function loadRoutines() {
+            const container = document.getElementById('routines-list');
+            let routines = [];
+            try {
+                routines = (await (await fetch('/api/routines')).json()).routines || [];
+            } catch (e) {
+                container.innerHTML = "<div class='core-empty'>Liste illisible.</div>";
+                return;
+            }
+            if (!routines.length) {
+                container.innerHTML = "<div class='core-empty'>Aucune routine. Dis-lui « tous les matins à 7h, … ».</div>";
+                return;
+            }
+            container.innerHTML = '<div class="core-file">' + routines.map(r => {
+                // Trim to minutes first: ' à ' is three characters where
+                // the T was one, so slicing afterwards eats them.
+                const when = (r.due_local || '').slice(0, 16).replace('T', ' à ');
+                const flags = [];
+                if (r.suspendue) {
+                    flags.push('<span class="routine-flag warn" title="Plus de bloc dans routines.md : elle ne fera rien tant qu&#39;il n&#39;est pas revenu">suspendue</span>');
+                } else if (!r.outils.length) {
+                    flags.push('<span class="routine-flag warn" title="Périmètre vide : elle ne peut atteindre aucun outil">périmètre vide</span>');
+                }
+                if (r.memoire) {
+                    flags.push('<span class="routine-flag" title="Ton profil et tes règles partent avec elle">mémoire</span>');
+                }
+                if (r.steriles) {
+                    flags.push('<span class="routine-flag warn" title="Passages de suite sans rien produire. Au bout de 5, elle s&#39;arrête.">' +
+                               escapeHtml(String(r.steriles)) + ' sans résultat</span>');
+                }
+                const outils = r.outils.length
+                    ? escapeHtml(r.outils.join(', '))
+                    : "aucun outil";
+                return `<div class="routine-row">
+                    <span class="routine-nom">${escapeHtml(r.nom || '?')}</span>
+                    <span class="routine-quand">${escapeHtml(when)}</span>
+                    <span class="routine-phrase">${escapeHtml(r.texte || '')}</span>
+                    ${flags.join(' ')}
+                    <button class="rappel-cancel" data-routine="${escapeHtml(r.id)}">Arrêter</button>
+                    <span class="routine-outils">🔧 ${outils}</span>
+                </div>`;
+            }).join('') + '</div>';
+
+            container.querySelectorAll('[data-routine]').forEach(button => {
+                button.addEventListener('click', async () => {
+                    if (!confirm("Arrêter cette routine ? Son bloc restera dans routines.md.")) return;
+                    button.disabled = true;
+                    try {
+                        await fetch('/api/routines/' + encodeURIComponent(button.dataset.routine),
+                                    { method: 'DELETE' });
+                    } catch (e) {
+                        button.disabled = false;
+                        return;
+                    }
+                    loadRoutines();
+                });
+            });
+        }
+
+        async function loadJournal() {
+            const container = document.getElementById('journal-list');
+            let pages = [];
+            try {
+                pages = (await (await fetch('/api/journal')).json()).pages || [];
+            } catch (e) {
+                container.innerHTML = "<div class='core-empty'>Journal illisible.</div>";
+                return;
+            }
+            if (!pages.length) {
+                container.innerHTML = "<div class='core-empty'>Aucune matinée écrite pour l'instant.</div>";
+                return;
+            }
+            container.innerHTML = pages.map(p => `<div class="journal-page">
+                <div class="journal-date">${escapeHtml(p.date)}</div>
+                <div class="journal-texte">${escapeHtml(p.texte)}</div>
+            </div>`).join('');
+        }
+
         document.getElementById('btn-clear-activity').addEventListener('click', async () => {
             if (!confirm("Effacer tout le registre d'activité ?")) return;
             await fetch('/api/activity', { method: 'DELETE' });
@@ -3287,6 +3527,7 @@ def index() -> str:
             corePane.style.display = 'none';
             activityPane.style.display = 'none';
             rappelsPane.style.display = 'none';
+            routinesPane.style.display = 'none';
 
             if (currentTab === 'memories') {
                 memoriesPane.style.display = '';
@@ -3300,6 +3541,10 @@ def index() -> str:
             } else if (currentTab === 'rappels') {
                 rappelsPane.style.display = '';
                 loadRappels();
+            } else if (currentTab === 'routines') {
+                routinesPane.style.display = '';
+                loadRoutines();
+                loadJournal();
             } else if (currentTab === 'graph') {
                 graphContent.style.display = '';
                 initGraph();
