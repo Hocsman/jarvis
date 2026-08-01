@@ -52,6 +52,8 @@ Defaults, when the user's file says nothing: `lecture` → `libre`, `action` and
 - Between wildcards, the longest matching prefix wins.
 - HTML comments are skipped, so the file can carry its own instructions in the user's language.
 
+`## Libre` also means "while you are asleep". A routine may reach a free tool when three further things hold: its own envelope names it, the call only reads, and the tool does not write Yuba's own state (see `src/jarvis/routines/routines.spec.md`). Moving a line to `## Demande` therefore puts it out of every routine's reach, since a routine has nobody to ask. The generated header says so, because a user tightening this file needs to know that one of the two things they are changing happens where they cannot see it.
+
 **Generated once from the tools actually installed, then never rewritten.** The user opens it and sees their own catalogue by name rather than a shipped list that may not match what they have. A tool that appears afterwards is absent from the file, and therefore unclassified, and therefore asked about.
 
 **A malformed file yields the defaults**, not an exception and not a blanket allow. Unparseable lines are skipped. A corrupt file must not silently unlock the machine, and must not stop Yuba working either.

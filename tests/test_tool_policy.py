@@ -201,3 +201,17 @@ def test_the_generated_file_explains_itself():
 
     assert text.lstrip().startswith("#")
     assert "<!--" in text
+
+
+def test_the_generated_file_says_that_libre_reaches_into_the_night():
+    """A user tightening this file is changing two things, and one of
+    them happens where they cannot see it: `## Libre` is also the list a
+    routine may reach from while they are asleep. Moving a line to
+    `## Demande` puts it out of every routine's reach, since a routine
+    has nobody to ask. The header has to say so, or the second effect is
+    a surprise found months later in a journal page."""
+    text = render_policy_file({"webSearch": RISK_READ}, {})
+
+    header = text.split("-->", 1)[0].lower()
+    assert "routine" in header
+    assert "périmètre" in header
