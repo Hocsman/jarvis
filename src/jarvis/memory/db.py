@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from ..debug import debug_log
 
 # Bumped whenever the shape changes, so a later version can migrate.
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 _SCHEMA_SQL = """
 PRAGMA journal_mode=WAL;
@@ -54,6 +54,37 @@ CREATE TABLE IF NOT EXISTS action_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_action_log_ts ON action_log(ts_utc DESC);
+
+-- Promises: things to say at a time, kept across restarts.
+--
+-- The one part of the assistant that MUST reach disk. A pending
+-- confirmation deliberately never does, because an approval that
+-- outlives the process was given without the context that produced it.
+-- A reminder is the opposite: if a restart loses it, it was never a
+-- reminder.
+--
+-- `kind` and `payload` carry defaults and exist so that recurring
+-- routines — the next thing built on this — need no ALTER. `due_utc` is
+-- what fires it; `due_local` and `tz` are what she reads back, kept
+-- alongside so a timezone change cannot silently rewrite either.
+CREATE TABLE IF NOT EXISTS rappels (
+  id           TEXT PRIMARY KEY,   -- also the action_log request_id
+  created_utc  TEXT NOT NULL,
+  origin       TEXT,               -- voix / chat / fichier
+  kind         TEXT NOT NULL DEFAULT 'rappel',
+  texte        TEXT NOT NULL,      -- said aloud, so kept in the user's words
+  payload      TEXT NOT NULL DEFAULT '{}',
+  due_utc      TEXT NOT NULL,
+  due_local    TEXT NOT NULL,
+  tz           TEXT NOT NULL,
+  query        TEXT,               -- redacted, like the ledger's
+  etat         TEXT NOT NULL,      -- prévu / fini / annulé
+  attempts     INTEGER NOT NULL DEFAULT 0,
+  last_try_utc TEXT,
+  said_utc     TEXT                -- non-NULL once actually spoken
+);
+
+CREATE INDEX IF NOT EXISTS idx_rappels_due ON rappels(etat, due_utc);
 
 -- Conversation summaries for diary/memory system
 CREATE TABLE IF NOT EXISTS conversation_summaries (
@@ -260,6 +291,125 @@ class Database:
         with self._lock:
             self.conn.execute("DELETE FROM action_log")
             self.conn.commit()
+
+    # ── Reminders ─────────────────────────────────────────────────────
+    #
+    # Two processes open this file — the daemon and the memory viewer —
+    # on a WAL database opened without a busy timeout, so a write can
+    # lose a race it would win a moment later. Each one retries once.
+
+    ETAT_PENDING = "prévu"
+    ETAT_DONE = "fini"
+    ETAT_CANCELLED = "annulé"
+
+    def _write(self, sql: str, params: tuple) -> int:
+        """Run one write, retrying once if the file was momentarily busy."""
+        import time as _time
+
+        for attempt in (0, 1):
+            try:
+                with self._lock:
+                    cur = self.conn.execute(sql, params)
+                    self.conn.commit()
+                    return cur.rowcount
+            except sqlite3.OperationalError as e:
+                if "locked" not in str(e).lower() or attempt:
+                    raise
+                debug_log("database busy, retrying once", "jarvis")
+                _time.sleep(0.1)
+        return 0
+
+    def add_rappel(
+        self, *, texte: str, due_utc: str, due_local: str, tz: str,
+        origin: Optional[str] = None, query: Optional[str] = None,
+        kind: str = "rappel", payload: Optional[dict] = None,
+    ) -> str:
+        """Record one promise. Returns its id, which is also its ledger key.
+
+        ``texte`` is kept as the user said it, because it is read back
+        aloud — redacting it would have her say a placeholder to their
+        face. ``query`` is redacted, like the ledger's, because it is
+        bookkeeping rather than speech.
+        """
+        import json
+        import uuid
+
+        from ..utils.redact import redact
+
+        rid = uuid.uuid4().hex
+        self._write(
+            "INSERT INTO rappels "
+            "(id, created_utc, origin, kind, texte, payload, due_utc, "
+            " due_local, tz, query, etat) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                rid, datetime.now(timezone.utc).isoformat(), origin, kind,
+                texte, json.dumps(payload or {}, ensure_ascii=False),
+                due_utc, due_local, tz,
+                redact(query) if query else None, self.ETAT_PENDING,
+            ),
+        )
+        return rid
+
+    def due_rappels(self, now_utc: str, limit: int = 20) -> list:
+        """Promises owed at ``now_utc``, oldest first."""
+        with self._lock:
+            cur = self.conn.execute(
+                "SELECT * FROM rappels WHERE etat = ? AND due_utc <= ? "
+                "ORDER BY due_utc ASC LIMIT ?",
+                (self.ETAT_PENDING, now_utc, int(limit)),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+    def pending_rappels(self) -> list:
+        """Everything still owed, soonest first — what the user is shown."""
+        with self._lock:
+            cur = self.conn.execute(
+                "SELECT * FROM rappels WHERE etat = ? ORDER BY due_utc ASC",
+                (self.ETAT_PENDING,),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+    def all_rappels(self, limit: int = 200) -> list:
+        with self._lock:
+            cur = self.conn.execute(
+                "SELECT * FROM rappels ORDER BY due_utc DESC LIMIT ?", (int(limit),),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+    def mark_rappel_tried(self, rappel_id: str, now_utc: str) -> None:
+        """One more attempt at delivering it. Bounds a failing loop."""
+        self._write(
+            "UPDATE rappels SET attempts = attempts + 1, last_try_utc = ? "
+            "WHERE id = ?",
+            (now_utc, rappel_id),
+        )
+
+    def settle_rappel(self, rappel_id: str, *, said_utc: str) -> None:
+        """It was actually said. Only delivery settles a promise."""
+        self._write(
+            "UPDATE rappels SET etat = ?, said_utc = ? WHERE id = ?",
+            (self.ETAT_DONE, said_utc, rappel_id),
+        )
+
+    def cancel_rappel(self, rappel_id: str) -> bool:
+        """The user does not want it any more. Returns whether one matched."""
+        return self._write(
+            "UPDATE rappels SET etat = ? WHERE id = ? AND etat = ?",
+            (self.ETAT_CANCELLED, rappel_id, self.ETAT_PENDING),
+        ) > 0
+
+    def prune_rappels(self, max_age_days: int = 90) -> int:
+        """Drop old settled and cancelled ones.
+
+        Never anything still owed, however old: pruning a promise is
+        losing it, and a reminder set for next year is still a promise.
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+        return self._write(
+            "DELETE FROM rappels WHERE etat != ? AND created_utc < ?",
+            (self.ETAT_PENDING, cutoff),
+        )
 
     
 
