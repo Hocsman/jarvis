@@ -195,6 +195,16 @@ Every distinct LLM call in Jarvis, what feeds it, what consumes it, and how it i
 - **Output**: one JSON object, three kinds. `relative` returns the units it was given (`{"minutes": 20}`) and never a timestamp — the caller does the arithmetic, because a small model that cannot add twenty minutes to 12:47 can still copy the number 20. `absolute` returns `date` and/or `time`, and an omitted field is the statement: a day with no hour means the caller applies `reminder_default_hour` and says so aloud. `none` means nothing was asked for.
 - **Limits**: `reminder_timeout_sec` (default 8 s, clamped 2–30). **Never invents**: a timeout, an exception, an unknown kind, an unparseable date, an instant in the past, one beyond 400 days, an empty subject or one carrying a redaction placeholder all raise with their reason, which is then spoken. That last guard is sharper here than on the core — a placeholder stored as a fact is merely useless, while one in a reminder is read aloud twenty minutes later.
 
+## 17. Routine recurrence extractor (turns "every Monday morning" into a rule)
+
+- **File**: [src/jarvis/routines/extract.py](src/jarvis/routines/extract.py) — `extract_routine_rule()`.
+- **Trigger**: inside `setRoutine`, once per call. Nowhere else.
+- **Model**: the same chain and the same pin as #16 (`reminder_model → tool_router_model → intent_judge_model → cfg.llm_chat_model`), because this prompt carries the same thing — the user's own sentence about their own life — and one privacy decision beats two things to get wrong.
+- **Inputs**: the reference moment and the user's utterance, fenced as data.
+- **System prompt**: `_EXTRACT_SYSTEM` in the same file. Names no day, no month, no adverb, in any language, and carries no worked example. States the weekday convention explicitly (0 = the first day of the working week): leaving it implicit is how a Monday routine runs on Sunday.
+- **Output**: `daily` or `weekly` with a wall-clock hour, or `none`. Never a cron expression — a model can be subtly wrong about one in a way nobody notices until a routine fires at 3am on the 31st, and this runs while the user is asleep. **There is deliberately no shape finer than a day**: a routine that fires on a tick empties a rate limit and a wallet overnight, so the vocabulary cannot express it.
+- **Limits**: `reminder_timeout_sec`. Refuses rather than guessing — an unknown kind, an hour out of range, a weekly rule with no day, an empty subject, a redaction placeholder, a timeout. That last guard bites hardest here: a placeholder in a routine's sentence is replayed to the model every single morning.
+
 ---
 
 ## Frequency / Size Summary
@@ -218,6 +228,7 @@ Every distinct LLM call in Jarvis, what feeds it, what consumes it, and how it i
 | 14 | Tool-specific | per-tool | n/a | LARGE |
 | 15 | Approval judge | 0-1 | only after a `parole` question | SMALL (via router chain) |
 | 16 | Reminder time extractor | 0-1 | only inside setReminder | SMALL (via router chain) |
+| 17 | Routine recurrence extractor | 0-1 | only inside setRoutine | SMALL (reuses #16's chain) |
 
 ## Size-aware auto switches
 

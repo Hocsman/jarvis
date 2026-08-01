@@ -70,6 +70,8 @@ _CALLER_TO_CONTEXT: dict[str, str] = {
     "read_approval": "confirmation_judge",
     # Context 16 — turning a spoken time into an instant
     "extract_reminder_time": "reminder_extract",
+    # Context 17 — reading a recurrence rule
+    "extract_routine_rule": "routine_extract",
 }
 
 
