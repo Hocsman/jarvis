@@ -17,6 +17,12 @@ from ..types import ToolExecutionResult
 class RememberTool(Tool):
     """Record a fact about the user, or a rule they want followed."""
 
+    # Writes Yuba's own state. The risk below stays `lecture`
+    # because an attended turn is correctable in the next breath;
+    # this carries what that reasoning assumes, for a caller running
+    # with nobody there to correct anything.
+    writes_own_state = True
+
     def risk_for(self, args):
         """Writes, but only into Yuba's own files and database: text the
         user can reopen and correct by hand, never their machine and

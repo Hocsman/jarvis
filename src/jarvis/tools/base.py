@@ -52,6 +52,28 @@ class Tool(ABC):
             prompts, redacted_text, retry allowance, and a user_print callable.
     """
 
+    # Whether running this writes Yuba's own state — the core files, the
+    # meals log, the reminders table.
+    #
+    # A second axis, not a louder risk. Four tools return ``lecture``
+    # from ``risk_for`` and all justify it the same way: they write only
+    # into files the user can reopen and correct by hand. That reasoning
+    # is sound and depends entirely on someone being there. At 14:00 a
+    # wrong entry is visible in the reply and correctable in the next
+    # breath; at 07:00 nobody reopens anything, and an unattended write
+    # to the core would put a sentence into every later prompt with no
+    # turn in which it was ever seen.
+    #
+    # So the risk stays where it is — raising it would make her ask
+    # permission to write down what she was just asked to write down —
+    # and this carries what that justification assumes, for callers that
+    # run without a user present.
+    #
+    # Defaults to False, the opposite of ``risk_for``'s default and right
+    # for the opposite reason: over-claiming here would stop a routine
+    # reading something harmless.
+    writes_own_state: bool = False
+
     @property
     @abstractmethod
     def name(self) -> str:
