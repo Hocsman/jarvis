@@ -141,3 +141,37 @@ def test_the_new_slices_are_whole_thoughts(name):
     seen = _seen(name)
 
     assert seen.rstrip().endswith(".")
+
+
+# ── The three tools that share a temporal vocabulary ─────────────────
+
+
+def test_the_router_sees_that_set_goal_is_not_the_other_two():
+    """`setGoal`, `setReminder` and `setRoutine` share a prefix and much
+    of their vocabulary. Past the cut, the discrimination is invisible
+    exactly where it is needed."""
+    seen = _seen("setGoal").lower()
+
+    assert "setreminder" in seen and "setroutine" in seen
+
+
+@pytest.mark.parametrize("name", ["setGoal", "noteGoal", "closeGoal", "listGoals"])
+def test_each_goal_tool_says_what_it_does_not_do(name):
+    """They differ by one verb each on the same object, which is the
+    shape a router confuses most."""
+    assert "never" in _seen(name).lower()
+
+
+@pytest.mark.parametrize("name", ["setGoal", "noteGoal", "closeGoal", "listGoals"])
+def test_the_goal_slices_are_whole_thoughts(name):
+    assert _seen(name).rstrip().endswith(".")
+
+
+@pytest.mark.parametrize("name", ["setGoal", "noteGoal", "closeGoal", "listGoals"])
+def test_the_whole_goal_description_survives_the_cut(name):
+    """Four tools differing by one verb each on the same object, which is
+    the shape a router confuses most. Whatever is past 200 characters
+    does not exist as far as it is concerned, so nothing here may be."""
+    from src.jarvis.tools.registry import BUILTIN_TOOLS
+
+    assert _seen(name) == BUILTIN_TOOLS[name].description

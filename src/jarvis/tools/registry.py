@@ -24,6 +24,12 @@ from .builtin.forget import ForgetTool
 from .builtin.set_reminder import SetReminderTool
 from .builtin.set_routine import SetRoutineTool
 from .builtin.cancel_routine import CancelRoutineTool
+from .builtin.goals import (
+    CloseGoalTool,
+    ListGoalsTool,
+    NoteGoalTool,
+    SetGoalTool,
+)
 from .builtin.stop import StopTool
 from .builtin.tool_search import ToolSearchTool
 from .types import ToolExecutionResult
@@ -48,6 +54,10 @@ BUILTIN_TOOLS = {
     "setReminder": SetReminderTool(),
     "setRoutine": SetRoutineTool(),
     "cancelRoutine": CancelRoutineTool(),
+    "setGoal": SetGoalTool(),
+    "noteGoal": NoteGoalTool(),
+    "closeGoal": CloseGoalTool(),
+    "listGoals": ListGoalsTool(),
     "stop": StopTool(),
     "toolSearchTool": ToolSearchTool(),
 }

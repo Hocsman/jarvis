@@ -30,7 +30,7 @@ from src.jarvis.tools.registry import BUILTIN_TOOLS
 
 @pytest.mark.parametrize("name", [
     "remember", "forget", "setReminder", "logMeal", "setRoutine",
-    "cancelRoutine",
+    "cancelRoutine", "setGoal", "noteGoal", "closeGoal", "listGoals",
 ])
 def test_a_tool_that_writes_yubas_state_says_so(name):
     assert BUILTIN_TOOLS[name].writes_own_state is True
@@ -38,12 +38,24 @@ def test_a_tool_that_writes_yubas_state_says_so(name):
 
 @pytest.mark.parametrize("name", [
     "remember", "forget", "setReminder", "logMeal", "cancelRoutine",
+    "listGoals",
 ])
 def test_and_still_counts_as_reading(name):
     """Raising the risk would make her ask permission to write down what
     she was just asked to write down. The flag is a second axis, not a
     louder risk."""
     assert BUILTIN_TOOLS[name].risk_for({}) == RISK_READ
+
+
+@pytest.mark.parametrize("name", ["setGoal", "noteGoal", "closeGoal"])
+def test_writing_a_goal_is_not_a_read_either(name):
+    """Same reasoning as `setRoutine`, one level down: as `lecture` these
+    would be `libre`, and a fetched page carrying "Note pour l'objectif
+    X : …" would write a durable line attributed to the user which she
+    then reads back to him as a fact about his life."""
+    from src.jarvis.tools.policy import RISK_ACTION
+
+    assert BUILTIN_TOOLS[name].risk_for({}) == RISK_ACTION
 
 
 def test_the_one_that_does_not_count_as_reading():

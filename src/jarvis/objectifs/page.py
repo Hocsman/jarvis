@@ -430,3 +430,23 @@ def close_objectif(cfg, nom: str, valeur: str) -> bool:
 def ouverts(cfg) -> List[Objectif]:
     """The goals still going, in the order the file lists them."""
     return [o for o in load_objectifs(cfg).values() if o.est_ouvert]
+
+
+def resolve(cfg, nom: str) -> Optional[Objectif]:
+    """The goal a name refers to, or None.
+
+    A name already in the file is an identity and is taken as written —
+    the sanitiser exists to clean a name on its way *into* the file, and
+    putting an existing heading through it makes a tool refuse names it
+    wrote itself.
+
+    With no name given and exactly one goal open, that is the one meant.
+    With several, nothing is guessed: picking the wrong goal writes a
+    fact about the wrong thing, under his name.
+    """
+    blocs = load_objectifs(cfg)
+    nom = (nom or "").strip()
+    if nom:
+        return blocs.get(nom)
+    encore = ouverts(cfg)
+    return encore[0] if len(encore) == 1 else None
