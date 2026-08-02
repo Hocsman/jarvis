@@ -313,6 +313,21 @@ class MockConfig:
     # file. The key is never written to disk or printed by the suite.
     llm_api_key: str = os.environ.get(EVAL_LLM_API_KEY_ENV, "") if EVAL_LLM_API_KEY_ENV else ""
     llm_chat_model: str = JUDGE_MODEL
+    # The small chain follows the suite's model, rather than falling
+    # through to `Settings`' Ollama defaults.
+    #
+    # It did fall through, and the cost was invisible: `intent_judge_model`
+    # defaulted to `gemma4:e2b`, `resolve_tool_router_model` resolved to
+    # it, and OpenRouter answered "gemma4:e2b is not a valid model ID" on
+    # every routing call. `select_tools` fails open, so every eval run
+    # against a remote provider was silently exercising the fall-open
+    # path — "20 selected" is the whole catalogue, not a routing
+    # decision — while appearing to pass. A suite that measures routing
+    # has to actually route.
+    intent_judge_model: str = JUDGE_MODEL
+    tool_router_model: str = JUDGE_MODEL
+    reminder_model: str = JUDGE_MODEL
+    confirmation_model: str = JUDGE_MODEL
     ollama_embed_model: str = "nomic-embed-text"
     db_path: str = ":memory:"
     sqlite_vss_path: Optional[str] = None

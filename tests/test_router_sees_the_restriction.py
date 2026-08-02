@@ -147,12 +147,11 @@ def test_the_new_slices_are_whole_thoughts(name):
 
 
 def test_the_router_sees_that_a_goal_is_not_a_fact():
-    """Measured in production, not guessed: "garde une trace de ça : je
-    prépare l'entretien chez Datadog, ce sera bon quand…" routed to
-    `remember`, whose slice carries the phrasings a person actually uses
-    while this one described in the abstract. The discriminator is the
-    ending — a goal is worked towards until it is done, a fact about the
-    user simply holds."""
+    """`setGoal` and `remember` compete for the same sentences: "garde
+    une trace de ça : je prépare l'entretien, ce sera bon quand…" is
+    exactly what `remember`'s own slice teaches ('note that I…'). The
+    discriminator is the ending — a goal is worked towards until it is
+    done, a fact about the user simply holds."""
     seen = _seen("setGoal").lower()
 
     assert "remember" in seen
@@ -166,8 +165,7 @@ def test_each_goal_tool_says_what_it_does_not_do(name):
 
     `setGoal` is absent: its 200 characters are spent on the collision
     that actually bites, which is with `remember` rather than with its
-    three siblings. Measured — see the xfail on
-    evals/test_a_goal_is_his_not_hers.py."""
+    three siblings."""
     assert "never" in _seen(name).lower()
 
 

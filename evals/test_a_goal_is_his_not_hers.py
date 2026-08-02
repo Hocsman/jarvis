@@ -75,24 +75,8 @@ def _page(mock_config):
 
 @pytest.mark.eval
 @requires_judge_llm
-@pytest.mark.xfail(
-    reason=(
-        "The tool router does not offer setGoal for any phrasing measured: "
-        "'garde une trace de ça', 'je veux suivre un objectif' and two "
-        "rewritten descriptions all routed to `remember` on "
-        "openai/gpt-oss-120b. The discrimination cannot be added where the "
-        "router would read it either — `remember`'s own slice already fills "
-        "the 200 characters it is shown, ending mid-example. This is a "
-        "routing problem, not a goals problem: every behaviour below is "
-        "covered by unit tests against the tools directly. Kept red on "
-        "purpose so it turns green the day the entry point is solved."
-    ),
-    strict=False,
-)
 class TestAGoalIsHisNotHers:
 
-    # Deliberately not "garde une trace de ça", which is measured
-    # separately below and does not reach this tool at all.
     POSE = ("Jarvis, je veux suivre un objectif : préparer l'entretien chez "
             "Datadog. Ce sera fini quand l'entretien est passé et que j'ai "
             "eu leur retour.")
@@ -204,4 +188,44 @@ class TestAGoalIsHisNotHers:
 
         assert "exercice" in response.lower(), (
             f"She did not say where he stands: {response!r}"
+        )
+
+
+@pytest.mark.eval
+@requires_judge_llm
+class TestTheEntryPhraseStillCollidesWithRemember:
+    """"Garde une trace de ça" is what a person actually says.
+
+    It is also what `remember`'s own description teaches the model to
+    answer ('remember that…', 'note that I…'), and the collision survives
+    both a rewritten `setGoal` slice and a working router: the goal is
+    created, but the ending condition lands as a stored fact rather than
+    in `fini quand`, and the follow-up notes go to `remember` too.
+
+    Marked xfail because the fix touches `remember`'s description, which
+    is pinned by an eval that exists because of a production incident,
+    and that is a change to make with its own measurements rather than as
+    a side effect of this one.
+    """
+
+    NATUREL = ("Jarvis, garde une trace de ça : je prépare l'entretien chez "
+               "Datadog. Ce sera bon quand l'entretien est passé et que j'ai "
+               "eu leur retour.")
+
+    @pytest.mark.xfail(
+        reason="'garde une trace de ça' is remember's own phrasing",
+        strict=False,
+    )
+    def test_the_ending_condition_survives_the_natural_phrasing(
+        self, mock_config, eval_db, eval_dialogue_memory, tmp_path,
+    ):
+        _setup(mock_config, tmp_path)
+
+        _ask(mock_config, eval_db, eval_dialogue_memory, self.NATUREL)
+
+        goals = _goals(mock_config)
+        assert goals, "no goal was created"
+        fini = next(iter(goals.values())).fini_quand.lower()
+        assert "retour" in fini or "entretien" in fini, (
+            f"What counts as done was lost on the way: {fini!r}"
         )
