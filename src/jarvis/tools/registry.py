@@ -22,6 +22,8 @@ from .builtin.weather import WeatherTool
 from .builtin.remember import RememberTool
 from .builtin.forget import ForgetTool
 from .builtin.set_reminder import SetReminderTool
+from .builtin.set_routine import SetRoutineTool
+from .builtin.cancel_routine import CancelRoutineTool
 from .builtin.stop import StopTool
 from .builtin.tool_search import ToolSearchTool
 from .types import ToolExecutionResult
@@ -44,6 +46,8 @@ BUILTIN_TOOLS = {
     "remember": RememberTool(),
     "forget": ForgetTool(),
     "setReminder": SetReminderTool(),
+    "setRoutine": SetRoutineTool(),
+    "cancelRoutine": CancelRoutineTool(),
     "stop": StopTool(),
     "toolSearchTool": ToolSearchTool(),
 }
@@ -779,6 +783,7 @@ def run_tool_with_retries(
             max_retries=max_retries,
             user_print=_user_print,
             language=language,
+            origin=origin,
         ))
 
     # Unknown tool

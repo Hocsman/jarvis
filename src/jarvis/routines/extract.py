@@ -22,7 +22,8 @@ own sentence about their own life just as that one does.
 from __future__ import annotations
 
 import json
-from typing import Optional, Tuple
+from dataclasses import dataclass
+from typing import Optional
 
 from ..debug import debug_log
 from ..reminders.extract import (
@@ -66,6 +67,21 @@ _EXTRACT_SYSTEM = (
 )
 
 
+@dataclass(frozen=True)
+class Lecture:
+    """What one sentence turned out to say.
+
+    ``heure_supposee`` travels because the caller has to say it out loud.
+    A rhythm named with no time of day gets one filled in, and for a
+    routine that is a claim about every morning from now on — the user
+    must hear which hour was chosen while they are still standing there.
+    """
+
+    regle: Regle
+    quoi: str
+    heure_supposee: bool
+
+
 def _resolve_model(cfg) -> str:
     """The same chain, and the same pin, as the reminder extractor."""
     return _resolve_reminder_model(cfg)
@@ -84,7 +100,7 @@ def _ask_model(cfg, system: str, user: str, timeout_sec: float) -> Optional[str]
     return (response.get("message") or {}).get("content")
 
 
-def extract_routine_rule(cfg, utterance: str) -> Tuple[Regle, str]:
+def extract_routine_rule(cfg, utterance: str) -> Lecture:
     """Read the repeating schedule a sentence asks for.
 
     Raises ``ExtractionFailed`` rather than guessing. A routine placed at
@@ -116,6 +132,7 @@ def extract_routine_rule(cfg, utterance: str) -> Tuple[Regle, str]:
 
     # An omitted hour is the statement, as with a reminder: they named a
     # rhythm and no time, so the caller fills one in and says so.
+    heure_supposee = parsed.get("hour") is None
     payload = {
         "kind": parsed.get("kind"),
         "hour": parsed.get("hour", default_hour),
@@ -141,4 +158,4 @@ def extract_routine_rule(cfg, utterance: str) -> Tuple[Regle, str]:
         raise ExtractionFailed("le texte contenait une valeur masquée")
 
     debug_log(f"    🔁 routine read as {rule} — {what}", "tools")
-    return rule, what
+    return Lecture(regle=rule, quoi=what, heure_supposee=heure_supposee)

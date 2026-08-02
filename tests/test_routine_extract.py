@@ -48,19 +48,19 @@ def _extract(utterance="peu importe"):
 def test_a_daily_rule_is_read():
     with _answering({"kind": "daily", "hour": 7, "minute": 0,
                      "what": "résumer les mails"}):
-        rule, what = _extract("tous les matins à 7h, résume-moi mes mails")
+        lecture = _extract("tous les matins à 7h, résume-moi mes mails")
 
-    assert (rule.kind, rule.hour, rule.minute) == ("daily", 7, 0)
-    assert what == "résumer les mails"
+    assert (lecture.regle.kind, lecture.regle.hour, lecture.regle.minute) == ("daily", 7, 0)
+    assert lecture.quoi == "résumer les mails"
 
 
 def test_a_daily_rule_with_no_hour_takes_the_default():
     """Same reasoning as a reminder: an omitted field is the statement,
     and the caller says out loud what it filled in."""
     with _answering({"kind": "daily", "what": "x"}):
-        rule, _ = _extract("tous les matins")
+        lecture = _extract("tous les matins")
 
-    assert rule.hour == _Cfg.reminder_default_hour
+    assert lecture.regle.hour == _Cfg.reminder_default_hour
 
 
 # ── Weekly ────────────────────────────────────────────────────────────
@@ -69,9 +69,9 @@ def test_a_daily_rule_with_no_hour_takes_the_default():
 def test_a_weekly_rule_carries_its_day():
     with _answering({"kind": "weekly", "weekday": 0, "hour": 9, "minute": 0,
                      "what": "faire le point"}):
-        rule, _ = _extract("tous les lundis à 9h")
+        lecture = _extract("tous les lundis à 9h")
 
-    assert (rule.kind, rule.weekday, rule.hour) == ("weekly", 0, 9)
+    assert (lecture.regle.kind, lecture.regle.weekday, lecture.regle.hour) == ("weekly", 0, 9)
 
 
 def test_a_weekly_rule_without_a_day_is_refused():
@@ -197,3 +197,24 @@ def test_it_uses_the_reminder_model_chain():
     from src.jarvis.routines.extract import _resolve_model
 
     assert _resolve_model(_Cfg()) == _resolve_reminder_model(_Cfg())
+
+
+# ── An hour nobody said ───────────────────────────────────────────────
+
+
+def test_it_says_when_it_filled_the_hour_in_itself():
+    """The caller has to say this out loud. A rhythm named with no time
+    gets one chosen for it, and for a routine that is a claim about every
+    morning from now on — the user must hear which hour while they are
+    still standing there to correct it."""
+    with _answering({"kind": "daily", "what": "x"}):
+        lecture = _extract("tous les matins")
+
+    assert lecture.heure_supposee is True
+
+
+def test_an_hour_the_user_gave_is_not_reported_as_supposed():
+    with _answering({"kind": "daily", "hour": 7, "minute": 0, "what": "x"}):
+        lecture = _extract("tous les matins à 7h")
+
+    assert lecture.heure_supposee is False

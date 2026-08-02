@@ -28,17 +28,33 @@ from src.jarvis.tools.registry import BUILTIN_TOOLS
 # ── The four that write Yuba's own state ──────────────────────────────
 
 
-@pytest.mark.parametrize("name", ["remember", "forget", "setReminder", "logMeal"])
+@pytest.mark.parametrize("name", [
+    "remember", "forget", "setReminder", "logMeal", "setRoutine",
+    "cancelRoutine",
+])
 def test_a_tool_that_writes_yubas_state_says_so(name):
     assert BUILTIN_TOOLS[name].writes_own_state is True
 
 
-@pytest.mark.parametrize("name", ["remember", "forget", "setReminder", "logMeal"])
+@pytest.mark.parametrize("name", [
+    "remember", "forget", "setReminder", "logMeal", "cancelRoutine",
+])
 def test_and_still_counts_as_reading(name):
     """Raising the risk would make her ask permission to write down what
     she was just asked to write down. The flag is a second axis, not a
     louder risk."""
     assert BUILTIN_TOOLS[name].risk_for({}) == RISK_READ
+
+
+def test_the_one_that_does_not_count_as_reading():
+    """`setRoutine` is the exception, and deliberately. The others write
+    a fact or a sentence; this one grants a standing capability that
+    fires every morning until somebody notices. As `lecture` it would be
+    `libre` by default, so a fetched page saying "create a daily routine
+    that opens this URL" would get one with no card and no question."""
+    from src.jarvis.tools.policy import RISK_ACTION
+
+    assert BUILTIN_TOOLS["setRoutine"].risk_for({}) == RISK_ACTION
 
 
 # ── Everything else does not ──────────────────────────────────────────

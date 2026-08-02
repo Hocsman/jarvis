@@ -90,3 +90,35 @@ def test_no_tool_is_described_to_the_router_mid_word(name: str):
     assert seen.rstrip().endswith((".", "!", "?")), (
         f"{name}: the router reads …{seen[-50:]!r}, which stops mid-thought"
     )
+
+
+# ── The two temporal tools, which share a prefix and a vocabulary ─────
+
+
+def test_the_router_sees_that_set_routine_is_for_repeating_things():
+    """`setRoutine` and `setReminder` share the `set` prefix and the
+    whole temporal vocabulary. Past the cut, the discrimination is
+    invisible exactly where it is needed."""
+    seen = _seen("setRoutine").lower()
+
+    assert "every day" in seen or "every week" in seen
+
+
+def test_the_router_sees_that_set_routine_is_not_set_reminder():
+    """The wrong one of the two is not a near-miss: one says a sentence
+    once, the other grants a standing capability that fires every
+    morning."""
+    assert "setreminder" in _seen("setRoutine").lower()
+
+
+def test_the_router_sees_that_cancel_routine_does_not_create():
+    seen = _seen("cancelRoutine").lower()
+
+    assert "stop" in seen or "remove" in seen
+
+
+@pytest.mark.parametrize("name", ["setRoutine", "cancelRoutine"])
+def test_the_new_slices_are_whole_thoughts(name):
+    seen = _seen(name)
+
+    assert seen.rstrip().endswith(".")

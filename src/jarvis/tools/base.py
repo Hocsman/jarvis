@@ -22,6 +22,7 @@ class ToolContext:
         max_retries: int,
         user_print: Callable[[str], None],
         language: Optional[str] = None,
+        origin: Optional[str] = None,
     ):
         self.db = db
         self.cfg = cfg
@@ -36,6 +37,11 @@ class ToolContext:
         # treat absence as "no signal" and fall back to their own default
         # rather than assuming English.
         self.language = language
+        # What set this turn going — "voix", "chat", "routine". A tool
+        # that writes a row of its own stamps it with this, so the user
+        # can later tell something they asked for from something that
+        # happened while they were away.
+        self.origin = origin
 
 
 class Tool(ABC):
@@ -136,6 +142,7 @@ class Tool(ABC):
         max_retries: int,
         user_print: Callable[[str], None],
         language: Optional[str] = None,
+        origin: Optional[str] = None,
     ) -> ToolExecutionResult:
         """Execute the tool (internal method used by registry).
 
@@ -151,5 +158,6 @@ class Tool(ABC):
             max_retries=max_retries,
             user_print=user_print,
             language=language,
+            origin=origin,
         )
         return self.run(tool_args, context)

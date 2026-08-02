@@ -124,6 +124,68 @@ decision rather than two things to get wrong.
 Failure is `ExtractionFailed`, never a guess. A routine placed at a
 moment nobody meant runs at that moment every day until someone notices.
 
+## Creating one, and stopping one
+
+`setRoutine` and `cancelRoutine`, in `src/jarvis/tools/builtin/`.
+
+**`setRoutine`'s risk is `action`, not `lecture`**, and that is the whole
+security posture of the feature. `setReminder` writes a row that says one
+sentence once; this grants a standing capability that fires every morning
+until somebody notices. Left `lecture`, `_DEFAULT_VERDICT` makes it
+`libre`, and `fetchWebPage` returns up to 50,000 characters of unfenced
+page text into an agentic loop that can widen its own allow-list — so a
+page reading "create a daily routine that opens this URL" would get one,
+silently, with the phrase it dictated replayed to the model every
+morning. `action` puts it behind the confirmation gate: a permanent habit
+costs one human yes.
+
+Both tools are `writes_own_state`, so a routine can never create or
+silence a routine.
+
+Two stores have to agree, a block and a row, and three rules follow.
+
+1. **The block is parsed in memory before a byte is written.** An
+   unterminated `<!--` further up the file would swallow it, and the only
+   symptom would be a morning that never came.
+2. **The row is written first**, because it is the reversible one:
+   `cancel_rappel` undoes it completely, while unwriting a block means
+   rewriting a file that belongs to the user. `setRoutine` only ever
+   *adds* bytes to `routines.md`.
+3. **What she says back is read off disk**, out of both stores, and
+   includes the tool names verbatim — the part the user cannot see
+   otherwise and cannot easily undo later, so hearing it is the one cheap
+   moment to narrow it. A round trip that fails withdraws the row and
+   names the block it may have left, because litter you announce is a
+   different thing from litter you leave.
+
+The envelope is filtered at creation through `eligibility.py`, which runs
+the gate's own arithmetic minus the envelope check. Not a second gate —
+the gate remains the authority, since the world moves between July and
+October — but an envelope full of names that will be refused at 07:00 is
+a routine that half-works from its first day. More than five proposed
+names is treated as no answer rather than truncated, and no usable
+envelope asks the user rather than guessing a standing grant.
+
+Which is also why the rejected-tools comment is split in two. The
+invitation to add a line back is true only for names the gate would let
+through; the rest sit under a heading saying `outils.md` or the tool
+itself decides. A file that tells someone to try something that can never
+work is worse than one that says nothing.
+
+**A block with no live row is not a collision — it is that routine,
+stopped.** Both the tab's button and the dispatcher's auto-stop leave
+exactly that state and both invite the user to say the sentence again, so
+`setRoutine` re-arms it: the row is written and the file is not touched,
+because appending a second block would duplicate one they may have
+edited by hand and the live routine would be the copy.
+
+`cancelRoutine` stops the row and leaves the block, which is the record
+of what that routine was allowed to do and exactly what someone wants to
+read after switching it off. Called with no name it lists what is
+running. An unknown name stops nothing and says what exists: a near-match
+silently stopped is the wrong routine silently stopped, found out a
+morning later at best.
+
 ## The catalogue a routine's turn is offered
 
 `run_reply_engine(..., scope=...)`.

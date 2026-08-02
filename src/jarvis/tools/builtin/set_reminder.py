@@ -127,7 +127,7 @@ class SetReminderTool(Tool):
             due_utc=due_utc,
             due_local=reading.due_local.strftime("%Y-%m-%dT%H:%M"),
             tz=tz,
-            origin=getattr(context, "origin", None),
+            origin=context.origin,
             query=utterance,
         )
 

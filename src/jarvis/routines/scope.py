@@ -209,6 +209,17 @@ def load_routines(cfg) -> Dict[str, RoutineBlock]:
     return blocks
 
 
+def invalidate_routines_cache() -> None:
+    """Forget the mtime stamp.
+
+    `load_routines` keys on `st_mtime_ns` alone, and a write followed by
+    a read inside the same filesystem tick is indistinguishable from no
+    write at all. A routine created and immediately read back would come
+    back as the file was a moment before it existed.
+    """
+    _CACHE["stamp"], _CACHE["blocks"] = None, None
+
+
 def scope_for(cfg, nom: str) -> Optional[RoutineScope]:
     """The envelope for one routine, or None if it has no block.
 
@@ -244,7 +255,8 @@ _HEADER = (
 
 
 def render_block(*, nom: str, phrase: str, quand: str, outils: List[str],
-                 ecartes: Optional[List[Tuple[str, str]]] = None) -> str:
+                 ecartes: Optional[List[Tuple[str, str]]] = None,
+                 impossibles: Optional[List[Tuple[str, str]]] = None) -> str:
     """Write one block, including what was left out and why.
 
     The rejected tools are named as a comment, so the user can put one
@@ -252,22 +264,38 @@ def render_block(*, nom: str, phrase: str, quand: str, outils: List[str],
     quietly does nothing for a week. A comment, because a rejected tool
     that parsed back as an allowed one would be the worst possible
     outcome of explaining yourself.
+
+    Two lists, not one. `ecartes` are names adding a line would really
+    admit; `impossibles` are names no line will ever admit, because
+    `outils.md` or the tool itself decides. Inviting someone to add a
+    line that changes nothing is worse than saying nothing: they find out
+    at 07:00, and only if they read the journal.
     """
     # Filtered here rather than only at the call sites, so no future
     # caller can route round it.
     outils = [n for n in (outils or []) if _NOM_OUTIL.match(str(n))]
-    ecartes = [(n, w) for n, w in (ecartes or []) if _NOM_OUTIL.match(str(n))]
 
     lines = [f"## {nom}", f"phrase: {phrase}", f"quand: {quand}", "outils:"]
     lines.extend(f"- {name}" for name in outils)
     if not outils:
         lines.append("<!-- vide : cette routine ne peut rien atteindre -->")
+    ecartes = [(n, w) for n, w in (ecartes or []) if _NOM_OUTIL.match(str(n))]
+    impossibles = [(n, w) for n, w in (impossibles or []) if _NOM_OUTIL.match(str(n))]
+
     if ecartes:
         lines.append("")
         lines.append("<!--")
-        lines.append("  Écartés du périmètre, avec la raison. Ajoute une ligne")
+        lines.append("  Hors du périmètre pour l'instant. Ajoute une ligne")
         lines.append("  « - nom » ci-dessus pour en autoriser un.")
         for name, why in ecartes:
+            lines.append(f"    {name} : {why}")
+        lines.append("-->")
+    if impossibles:
+        lines.append("")
+        lines.append("<!--")
+        lines.append("  Ceux-là, l'ajouter ici ne changerait rien : c'est")
+        lines.append("  outils.md, ou l'outil lui-même, qui refuse.")
+        for name, why in impossibles:
             lines.append(f"    {name} : {why}")
         lines.append("-->")
     return "\n".join(lines) + "\n"
