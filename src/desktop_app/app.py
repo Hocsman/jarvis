@@ -2340,33 +2340,55 @@ def _smoke_test_main() -> int:
     multiprocessing.freeze_support()
 
     # Ensure stdout/stderr use UTF-8.  PyInstaller GUI-subsystem executables
-    # (console=False) on Windows default to the ANSI code page when stdout is
-    # redirected, which cannot encode emoji and crashes on the first ✅ print.
-    if sys.platform == 'win32':
-        try:
-            import io
-            if hasattr(sys.stdout, 'buffer') and hasattr(sys.stdout.buffer, 'write'):
-                sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-            if hasattr(sys.stderr, 'buffer') and hasattr(sys.stderr.buffer, 'write'):
-                sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
-        except Exception:
-            pass
+    # (console=False) can attach an ANSI-code-page stdout (Windows) or even
+    # None when there is no console at all; the daemon prints emoji
+    # (✅, ✓, 🧠…), so a non-UTF-8 stream raises UnicodeEncodeError (or
+    # AttributeError when stdout is None) and the smoke test exits 1 before
+    # ever reaching the daemon.  Wrap in UTF-8 when a binary buffer is
+    # available and fall back to a sink so prints can never crash the test.
+    # Only wrap bundled (frozen) runs and Windows: a plain dev run already
+    # gets correct locale handling from Python, and pytest swaps in its own
+    # capture objects that must not be re-wrapped.
+    try:
+        import io
+        for _stream_name in ("stdout", "stderr"):
+            _stream = getattr(sys, _stream_name)
+            if _stream is None:
+                setattr(sys, _stream_name, io.StringIO())
+            elif (getattr(sys, "frozen", False) or sys.platform == "win32") \
+                    and hasattr(_stream, "buffer") and hasattr(_stream.buffer, "write"):
+                setattr(sys, _stream_name, io.TextIOWrapper(
+                    _stream.buffer, encoding="utf-8", errors="replace"))
+    except Exception:
+        pass
 
-    # Offscreen rendering when no display is available (Linux CI).
-    if sys.platform == 'linux' and not os.environ.get('DISPLAY'):
+    # The smoke test never renders UI, so force Qt's offscreen platform on
+    # Linux regardless of whether xvfb supplies a $DISPLAY.  This keeps the
+    # CI gate focused on "does the bundle start / do imports resolve" instead
+    # of depending on the xcb platform plugin and its X11 system libraries.
+    if sys.platform == 'linux':
         os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
-    from PyQt6.QtWidgets import QApplication
+    try:
+        from PyQt6.QtWidgets import QApplication
 
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication(sys.argv)
-    app.setQuitOnLastWindowClosed(False)
+        app = QApplication.instance()
+        if app is None:
+            app = QApplication(sys.argv)
+        app.setQuitOnLastWindowClosed(False)
+    except Exception as exc:
+        print(f"❌ Qt initialisation failed: {exc}", flush=True)
+        traceback.print_exc()
+        return 1
 
     print("✅ Qt initialised successfully", flush=True)
 
-    from jarvis.daemon import main as daemon_main
     try:
+        # Import inside the try so a missing/broken bundled dependency
+        # (e.g. a faster_whisper / ctranslate2 native lib) surfaces as a
+        # clean "Daemon initialisation failed" instead of an uncaught
+        # traceback with a mysterious exit code 1.
+        from jarvis.daemon import main as daemon_main
         daemon_main(smoke_test=True)
     except Exception as exc:
         print(f"❌ Daemon initialisation failed: {exc}", flush=True)
