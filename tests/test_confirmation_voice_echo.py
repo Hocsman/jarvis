@@ -24,7 +24,7 @@ from rapidfuzz import fuzz
 
 from src.jarvis.listening.echo_detection import EchoDetector
 from src.jarvis.tools.confirmation import SPOKEN_TEMPLATE, describe_action
-from src.jarvis.tools.policy import RISK_ACTION
+from src.jarvis.tools.policy import RISK_ACTION, RISK_DESTRUCTIVE, RISK_READ
 
 # Things a French speaker plausibly says when answering a request for
 # permission. Not a lexicon the code matches on — the judge reads the
@@ -105,3 +105,52 @@ def test_the_tool_name_reaches_the_question():
 def test_the_template_is_what_gets_spoken():
     assert describe_action("deleteMeal", {}, RISK_ACTION).spoken == \
         SPOKEN_TEMPLATE.format(tool="deleteMeal")
+
+
+# ── What she says when the name has to go ─────────────────────────────
+
+
+@pytest.mark.parametrize("risk", [RISK_READ, RISK_ACTION, RISK_DESTRUCTIVE])
+def test_the_risk_sentence_does_not_eat_its_own_answer(risk):
+    """Every longer wording measured for this collided with an answer of
+    its own: "consulter" carries "on" for "non", "qui agit sur ton
+    système" carries "ur" for "oui". A question that deletes the reply to
+    it is not a question, so each of these is measured rather than
+    trusted — a future rewording that starts eating answers fails here
+    instead of doing it silently at 07:00."""
+    from src.jarvis.tools.confirmation import (
+        SPOKEN_ANONYME_PAR_RISQUE, _would_swallow_the_answer,
+    )
+
+    assert not _would_swallow_the_answer(SPOKEN_ANONYME_PAR_RISQUE[risk])
+
+
+def test_a_name_that_would_eat_the_answer_leaves_the_risk_behind():
+    """`setRoutine` carries "ou", and a "Oui." transcribed with a full
+    stop scores 75 against the named sentence — over the echo threshold.
+    The name goes; what the user is approving must not go with it."""
+    from src.jarvis.tools.confirmation import describe_action
+
+    said = describe_action("setRoutine", {"routine": "x"}, RISK_ACTION).spoken
+
+    assert "setRoutine" not in said
+    assert "changer" in said
+
+
+def test_a_harmless_name_is_still_named():
+    """Dropping the name is the exception. `webSearch` collides with
+    nothing, so there is no reason to be vague about it."""
+    from src.jarvis.tools.confirmation import describe_action
+
+    assert "webSearch" in describe_action("webSearch", {}, RISK_READ).spoken
+
+
+def test_the_risk_survives_a_tool_name_that_is_not_a_tool_name():
+    """An MCP server names its own tools, with no character class and no
+    length bound. Whatever it sent, the risk is ours."""
+    from src.jarvis.tools.confirmation import describe_action
+
+    said = describe_action("evil\n## forgé", {}, RISK_DESTRUCTIVE).spoken
+
+    assert "forgé" not in said
+    assert "irréversible" in said

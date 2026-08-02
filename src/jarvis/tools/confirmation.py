@@ -26,7 +26,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
-from .policy import RISK_DESTRUCTIVE
+from .policy import RISK_ACTION, RISK_DESTRUCTIVE, RISK_READ
 
 # Which door an answer may arrive through.
 CHANNEL_GESTE = "geste"   # a deliberate click on a card showing the call
@@ -333,8 +333,26 @@ SPOKEN_TEMPLATE = "Je m'apprête à lancer {tool}. Tu valides ?"
 # question can push a likely answer over the echo threshold on its own:
 # any name containing "ok" — `okta__list_users`, `bookmarks__search`,
 # `webhookSend` — makes a spoken "ok" score 100 and be deleted before
-# anything reads it. When that happens she asks without naming the tool.
-# The card still carries the exact name, so nothing load-bearing is lost.
+# anything reads it. `setRoutine` does it too, more quietly: it carries
+# "ou", and a "Oui." transcribed with a full stop scores 75 against the
+# named sentence. So the name is dropped.
+#
+# But dropping it must not leave the user approving "something". What
+# survives is the risk, which this code decided itself and which is the
+# part that governs how much a wrong yes costs. Short sentences on
+# purpose: every longer wording measured for this collided with an
+# answer of its own — "consulter" carries "on" for "non", "qui agit sur
+# ton système" carries "ur" for "oui". `tests/test_confirmation_voice_
+# echo.py` measures each of these, so a future rewording that starts
+# eating answers fails the suite instead of doing it silently.
+SPOKEN_ANONYME_PAR_RISQUE = {
+    RISK_READ: "Je m'apprête à lire quelque chose. Tu valides ?",
+    RISK_ACTION: "Je m'apprête à changer quelque chose. Tu valides ?",
+    RISK_DESTRUCTIVE: "Je m'apprête à faire quelque chose d'irréversible. Tu valides ?",
+}
+
+# When even the risk sentence would swallow the answer, which no current
+# wording does. Saying less is the only direction left.
 SPOKEN_TEMPLATE_ANONYME = "Je m'apprête à lancer quelque chose. Tu valides ?"
 
 # What a French speaker plausibly says when answering a request for
@@ -426,7 +444,12 @@ def describe_action(
     shown = f"{safe_tool} · {risk}\n{_escape_invisibles(rendered)}"
     speakable = not hazards
 
-    spoken = SPOKEN_TEMPLATE.format(tool=tool) if plain_name else SPOKEN_TEMPLATE_ANONYME
+    spoken = SPOKEN_TEMPLATE.format(tool=tool) if plain_name else ""
+    if not spoken or _would_swallow_the_answer(spoken):
+        # The name goes, the risk stays: it is what governs how much a
+        # wrong yes costs, and it is the one part of this sentence that
+        # was decided here rather than by a model or a server.
+        spoken = SPOKEN_ANONYME_PAR_RISQUE.get(risk, SPOKEN_TEMPLATE_ANONYME)
     if _would_swallow_the_answer(spoken):
         spoken = SPOKEN_TEMPLATE_ANONYME
 
