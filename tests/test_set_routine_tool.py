@@ -467,6 +467,9 @@ def test_restarting_a_wider_block_asks_again_instead(db, cfg):
     result = _run(db, cfg, {"routine": "x", "outils": ["webSearch"], "nom": "matin"})
 
     assert result.success is False
+    # A question, not a failure. `setRoutine → échec` in the Activity tab
+    # for a turn that asked the user something is a lie about the tool.
+    assert result.outcome == "question"
     assert _rows(db) == []
     assert "fetchWebPage" in result.reply_text
 

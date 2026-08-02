@@ -430,7 +430,7 @@ class SetRoutineTool(Tool):
             if scope.memoire else ""
         )
         return ToolExecutionResult(
-            success=False,
+            success=False, outcome=OUTCOME_QUESTION,
             reply_text=(
                 f"Nothing was set up yet. The stopped routine « {nom} » "
                 f"already exists in routines.md and restarting it would arm "
