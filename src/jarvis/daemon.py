@@ -75,6 +75,8 @@ _confirmation_callbacks: dict = {
     "on_confirm_settled": None,  # Callable[[str, str], None] — id, outcome
     # Callable[[str, str, bool], None] — nom, raison, stopped
     "on_routine_trouble": None,
+    # Callable[[str, str, str], None] — texte, due_local, raison
+    "on_reminder_failed": None,
 }
 
 # Shutdown timeout for diary update (shorter than normal to allow reasonable quit time)
@@ -674,6 +676,11 @@ def announce_reminder_failure(row: dict, why: str) -> None:
 
     The ledger alone is a tab nobody has a reason to open, and a promise
     that quietly failed is the thing this subsystem exists to prevent.
+
+    Both routes, like every other surface here: subprocess mode reads the
+    stdout bus, bundled mode has no stdout bus and reads the callback.
+    One of the two alone is a notification that exists in exactly half
+    the builds, and silently not in the other.
     """
     try:
         _emit_chat_event("reminder_failed", {
@@ -684,6 +691,15 @@ def announce_reminder_failure(row: dict, why: str) -> None:
         })
     except Exception as e:
         debug_log(f"reminder failure not announced: {e}", "tools")
+
+    callback = _confirmation_callbacks.get("on_reminder_failed")
+    if callback is not None:
+        try:
+            callback(
+                str(row.get("texte") or ""), str(row.get("due_local") or ""), why,
+            )
+        except Exception as e:
+            debug_log(f"reminder failure callback failed: {e}", "tools")
 
 
 def nudge_reminders() -> None:
@@ -760,11 +776,13 @@ def revoke_pending_confirmation() -> None:
 
 
 def set_confirmation_callbacks(*, on_confirm=None, on_confirm_settled=None,
-                               on_routine_trouble=None) -> None:
+                               on_routine_trouble=None,
+                               on_reminder_failed=None) -> None:
     """Wire the desktop app's surfaces in bundled mode."""
     _confirmation_callbacks["on_confirm"] = on_confirm
     _confirmation_callbacks["on_confirm_settled"] = on_confirm_settled
     _confirmation_callbacks["on_routine_trouble"] = on_routine_trouble
+    _confirmation_callbacks["on_reminder_failed"] = on_reminder_failed
 
 
 def is_stop_requested() -> bool:

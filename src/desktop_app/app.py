@@ -1493,8 +1493,10 @@ class ConfirmationSignals(QObject):
     raised = pyqtSignal(dict)
     settled = pyqtSignal(str, str)
     # A routine fires from the runner's own thread, which is neither the
-    # reply-engine worker nor the GUI one.
+    # reply-engine worker nor the GUI one. A reminder fires from the
+    # scheduler's.
     routine_trouble = pyqtSignal(dict)
+    reminder_failed = pyqtSignal(dict)
 
 
 class JarvisSystemTray:
@@ -1587,6 +1589,7 @@ class JarvisSystemTray:
         self._confirm_signals.raised.connect(self.on_confirmation_raised)
         self._confirm_signals.settled.connect(self.on_confirmation_settled)
         self._confirm_signals.routine_trouble.connect(self.on_routine_trouble)
+        self._confirm_signals.reminder_failed.connect(self.on_reminder_failed)
 
         # Set up status checking timer
         self.status_timer = QTimer()
@@ -2033,6 +2036,8 @@ class JarvisSystemTray:
                 )
             elif event.get("type") == "routine_trouble":
                 self.on_routine_trouble(data)
+            elif event.get("type") == "reminder_failed":
+                self.on_reminder_failed(data)
         except Exception as exc:
             debug_log(f"confirmation line not routed to tray: {exc}", "desktop")
 
@@ -2063,6 +2068,30 @@ class JarvisSystemTray:
             )
         except Exception as exc:
             debug_log(f"routine notification failed: {exc}", "desktop")
+
+    def on_reminder_failed(self, data: dict) -> None:
+        """A promise nothing could say.
+
+        This is the one failure the whole reminders subsystem exists to
+        prevent, so it must not end in a ledger row nobody opens. The
+        text goes in: unlike a tool call, a reminder *is* the sentence the
+        user asked to hear, and a notification saying only "a reminder
+        failed" leaves them no way to know which promise was dropped.
+        """
+        from PyQt6.QtWidgets import QSystemTrayIcon
+
+        texte = str((data or {}).get("texte") or "")
+        quand = str((data or {}).get("due_local") or "").replace("T", " à ")
+        raison = str((data or {}).get("raison") or "")
+        try:
+            self.tray_icon.showMessage(
+                "Un rappel n'a pas pu être dit",
+                f"{quand} — {texte}\n{raison}" if quand else f"{texte}\n{raison}",
+                QSystemTrayIcon.MessageIcon.Warning,
+                15000,
+            )
+        except Exception as exc:
+            debug_log(f"reminder notification failed: {exc}", "desktop")
 
     def _build_confirmation_action(self) -> None:
         """The menu entry for a waiting question. Hidden until there is one."""
@@ -2463,6 +2492,10 @@ class JarvisSystemTray:
                         on_routine_trouble=lambda nom, raison, stopped:
                             self._confirm_signals.routine_trouble.emit(
                                 {"nom": nom, "raison": raison, "arretee": stopped}
+                            ),
+                        on_reminder_failed=lambda texte, quand, raison:
+                            self._confirm_signals.reminder_failed.emit(
+                                {"texte": texte, "due_local": quand, "raison": raison}
                             ),
                     )
                 except Exception as exc:
