@@ -99,13 +99,17 @@ class SetGoalTool(_GoalTool):
 
     @property
     def description(self) -> str:
-        # Whole sentences, restriction first: the router reads only the
-        # opening. This shares its vocabulary with setReminder and
-        # setRoutine, so the discrimination has to land before the cut.
+        # The router picked `remember` for "garde une trace de ça : je
+        # prépare l'entretien, ce sera bon quand…", because that
+        # description carries the phrasings a person actually uses and
+        # this one described in the abstract. The discriminator is the
+        # ending: a goal is worked towards until it is done, a fact about
+        # the user simply holds.
         return (
-            "Write down a goal the user works towards, ONLY when they ask to "
-            "track one. Nothing here happens at a time or repeats: those are "
-            "setReminder and setRoutine. This never records progress."
+            "Write down something the user works towards until it is done "
+            "('keep track of this until…', 'it will be done when…'), ONLY "
+            "when they say what would finish it. A fact that just holds is "
+            "remember."
         )
 
     @property

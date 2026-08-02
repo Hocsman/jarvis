@@ -542,6 +542,58 @@ def routines_cancel(routine_id: str) -> Response:
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/objectifs")
+def objectifs_get() -> Response:
+    """What the user is working towards, and everything recorded about it.
+
+    The whole page, not a summary: this is the artefact, and the reason
+    it exists is that he can read in October what he said in August. Open
+    ones first, because a closed goal is a record and an open one is a
+    question.
+    """
+    from jarvis.objectifs.page import invalidate_objectifs_cache, load_objectifs
+
+    try:
+        cfg = load_settings()
+        invalidate_objectifs_cache()
+        out = []
+        for o in load_objectifs(cfg).values():
+            out.append({
+                "nom": o.nom,
+                "phrase": o.phrase,
+                "fini_quand": o.fini_quand,
+                "clos": o.clos,
+                "ouvert": o.est_ouvert,
+                "points": [
+                    {"date": p.date, "source": p.source, "texte": p.texte}
+                    for p in o.points
+                ],
+            })
+        out.sort(key=lambda o: (not o["ouvert"], o["nom"]))
+        return jsonify({"objectifs": out})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/objectifs/<nom>", methods=["DELETE"])
+def objectifs_close(nom: str) -> Response:
+    """End one from here.
+
+    The same act the tool performs and the same one it reserves for him:
+    a click is him. The block stays in the file with everything it
+    recorded, because that is what somebody wants to read afterwards.
+    """
+    from datetime import datetime
+
+    from jarvis.objectifs.page import close_objectif
+
+    try:
+        valeur = f"{datetime.now().strftime('%Y-%m-%d')} · terminé"
+        return jsonify({"closed": bool(close_objectif(load_settings(), nom, valeur))})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/journal")
 def journal_get() -> Response:
     """The mornings, newest first.
@@ -1472,6 +1524,34 @@ def index() -> str:
             border: 1px solid var(--border-color); white-space: nowrap;
         }
         .routine-flag.warn { border-color: var(--error); color: var(--error); }
+
+        .objectif-carte {
+            background: var(--bg-secondary); border-radius: 10px;
+            padding: 14px 16px; margin-bottom: 12px;
+            border: 1px solid var(--border-color);
+        }
+        .objectif-carte.close { opacity: 0.55; }
+        .objectif-tete {
+            display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap;
+            margin-bottom: 4px;
+        }
+        .objectif-nom { font-weight: 600; }
+        .objectif-phrase { flex: 1; min-width: 200px; overflow-wrap: anywhere; }
+        .objectif-fin {
+            font-size: 12px; opacity: 0.65; margin-bottom: 10px;
+        }
+        .objectif-point {
+            display: flex; gap: 10px; align-items: baseline; font-size: 13px;
+            padding: 4px 0; border-top: 1px solid rgba(128, 128, 128, 0.12);
+        }
+        .objectif-date {
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 12px; color: var(--accent-primary); white-space: nowrap;
+        }
+        .objectif-source {
+            font-size: 11px; opacity: 0.5; white-space: nowrap; min-width: 44px;
+        }
+        .objectif-texte { flex: 1; overflow-wrap: anywhere; }
 
         .journal-page { margin-bottom: 18px; }
         .journal-date {
@@ -2674,6 +2754,9 @@ def index() -> str:
             <button class="tab" data-tab="routines">
                 <span>🌅</span> Routines
             </button>
+            <button class="tab" data-tab="objectifs">
+                <span>🎯</span> Objectifs
+            </button>
             <button class="tab" data-tab="graph">
                 <span>🧠</span> Knowledge
             </button>
@@ -2853,6 +2936,24 @@ def index() -> str:
                 </div>
             </div>
 
+            <div id="objectifs-content" class="tab-pane" style="display: none;">
+                <div class="core-intro">
+                    <p>
+                        🎯 Ce vers quoi tu travailles, sur plusieurs
+                        conversations. Chaque ligne est datée et porte sa
+                        source : rien ici n'est déduit, la seule source qu'elle
+                        sait produire est « dit », c'est-à-dire toi. Le fichier
+                        est <code>yuba/objectifs.md</code> et il est à toi :
+                        corrige, réécris, supprime. Rien de tout ceci ne tourne
+                        tout seul.
+                    </p>
+                </div>
+
+                <div id="objectifs-list">
+                    <div class="loading"><div class="spinner"></div></div>
+                </div>
+            </div>
+
             <div id="meals-content" class="tab-pane" style="display: none;">
                 <div class="inline-filters">
                     <span class="inline-filter-label">📅</span>
@@ -2897,6 +2998,7 @@ def index() -> str:
         const activityPane = document.getElementById('activity-content');
         const rappelsPane = document.getElementById('rappels-content');
         const routinesPane = document.getElementById('routines-content');
+        const objectifsPane = document.getElementById('objectifs-content');
         const memoriesContent = memoriesPane.querySelector('.memory-list');
         const mealsContent = mealsPane.querySelector('.memory-list');
         const tabs = document.querySelectorAll('.tab');
@@ -3562,6 +3664,64 @@ def index() -> str:
             </div>`).join('');
         }
 
+        // ── Goals tab ───────────────────────────────────────────────
+        //
+        // The whole page, not a summary. The reason this artefact exists
+        // is that he can read in October what he said in August, and a
+        // tab that showed only the last line would be a worse version of
+        // the prompt block.
+
+        async function loadObjectifs() {
+            const container = document.getElementById('objectifs-list');
+            let objectifs = [];
+            try {
+                objectifs = (await (await fetch('/api/objectifs')).json()).objectifs || [];
+            } catch (e) {
+                container.innerHTML = "<div class='core-empty'>Liste illisible.</div>";
+                return;
+            }
+            if (!objectifs.length) {
+                container.innerHTML = "<div class='core-empty'>Aucun objectif. Dis-lui « garde une trace de… ».</div>";
+                return;
+            }
+            container.innerHTML = objectifs.map(o => {
+                const points = (o.points || []).map(p =>
+                    `<div class="objectif-point">
+                        <span class="objectif-date">${escapeHtml(p.date)}</span>
+                        <span class="objectif-source">${escapeHtml(p.source)}</span>
+                        <span class="objectif-texte">${escapeHtml(p.texte)}</span>
+                    </div>`).join('')
+                    || "<div class='objectif-point'><span class='objectif-texte'>Rien de noté pour l'instant.</span></div>";
+                const etat = o.ouvert
+                    ? `<button class="rappel-cancel" data-objectif="${escapeHtml(o.nom)}">Terminer</button>`
+                    : `<span class="routine-flag">terminé ${escapeHtml(o.clos)}</span>`;
+                return `<div class="objectif-carte${o.ouvert ? '' : ' close'}">
+                    <div class="objectif-tete">
+                        <span class="objectif-nom">${escapeHtml(o.nom)}</span>
+                        <span class="objectif-phrase">${escapeHtml(o.phrase)}</span>
+                        ${etat}
+                    </div>
+                    <div class="objectif-fin">Fini quand : ${escapeHtml(o.fini_quand || '(non dit)')}</div>
+                    ${points}
+                </div>`;
+            }).join('');
+
+            container.querySelectorAll('[data-objectif]').forEach(button => {
+                button.addEventListener('click', async () => {
+                    if (!confirm("Terminer cet objectif ? Tout ce qu'il a enregistré reste dans le fichier.")) return;
+                    button.disabled = true;
+                    try {
+                        await fetch('/api/objectifs/' + encodeURIComponent(button.dataset.objectif),
+                                    { method: 'DELETE' });
+                    } catch (e) {
+                        button.disabled = false;
+                        return;
+                    }
+                    loadObjectifs();
+                });
+            });
+        }
+
         document.getElementById('btn-clear-activity').addEventListener('click', async () => {
             if (!confirm("Effacer tout le registre d'activité ?")) return;
             await fetch('/api/activity', { method: 'DELETE' });
@@ -3581,6 +3741,7 @@ def index() -> str:
             activityPane.style.display = 'none';
             rappelsPane.style.display = 'none';
             routinesPane.style.display = 'none';
+            objectifsPane.style.display = 'none';
 
             if (currentTab === 'memories') {
                 memoriesPane.style.display = '';
@@ -3598,6 +3759,9 @@ def index() -> str:
                 routinesPane.style.display = '';
                 loadRoutines();
                 loadJournal();
+            } else if (currentTab === 'objectifs') {
+                objectifsPane.style.display = '';
+                loadObjectifs();
             } else if (currentTab === 'graph') {
                 graphContent.style.display = '';
                 initGraph();

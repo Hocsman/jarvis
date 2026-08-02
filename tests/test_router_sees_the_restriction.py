@@ -146,13 +146,17 @@ def test_the_new_slices_are_whole_thoughts(name):
 # ── The three tools that share a temporal vocabulary ─────────────────
 
 
-def test_the_router_sees_that_set_goal_is_not_the_other_two():
-    """`setGoal`, `setReminder` and `setRoutine` share a prefix and much
-    of their vocabulary. Past the cut, the discrimination is invisible
-    exactly where it is needed."""
+def test_the_router_sees_that_a_goal_is_not_a_fact():
+    """Measured in production, not guessed: "garde une trace de ça : je
+    prépare l'entretien chez Datadog, ce sera bon quand…" routed to
+    `remember`, whose slice carries the phrasings a person actually uses
+    while this one described in the abstract. The discriminator is the
+    ending — a goal is worked towards until it is done, a fact about the
+    user simply holds."""
     seen = _seen("setGoal").lower()
 
-    assert "setreminder" in seen and "setroutine" in seen
+    assert "remember" in seen
+    assert "until it is done" in seen
 
 
 @pytest.mark.parametrize("name", ["setGoal", "noteGoal", "closeGoal", "listGoals"])
