@@ -459,7 +459,7 @@ def routines_get() -> Response:
     hidden: it still holds a slot in the table, and it comes back the
     moment the block does.
     """
-    from jarvis.routines.runner import _missing_from_catalogue, payload_of
+    from jarvis.routines.runner import missing_from_catalogue, payload_of
     from jarvis.routines.scope import scope_for
 
     try:
@@ -483,7 +483,7 @@ def routines_get() -> Response:
                 # the row keeps advertising a capability that stopped
                 # existing in October, and the only trace anywhere is a
                 # debug line nobody has switched on.
-                "introuvables": _missing_from_catalogue(scope) if scope else [],
+                "introuvables": missing_from_catalogue(scope) if scope else [],
                 "steriles": int(payload.get("steriles", 0) or 0),
             })
         return jsonify({"routines": out})

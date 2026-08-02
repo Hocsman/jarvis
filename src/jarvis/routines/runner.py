@@ -168,7 +168,7 @@ class RoutineRunner:
             nom, rid, phrase, started_at, began, payload,
             erreur=erreur, texte=texte,
             outcome=OUTCOME_OK if texte else OUTCOME_FAILED,
-            since=started_iso, absents=_missing_from_catalogue(scope),
+            since=started_iso, absents=missing_from_catalogue(scope),
         )
 
     def _ask_the_engine(self, phrase: str, scope) -> tuple:
@@ -302,7 +302,7 @@ class RoutineRunner:
                 debug_log(f"routine trouble not announced: {e}", "tools")
 
 
-def _missing_from_catalogue(scope) -> List[str]:
+def missing_from_catalogue(scope) -> List[str]:
     """Names the envelope holds that no longer exist anywhere.
 
     An MCP server that left the config takes its tools with it. The
