@@ -27,7 +27,9 @@ See objectifs.spec.md for the full contract.
 
 from __future__ import annotations
 
+import os
 import re
+import uuid
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Dict, List, Optional
@@ -246,6 +248,183 @@ def load_objectifs(cfg) -> Dict[str, Objectif]:
 
     _CACHE["stamp"], _CACHE["blocks"] = stamp, blocks
     return blocks
+
+
+def _span(lignes: List[str], nom: str):
+    """Where one block starts and ends, ignoring comments.
+
+    The file's own header explains the grammar using the same words the
+    fields use, so a scan that does not track comment state would edit
+    the documentation — and a parse-based check could not see it, since
+    a comment never becomes a block.
+    """
+    in_comment = False
+    debut = None
+    for i, ligne in enumerate(lignes):
+        if in_comment:
+            if _COMMENT_CLOSE in ligne:
+                in_comment = False
+            continue
+        if _COMMENT_OPEN in ligne:
+            if _COMMENT_CLOSE not in ligne:
+                in_comment = True
+            continue
+        heading = _HEADING_RE.match(ligne)
+        if not heading:
+            continue
+        if debut is not None:
+            return debut, i
+        if heading.group("name").strip() == nom:
+            debut = i
+    return (debut, len(lignes)) if debut is not None else (None, None)
+
+
+def _compose_point(lignes: List[str], nom: str, point: Point):
+    """The file with one dated line added to a block, or None."""
+    debut, fin = _span(lignes, nom)
+    if debut is None:
+        return None
+
+    rendu = render_point(point.texte, source=point.source, jour=point.date)
+    if not rendu:
+        return None
+
+    dernier = None
+    liste = None
+    in_comment = False
+    for i in range(debut + 1, fin):
+        ligne = lignes[i]
+        if in_comment:
+            if _COMMENT_CLOSE in ligne:
+                in_comment = False
+            continue
+        if _COMMENT_OPEN in ligne:
+            if _COMMENT_CLOSE not in ligne:
+                in_comment = True
+            continue
+        if _POINTS_RE.match(ligne):
+            liste = i
+        elif _POINT_RE.match(ligne):
+            dernier = i
+
+    out = list(lignes)
+    if dernier is not None:
+        out.insert(dernier + 1, rendu)
+    elif liste is not None:
+        out.insert(liste + 1, rendu)
+    else:
+        # No list yet. Added at the end of the block's own span so the
+        # heading and the fields stay where the user expects them.
+        queue = fin
+        while queue > debut + 1 and not lignes[queue - 1].strip():
+            queue -= 1
+        out.insert(queue, "points:\n")
+        out.insert(queue + 1, rendu)
+    return out
+
+
+def _compose_clos(lignes: List[str], nom: str, valeur: str):
+    """The file with a block's closing line added, or None.
+
+    Only ever added. A goal already closed is left alone: reopening one
+    by overwriting the line is a different act, and it is his.
+    """
+    debut, fin = _span(lignes, nom)
+    if debut is None or not _SUR_UNE_LIGNE.match(valeur or ""):
+        return None
+
+    apres = debut + 1
+    in_comment = False
+    for i in range(debut + 1, fin):
+        ligne = lignes[i]
+        if in_comment:
+            if _COMMENT_CLOSE in ligne:
+                in_comment = False
+            continue
+        if _COMMENT_OPEN in ligne:
+            if _COMMENT_CLOSE not in ligne:
+                in_comment = True
+            continue
+        champ = _FIELD_RE.match(ligne)
+        if champ:
+            if champ.group("key") == "clos":
+                return None
+            apres = i + 1
+
+    out = list(lignes)
+    out.insert(apres, f"clos: {valeur}\n")
+    return out
+
+
+def _write_guarded(cfg, compose) -> bool:
+    """Apply one composed change to the file, or refuse.
+
+    The same discipline as `rewrite_quand`, for the same reason: the user
+    may have this open in an editor, and the value passing through came
+    from a model reading a transcription.
+
+    Never raises. A refusal leaves the file exactly as it was, which is
+    always a legal state.
+    """
+    tmp = None
+    try:
+        path = objectifs_path(cfg)
+        avant_stat = path.stat()
+        lignes = path.read_text(encoding="utf-8").splitlines(keepends=True)
+
+        apres = compose(lignes)
+        if apres is None:
+            return False
+
+        # Byte for byte, not parse-alike: two files can parse the same
+        # and differ in a paragraph the user wrote. One or two lines
+        # added, everything else identical and merely shifted down.
+        ajout = len(apres) - len(lignes)
+        if ajout not in (1, 2):
+            return False
+        idx = next((i for i, (a, b) in enumerate(zip(lignes, apres)) if a != b),
+                   len(lignes))
+        if lignes[idx:] != apres[idx + ajout:]:
+            return False
+
+        maintenant = path.stat()
+        if (maintenant.st_mtime_ns != avant_stat.st_mtime_ns
+                or maintenant.st_size != avant_stat.st_size):
+            debug_log("objectifs.md moved underneath, nothing written", "tools")
+            return False
+
+        tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
+        tmp.write_text("".join(apres), encoding="utf-8")
+        os.chmod(tmp, avant_stat.st_mode & 0o777)
+        os.replace(tmp, path)
+        tmp = None
+        invalidate_objectifs_cache()
+        return True
+    except Exception as e:
+        debug_log(f"objectifs.md not written: {e}", "tools")
+        return False
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
+
+
+def append_point(cfg, nom: str, point: Point) -> bool:
+    """Add one dated line of state to a goal. Returns whether it did."""
+    fait = _write_guarded(cfg, lambda lignes: _compose_point(lignes, nom, point))
+    if fait:
+        debug_log(f"    🎯 {nom}: {point.source} · {point.texte[:60]}", "tools")
+    return fait
+
+
+def close_objectif(cfg, nom: str, valeur: str) -> bool:
+    """Write the line that ends a goal. Returns whether it did."""
+    fait = _write_guarded(cfg, lambda lignes: _compose_clos(lignes, nom, valeur))
+    if fait:
+        debug_log(f"    🎯 {nom} closed: {valeur}", "tools")
+    return fait
 
 
 def ouverts(cfg) -> List[Objectif]:
