@@ -212,7 +212,7 @@ An attended turn — no `scope` — is untouched by all of this.
 
 `registry.py::_out_of_scope`, at the single tool funnel.
 
-The envelope is decided once, when the routine is created. Four checks
+The envelope is decided once, when the routine is created. Five checks
 run again on every call, because what could have changed in between is
 exactly what matters:
 
@@ -228,6 +228,12 @@ exactly what matters:
    risk is `lecture` and that is correct for an attended turn, where a
    wrong entry is correctable in the next breath. At 07:00 nobody
    reopens anything.
+5. the tool does not wait for a person (`needs_a_human`). `screenshot`
+   shells out to `screencapture -i`, which blocks until a rectangle is
+   dragged, with no timeout. Unattended it does not fail, it *waits* —
+   holding the runner's single slot, which every other routine queues
+   on, until a restart. One such name in one envelope would stop the
+   whole feature, silently.
 
 A routine can therefore only ever read, and only inside its envelope.
 

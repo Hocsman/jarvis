@@ -80,6 +80,20 @@ class Tool(ABC):
     # reading something harmless.
     writes_own_state: bool = False
 
+    # Whether the tool blocks until a person does something.
+    #
+    # `screenshot` shells out to `screencapture -i`, which waits for a
+    # rectangle to be dragged, with no timeout. At 07:00 nobody drags
+    # anything, and `subprocess.run` waits forever — holding the routine
+    # runner's single slot, which is what every other routine queues on.
+    # One such tool in one envelope would stop the whole feature until a
+    # restart, silently.
+    #
+    # A separate axis from the risk, like `writes_own_state`, and for the
+    # same reason: it is not that the call is dangerous, it is that its
+    # justification assumes somebody is there.
+    needs_a_human: bool = False
+
     @property
     @abstractmethod
     def name(self) -> str:

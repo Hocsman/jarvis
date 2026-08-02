@@ -2,7 +2,7 @@
 🚪 The gate's arithmetic, run before anything is written.
 
 The gate at the tool funnel already decides, every morning, whether a
-routine may reach a given tool. This runs the same four checks at
+routine may reach a given tool. This runs the same checks at
 creation time, for one reason: an envelope full of names that will be
 refused at 07:00 is a routine that half-works from its first day, and
 the only trace is a journal line the user reads a week later.
@@ -25,12 +25,13 @@ from typing import List, Optional, Tuple
 from ..debug import debug_log
 from .scope import JAMAIS_EN_ROUTINE
 
-# Tightest of the four reasons first, because a name usually fails
+# Tightest reason first, because a name usually fails
 # several and the user should be told the one they can act on.
 POURQUOI_JAMAIS = "aucune routine ne peut l'atteindre"
 POURQUOI_POLITIQUE = "tu as demandé à être consulté pour cet outil"
 POURQUOI_ECRIT = "il ne se contente pas de lire"
 POURQUOI_MEMOIRE = "il écrit la mémoire de Yuba, et personne n'est là pour relire"
+POURQUOI_HUMAIN = "il attend que quelqu'un fasse un geste, et personne n'est là"
 
 
 def refuse_reason(cfg, name: str) -> Optional[str]:
@@ -57,6 +58,8 @@ def refuse_reason(cfg, name: str) -> Optional[str]:
         return POURQUOI_ECRIT
     if getattr(tool, "writes_own_state", False):
         return POURQUOI_MEMOIRE
+    if getattr(tool, "needs_a_human", False):
+        return POURQUOI_HUMAIN
     return None
 
 

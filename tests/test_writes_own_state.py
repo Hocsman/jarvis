@@ -129,3 +129,44 @@ def test_the_prose_no_longer_carries_the_claim_alone():
         assert "writes_own_state" in source, (
             f"{name} still explains this only in prose"
         )
+
+
+# ── The other axis: a tool that waits for a person ────────────────────
+
+
+def test_a_tool_that_waits_for_a_gesture_says_so():
+    """`screencapture -i` waits for a rectangle to be dragged, with no
+    timeout. Unattended it does not fail, it *waits* — holding the
+    routine runner's single slot, which every other routine queues on,
+    until someone restarts the app."""
+    assert BUILTIN_TOOLS["screenshot"].needs_a_human is True
+
+
+def test_it_is_a_separate_axis_from_the_risk():
+    """Reading the screen is `lecture` and that is correct. The problem
+    is not that the call is dangerous, it is that its justification
+    assumes somebody is there."""
+    assert BUILTIN_TOOLS["screenshot"].risk_for({}) == RISK_READ
+    assert BUILTIN_TOOLS["screenshot"].writes_own_state is False
+
+
+def test_waiting_for_a_person_is_false_by_default():
+    from src.jarvis.tools.base import Tool
+
+    class _NewTool(Tool):
+        @property
+        def name(self):
+            return "newTool"
+
+        @property
+        def description(self):
+            return ""
+
+        @property
+        def inputSchema(self):
+            return {"type": "object", "properties": {}}
+
+        def run(self, args, context):
+            raise NotImplementedError
+
+    assert _NewTool().needs_a_human is False

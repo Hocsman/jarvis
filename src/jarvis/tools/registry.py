@@ -495,6 +495,10 @@ def _out_of_scope(name, scope, risk, verdict):
         why = "il ne se contente pas de lire"
     elif getattr(tool, "writes_own_state", False):
         why = "il écrit la mémoire de Yuba, et personne n'est là pour relire"
+    elif getattr(tool, "needs_a_human", False):
+        # It would not fail, it would *wait* — holding the runner's one
+        # slot, which every other routine queues on, until a restart.
+        why = "il attend que quelqu'un fasse un geste, et personne n'est là"
     else:
         return None
 

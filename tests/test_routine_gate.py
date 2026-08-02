@@ -1,4 +1,4 @@
-"""Four checks, re-run on every call, with nobody in the room.
+"""Five checks, re-run on every call, with nobody in the room.
 
 The envelope is decided once, when the routine is created. Everything
 else is decided again at 07:00 on the morning it runs, because the things
@@ -10,8 +10,9 @@ name the envelope cannot tell apart.
 
 So: the name is in this routine's envelope; the user's own file says
 `libre`; `resolve_risk` says `lecture` **for this morning's arguments**;
-and the tool does not write Yuba's own state. A routine can therefore
-only ever read, and never outside its envelope.
+the tool does not write Yuba's own state; and it does not block waiting
+for somebody to do something. A routine can therefore only ever read,
+never outside its envelope, and never in a way that needs a hand.
 
 `jamais` still outranks all of it, checked first. A tool the user retired
 is refused rather than reported out-of-scope, because those are different
@@ -269,3 +270,17 @@ def test_an_attended_turn_is_untouched(risk, writes, policy):
     # `lecture` runs; anything else is refused for want of a channel —
     # which is the pre-existing behaviour, unchanged.
     assert tool.ran == ([{}] if risk == "lecture" else [])
+
+
+def test_a_tool_that_waits_for_a_person_does_not_run_unattended():
+    """It would not fail, it would wait — holding the runner's one slot,
+    which every other routine queues on, until a restart. One such tool
+    in one envelope would stop the whole feature, silently."""
+    tool = _Fake("screenshot")
+    tool.needs_a_human = True
+    db = MagicMock()
+
+    _run(tool, scope=RoutineScope(nom="matin", outils=["screenshot"]), db=db)
+
+    assert tool.ran == []
+    assert _outcome(db) == OUTCOME_OUT_OF_SCOPE
