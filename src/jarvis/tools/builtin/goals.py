@@ -284,11 +284,31 @@ class NoteGoalTool(_GoalTool):
         if relu is None or not relu.points or relu.points[-1].texte != texte:
             return self._refuse("je n'ai pas réussi à le relire correctement")
 
+        # Judged here and only here: the state has just changed, somebody
+        # is in the room, and an ordinary turn about anything else pays
+        # nothing. It also closes the loop that a per-turn judge would
+        # open — his "not yet" is itself a note, so the next call sees
+        # different inputs instead of repeating the same verdict daily.
+        demande = ""
+        try:
+            from ...objectifs.juge import PEUT_ETRE, peut_etre_fini
+
+            if peut_etre_fini(cfg, relu) == PEUT_ETRE:
+                demande = (
+                    f" Then ask whether it is done, since they said it would "
+                    f"be when: {relu.fini_quand}. Do not decide it yourself "
+                    f"and do not close anything; if they say yes, closeGoal "
+                    f"is what ends it, and if they say no, record that with "
+                    f"noteGoal so you stop asking."
+                )
+        except Exception as e:
+            debug_log(f"goal not judged: {e}", "tools")
+
         return ToolExecutionResult(
             success=True,
             reply_text=(
                 f"Noted against « {relu.nom} »: {relu.points[-1].texte}. Tell "
-                f"the user it is written, briefly, in their language."
+                f"the user it is written, briefly, in their language.{demande}"
             ),
         )
 

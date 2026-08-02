@@ -265,3 +265,88 @@ def test_it_hands_back_his_lines_without_a_verdict(cfg):
     said = _run("listGoals", cfg, {}).reply_text
 
     assert "do not add a conclusion" in said
+
+
+# ── Wondering whether it is done ──────────────────────────────────────
+
+
+def _judging(verdict):
+    from unittest.mock import patch
+
+    return patch("src.jarvis.objectifs.juge.peut_etre_fini", return_value=verdict)
+
+
+def test_a_note_that_might_finish_it_leads_to_a_question(cfg):
+    """Judged where the state changed, and nowhere else: an ordinary turn
+    about anything else pays nothing for this."""
+    _pose(cfg)
+
+    with _judging("peut-etre"):
+        result = _run("noteGoal", cfg, {"nom": "entretien",
+                                        "point": "entretien fait"})
+
+    assert "ask whether it is done" in result.reply_text
+    assert "l'entretien est passé" in result.reply_text
+
+
+def test_she_is_told_not_to_decide_it_herself(cfg):
+    _pose(cfg)
+
+    with _judging("peut-etre"):
+        result = _run("noteGoal", cfg, {"nom": "entretien", "point": "x"})
+
+    assert "Do not decide it yourself" in result.reply_text
+
+
+def test_his_no_has_somewhere_to_land(cfg):
+    """The loop a per-turn judge would open: identical inputs tomorrow,
+    identical verdict, and she asks every day for a fortnight. His "not
+    yet" is itself a note, so the next judgement sees changed inputs."""
+    _pose(cfg)
+
+    with _judging("peut-etre"):
+        result = _run("noteGoal", cfg, {"nom": "entretien", "point": "x"})
+
+    assert "noteGoal" in result.reply_text
+
+
+def test_wondering_writes_nothing(cfg):
+    """The verdict has no writer at all. It travels in this reply and
+    dies with the turn: she may think it, she may say it, and only he can
+    make it a fact."""
+    _pose(cfg)
+    _run("noteGoal", cfg, {"nom": "entretien", "point": "première"})
+    avant = objectifs_path(cfg).read_text(encoding="utf-8")
+
+    with _judging("peut-etre"):
+        _run("noteGoal", cfg, {"nom": "entretien", "point": "seconde"})
+
+    apres = objectifs_path(cfg).read_text(encoding="utf-8")
+    # The note landed, and nothing about the wondering did.
+    assert [p.texte for p in _goals(cfg)["entretien"].points] == [
+        "première", "seconde",
+    ]
+    assert apres.count("\n") == avant.count("\n") + 1
+    assert "peut-etre" not in apres and "fini quand" in apres
+
+
+def test_an_ordinary_note_says_nothing_about_finishing(cfg):
+    _pose(cfg)
+
+    with _judging("pas-encore"):
+        result = _run("noteGoal", cfg, {"nom": "entretien", "point": "x"})
+
+    assert "ask whether it is done" not in result.reply_text
+
+
+def test_a_judge_that_breaks_does_not_lose_the_note(cfg):
+    from unittest.mock import patch
+
+    _pose(cfg)
+
+    with patch("src.jarvis.objectifs.juge.peut_etre_fini",
+               side_effect=RuntimeError("pas de modèle")):
+        result = _run("noteGoal", cfg, {"nom": "entretien", "point": "x"})
+
+    assert result.success is True
+    assert _goals(cfg)["entretien"].points[-1].texte == "x"

@@ -72,6 +72,8 @@ _CALLER_TO_CONTEXT: dict[str, str] = {
     "extract_reminder_time": "reminder_extract",
     # Context 17 — reading a recurrence rule
     "extract_routine_rule": "routine_extract",
+    # Context 18 — whether a goal is worth one question
+    "peut_etre_fini": "goal_judge",
 }
 
 

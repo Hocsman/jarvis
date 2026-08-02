@@ -206,6 +206,17 @@ Every distinct LLM call in Jarvis, what feeds it, what consumes it, and how it i
 - **Output**: a `Lecture(regle, quoi, heure_supposee)` — `daily` or `weekly` with a wall-clock hour, or `none`. `heure_supposee` travels because `setRoutine` has to say it out loud: a rhythm named with no time of day gets one filled in, and for a routine that is a claim about every morning from now on. Never a cron expression — a model can be subtly wrong about one in a way nobody notices until a routine fires at 3am on the 31st, and this runs while the user is asleep. **There is deliberately no shape finer than a day**: a routine that fires on a tick empties a rate limit and a wallet overnight, so the vocabulary cannot express it.
 - **Limits**: `reminder_timeout_sec`. Refuses rather than guessing — an unknown kind, an hour out of range, a weekly rule with no day, an empty subject, a redaction placeholder, a timeout. That last guard bites hardest here: a placeholder in a routine's sentence is replayed to the model every single morning.
 
+## 18. Goal completion judge (whether a goal is worth one question)
+
+- **File**: [src/jarvis/objectifs/juge.py](src/jarvis/objectifs/juge.py) — `peut_etre_fini()`.
+- **Trigger**: inside `noteGoal`, once, immediately after a dated line lands. Nowhere else, and never on a turn that has nothing to do with a goal — the state has just changed, somebody is in the room, and an ordinary turn pays nothing.
+- **Model**: the same chain and the same pin as #16 and #17 (`reminder_model → tool_router_model → intent_judge_model → cfg.llm_chat_model`), because this prompt carries the same thing: the user's own sentences about their own life.
+- **Inputs**: the goal's sentence, the ending condition **the user gave**, and his own dated lines, fenced as data. It never reads prose a model wrote — there is none in this slice, and the contract is stated so that the day an unattended pass exists its write-up is already excluded.
+- **System prompt**: `_SYSTEM` in the same file. Names no language and carries no worked example.
+- **Output**: `peut-etre` or `pas-encore`, and **there is deliberately no third value**. The vocabulary contains nothing meaning "finished", enforced at the parser rather than in the prompt: an answer this code does not recognise becomes `pas-encore`, so no sentence a model can emit and no page it could have read closes a goal. Closing one is `closeGoal`, which costs a card, and it is the user's.
+- **The verdict has no writer.** It travels in `noteGoal`'s reply and dies with the turn. Nothing durable records that she wondered, which is what keeps the fork's one rule intact: she may think it, she may say it, and only he can make it a fact. His answer either way is written as an ordinary note, which is also what stops her asking the same question every day — the next judgement then sees changed inputs.
+- **Limits**: `reminder_timeout_sec`. Every failure is quiet: no model, a timeout, unreadable JSON, an unknown word, a goal with no notes, a goal with no ending condition, or a redaction placeholder in the premise all return `pas-encore`. A question asked too early is asked again every day, and then nobody listens.
+
 ---
 
 ## Frequency / Size Summary
@@ -230,6 +241,7 @@ Every distinct LLM call in Jarvis, what feeds it, what consumes it, and how it i
 | 15 | Approval judge | 0-1 | only after a `parole` question | SMALL (via router chain) |
 | 16 | Reminder time extractor | 0-1 | only inside setReminder | SMALL (via router chain) |
 | 17 | Routine recurrence extractor | 0-1 | only inside setRoutine | SMALL (reuses #16's chain) |
+| 18 | Goal completion judge | 0-1 | only inside noteGoal | SMALL (reuses #16's chain) |
 
 ## Size-aware auto switches
 
