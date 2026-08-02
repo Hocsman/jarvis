@@ -23,6 +23,14 @@ import os
 # were only testing the 20B tier. Defaulting to the small tier is the
 # cheapest way to stop that happening again.
 JUDGE_MODEL = os.environ.get("EVAL_JUDGE_MODEL", "gemma4:e2b")
+
+# The small chain, separately from the chat model.
+#
+# They are one tier in the suite's defaults and two on a real machine:
+# the chat model answers, and a smaller one routes tools, judges intent,
+# extracts times and reads approvals. Pinning them together measures a
+# configuration nobody runs, so this exists to measure the one they do.
+SMALL_MODEL = os.environ.get("EVAL_SMALL_MODEL", "") or JUDGE_MODEL
 JUDGE_BASE_URL = os.environ.get("EVAL_JUDGE_BASE_URL", "http://localhost:11434")
 
 # Which backend the suite runs against. Ollama by default, because the
@@ -324,10 +332,10 @@ class MockConfig:
     # path — "20 selected" is the whole catalogue, not a routing
     # decision — while appearing to pass. A suite that measures routing
     # has to actually route.
-    intent_judge_model: str = JUDGE_MODEL
-    tool_router_model: str = JUDGE_MODEL
-    reminder_model: str = JUDGE_MODEL
-    confirmation_model: str = JUDGE_MODEL
+    intent_judge_model: str = SMALL_MODEL
+    tool_router_model: str = SMALL_MODEL
+    reminder_model: str = SMALL_MODEL
+    confirmation_model: str = SMALL_MODEL
     ollama_embed_model: str = "nomic-embed-text"
     db_path: str = ":memory:"
     sqlite_vss_path: Optional[str] = None
