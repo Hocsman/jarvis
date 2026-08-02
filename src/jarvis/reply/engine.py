@@ -1900,6 +1900,20 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
             # gated by the planner's searchMemory decision.
             guidance.append("\n" + warm_profile_block)
 
+        # What he is working towards, so she recognises the subject when
+        # it comes up. Withheld from a routine turn for the same reason
+        # the profile is: his goals are his life, and a pass summarising
+        # his mail has no business knowing them.
+        if scope is None:
+            try:
+                from ..objectifs.prompt import format_objectifs_block
+
+                _objectifs = format_objectifs_block(cfg)
+                if _objectifs:
+                    guidance.append("\n" + _objectifs)
+            except Exception as e:
+                debug_log(f"goals block skipped (non-fatal): {e}", "memory")
+
         if conversation_context:
             # Two safety framings, both needed:
             # (1) Reference-only — past diary entries must not be read as
