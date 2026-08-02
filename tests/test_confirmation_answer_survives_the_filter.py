@@ -122,3 +122,49 @@ def test_a_confident_answer_was_never_the_problem():
     listener = _listener(_pending(CHANNEL_PAROLE))
 
     assert _kept(listener, _segment("oui vas-y", 0.8)) == ["oui vas-y"]
+
+
+# ── And the word that wakes her ───────────────────────────────────────
+
+
+def test_her_own_name_survives_a_poor_transcription():
+    """`avg_logprob` is a poor judge of a proper noun the model has never
+    seen — which is exactly why "Yuba" comes back as "Youba", "Nuba",
+    "Juba". The segment carrying it scores low and is thrown away, the
+    sentence that follows arrives with no wake word in it and is ignored,
+    and she looks broken. That is the one failure a wake word cannot
+    afford."""
+    listener = _listener(DialogueMemory())
+    listener.cfg.wake_word = "yuba"
+    listener.cfg.wake_aliases = []
+
+    assert _kept(listener, _segment("Yuba...", 0.20)) == ["Yuba..."]
+
+
+def test_a_mangled_spelling_of_it_survives_too():
+    listener = _listener(DialogueMemory())
+    listener.cfg.wake_word = "yuba"
+    listener.cfg.wake_aliases = []
+
+    assert _kept(listener, _segment("Youba !...", 0.24)) == ["Youba !..."]
+
+
+def test_ambient_speech_without_her_name_is_still_dropped():
+    """36 of the 38 segments this filter dropped in one afternoon were a
+    television and a conversation in the room. Lifting the bar for all of
+    them would send every one of those to the intent judge."""
+    listener = _listener(DialogueMemory())
+    listener.cfg.wake_word = "yuba"
+    listener.cfg.wake_aliases = []
+
+    assert _kept(listener, _segment("C'est trop dur, merci hein...", 0.28)) == []
+
+
+def test_keeping_it_decides_nothing():
+    """The wake detector and the intent judge both still run. This only
+    stops the word being deleted before either can see it."""
+    listener = _listener(DialogueMemory())
+    listener.cfg.wake_word = "yuba"
+    listener.cfg.wake_aliases = []
+
+    assert _kept(listener, _segment("Yuba", 0.9)) == ["Yuba"]

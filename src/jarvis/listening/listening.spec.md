@@ -412,3 +412,21 @@ Currently, echo is handled at the transcript level via fuzzy text matching and t
 - Add 10-50ms latency
 
 **Current recommendation:** The transcript-level echo detection (fuzzy matching + intent judge) is sufficient and simpler. Consider AEC only if transcript-level detection proves inadequate in practice.
+
+## The word that wakes her
+
+`whisper_min_confidence` (0.3) is computed from `avg_logprob`, and that
+is a poor judge of a proper noun the model has never seen — which is
+exactly why "Yuba" comes back as "Youba", "Nuba", "Juba". The segment
+carrying the wake word scores low, is dropped, and the sentence that
+follows arrives with no wake word in it and is ignored. She then looks
+broken, which is the one failure a wake word cannot afford.
+
+A segment about to be dropped for confidence is kept when it matches the
+wake word, using the same matcher the detector runs a moment later. The
+wake word is configured, not a language pattern, and keeping the segment
+decides nothing: the detector and the intent judge both still apply.
+
+Everything else stays dropped. In one afternoon's logs, 38 segments went
+to this filter and 36 were a television and a conversation in the room —
+lifting the bar for all of them would send every one to the intent judge.

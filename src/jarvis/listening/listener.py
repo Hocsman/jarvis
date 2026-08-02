@@ -1326,6 +1326,29 @@ class VoiceListener(threading.Thread):
             return
         self._speak_reply(text, on_spoken=on_spoken)
 
+    def _sounds_like_her_name(self, text: str) -> bool:
+        """Whether a segment about to be dropped is the user calling her.
+
+        `avg_logprob` is a poor judge of a proper noun the model has
+        never seen. That is exactly why "Yuba" comes back as "Youba",
+        "Nuba", "Juba" — and why the segment carrying it scores low and
+        is thrown away, leaving the sentence that follows to arrive with
+        no wake word in it and be ignored. She then looks broken, which
+        is the one failure mode a wake word cannot afford.
+
+        The wake word is configured, not a language pattern, and this is
+        the same matcher the detector uses a moment later. Keeping the
+        segment decides nothing: everything downstream still applies.
+        """
+        try:
+            from .wake_detection import is_wake_word_detected
+
+            wake = getattr(self.cfg, "wake_word", "jarvis")
+            aliases = list(set(getattr(self.cfg, "wake_aliases", [])) | {wake})
+            return is_wake_word_detected((text or "").lower(), wake, aliases)
+        except Exception:
+            return False
+
     def awaiting_spoken_answer(self) -> bool:
         """Whether a question is on the table that a sentence can settle.
 
@@ -1456,6 +1479,15 @@ class VoiceListener(threading.Thread):
                 confidence = min(1.0, max(0.0, (seg.avg_logprob + 1.0)))
             elif hasattr(seg, 'no_speech_prob'):
                 confidence = 1.0 - seg.no_speech_prob
+
+            if (confidence is not None and confidence < min_confidence
+                    and self._sounds_like_her_name(seg.text)):
+                debug_log(
+                    f"segment kept despite confidence={confidence:.2f}: "
+                    f"it carries her name", "voice",
+                )
+                filtered.append(seg)
+                continue
 
             if confidence is not None and confidence < min_confidence:
                 if confidence >= marginal_threshold:
@@ -2521,6 +2553,16 @@ class VoiceListener(threading.Thread):
                         # Hard filter: high no_speech_prob means no real speech regardless of logprob.
                         if is_whisper_hallucination(no_speech_prob, no_speech_threshold):
                             debug_log(f"MLX segment filtered (no_speech_prob={no_speech_prob:.2f}): '{seg_text[:50]}'", "voice")
+                            continue
+
+                        if (confidence < min_confidence
+                                and self._sounds_like_her_name(seg_text)):
+                            debug_log(
+                                f"MLX segment kept despite "
+                                f"confidence={confidence:.2f}: it carries her "
+                                f"name", "voice",
+                            )
+                            filtered_texts.append(seg.get("text", ""))
                             continue
 
                         if confidence < min_confidence:
