@@ -43,10 +43,13 @@ from ...routines.scope import (
     ensure_routines_file,
     invalidate_routines_cache,
     parse_routines,
+    quand_fichier,
     render_block,
+    rewrite_quand,
     routines_path,
 )
 from ..base import Tool, ToolContext
+from ..policy import OUTCOME_QUESTION
 from ..types import ToolExecutionResult
 
 # More names than this is not a narrowed answer, it is an unnarrowed one.
@@ -206,18 +209,68 @@ class SetRoutineTool(Tool):
 
         blocs = parse_routines(texte)
         lignes = _live_rows(context.db)
-        nom = _nom(args.get("nom")) or _nom_derive(lecture.regle, set(blocs) | set(lignes))
+        propose = str(args.get("nom") or "").strip()
+        if propose and propose in blocs:
+            # A heading already in the file needs no sanitising. `_nom`
+            # exists to clean a name on its way *into* the file, and
+            # putting an existing title through it makes this tool refuse
+            # names it wrote itself — which is how a routine that was
+            # stopped becomes unrestartable under its own name.
+            nom = propose
+        else:
+            nom = _nom(propose) or _nom_derive(
+                lecture.regle, set(blocs) | set(lignes),
+            )
+
+        if nom not in blocs:
+            # The model names a routine differently every time it is
+            # asked: one turn proposes `actusWebMatin`, the next
+            # `news_summary` for the same sentence. Matching a restart on
+            # the name therefore never fires by itself, and the user
+            # accumulates duplicate blocks doing one job under several
+            # names. There is no reliable automatic identity here — the
+            # name is unstable, the phrase is a model's reading of a
+            # transcription, and a recurrence is not unique — so when a
+            # stopped routine already runs at this very hour, it asks.
+            attendu = quand_fichier(lecture.regle)
+            arretes = [
+                n for n, b in blocs.items()
+                if n not in lignes and b.quand.strip() == attendu
+            ]
+            if len(arretes) == 1:
+                # One stopped routine, already set for this very hour.
+                # Saying the sentence again means that one, and the user
+                # was told twice that it would. Safe to take without
+                # asking because the name is not the guard: `_carte_dit_
+                # vrai` still refuses to arm an envelope wider than the
+                # one the confirmation card showed.
+                nom = arretes[0]
+            elif arretes:
+                return self._arretes(arretes, blocs)
 
         verdict = self._collision(nom, blocs, lignes, phrase, outils)
         if isinstance(verdict, ToolExecutionResult):
             return verdict
         rallumer = verdict == _RALLUMER
 
+        if rallumer:
+            bloc_repris = blocs[nom]
+            carte = self._carte_dit_vrai(cfg, nom, bloc_repris, outils)
+            if carte is not None:
+                return carte
+            # The block wins: it is the user's corrected version, and the
+            # phrase is what actually runs.
+            phrase = bloc_repris.phrase.strip() or phrase
+            outils = list(bloc_repris.outils)
+            lecture = _heure_reprise(context.db, nom, lecture)
+            if isinstance(lecture, ToolExecutionResult):
+                return lecture
+
         separateur, bloc = "", ""
         if not rallumer:
             separateur = ("" if texte.endswith("\n") else "\n") + "\n"
             bloc = render_block(
-                nom=nom, phrase=phrase, quand=_quand_fichier(lecture.regle),
+                nom=nom, phrase=phrase, quand=quand_fichier(lecture.regle),
                 outils=outils, ecartes=ajoutables, impossibles=impossibles,
             )
 
@@ -262,6 +315,13 @@ class SetRoutineTool(Tool):
                 _withdraw(context.db, rid)
                 return self._refuse("je n'ai pas pu écrire son bloc dans routines.md")
 
+        if rallumer:
+            # The one place this tool changes an existing byte, and only
+            # when the line would otherwise name an hour nothing fires at.
+            attendu = quand_fichier(lecture.regle)
+            if blocs[nom].quand.strip() != attendu:
+                rewrite_quand(cfg, nom, attendu)
+
         # Two writes inside one filesystem tick are indistinguishable to
         # an mtime cache, so the read-back below would see the file as it
         # was a moment before the block existed.
@@ -292,7 +352,7 @@ class SetRoutineTool(Tool):
                 or relu.outils != outils or relu.phrase != phrase
                 or ligne.get("id") != rid):
             _withdraw(context.db, rid)
-            return self._refuse_moitie(nom)
+            return self._refuse_moitie(nom, relu)
 
         try:
             from ...daemon import nudge_routines
@@ -313,42 +373,111 @@ class SetRoutineTool(Tool):
     def _collision(self, nom, blocs, lignes, phrase, outils):
         """A name already spoken for, or the same routine said twice.
 
-        Returns a refusal, or which of the two ways forward this is.
+        Returns a refusal, a question, or which way forward this is.
 
-        A block with no live row is not a collision: it is this same
-        routine, stopped. The tab's own button leaves exactly that state,
-        and so does the dispatcher's auto-stop, and both invite the user
-        to say the sentence again. Refusing there would make stopping a
-        one-way door, under a message pointing at a file the tab has just
-        called empty.
+        A block with no live row is not a collision: it is that routine,
+        stopped. Both the tab's button and the dispatcher's auto-stop
+        leave exactly that state and both invite the user to say the
+        sentence again, so refusing there would make stopping a one-way
+        door. Matched on the **name** alone — the phrase is a model's
+        reading of a Whisper transcription and the block may have been
+        corrected by hand, so two utterances of one routine never agree
+        byte for byte.
         """
         bloc = blocs.get(nom)
         vivante = lignes.get(nom)
 
         if bloc is not None and vivante is None:
-            if bloc.phrase == phrase and bloc.outils == outils:
-                # Same routine, same envelope, currently stopped. Write
-                # the row and nothing else: appending a second block
-                # would duplicate one the user may have edited by hand,
-                # and the live routine would be the copy.
-                return _RALLUMER
-            return self._refuse(
-                f"un bloc « {nom} » existe déjà dans routines.md, arrêté, "
-                f"avec une autre demande — renomme-le ou supprime-le, puis "
-                f"redis-moi celle-ci"
-            )
+            return _RALLUMER
 
         if vivante is not None:
             if str(vivante.get("texte") or "") == phrase:
-                return self._refuse(
-                    f"« {nom} » fait déjà exactement ça, prévu le "
-                    f"{_lisible(vivante.get('due_local'))}"
-                )
+                return self._inchangee(nom, vivante)
             return self._refuse(
                 f"« {nom} » est déjà pris par une autre routine ; donne-lui "
                 f"un autre nom, ou arrête celle-là dans l'onglet Routines"
             )
         return _CREER
+
+    def _carte_dit_vrai(self, cfg, nom, bloc, outils) -> Optional[ToolExecutionResult]:
+        """Whether the yes already given describes what re-arming grants.
+
+        The whole security posture of this tool is one sentence: a
+        standing habit costs a human yes. That yes is given on a card
+        `describe_action` composes **only from the call's arguments**, and
+        the digest is recomputed at execution so an approval cannot slide
+        from one call to another. Re-arming from the block would break
+        that equivalence for the first time: the envelope actually armed
+        is the block's, and the card showed the model's proposal.
+
+        Concretely: a fetched page tells the model to set up a routine
+        named like one the user stopped. The card shows one harmless
+        tool. The block carries three and a `mémoire: oui` line, so the
+        user's whole profile leaves the machine every morning — none of
+        it on the card they approved. Revoking is free (`cancelRoutine`
+        is `libre`), restoring costs a yes that describes something else.
+
+        So when the block grants more than the call proposed, nothing is
+        written and the question is asked again with the block's real
+        envelope in the arguments, where the gate will fingerprint it.
+        """
+        scope = bloc.scope()
+        if set(scope.outils) == set(outils) and not scope.memoire:
+            return None
+
+        profil = (
+            " Elle emporte aussi ton profil et tes règles (« mémoire: oui »)."
+            if scope.memoire else ""
+        )
+        return ToolExecutionResult(
+            success=False,
+            reply_text=(
+                f"Nothing was set up yet. The stopped routine « {nom} » "
+                f"already exists in routines.md and restarting it would arm "
+                f"what its own block says, not what was just proposed: "
+                f"{', '.join(f'`{n}`' for n in scope.outils) or 'aucun outil'}."
+                f"{profil} Tell the user exactly that, in their language, "
+                f"listing those tool names unchanged, and ask whether to "
+                f"restart it as written. If they agree, call setRoutine "
+                f"again with outils set to exactly that list."
+            ),
+        )
+
+    def _inchangee(self, nom, vivante) -> ToolExecutionResult:
+        """It already does this. The user asked for a state, and the
+        state holds — recording that as `échec` would be a lie about the
+        tool in a tab the user reads."""
+        return ToolExecutionResult(
+            success=True,
+            reply_text=(
+                f"Nothing needed doing: « {nom} » already does exactly that, "
+                f"next on {_lisible(vivante.get('due_local'))}. Tell the user "
+                f"plainly, in their language."
+            ),
+        )
+
+    def _arretes(self, noms: List[str], blocs) -> ToolExecutionResult:
+        """A stopped routine already runs at this hour. Which is it?
+
+        Nothing is written. The names quoted are headings already in the
+        file, so calling back with one of them resolves without going
+        through `_nom` — which is what stops this question repeating
+        itself forever.
+        """
+        lignes = "; ".join(
+            f"« {n} » ({blocs[n].phrase.strip() or 'sans phrase'})" for n in noms
+        )
+        return ToolExecutionResult(
+            success=False, outcome=OUTCOME_QUESTION,
+            reply_text=(
+                f"Nothing was set up yet. These routines are stopped and "
+                f"already set for that time: {lignes}. Ask the user, in "
+                f"their language, whether to restart one of them or to add a "
+                f"new one alongside. To restart one, call setRoutine again "
+                f"with nom set to that name exactly as written here. Do not "
+                f"claim anything was created."
+            ),
+        )
 
     def _menu(self, candidats: List[str]) -> ToolExecutionResult:
         """No usable envelope. Ask, naming what is actually reachable.
@@ -367,6 +496,17 @@ class SetRoutineTool(Tool):
             ),
         )
 
+    def _question(self, ask: str) -> ToolExecutionResult:
+        """Something only the user can supply is missing. Not a failure:
+        nothing broke, and the ledger should not say it did."""
+        return ToolExecutionResult(
+            success=False, outcome=OUTCOME_QUESTION,
+            reply_text=(
+                f"Nothing was set up yet: {ask}. Do not claim a routine was "
+                f"created, and do not tell them when it would have run."
+            ),
+        )
+
     def _refuse(self, reason: str) -> ToolExecutionResult:
         return ToolExecutionResult(
             success=False,
@@ -378,18 +518,27 @@ class SetRoutineTool(Tool):
             ),
         )
 
-    def _refuse_moitie(self, nom: str) -> ToolExecutionResult:
-        """The block landed and the row did not, or one of them is
-        unreadable. Named aloud, because litter you announce is a
-        different thing from litter you leave."""
+    def _refuse_moitie(self, nom: str, relu) -> ToolExecutionResult:
+        """The round trip failed. What is said depends on which half of
+        it failed, because the same rule holds here as everywhere else in
+        this feature: never claim anything about a store you have not
+        just read."""
+        if relu is None:
+            reste = (
+                f"no block named « {nom} » could be read back from "
+                f"routines.md, so do not tell them to say the request again"
+            )
+        else:
+            reste = (
+                f"a block named « {nom} » is in routines.md and intact, so "
+                f"they can read what it was allowed to do, or delete it"
+            )
         return ToolExecutionResult(
             success=False,
             reply_text=(
-                f"No routine was set up: it could not be read back. Tell the "
-                f"user plainly, in their language, that a block named "
-                f"« {nom} » may have been left in routines.md and that they "
-                f"can delete it. Nothing is scheduled. Do not claim a "
-                f"routine was created."
+                f"No routine was set up: it could not be read back, and "
+                f"{reste}. Nothing is scheduled. Tell the user plainly, in "
+                f"their language, and do not claim a routine was created."
             ),
         )
 
@@ -441,6 +590,45 @@ def _nom_derive(regle: Regle, pris) -> str:
     return f"{base}-{len(pris) + 1}"
 
 
+def _heure_reprise(db, nom: str, lecture):
+    """The hour a re-armed routine runs at, when none was spoken.
+
+    Taking `reminder_default_hour` here would silently move a 07:00 habit
+    to 09:00 and then rewrite the file to agree — exactly the failure the
+    disclosure exists to prevent. The routine's own cancelled row still
+    records the recurrence it had, so that is where the hour comes from.
+
+    Only the hour and the minute: a rhythm freshly spoken must survive,
+    and rebuilding through `from_json` normalises a weekday left over
+    from a rule that has become daily.
+    """
+    from ...routines.extract import Lecture
+
+    if not lecture.heure_supposee:
+        return lecture
+    try:
+        ancienne = db.last_cancelled_rappel("routine", nom)
+        regle = Regle.from_json(payload_of(ancienne).get("regle")) if ancienne else None
+    except Exception as e:
+        debug_log(f"previous schedule unreadable: {e}", "tools")
+        regle = None
+
+    if regle is None:
+        return ToolExecutionResult(
+            success=False, outcome=OUTCOME_QUESTION,
+            reply_text=(
+                f"Nothing was set up yet: « {nom} » was stopped and no time "
+                f"of day was given to restart it, and none is recorded. Ask "
+                f"the user what time it should run, in their language. Do "
+                f"not choose one for them."
+            ),
+        )
+    reprise = Regle.from_json({
+        **lecture.regle.to_json(), "hour": regle.hour, "minute": regle.minute,
+    })
+    return Lecture(regle=reprise, quoi=lecture.quoi, heure_supposee=False)
+
+
 def _live_rows(db) -> Dict[str, dict]:
     """Pending routine rows, keyed by name.
 
@@ -465,14 +653,6 @@ def _withdraw(db, rid: str) -> None:
         db.cancel_rappel(rid)
     except Exception as e:
         debug_log(f"routine row not withdrawn: {e}", "tools")
-
-
-def _quand_fichier(regle: Regle) -> str:
-    """The schedule for the user's own file, composed from the rule."""
-    heure = f"{regle.hour:02d}:{regle.minute:02d}"
-    if regle.kind == "daily":
-        return f"tous les jours à {heure}"
-    return f"chaque semaine, jour {regle.weekday}, à {heure}"
 
 
 def _quand_directive(regle: Regle) -> str:
@@ -523,5 +703,8 @@ def _confirmation(nom: str, regle: Regle, quand: datetime, outils: List[str],
         f"schedule, and then every one of those tool names reproduced "
         f"exactly as written here, unchanged and untranslated — they are "
         f"what the user searches for in routines.md to narrow it. Say they "
-        f"can change the schedule or the list there.{supposition}"
+        f"can narrow that list in routines.md. Do NOT tell them they can "
+        f"change the schedule there: that line is a copy, and editing it "
+        f"moves nothing. Changing when it runs is something they say to "
+        f"her.{supposition}"
     )

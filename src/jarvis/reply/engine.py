@@ -768,6 +768,11 @@ _HINT_MESSAGE_CHAR_LIMIT = 200
 # than a fact note.
 _DIGEST_SKIP_TOOLS = frozenset({
     "getWeather",
+    # Composed entirely by code, already short, and carrying a block's
+    # tool names to be repeated word for word. A summariser paraphrases
+    # exactly the part the user needs verbatim to find it in their file.
+    "setRoutine",
+    "cancelRoutine",
 })
 
 

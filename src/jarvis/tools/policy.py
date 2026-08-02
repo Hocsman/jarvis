@@ -46,6 +46,11 @@ OUTCOME_REFUSED = "refusé"
 OUTCOME_ASKED = "demandé"
 OUTCOME_DECLINED = "décliné"
 OUTCOME_EXPIRED = "expiré"
+# A tool that could not proceed without something only the user can
+# supply, and asked. Distinct from `échec`, which says something broke,
+# and from `demandé`, which is the gate holding a pinned call: nothing is
+# pinned here and nothing is waiting on an id.
+OUTCOME_QUESTION = "question"
 # A routine reached past its own envelope. Kept apart from `refusé`
 # because the two point at different files: `refusé` is the user's policy
 # saying no to everyone, `hors-cadre` is one routine's own scope, which

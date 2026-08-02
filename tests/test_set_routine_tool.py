@@ -323,13 +323,17 @@ def test_the_file_is_only_ever_appended_to(db, cfg):
 # ── A name already spoken for ─────────────────────────────────────────
 
 
-def test_the_same_routine_said_twice_is_refused(db, cfg):
+def test_the_same_routine_said_twice_changes_nothing_and_says_so(db, cfg):
+    """The user asked for a state and the state holds. Recording that as
+    `échec` would be a lie about the tool in a tab they read, and telling
+    the model it failed invites it to try again."""
     _run(db, cfg, {"routine": "x", "outils": ["webSearch"], "nom": "matin"})
 
     result = _run(db, cfg, {"routine": "x", "outils": ["webSearch"], "nom": "matin"})
 
-    assert result.success is False
+    assert result.success is True
     assert len(_rows(db)) == 1
+    assert len(_blocks(cfg)) == 1
 
 
 def test_a_stopped_routine_is_restarted_rather_than_refused(db, cfg):
@@ -393,3 +397,247 @@ def test_what_was_left_out_could_actually_be_added(db, cfg):
     invitation = texte.split("Ajoute une ligne")[1].split("-->")[0]
     assert "remember" not in invitation
     assert "remember" in texte
+
+
+# ── Restarting one that was stopped ───────────────────────────────────
+
+
+def _stop(db):
+    db.cancel_rappel(_rows(db)[0]["id"])
+
+
+def test_a_stopped_routine_restarts_on_the_name_alone(db, cfg):
+    """The phrase is a model's reading of a Whisper transcription, and
+    the block may have been corrected by hand — which is what the file is
+    for. Two utterances of one routine never agree byte for byte, so
+    matching on the phrase made the restart path a one-way door of its
+    own."""
+    _run(db, cfg, {"routine": "x", "outils": ["webSearch"], "nom": "matin"})
+    _stop(db)
+
+    result = _run(db, cfg, {"routine": "x", "outils": ["webSearch"], "nom": "matin"},
+                  lecture=Lecture(
+                      regle=Regle(kind="daily", hour=7, minute=0, weekday=None),
+                      quoi="une formulation entièrement différente",
+                      heure_supposee=False))
+
+    assert result.success is True
+    assert len(_rows(db)) == 1
+
+
+def test_restarting_writes_no_second_block(db, cfg):
+    """A duplicate would leave the live routine as the copy, while the
+    user edits the original and watches nothing change."""
+    _run(db, cfg, {"routine": "x", "outils": ["webSearch"], "nom": "matin"})
+    _stop(db)
+    fichier = _file(cfg)
+
+    _run(db, cfg, {"routine": "x", "outils": ["webSearch"], "nom": "matin"})
+
+    assert _file(cfg) == fichier
+
+
+def test_the_block_wins_over_what_the_model_reconstructed(db, cfg):
+    """The block is the user's corrected version. Its phrase is what
+    actually runs."""
+    _run(db, cfg, {"routine": "x", "outils": ["webSearch"], "nom": "matin"})
+    _stop(db)
+
+    _run(db, cfg, {"routine": "x", "outils": ["webSearch"], "nom": "matin"},
+         lecture=Lecture(
+             regle=Regle(kind="daily", hour=7, minute=0, weekday=None),
+             quoi="autre chose", heure_supposee=False))
+
+    assert _rows(db)[0]["texte"] == "résumer mes mails"
+
+
+# ── The card has to describe what is actually armed ───────────────────
+
+
+def test_restarting_a_wider_block_asks_again_instead(db, cfg):
+    """The whole security posture is that a standing habit costs a human
+    yes, and that yes is given on a card composed only from the call's
+    arguments. Re-arming from the block would break the equivalence for
+    the first time: a fetched page proposes one harmless tool, the card
+    shows one harmless tool, and the block arms three."""
+    _run(db, cfg, {"routine": "x", "outils": ["webSearch", "fetchWebPage"],
+                   "nom": "matin"})
+    _stop(db)
+
+    result = _run(db, cfg, {"routine": "x", "outils": ["webSearch"], "nom": "matin"})
+
+    assert result.success is False
+    assert _rows(db) == []
+    assert "fetchWebPage" in result.reply_text
+
+
+def test_a_block_that_carries_the_profile_asks_again_too(db, cfg):
+    """`mémoire: oui` is a standing grant of the user's whole profile
+    leaving the machine every morning, and it appears on no card."""
+    from src.jarvis.routines.scope import routines_path
+
+    _run(db, cfg, {"routine": "x", "outils": ["webSearch"], "nom": "matin"})
+    _stop(db)
+    chemin = routines_path(cfg)
+    chemin.write_text(
+        chemin.read_text(encoding="utf-8").replace(
+            "## matin\n", "## matin\nmémoire: oui\n"),
+        encoding="utf-8")
+    from src.jarvis.routines.scope import invalidate_routines_cache
+    invalidate_routines_cache()
+
+    result = _run(db, cfg, {"routine": "x", "outils": ["webSearch"], "nom": "matin"})
+
+    assert result.success is False
+    assert _rows(db) == []
+    assert "mémoire" in result.reply_text
+
+
+def test_a_proposal_that_already_matches_the_block_goes_through(db, cfg):
+    """Asking twice for something the card described correctly is
+    ceremony, and ceremony is what gets a permission wall switched off."""
+    _run(db, cfg, {"routine": "x", "outils": ["webSearch"], "nom": "matin"})
+    _stop(db)
+
+    result = _run(db, cfg, {"routine": "x", "outils": ["webSearch"], "nom": "matin"})
+
+    assert result.success is True
+
+
+# ── The hour, when none was spoken ────────────────────────────────────
+
+
+def test_restarting_without_an_hour_keeps_the_one_it_had(db, cfg):
+    """Taking the default would silently move a 07:00 habit to 09:00 and
+    then rewrite the file to agree — the exact failure the disclosure
+    exists to prevent."""
+    _run(db, cfg, {"routine": "x", "outils": ["webSearch"], "nom": "matin"})
+    _stop(db)
+
+    _run(db, cfg, {"routine": "tous les matins", "outils": ["webSearch"],
+                   "nom": "matin"},
+         lecture=Lecture(
+             regle=Regle(kind="daily", hour=9, minute=0, weekday=None),
+             quoi="x", heure_supposee=True))
+
+    assert Regle.from_json(payload_of(_rows(db)[0])["regle"]).hour == 7
+
+
+def test_a_freshly_spoken_rhythm_survives_the_hour_being_recovered(db, cfg):
+    """Only the hour and the minute come from the old rule. A routine the
+    user has just made weekly must not go back to daily."""
+    _run(db, cfg, {"routine": "x", "outils": ["webSearch"], "nom": "matin"})
+    _stop(db)
+
+    _run(db, cfg, {"routine": "chaque lundi", "outils": ["webSearch"],
+                   "nom": "matin"},
+         lecture=Lecture(
+             regle=Regle(kind="weekly", hour=9, minute=0, weekday=0),
+             quoi="x", heure_supposee=True))
+
+    regle = Regle.from_json(payload_of(_rows(db)[0])["regle"])
+    assert (regle.kind, regle.weekday, regle.hour) == ("weekly", 0, 7)
+
+
+def test_a_newly_spoken_hour_updates_the_line_in_the_file(db, cfg):
+    """Otherwise `quand:` names an hour nothing fires at, in the one file
+    whose whole purpose is being readable a month later."""
+    _run(db, cfg, {"routine": "x", "outils": ["webSearch"], "nom": "matin"})
+    _stop(db)
+
+    _run(db, cfg, {"routine": "x", "outils": ["webSearch"], "nom": "matin"},
+         lecture=Lecture(
+             regle=Regle(kind="daily", hour=8, minute=30, weekday=None),
+             quoi="x", heure_supposee=False))
+
+    assert _blocks(cfg)["matin"].quand == "tous les jours à 08:30"
+
+
+def test_an_unchanged_hour_touches_no_byte(db, cfg):
+    """The ordinary case. The one exception to only ever adding bytes
+    must not fire when there is nothing to change."""
+    _run(db, cfg, {"routine": "x", "outils": ["webSearch"], "nom": "matin"})
+    _stop(db)
+    fichier = _file(cfg)
+
+    _run(db, cfg, {"routine": "x", "outils": ["webSearch"], "nom": "matin"})
+
+    assert _file(cfg) == fichier
+
+
+# ── The model does not name a routine the same way twice ──────────────
+
+
+def test_one_stopped_routine_at_that_hour_is_the_one_meant(db, cfg):
+    """One turn proposes `actusWebMatin` for a sentence, the next
+    proposes `news_summary` for the same one, so a restart cannot be
+    recognised by the name. With a single stopped routine already set
+    for this very hour, saying the sentence again means that one — and
+    the user was told twice that it would. The name is not the guard:
+    the card check still refuses to arm a wider envelope."""
+    _run(db, cfg, {"routine": "x", "outils": ["webSearch"], "nom": "matin"})
+    _stop(db)
+
+    result = _run(db, cfg, {"routine": "x", "outils": ["webSearch"],
+                            "nom": "autreNom"})
+
+    assert result.success is True
+    assert len(_rows(db)) == 1
+    assert len(_blocks(cfg)) == 1
+
+
+def test_several_stopped_at_that_hour_is_a_question(db, cfg):
+    """Now it is a guess about which one they meant, and guessing wrong
+    restarts a routine they had deliberately switched off."""
+    # Both created while both are live, then both stopped: stopping one
+    # first would make the second request restart it instead.
+    _run(db, cfg, {"routine": "x", "outils": ["webSearch"], "nom": "matin"})
+    _run(db, cfg, {"routine": "x", "outils": ["fetchWebPage"], "nom": "veille"})
+    for row in list(_rows(db)):
+        db.cancel_rappel(row["id"])
+
+    result = _run(db, cfg, {"routine": "x", "outils": ["webSearch"],
+                            "nom": "autreNom"})
+
+    assert result.success is False
+    assert result.outcome == "question"
+    assert _rows(db) == []
+    assert "matin" in result.reply_text and "veille" in result.reply_text
+
+
+def test_a_different_hour_is_a_different_routine(db, cfg):
+    """Only a stopped one set for this very time is a plausible restart.
+    Asking about every stopped block would put a question in front of
+    every genuinely new routine."""
+    _run(db, cfg, {"routine": "x", "outils": ["webSearch"], "nom": "matin"})
+    _stop(db)
+
+    result = _run(db, cfg, {"routine": "x", "outils": ["webSearch"],
+                            "nom": "soir"},
+                  lecture=Lecture(
+                      regle=Regle(kind="daily", hour=19, minute=0, weekday=None),
+                      quoi="x", heure_supposee=False))
+
+    assert result.success is True
+    assert len(_blocks(cfg)) == 2
+
+
+def test_answering_with_the_name_restarts_it(db, cfg):
+    """The names quoted are headings already in the file, so calling back
+    with one resolves without going through `_nom` — which is what stops
+    the question repeating itself forever."""
+    _run(db, cfg, {"routine": "x", "outils": ["webSearch"], "nom": "matin"})
+    _stop(db)
+    _run(db, cfg, {"routine": "x", "outils": ["webSearch"], "nom": "autreNom"})
+
+    result = _run(db, cfg, {"routine": "x", "outils": ["webSearch"], "nom": "matin"})
+
+    assert result.success is True
+    assert len(_rows(db)) == 1
+    assert len(_blocks(cfg)) == 1
+
+
+def test_nothing_is_asked_when_no_routine_is_stopped(db, cfg):
+    result = _run(db, cfg, {"routine": "x", "outils": ["webSearch"], "nom": "matin"})
+
+    assert result.success is True

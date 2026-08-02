@@ -23,7 +23,9 @@ See routines.spec.md for the full contract.
 
 from __future__ import annotations
 
+import os
 import re
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -207,6 +209,160 @@ def load_routines(cfg) -> Dict[str, RoutineBlock]:
 
     _CACHE["stamp"], _CACHE["blocks"] = stamp, blocks
     return blocks
+
+
+# A schedule line composed by this code, and nothing else. The value is
+# ours today, but a newline in it would append a field, a heading, or a
+# whole block to a file that belongs to the user.
+_QUAND_PROPRE = re.compile(r"^[^\r\n]{1,120}$")
+
+_QUAND_LIGNE = re.compile(r"^\s*quand\s*:")
+
+
+def _compose_quand(lignes: List[str], nom: str, valeur: str):
+    """The file with one block's schedule lines replaced, or None.
+
+    Only inside that block's own span, and never inside a comment: the
+    header comment carries the word `quand` in its own explanation of
+    itself, and rewriting there would edit the file's documentation while
+    a parse-based check stayed green — a comment does not become a block.
+
+    Every schedule line in the span, not merely the last. `parse_routines`
+    is last-wins, so replacing only the last would leave an earlier
+    contradictory line above it, and that is the one a human reads first.
+    """
+    dedans = False
+    in_comment = False
+    remplacees: List[int] = []
+    apres_titre = None
+    apres_phrase = None
+    fin = len(lignes)
+
+    for i, ligne in enumerate(lignes):
+        if in_comment:
+            if _COMMENT_CLOSE in ligne:
+                in_comment = False
+            continue
+        if _COMMENT_OPEN in ligne:
+            if _COMMENT_CLOSE not in ligne:
+                in_comment = True
+            continue
+
+        heading = _HEADING_RE.match(ligne)
+        if heading:
+            if dedans:
+                fin = i
+                break
+            dedans = heading.group("name").strip() == nom
+            if dedans:
+                apres_titre = i + 1
+            continue
+
+        if not dedans:
+            continue
+        if _QUAND_LIGNE.match(ligne):
+            remplacees.append(i)
+        elif ligne.startswith("phrase:"):
+            apres_phrase = i + 1
+
+    if apres_titre is None:
+        return None
+
+    out = list(lignes)
+    for i in remplacees:
+        out[i] = f"quand: {valeur}\n"
+    if not remplacees:
+        # A half-written block, so the line is added where `render_block`
+        # would have put it.
+        out.insert(min(apres_phrase or apres_titre, fin), f"quand: {valeur}\n")
+    return out
+
+
+def rewrite_quand(cfg, nom: str, valeur: str) -> bool:
+    """Replace one block's schedule line in place. Returns whether it did.
+
+    The single exception to this tool only ever adding bytes, and drawn as
+    narrowly as it can be. It is not called at all when the line already
+    says the right thing, which is the ordinary case.
+
+    Never raises. A refusal leaves the file exactly as it was, which is
+    always a legal state: `quand:` is a mirror, and a stale mirror is
+    reported rather than forced.
+    """
+    if not _QUAND_PROPRE.match(valeur or ""):
+        debug_log(f"quand not rewritten: unusable value for {nom}", "tools")
+        return False
+
+    tmp = None
+    try:
+        path = routines_path(cfg)
+        avant_stat = path.stat()
+        texte = path.read_text(encoding="utf-8")
+        lignes = texte.splitlines(keepends=True)
+
+        apres = _compose_quand(lignes, nom, valeur)
+        if apres is None:
+            return False
+
+        # Byte for byte, not parse-alike. Two files can parse the same and
+        # differ in a paragraph the user wrote, so equivalence is the
+        # wrong claim: every line identical except the ones deliberately
+        # rewritten, or the single one inserted.
+        if len(apres) == len(lignes):
+            bouge = [i for i, (a, b) in enumerate(zip(lignes, apres)) if a != b]
+            if not bouge or any(not _QUAND_LIGNE.match(apres[i]) for i in bouge):
+                return False
+        elif len(apres) == len(lignes) + 1:
+            # One line added. Everything above it is untouched and
+            # everything below it has only shifted down by one.
+            idx = next((i for i, (a, b) in enumerate(zip(lignes, apres)) if a != b),
+                       len(lignes))
+            if not _QUAND_LIGNE.match(apres[idx]):
+                return False
+            if lignes[idx:] != apres[idx + 1:]:
+                return False
+        else:
+            return False
+
+        # The user has this file open in an editor. Checked here rather
+        # than at the read, so the window is the write itself.
+        maintenant = path.stat()
+        if (maintenant.st_mtime_ns != avant_stat.st_mtime_ns
+                or maintenant.st_size != avant_stat.st_size):
+            debug_log(f"quand not rewritten: {nom}'s file moved underneath", "tools")
+            return False
+
+        tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
+        tmp.write_text("".join(apres), encoding="utf-8")
+        os.chmod(tmp, avant_stat.st_mode & 0o777)
+        os.replace(tmp, path)
+        tmp = None
+        invalidate_routines_cache()
+        debug_log(f"    🌅 {nom}: schedule line rewritten to {valeur!r}", "tools")
+        return True
+    except Exception as e:
+        debug_log(f"quand not rewritten for {nom}: {e}", "tools")
+        return False
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
+
+
+def quand_fichier(regle) -> str:
+    """The schedule line one rule is written as, in the user's file.
+
+    Composed here so that everything which needs to compare against it —
+    the tool that writes it, the runner that notices it has gone stale —
+    is comparing two strings this code produced, rather than reading
+    French out of a file.
+    """
+    heure = f"{regle.hour:02d}:{regle.minute:02d}"
+    if regle.kind == "daily":
+        return f"tous les jours à {heure}"
+    return f"chaque semaine, jour {regle.weekday}, à {heure}"
 
 
 def invalidate_routines_cache() -> None:

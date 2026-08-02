@@ -181,14 +181,87 @@ work is worse than one that says nothing.
 **A block with no live row is not a collision — it is that routine,
 stopped.** Both the tab's button and the dispatcher's auto-stop leave
 exactly that state and both invite the user to say the sentence again, so
-`setRoutine` re-arms it: the row is written and the file is not touched,
-because appending a second block would duplicate one they may have
-edited by hand and the live routine would be the copy.
+`setRoutine` re-arms it rather than refusing. Matched on the **name**
+alone: the phrase is a model's reading of a Whisper transcription and the
+block may have been corrected by hand, so two utterances of one routine
+never agree byte for byte, and matching on the phrase made the restart
+path a one-way door of its own.
+
+The model does not name a routine the same way twice: one turn proposes
+`actusWebMatin` for a sentence, the next `news_summary` for the same one.
+So a restart cannot be recognised by the name alone, and the user would
+accumulate duplicate blocks doing one job under several names. When the
+name is new and exactly **one** stopped routine is already set for that
+very hour, that is the one meant — the user was told twice that saying
+the sentence again restarts it. With several, it asks which, quoting
+headings already in the file so the answer resolves without going through
+`_nom`, which is what stops the question repeating forever. Comparing
+schedule lines is not a language pattern: both strings were composed by
+`quand_fichier`.
+
+On a re-arm the block wins — its phrase and its envelope are the user's
+corrected version — and no second block is appended, since the live
+routine would then be the copy while they edit the original.
+
+**But the card has to describe what is actually armed.** The whole
+security posture is that a standing habit costs a human yes, and that yes
+is given on a card `describe_action` composes *only from the call's
+arguments*, with the digest recomputed at execution so an approval cannot
+slide from one call to another. Re-arming from the block breaks that
+equivalence: a fetched page proposes one harmless tool, the card shows
+one harmless tool, and the block arms three plus `mémoire: oui` — the
+user's whole profile leaving the machine every morning, on no card they
+saw. Revoking is free (`cancelRoutine` is `libre`) and restoring would
+cost a yes that described something else. So when the block grants more
+than the call proposed, or carries `mémoire: oui`, nothing is written and
+the question is asked again with the block's real envelope in the
+arguments, where the gate fingerprints it. A proposal that already
+matches passes on the first yes, because there the card was true.
+
+**An hour nobody spoke comes from the routine's own cancelled row**, not
+from `reminder_default_hour`: taking the default would silently move a
+07:00 habit to 09:00 and then rewrite the file to agree, which is exactly
+the failure the assumed-hour disclosure exists to prevent. Only the hour
+and the minute are recovered, so a rhythm freshly spoken survives. With
+no record at all, it asks.
+
+## The one line it rewrites
+
+`scope.py::rewrite_quand`.
+
+`setRoutine` only ever adds bytes to `routines.md`, with one exception: a
+re-arm carrying a newly spoken hour would otherwise leave `quand:` naming
+an hour nothing fires at, and a file that lies is worse than one never
+written.
+
+The exception is drawn as narrowly as it can be. Only inside the target
+block's own span; never inside a comment, since the file's own header
+carries the word in its explanation of itself and a parse-based check
+cannot see that edit; every schedule line in that span rather than only
+the last, because `parse_routines` is last-wins and the earlier line is
+the one a human reads first; and the result compared to the original
+**byte for byte** — every line identical except those deliberately
+rewritten, or the single one inserted. Parsing alike is a weaker claim:
+two files can parse the same and differ in a paragraph the user wrote.
+
+The file's mtime and size are re-checked immediately before the write, so
+an editor buffer saved in between is left alone rather than overwritten;
+the write goes through a dotted temporary file that is removed on any
+path; the mode is preserved; and the mtime cache is invalidated on
+success. It does not run at all when the line already says the right
+thing, which is the ordinary case: zero bytes, unchanged mtime.
+
+When the two do fall out of step anyway — an editor saving after the
+rewrite — the runner notices, because it already reads the block, and the
+morning's journal entry says which schedule each store believes. The tab
+flags the same row. A rewrite that broke the append-only law without
+buying the property it claims would be the worst of both.
 
 `cancelRoutine` stops the row and leaves the block, which is the record
 of what that routine was allowed to do and exactly what someone wants to
 read after switching it off. Called with no name it lists what is
-running — and both jobs are stated inside the first 200 characters of its
+running, including the ones that are stopped — and both jobs are stated
+inside the first 200 characters of its
 description, because that is all the tool router is shown. A second
 capability described in sentence three does not exist as far as routing
 is concerned: asked "what do you do on your own?", the catalogue offered

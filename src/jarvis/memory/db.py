@@ -394,6 +394,31 @@ class Database:
             )
             return [dict(row) for row in cur.fetchall()]
 
+    def last_cancelled_rappel(self, kind: str, nom: str) -> Optional[dict]:
+        """The most recently created cancelled row of a given name.
+
+        Read only. `annulé` stays final for every write — nothing here
+        revives it — but a routine the user is restarting still has its
+        old recurrence recorded, and taking the hour from there beats
+        inventing one.
+        """
+        import json
+
+        with self._lock:
+            cur = self.conn.execute(
+                "SELECT * FROM rappels WHERE kind = ? AND etat = ? "
+                "ORDER BY created_utc DESC",
+                (kind, self.ETAT_CANCELLED),
+            )
+            for row in cur.fetchall():
+                row = dict(row)
+                try:
+                    if json.loads(row.get("payload") or "{}").get("nom") == nom:
+                        return row
+                except Exception:
+                    continue
+        return None
+
     def mark_rappel_tried(self, rappel_id: str, now_utc: str) -> None:
         """One more attempt at delivering it. Bounds a failing loop."""
         self._write(

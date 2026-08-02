@@ -249,11 +249,124 @@ class TestSheDoesNotInventTheHour:
         print(f"\n  Response: {response[:250]}")
 
         assert len(_routines(eval_db)) == 1, f"No routine was created: {response!r}"
+
+        bas = response.lower()
         assert any(
-            m in response.lower()
-            for m in ("choisi", "chose", "par défaut", "default", "tu peux",
-                      "you can change", "modifier")
+            m in bas
+            for m in ("choisi", "chois", "par défaut", "default", "tu peux",
+                      "vous pouvez", "you can", "modifier", "changer",
+                      "adjust", "ajuster")
         ), (
             f"She stated an hour the user never gave without saying it was "
-            f"her choice: {response!r}"
+            f"her choice or that they can change it: {response!r}"
+        )
+
+    def test_she_does_not_send_them_to_the_file_to_change_the_hour(
+        self, mock_config, eval_db, eval_dialogue_memory, tmp_path,
+    ):
+        """`quand:` is a copy of the rule and nothing reads it. Telling
+        the user to edit it there sends them to make a change that does
+        nothing, and they only find out at 07:00 — if they notice."""
+        _setup(mock_config, tmp_path, verdict="Libre")
+
+        response = _ask(
+            mock_config, eval_db, eval_dialogue_memory, self.ASK_SANS_HEURE,
+        ) or ""
+
+        print(f"\n  Response: {response[:250]}")
+
+        bas = response.lower()
+        for faux in ("l'heure dans routines.md", "l'horaire dans routines.md",
+                     "time in routines.md", "the time or tool list later in "
+                     "the routine file", "schedule in routines.md"):
+            assert faux not in bas, (
+                f"She sent the user to edit a line that changes nothing: "
+                f"{response!r}"
+            )
+
+
+@pytest.mark.eval
+@requires_judge_llm
+class TestRestartingOneThatWasStopped:
+    """Stopping has to be reversible by saying the same thing again.
+
+    Both the tool's own reply and the Routines tab tell the user exactly
+    that, so a refusal there is the worst outcome available: they stopped
+    it, were told twice how to restart it, said it, approved a
+    confirmation, and got "I can delete it or rename it, which do you
+    prefer?".
+
+    The tool result is composed entirely by code and carries tool names
+    to be repeated word for word, so this runs with the result digest ON:
+    a summariser paraphrasing exactly the part the user needs verbatim is
+    a regression this has to catch.
+    """
+
+    ASK = "Jarvis, tous les matins à 7h, résume-moi l'actualité."
+
+    def _create_then_stop(self, mock_config, eval_db, eval_dialogue_memory):
+        """Create one, stop it, and hand back a fresh conversation.
+
+        The restart happens days later, or after a restart. Reusing the
+        same dialogue memory measures the model's recollection of having
+        just created it — it answers "c'est déjà configuré" from history
+        and calls nothing — rather than the path under test.
+        """
+        from jarvis.memory.conversation import DialogueMemory
+
+        _ask(mock_config, eval_db, eval_dialogue_memory, self.ASK)
+        rows = _routines(eval_db)
+        assert rows, "setup failed: no routine was created"
+        eval_db.cancel_rappel(rows[0]["id"])
+        return DialogueMemory()
+
+    def test_saying_it_again_brings_it_back(
+        self, mock_config, eval_db, eval_dialogue_memory, tmp_path,
+    ):
+        _setup(mock_config, tmp_path, verdict="Libre")
+        mock_config.tool_result_digest_enabled = True
+        plus_tard = self._create_then_stop(
+            mock_config, eval_db, eval_dialogue_memory)
+
+        response = _ask(mock_config, eval_db, plus_tard, self.ASK)
+
+        print(f"\n  Routines: {_routines(eval_db)}")
+        print(f"  Response: {(response or '')[:250]}")
+
+        assert len(_routines(eval_db)) == 1, (
+            f"A routine the user stopped could not be restarted by saying "
+            f"the same thing, which is what they were told to do: "
+            f"{response!r}"
+        )
+
+    def test_it_never_silently_duplicates_the_block(
+        self, mock_config, eval_db, eval_dialogue_memory, tmp_path,
+    ):
+        """A second block doing the same job would leave the live routine
+        as the copy, while the user edits the original and watches
+        nothing change.
+
+        The model does not name a routine the same way twice — one turn
+        proposes `actusWebMatin`, the next `news_summary` for the same
+        sentence — so a restart cannot be recognised by the name alone.
+        What must never happen is a silent duplicate: either it restarts
+        the stopped one, or it says there is one and asks."""
+        from jarvis.routines.scope import invalidate_routines_cache, routines_path
+
+        _setup(mock_config, tmp_path, verdict="Libre")
+        plus_tard = self._create_then_stop(
+            mock_config, eval_db, eval_dialogue_memory)
+        invalidate_routines_cache()
+        avant = routines_path(mock_config).read_text(encoding="utf-8")
+
+        response = _ask(mock_config, eval_db, plus_tard, self.ASK) or ""
+
+        apres = routines_path(mock_config).read_text(encoding="utf-8")
+        print(f"\n  Blocs: {avant.count(chr(10) + '## ')} → "
+              f"{apres.count(chr(10) + '## ')}")
+        print(f"  Response: {response[:250]}")
+
+        assert apres.count("\n## ") == avant.count("\n## "), (
+            f"A second block was appended for a routine that already had "
+            f"one: {response!r}"
         )

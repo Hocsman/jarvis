@@ -151,6 +151,19 @@ class RoutineRunner:
         if bloc is not None and bloc.phrase.strip():
             phrase = bloc.phrase.strip()
 
+        # The schedule line is a mirror of the rule, and an editor buffer
+        # saved after a rewrite puts the two out of step with nothing
+        # anywhere able to see it. Both strings are composed by this code,
+        # so comparing them is not a language pattern.
+        desaccord = None
+        if bloc is not None:
+            attendu = quand_fichier_pour(payload)
+            if attendu and bloc.quand.strip() != attendu:
+                desaccord = (
+                    f"routines.md dit « {bloc.quand.strip()} », "
+                    f"elle tourne sur « {attendu} »"
+                )
+
         scope = bloc.scope() if bloc is not None else None
         if scope is None:
             # The block was deleted, which is the off switch a user can
@@ -180,6 +193,7 @@ class RoutineRunner:
             erreur=erreur, texte=texte,
             outcome=OUTCOME_OK if texte else OUTCOME_FAILED,
             since=started_iso, absents=missing_from_catalogue(scope),
+            desaccord=desaccord,
         )
 
     def _ask_the_engine(self, phrase: str, scope) -> tuple:
@@ -285,7 +299,8 @@ class RoutineRunner:
 
     def _settle(self, nom, rid, phrase, started_at, began, payload, *,
                 erreur, texte, outcome, since: Optional[str] = None,
-                absents: Optional[List[str]] = None, count: bool = True) -> None:
+                absents: Optional[List[str]] = None, count: bool = True,
+                desaccord: Optional[str] = None) -> None:
         outils, ecartes = self._tool_calls_since(since)
         # A name the envelope holds but the catalogue no longer does is
         # dropped by the engine before a single ledger row exists, so the
@@ -294,6 +309,8 @@ class RoutineRunner:
         # reports success every morning while doing a fraction of its job.
         for nom_absent in (absents or []):
             ecartes.append((nom_absent, "cet outil n'existe plus ici"))
+        if desaccord:
+            ecartes.append(("horaire", desaccord))
         append_run(self._cfg, Entree(
             nom=nom or "?", moment=started_at, demande=phrase,
             texte=texte or None, outils=outils, ecartes=ecartes,
@@ -311,6 +328,16 @@ class RoutineRunner:
                                stopped=False)
             except Exception as e:
                 debug_log(f"routine trouble not announced: {e}", "tools")
+
+
+def quand_fichier_pour(payload: dict) -> str:
+    """The schedule line this rule would be written as, or empty."""
+    from .scope import quand_fichier
+
+    try:
+        return quand_fichier(Regle.from_json(payload.get("regle")))
+    except Exception:
+        return ""
 
 
 def missing_from_catalogue(scope) -> List[str]:

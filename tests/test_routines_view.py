@@ -81,6 +81,10 @@ def _list(client):
     return json.loads(client.get("/api/routines").data)["routines"]
 
 
+def _vivantes(client):
+    return [r for r in _list(client) if not r["arretee"]]
+
+
 def _pages(client):
     return json.loads(client.get("/api/journal").data)["pages"]
 
@@ -101,15 +105,22 @@ def test_a_reminder_is_not(viewer):
     db, client, _ = viewer
     _add(db, kind="rappel")
 
-    assert _list(client) == []
+    assert _vivantes(client) == []
 
 
-def test_a_cancelled_routine_is_not_listed(viewer):
+def test_a_stopped_routine_is_shown_as_stopped_rather_than_hidden(viewer):
+    """Its block is the durable record of what it was allowed to do, and
+    saying the same request again restarts it. Hidden, the only surface
+    holding that was a file the desktop app never opened, under an empty
+    state reading "aucune routine" over a routines.md that held one."""
     db, client, _ = viewer
     rid = _add(db)
     db.cancel_rappel(rid)
 
-    assert _list(client) == []
+    arretees = [r for r in _list(client) if r["arretee"]]
+    assert [r["nom"] for r in arretees] == ["matin"]
+    assert arretees[0]["outils"] == ["webSearch", "fetchWebPage"]
+    assert _vivantes(client) == []
 
 
 def test_the_next_time_it_fires_is_shown(viewer):
@@ -120,6 +131,21 @@ def test_the_next_time_it_fires_is_shown(viewer):
 
 
 # ── What it may reach ─────────────────────────────────────────────────
+
+
+def test_the_sentence_shown_is_the_one_that_runs(viewer):
+    """The block's phrase is what the runner executes, so showing the
+    row's original wording would display something that is no longer
+    what happens."""
+    db, client, cfg = viewer
+    from src.jarvis.routines.scope import routines_path
+
+    routines_path(cfg).write_text(
+        ROUTINES_FILE.replace("résume-moi mes mails", "corrigé à la main"),
+        encoding="utf-8")
+    _add(db, texte="résume-moi mes mails")
+
+    assert _vivantes(client)[0]["texte"] == "corrigé à la main"
 
 
 def test_the_envelope_is_shown_beside_the_hour(viewer):
@@ -178,7 +204,7 @@ def test_a_routine_can_be_stopped(viewer):
 
     client.delete(f"/api/routines/{rid}")
 
-    assert _list(client) == []
+    assert _vivantes(client) == []
 
 
 def test_stopping_reports_honestly(viewer):

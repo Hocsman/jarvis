@@ -459,32 +459,69 @@ def routines_get() -> Response:
     hidden: it still holds a slot in the table, and it comes back the
     moment the block does.
     """
-    from jarvis.routines.runner import missing_from_catalogue, payload_of
-    from jarvis.routines.scope import scope_for
+    from jarvis.routines.runner import (
+        missing_from_catalogue, payload_of, quand_fichier_pour,
+    )
+    from jarvis.routines.scope import load_routines
 
     try:
         cfg = load_settings()
+        blocs = load_routines(cfg)
         out = []
+        vus = set()
         for r in get_activity_db().pending_rappels(kind="routine"):
             payload = payload_of(r)
             nom = str(payload.get("nom") or "")
-            scope = scope_for(cfg, nom) if nom else None
+            bloc = blocs.get(nom)
+            scope = bloc.scope() if bloc is not None else None
+            vus.add(nom)
+            attendu = quand_fichier_pour(payload)
             out.append({
                 "id": r["id"],
                 "nom": nom,
-                "texte": r["texte"],
+                # The block's phrase is what actually runs, so it is the
+                # one to show. The row keeps what was first asked.
+                "texte": (bloc.phrase.strip() if bloc and bloc.phrase.strip()
+                          else r["texte"]),
                 "due_local": r["due_local"],
                 "tz": r["tz"],
                 "origin": r["origin"],
                 "outils": list(scope.outils) if scope else [],
                 "memoire": bool(scope.memoire) if scope else False,
                 "suspendue": scope is None,
+                "arretee": False,
                 # Named in the block, gone from the machine. Without this
                 # the row keeps advertising a capability that stopped
                 # existing in October, and the only trace anywhere is a
                 # debug line nobody has switched on.
                 "introuvables": missing_from_catalogue(scope) if scope else [],
+                # An editor buffer saved after the schedule line was
+                # rewritten puts the file and the rule out of step, and
+                # the file is the thing the user reads.
+                "horaire_divergent": bool(
+                    bloc is not None and attendu
+                    and bloc.quand.strip() != attendu
+                ),
                 "steriles": int(payload.get("steriles", 0) or 0),
+            })
+
+        # Blocks with no live row: routines that were stopped. Listed,
+        # because the block is the durable record of what that routine
+        # was allowed to do and saying the same request again restarts
+        # it — and until now the only surface holding that was a file the
+        # desktop app never opened, under an empty state reading "aucune
+        # routine" over a routines.md that held one.
+        for nom, bloc in blocs.items():
+            if nom in vus:
+                continue
+            scope = bloc.scope()
+            out.append({
+                "id": None, "nom": nom, "texte": bloc.phrase,
+                "due_local": "", "tz": "", "origin": None,
+                "outils": list(scope.outils), "memoire": bool(scope.memoire),
+                "suspendue": False, "arretee": True,
+                "introuvables": missing_from_catalogue(scope),
+                "horaire_divergent": False, "steriles": 0,
             })
         return jsonify({"routines": out})
     except Exception as e:
@@ -3446,7 +3483,7 @@ def index() -> str:
                 return;
             }
             if (!routines.length) {
-                container.innerHTML = "<div class='core-empty'>Aucune routine. Dis-lui « tous les matins à 7h, … ».</div>";
+                container.innerHTML = "<div class='core-empty'>Aucune routine, et aucun bloc dans routines.md. Dis-lui « tous les matins à 7h, … ».</div>";
                 return;
             }
             container.innerHTML = '<div class="core-file">' + routines.map(r => {
@@ -3454,6 +3491,12 @@ def index() -> str:
                 // the T was one, so slicing afterwards eats them.
                 const when = (r.due_local || '').slice(0, 16).replace('T', ' à ');
                 const flags = [];
+                if (r.arretee) {
+                    flags.push('<span class="routine-flag" title="Arrêtée. Son bloc est toujours là : redis la même demande et elle repart.">arrêtée</span>');
+                }
+                if (r.horaire_divergent) {
+                    flags.push('<span class="routine-flag warn" title="routines.md annonce un horaire différent de celui auquel elle part.">horaire à revoir</span>');
+                }
                 if (r.suspendue) {
                     flags.push('<span class="routine-flag warn" title="Plus de bloc dans routines.md : elle ne fera rien tant qu&#39;il n&#39;est pas revenu">suspendue</span>');
                 } else if ((r.introuvables || []).length) {
@@ -3479,7 +3522,7 @@ def index() -> str:
                     <span class="routine-quand">${escapeHtml(when)}</span>
                     <span class="routine-phrase">${escapeHtml(r.texte || '')}</span>
                     ${flags.join(' ')}
-                    <button class="rappel-cancel" data-routine="${escapeHtml(r.id)}">Arrêter</button>
+                    ${r.arretee ? '' : `<button class="rappel-cancel" data-routine="${escapeHtml(r.id)}">Arrêter</button>`}
                     <span class="routine-outils">🔧 ${outils}</span>
                 </div>`;
             }).join('') + '</div>';

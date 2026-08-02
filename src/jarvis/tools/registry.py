@@ -734,7 +734,10 @@ def run_tool_with_retries(
     def _finish(result: ToolExecutionResult) -> ToolExecutionResult:
         _log_action(
             db, tool=name, args=tool_args, risk=risk, verdict=verdict,
-            outcome=(OUTCOME_OK if getattr(result, "success", False) else OUTCOME_FAILED),
+            outcome=(
+                getattr(result, "outcome", None)
+                or (OUTCOME_OK if getattr(result, "success", False) else OUTCOME_FAILED)
+            ),
             query=redacted_text, origin=origin, request_id=request_id,
             duration_ms=int((time.monotonic() - _started) * 1000),
         )
