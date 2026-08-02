@@ -113,9 +113,15 @@ class SetRoutineTool(Tool):
                 "routine": {
                     "type": "string",
                     "description": (
-                        "The user's request, copied verbatim, including "
-                        "how often and at what time they said it should "
-                        "happen."
+                        "The user's request, copied word for word. Always "
+                        "keep how often they said it should happen — "
+                        "without that this tool cannot do anything at "
+                        "all. Keep the time of day only if they actually "
+                        "said one: if they did not, leave it out and do "
+                        "not supply one, not even a likely one. An hour "
+                        "you add here cannot be told apart from an hour "
+                        "they said, and it becomes the moment this runs "
+                        "every day from now on."
                     ),
                 },
                 "outils": {

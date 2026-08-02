@@ -52,8 +52,14 @@ outils:
 - fetchWebPage
 ```
 
-Editing that file is the control surface. Remove a tool line and the
-routine is tightened; delete the block and the routine is suspended.
+Editing that file is the control surface, for the sentence as much as
+for the envelope: `phrase:` is what the routine actually runs, and the
+`rappels` row keeps what was originally asked as the fallback for a
+half-written block. A field that changed nothing when edited would be
+worse than no field at all — the user corrects a mis-heard word, watches
+the same wrong summary arrive tomorrow, and cannot tell which of the two
+they got wrong. Remove a tool line and the routine is tightened; delete
+the block and the routine is suspended.
 `load_routines` caches on the file's mtime and re-reads when it changes,
 so an edit takes effect on the next run rather than the next restart — a
 control surface with a restart delay is one people stop trusting.

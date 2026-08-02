@@ -587,3 +587,47 @@ def test_a_tool_still_installed_is_not_reported_as_missing(db, cfg):
     runner.stop()
 
     assert "n'existe plus" not in read_day(cfg, datetime.now())
+
+
+# ── The file is the control surface, for the sentence too ─────────────
+
+
+def test_the_sentence_that_runs_is_the_one_in_the_file(db, cfg):
+    """`routines.md` shows `phrase:` next to `outils:`, and one of them
+    controlled what happened while the other was decoration. Editing a
+    field that changes nothing is worse than not having it: the user
+    corrects a mis-transcribed word, watches the same wrong summary
+    arrive the next morning, and has no way to tell which of the two
+    they got wrong."""
+    from src.jarvis.routines.scope import routines_path
+
+    routines_path(cfg).write_text(
+        "# Routines\n\n## matin\nphrase: résume l'actualité IA\n"
+        "quand: x\noutils:\n- webSearch\n",
+        encoding="utf-8",
+    )
+    calls = []
+    runner = _runner(db, cfg, calls=calls)
+
+    _run_now(runner, db, _add(db, texte="résume mes mails"))
+    runner.stop()
+
+    assert calls[0]["text"] == "résume l'actualité IA"
+
+
+def test_a_block_with_no_sentence_falls_back_to_the_row(db, cfg):
+    """An `outils:` list with no `phrase:` is a half-written block, not
+    an instruction to run nothing."""
+    from src.jarvis.routines.scope import routines_path
+
+    routines_path(cfg).write_text(
+        "# Routines\n\n## matin\nquand: x\noutils:\n- webSearch\n",
+        encoding="utf-8",
+    )
+    calls = []
+    runner = _runner(db, cfg, calls=calls)
+
+    _run_now(runner, db, _add(db, texte="résume mes mails"))
+    runner.stop()
+
+    assert calls[0]["text"] == "résume mes mails"

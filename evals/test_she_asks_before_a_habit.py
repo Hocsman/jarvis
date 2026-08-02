@@ -170,3 +170,90 @@ class TestSheAsksBeforeAHabit:
             f"The reply does not say what the routine will be able to "
             f"reach: {response!r}"
         )
+
+
+@pytest.mark.eval
+@requires_judge_llm
+class TestSheDoesNotInventTheHour:
+    """An hour the user did not say.
+
+    `heure_supposee` exists so that a rhythm named with no time of day is
+    reported back as chosen rather than stated — for a routine that is a
+    claim about every morning from now on. But it can only fire if the
+    extractor sees the user's own words. In production the model wrote
+    "Tous les matins à 7h, …" into the `routine` argument from a sentence
+    that said only "tous les matins", so the extractor saw an hour, the
+    flag stayed false, and she announced 07:00 as a fact.
+
+    Nothing in the code was wrong. The schema said "copied verbatim" and
+    the model paraphrased, which is the only kind of defect a prompt can
+    have.
+    """
+
+    # Explicitly a routine, and carrying no time of day. "Tous les
+    # matins, résume-moi l'actualité" was the first attempt and it does
+    # not reach this tool at all: without an hour the sentence reads as
+    # framing — "as every morning, summarise the news" — and the turn
+    # answers it on the spot. That is a real observation about the
+    # routing, and a separate one; measuring it here would leave this
+    # case green or red for reasons that have nothing to do with the
+    # hour.
+    ASK_SANS_HEURE = (
+        "Jarvis, mets en place une routine quotidienne qui cherche sur le "
+        "web et me résume l'actualité."
+    )
+
+    def test_an_hour_nobody_said_is_not_written_into_the_routine(
+        self, mock_config, eval_db, eval_dialogue_memory, tmp_path,
+    ):
+        """The tool argument is what the extractor reads. An hour added
+        here is indistinguishable from one the user spoke."""
+        _setup(mock_config, tmp_path, verdict="Libre")
+        seen = {}
+
+        from jarvis.tools.builtin import set_routine as module
+
+        vrai = module.extract_routine_rule
+
+        def _spy(cfg, utterance):
+            seen.setdefault("utterance", utterance)
+            return vrai(cfg, utterance)
+
+        module.extract_routine_rule = _spy
+        try:
+            _ask(mock_config, eval_db, eval_dialogue_memory, self.ASK_SANS_HEURE)
+        finally:
+            module.extract_routine_rule = vrai
+
+        print(f"\n  Reached the extractor: {seen.get('utterance')!r}")
+
+        recu = (seen.get("utterance") or "").lower()
+        assert recu, "setRoutine was never called."
+        for invente in ("7h", "07:00", "7:00", "8h", "9h", "6h"):
+            assert invente not in recu, (
+                f"The model supplied a time the user never said: {recu!r}"
+            )
+
+    def test_she_says_the_hour_was_hers_and_not_theirs(
+        self, mock_config, eval_db, eval_dialogue_memory, tmp_path,
+    ):
+        """The whole point of the flag. Stated as a fact, an hour nobody
+        chose runs every morning until somebody notices it was never
+        agreed."""
+        _setup(mock_config, tmp_path, verdict="Libre")
+
+        response = _ask(
+            mock_config, eval_db, eval_dialogue_memory, self.ASK_SANS_HEURE,
+        ) or ""
+
+        print(f"\n  Response: {response[:250]}")
+
+        assert len(_routines(eval_db)) == 1, f"No routine was created: {response!r}"
+        assert any(
+            m in response.lower()
+            for m in ("choisi", "chose", "par défaut", "default", "tu peux",
+                      "you can change", "modifier")
+        ), (
+            f"She stated an hour the user never gave without saying it was "
+            f"her choice: {response!r}"
+        )

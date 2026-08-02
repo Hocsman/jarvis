@@ -48,7 +48,7 @@ from ..tools.policy import (
 )
 from .journal import Entree, append_run
 from .recurrence import Regle, next_occurrence
-from .scope import scope_for
+from .scope import block_for
 
 ORIGIN = "routine"
 
@@ -140,7 +140,18 @@ class RoutineRunner:
         self._record(nom, OUTCOME_STARTED, rid, phrase)
         self._advance(row, payload)
 
-        scope = scope_for(self._cfg, nom) if nom else None
+        bloc = block_for(self._cfg, nom) if nom else None
+        # The file is the control surface, for the sentence as much as
+        # for the envelope. `routines.md` shows `phrase:` beside
+        # `outils:`, and a field that changes nothing when edited is
+        # worse than no field at all: the user corrects a mis-heard word,
+        # watches the same wrong summary arrive tomorrow, and cannot tell
+        # which of the two they got wrong. The row keeps what was
+        # originally asked, and is the fallback for a half-written block.
+        if bloc is not None and bloc.phrase.strip():
+            phrase = bloc.phrase.strip()
+
+        scope = bloc.scope() if bloc is not None else None
         if scope is None:
             # The block was deleted, which is the off switch a user can
             # reach with a text editor. Journalled rather than silent:

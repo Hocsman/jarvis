@@ -220,13 +220,22 @@ def invalidate_routines_cache() -> None:
     _CACHE["stamp"], _CACHE["blocks"] = None, None
 
 
+def block_for(cfg, nom: str) -> Optional["RoutineBlock"]:
+    """One routine's whole block, or None if it has no block.
+
+    None means suspended, never unrestricted. That is what makes deleting
+    the block an off switch a user can reach with a text editor.
+    """
+    return load_routines(cfg).get(nom)
+
+
 def scope_for(cfg, nom: str) -> Optional[RoutineScope]:
     """The envelope for one routine, or None if it has no block.
 
     None means suspended, never unrestricted. That is what makes
     deleting the block an off switch a user can reach with a text editor.
     """
-    block = load_routines(cfg).get(nom)
+    block = block_for(cfg, nom)
     return block.scope() if block is not None else None
 
 
