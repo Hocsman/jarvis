@@ -525,7 +525,7 @@ class TestLLMStrategy:
         of the prior turn rather than as standalone idle chatter."""
         captured = {}
 
-        def _direct(model, sys, user, timeout_sec=8.0):
+        def _direct(model, sys, user, timeout_sec=8.0, **kwargs):
             captured["sys"] = sys
             captured["user"] = user
             return "getWeather"
@@ -560,7 +560,7 @@ class TestLLMStrategy:
         through under the KNOWN FACTS label with no dialogue block."""
         captured = {}
 
-        def _direct(model, sys, user, timeout_sec=8.0):
+        def _direct(model, sys, user, timeout_sec=8.0, **kwargs):
             captured["user"] = user
             return "getWeather"
 

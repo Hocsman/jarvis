@@ -15,14 +15,20 @@ class TestModelSizeDetection:
         ("gemma4", True),
         ("gemma4:e2b", True),
         ("gemma4:e4b", True),
-        ("google/gemma-4-e2b", True),  # OpenAI-compatible format
-        ("google/gemma-4-12b-qat", True),  # OpenAI-compatible format
+        ("google/gemma-4-e2b", True),  # OpenAI-compatible format — 2B
+        ("google/gemma-4-12b-qat", False),  # 12B > threshold — LARGE despite gemma-4 family
+        ("qwen3.5:0.8b", True),  # Sub-1B decimal
+        ("qwen3.5:0.5b", True),  # Sub-1B decimal
         ("llama3.2:3b", True),
         ("llama3.2:1b", True),
         ("mistral:7b", True),
         ("gemma:7b", True),
         ("phi3:3b", True),
         ("qwen2:7b", True),
+        # Decimal sizes (caught by regex, would be missed by hardcoded patterns)
+        ("phi:2.7b", True),
+        ("tinyllama:1.1b", True),
+        ("deepseek-coder:1.3b", True),
         # Various separators
         ("model-3b-instruct", True),
         ("model_1b_chat", True),
@@ -32,7 +38,9 @@ class TestModelSizeDetection:
         ("qwen2.5:14b", False),
         ("gemma2:27b", False),
         ("llama3:70b", False),
-        ("mixtral:8x7b", False),  # 8x7b is effectively large
+        ("mixtral:8x7b", False),  # 8x7b is MoE — large total params
+        ("dolphin-mixtral:8x7b-v2.6", False),  # MoE with version suffix
+        ("qwq:32b", False),  # Large dense model
         # Edge cases
         (None, False),  # None defaults to LARGE
         ("", False),    # Empty defaults to LARGE

@@ -96,6 +96,7 @@ class OllamaBackend(LLMBackend):
         thinking: bool = False,
         num_ctx: int = 4096,
         temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ) -> Optional[str]:
         """Direct LLM call without temporal context, location, or other
         ``ask_coach`` features.
@@ -111,6 +112,11 @@ class OllamaBackend(LLMBackend):
         creativity — Ollama defaults to ~0.8 otherwise, which can
         flake small models on rule-following tasks (e.g. the knowledge
         extractor's banned-form list).
+
+        ``max_tokens`` maps to Ollama's ``num_predict``, capping the
+        total generated tokens (including reasoning). Essential for
+        classification calls where small reasoning models otherwise
+        loop endlessly.
         """
         messages = [
             {"role": "system", "content": system_prompt},
@@ -120,6 +126,8 @@ class OllamaBackend(LLMBackend):
         options: Dict[str, Any] = {"num_ctx": num_ctx}
         if temperature is not None:
             options["temperature"] = temperature
+        if max_tokens is not None:
+            options["num_predict"] = max_tokens
 
         payload: Dict[str, Any] = {
             "model": chat_model,
@@ -248,12 +256,21 @@ class OllamaBackend(LLMBackend):
         # request-level fields (``keep_alive``, ``format``, ``think``); the
         # rest fold into the sampling-options dict. The split lets callers
         # pin per-request keep-alive without learning Ollama's wire shape.
+        # ``max_tokens`` is the canonical generation cap across backends —
+        # translate it to Ollama's ``num_predict`` so callers don't need to
+        # know which knob each server speaks.
         if extra_options and isinstance(extra_options, dict):
             for key, value in extra_options.items():
                 if key in {"keep_alive", "format", "think"}:
                     payload[key] = value
+                elif key == "max_tokens":
+                    payload["options"]["num_predict"] = int(value)
                 elif key == "options" and isinstance(value, dict):
-                    payload["options"].update(value)
+                    for inner_key, inner_value in value.items():
+                        if inner_key == "max_tokens":
+                            payload["options"]["num_predict"] = int(inner_value)
+                        else:
+                            payload["options"][inner_key] = inner_value
                 else:
                     payload["options"][key] = value
 

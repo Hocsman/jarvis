@@ -35,7 +35,7 @@ Two interchangeable styles dispatch to the same backend:
 
 | Method | Returns | Contract |
 |--------|---------|----------|
-| `direct(model, system, user, *, timeout_sec, thinking, num_ctx, temperature)` | `Optional[str]` | Single-shot system+user. Returns assistant text, or `None` on timeout / error / empty content. |
+| `direct(model, system, user, *, timeout_sec, thinking, num_ctx, temperature, max_tokens)` | `Optional[str]` | Single-shot system+user. Returns assistant text, or `None` on timeout / error / empty content. `max_tokens` caps generation length — essential for small reasoning models on classification tasks. |
 | `streaming(model, system, user, *, on_token, timeout_sec, thinking)` | `Optional[str]` | Streams tokens via `on_token`; returns the concatenated full text or `None` if no content was produced. |
 | `chat(model, messages, *, timeout_sec, extra_options, tools, thinking)` | `Optional[Dict]` | Arbitrary messages array. Returns the raw response dict so callers (today: the reply engine) can inspect `content` and `tool_calls`. Raises `ToolsNotSupportedError` when the model rejects native tools. Re-raises `requests.ConnectionError` so callers can distinguish "server unreachable" from a transient HTTP failure. |
 | `embed(text, model, *, timeout_sec)` | `Optional[List[float]]` | Vector embedding. Returns `None` on error or when the runtime does not expose embeddings. |
@@ -107,7 +107,7 @@ The migration in `_migrate_config` runs once when `_config_version < 2`:
 - Endpoints: `POST /api/chat`, `POST /api/embeddings`, `GET /api/tags`, `POST /api/generate` (used by `warm_up`).
 - Streaming: JSON-lines (`{...}\n`).
 - Tool calls: native `tools` parameter (Ollama 0.4+); arguments returned as a Python dict.
-- `extra_options` keys map onto the wire shape: `keep_alive` / `format` / `think` go to the payload root; everything else (incl. `temperature`, `num_ctx`, `num_predict`) folds into the nested `options` object. Callers can also pass an explicit `options` sub-dict for explicit nesting.
+- `extra_options` keys map onto the wire shape: `keep_alive` / `format` / `think` go to the payload root; `max_tokens` (the canonical generation cap across backends) is translated to `num_predict`; everything else (incl. `temperature`, `num_ctx`, `num_predict`) folds into the nested `options` object. Callers can also pass an explicit `options` sub-dict for explicit nesting (its `max_tokens` is likewise translated).
 - `warm_up(model)` first verifies the endpoint is actually an Ollama server via `GET /api/version`, then issues `POST /api/generate` with an empty prompt and `keep_alive: "30m"`; the model stays resident for 30 minutes after each call.
 
 ### OpenAI-compatible (`OpenAICompatibleBackend`)

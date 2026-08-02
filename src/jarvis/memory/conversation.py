@@ -13,13 +13,15 @@ from ..utils.redact import redact, scrub_secrets
 
 
 def _direct_llm(cfg, system_prompt: str, user_content: str, *,
-                timeout_sec: float = 30.0, thinking: bool = False) -> Optional[str]:
+                timeout_sec: float = 30.0, thinking: bool = False,
+                max_tokens: Optional[int] = None) -> Optional[str]:
     """Single intercept for chat-direct calls in this module. Tests patch
     ``conversation._direct_llm`` to capture every diary/summary LLM round-trip
     without reaching through the backend ABC."""
     return get_llm_backend(cfg).direct(
         cfg.llm_chat_model, system_prompt, user_content,
         timeout_sec=timeout_sec, thinking=thinking,
+        max_tokens=max_tokens,
     )
 
 
@@ -119,6 +121,11 @@ def _rewrite_diary_summary(
             _REWRITE_DEFLECTION_SYSTEM_PROMPT,
             user_prompt,
             timeout_sec=timeout_sec,
+            # Rewrite output scales with the input summary (created at
+            # "max 200 words" ≈ 260 tokens), so a fixed cap could truncate
+            # it. Cap proportionally to the summary length with a floor —
+            # bounded against runaway generation, never silently short.
+            max_tokens=max(200, len(summary) // 2),
         )
     except Exception as e:
         debug_log(
@@ -456,6 +463,7 @@ def optimise_diary_topics(
             _TOPIC_OPTIMISE_SYSTEM_PROMPT,
             user_content,
             timeout_sec=60.0,
+            max_tokens=200,
         )
         if raw:
             # Strip markdown fences if the model wrapped the JSON.
@@ -1246,6 +1254,11 @@ TOPICS: [topic1, topic2, topic3]"""
             response = _direct_llm(
                 cfg, system_prompt, user_prompt,
                 timeout_sec=timeout_sec, thinking=thinking,
+                # Prompt allows a 200-word summary (≈260 tokens) plus the
+                # SUMMARY:/TOPICS: labels and 3-5 topics. 400 gives headroom
+                # so a full-length summary is never truncated — a cut here
+                # would persist a partial summary or skip the day entirely.
+                max_tokens=400,
             )
 
         if not response:

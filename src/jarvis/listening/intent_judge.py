@@ -412,7 +412,7 @@ Examples:
                     timeout_sec=self.config.timeout_sec,
                     extra_options={
                         "temperature": 0.0,
-                        "num_predict": 200,
+                        "max_tokens": 500,
                         "num_ctx": 8192,
                         "keep_alive": "30m",
                     },
@@ -438,6 +438,17 @@ Examples:
                 content = message.get("content")
                 if isinstance(content, str):
                     response_text = content
+                if not response_text:
+                    # Some reasoning models (e.g. Qwen3.5 on LM Studio)
+                    # put the entire output in ``reasoning_content`` and
+                    # leave ``content`` empty. Try to extract JSON from
+                    # the reasoning — the model often includes the answer
+                    # at the end of its thinking process.
+                    reasoning = message.get("reasoning_content")
+                    if isinstance(reasoning, str):
+                        extracted = _extract_json_object(reasoning)
+                        if extracted:
+                            response_text = extracted
             if not response_text:
                 # Ollama's /api/generate returned ``response``; chat() shape
                 # surfaces content under ``message.content``. Some adapters

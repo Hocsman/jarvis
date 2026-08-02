@@ -52,6 +52,7 @@ def _extract_place_from_user_text(text: str, cfg) -> Optional[str]:
         resp = get_llm_backend(cfg).direct(
             model, sys_prompt, user_prompt,
             timeout_sec=float(getattr(cfg, "llm_tools_timeout_sec", 8.0)),
+            max_tokens=50,
         )
     except Exception as e:
         debug_log(f"    ⚠️ place extraction failed: {e}", "tools")
