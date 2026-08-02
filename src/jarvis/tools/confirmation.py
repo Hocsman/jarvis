@@ -538,6 +538,39 @@ def _ask_model(cfg, system: str, user: str, timeout_sec: float) -> Optional[str]
     return (response.get("message") or {}).get("content")
 
 
+# Sentence-ish boundaries. Splitting is only used to drop her own words
+# back out of a transcript, so a wrong split costs a fragment, never a
+# decision.
+_MORCEAU = re.compile(r"(?<=[.!?])\s+")
+
+
+def strip_own_question(utterance: str, spoken: str) -> str:
+    """The transcript with her own question taken back out of it.
+
+    Whisper merges a whole hot window into one segment, so what comes
+    back is her question echoed, then the answer, then whatever else was
+    said in the room. Handing all of that to the judge asks it to read a
+    yes out of a passage that contains the question the yes answers.
+
+    Fragments matching what she just said are dropped. What remains may
+    be empty, and empty is right: it means nothing was said but the echo,
+    and the judge fails closed on it.
+    """
+    from rapidfuzz import fuzz
+
+    from ..listening.echo_detection import EchoDetector
+
+    if not utterance or not spoken:
+        return utterance or ""
+    seuil = EchoDetector.PURE_ECHO_THRESHOLD
+    bas = spoken.lower()
+    garde = [
+        m for m in _MORCEAU.split(utterance)
+        if m.strip() and fuzz.partial_ratio(m.lower(), bas) < seuil
+    ]
+    return " ".join(garde).strip()
+
+
 def read_approval(cfg, utterance: str) -> str:
     """Whether ``utterance`` grants permission: GRANTED, DENIED or UNCLEAR.
 

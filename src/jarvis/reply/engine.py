@@ -270,6 +270,19 @@ def settle_pending_confirmation(*, cfg, dialogue_memory, utterance, origin) -> _
     if action is None:
         return _Settled()
 
+    # Her own question comes back out first. Whisper merges a whole hot
+    # window into one segment, so the transcript carries the question
+    # echoed, the answer, and whatever else was said in the room —
+    # reading a yes out of a passage containing the question the yes
+    # answers is not a fair thing to ask of a judge.
+    try:
+        from ..tools.confirmation import describe_action, strip_own_question
+
+        dit = describe_action(action.tool, action.args, action.risk).spoken
+        utterance = strip_own_question(utterance, dit)
+    except Exception as e:
+        debug_log(f"echo not stripped from the answer: {e}", "tools")
+
     verdict = read_approval(cfg, utterance)
     debug_log(f"    🙋 approval read as {verdict} for {action.tool}", "tools")
 
@@ -1023,7 +1036,8 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                     origin: Optional[str] = None,
                     granted: Optional[Any] = None,
                     granted_action: Optional[Any] = None,
-                    scope: Optional[Any] = None) -> Optional[str]:
+                    scope: Optional[Any] = None,
+                    heard: Optional[str] = None) -> Optional[str]:
     """
     Main entry point for reply generation.
 
@@ -1156,9 +1170,16 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
     elif dialogue_memory is not None and hasattr(dialogue_memory, "begin_turn"):
         try:
             _turn_seq = dialogue_memory.begin_turn(origin)
+            # The answer to a waiting question is read from what was
+            # actually heard, not from the query the intent judge pulled
+            # out of it. That judge's job is finding the thing addressed
+            # to her in a flow of speech, and at this moment there is no
+            # request to find — there is a reply to read. In production it
+            # extracted "pourquoi" from a segment that also contained
+            # "Oui, je valide".
             _settled = settle_pending_confirmation(
                 cfg=cfg, dialogue_memory=dialogue_memory,
-                utterance=redacted, origin=origin,
+                utterance=redact(heard) if heard else redacted, origin=origin,
             )
         except Exception as e:
             debug_log(f"confirmation settle failed, treating as unanswered: {e}", "tools")

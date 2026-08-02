@@ -511,7 +511,7 @@ class VoiceListener(threading.Thread):
         debug_log(f"scheduling hot window activation (echo_tolerance={self.state_manager.echo_tolerance}s, hot_window={self.state_manager.hot_window_seconds}s)", "voice")
         self.state_manager.schedule_hot_window_activation(self.cfg.voice_debug)
 
-    def _process_transcript(self, text: str, utterance_energy: float = 0.0, utterance_start_time: float = 0.0, utterance_end_time: float = 0.0) -> None:
+    def _process_transcript(self, text: str, utterance_energy: float = 0.0, utterance_start_time: float = 0.0, utterance_end_time: float = 0.0) -> None:  # noqa: E501
         """
         Process a transcript from speech recognition.
 
@@ -519,6 +519,13 @@ class VoiceListener(threading.Thread):
             text: Transcribed text from audio
             utterance_energy: Pre-calculated energy from the utterance frames
         """
+        # Kept whole. When a spoken question is waiting, the answer is
+        # read from this rather than from the query the intent judge
+        # extracts, because at that moment there is no request to find in
+        # the speech — there is a reply to read.
+        if text and text.strip():
+            self._last_transcript = text
+
         if not text or not text.strip():
             # Check for timeouts
             if self.state_manager.check_collection_timeout():
@@ -1205,6 +1212,7 @@ class VoiceListener(threading.Thread):
                     self.db, self.cfg, None, query, self.dialogue_memory,
                     language=self._last_detected_language,
                     origin="voix",
+                    heard=getattr(self, "_last_transcript", None),
                 )
         except Exception as e:
             # Log the error visibly - this should never happen silently
