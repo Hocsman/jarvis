@@ -1326,6 +1326,30 @@ class VoiceListener(threading.Thread):
             return
         self._speak_reply(text, on_spoken=on_spoken)
 
+    def awaiting_spoken_answer(self) -> bool:
+        """Whether a question is on the table that a sentence can settle.
+
+        The confidence filter exists to stop her *acting* on a mumble.
+        While this is true nothing acts on it: the approval judge reads
+        the sentence and fails closed, so anything it cannot read as a
+        clear yes is not an approval. The filter is therefore redundant
+        here, and actively harmful — the answer to a yes/no question is
+        one word, one word carries almost no context, and `avg_logprob`
+        over one word is poor by construction. The shorter the answer the
+        likelier it is dropped, and "oui" is as short as they come.
+        """
+        dm = getattr(self, "dialogue_memory", None)
+        if dm is None or not hasattr(dm, "peek_pending"):
+            return False
+        try:
+            from ..tools.confirmation import CHANNEL_PAROLE
+
+            waiting = dm.peek_pending()
+            return waiting is not None and waiting.channel == CHANNEL_PAROLE
+        except Exception as e:
+            debug_log(f"pending question not checked: {e}", "voice")
+            return False
+
     def hot_window_duration(self) -> float:
         """How long to keep listening after she finishes speaking.
 
@@ -1405,6 +1429,12 @@ class VoiceListener(threading.Thread):
     def _filter_noisy_segments(self, segments):
         """Filter out low-confidence Whisper segments."""
         min_confidence = getattr(self.cfg, "whisper_min_confidence", 0.3)
+        if self.awaiting_spoken_answer():
+            # A question is waiting and only the judge decides. Keeping
+            # this bar would make the spoken channel unanswerable: the
+            # observed "Oui" scored 0.22 against a 0.3 floor, which is
+            # what a one-word utterance scores.
+            min_confidence = 0.0
         marginal_threshold = min_confidence / 3  # Show user-visible log for marginal confidence
         # Threshold above which a segment is considered non-speech (hallucination during silence).
         # Checked independently of avg_logprob because Whisper can be confident about a
@@ -2471,6 +2501,9 @@ class VoiceListener(threading.Thread):
 
                 # Filter segments by confidence (MLX Whisper returns segments with avg_logprob)
                 min_confidence = getattr(self.cfg, "whisper_min_confidence", 0.3)
+                if self.awaiting_spoken_answer():
+                    # Same reasoning as the faster-whisper path above.
+                    min_confidence = 0.0
                 marginal_threshold = min_confidence / 3  # Show user-visible log for marginal confidence
                 no_speech_threshold = getattr(self.cfg, "whisper_no_speech_threshold", 0.5)
                 segments = result.get("segments", [])
