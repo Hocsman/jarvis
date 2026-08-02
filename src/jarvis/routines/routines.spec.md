@@ -77,6 +77,17 @@ There are no wildcards, unlike `outils.md`. That file has them because
 the user is present to see the result; here nobody is, and an MCP server
 that gains a tool overnight would gain it inside the envelope too.
 
+A tool name is third-party text: MCP names are `f"{server}__{tool}"` from
+whatever a server announces, with only emptiness checked. Only names
+matching `^[A-Za-z0-9_.-]{1,64}$` are written into the file or read back
+out of it, enforced inside `render_block` and `parse_routines` rather
+than at the call sites, so no future caller routes round it. A name
+carrying a newline and `-->` would otherwise close the rejected-tools
+comment, turn what follows back into file content, and append a block of
+its own — and since the last block of a name wins, a routine the user had
+tightened comes back widened, with `mémoire: oui`, sending their whole
+profile to a remote model every morning.
+
 Three names no envelope can hold, whatever the file says
 (`JAMAIS_EN_ROUTINE`):
 
@@ -205,9 +216,20 @@ released even when a run raises, or one bad morning would suspend every
 routine until the next restart.
 
 A routine whose block has gone is suspended: nothing runs, and the
-journal says so rather than staying silent, because silence reads as "it
-never fired" and sends the user to look at the schedule instead of at the
-block they deleted.
+journal says so, naming the heading it looked for — silence reads as "it
+never fired" and sends the user to the schedule instead of the block they
+deleted or renamed. A suspended morning does **not** count towards the
+sterile tally: it has not failed, it is switched off, and counting it
+would have the dispatcher cancel the row after five of them. A cancelled
+row is final, so a fortnight away would destroy the routine under a
+message blaming it for producing nothing.
+
+A name the envelope holds that the catalogue no longer does — an MCP
+server that left the config — is reported as a rejected tool in the
+journal and flagged on the row in the tab. The engine drops it before a
+single ledger row exists, so nothing else could know; unsaid, the model
+answers in prose anyway, the run counts as productive, and the routine
+reports success every morning while doing a fraction of its job.
 
 Each run is bracketed in the action ledger under `routine:<nom>` — the
 tab lists tool calls and a run is not one, so a bare `matin` would invent

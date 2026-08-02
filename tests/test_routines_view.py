@@ -224,3 +224,30 @@ def test_no_journal_at_all_is_empty_rather_than_an_error(viewer):
     _, client, _ = viewer
 
     assert _pages(client) == []
+
+
+# ── An envelope that names something no longer installed ──────────────
+
+
+def test_a_tool_that_has_left_the_catalogue_is_flagged(viewer):
+    """Otherwise the row keeps advertising a capability that stopped
+    existing in October, and the only trace anywhere is a debug line
+    nobody has switched on."""
+    db, client, cfg = viewer
+    from src.jarvis.routines.scope import routines_path
+
+    routines_path(cfg).write_text(
+        "# Routines\n\n## matin\nphrase: x\nquand: x\noutils:\n"
+        "- webSearch\n- mail__list\n",
+        encoding="utf-8",
+    )
+    _add(db)
+
+    assert _list(client)[0]["introuvables"] == ["mail__list"]
+
+
+def test_an_envelope_that_is_all_there_flags_nothing(viewer):
+    db, client, _ = viewer
+    _add(db)
+
+    assert _list(client)[0]["introuvables"] == []

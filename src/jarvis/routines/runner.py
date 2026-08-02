@@ -35,7 +35,7 @@ import json
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Callable, Optional
+from typing import Any, Callable, List, Optional
 
 from ..debug import debug_log
 from ..tools.policy import (
@@ -146,10 +146,20 @@ class RoutineRunner:
             # reach with a text editor. Journalled rather than silent:
             # silence reads as "it never fired", which sends them to look
             # at the schedule instead of at the block.
+            #
+            # `count=False` is the whole point. A suspended routine has
+            # not failed, it is switched off, and counting these mornings
+            # would have the dispatcher cancel the row after five of
+            # them. A cancelled row is final, so a fortnight away would
+            # destroy the routine under a message blaming it for
+            # producing nothing.
             self._settle(
                 nom, rid, phrase, started_at, began, payload,
-                erreur="cette routine n'a plus de bloc dans routines.md",
-                outcome=OUTCOME_OUT_OF_SCOPE, texte=None,
+                erreur=(
+                    f"aucun bloc « {nom} » dans routines.md — elle est "
+                    f"suspendue jusqu'à ce qu'il revienne"
+                ),
+                outcome=OUTCOME_OUT_OF_SCOPE, texte=None, count=False,
             )
             return
 
@@ -158,7 +168,7 @@ class RoutineRunner:
             nom, rid, phrase, started_at, began, payload,
             erreur=erreur, texte=texte,
             outcome=OUTCOME_OK if texte else OUTCOME_FAILED,
-            since=started_iso,
+            since=started_iso, absents=_missing_from_catalogue(scope),
         )
 
     def _ask_the_engine(self, phrase: str, scope) -> tuple:
@@ -263,8 +273,16 @@ class RoutineRunner:
         return outils, ecartes
 
     def _settle(self, nom, rid, phrase, started_at, began, payload, *,
-                erreur, texte, outcome, since: Optional[str] = None) -> None:
+                erreur, texte, outcome, since: Optional[str] = None,
+                absents: Optional[List[str]] = None, count: bool = True) -> None:
         outils, ecartes = self._tool_calls_since(since)
+        # A name the envelope holds but the catalogue no longer does is
+        # dropped by the engine before a single ledger row exists, so the
+        # read-back above cannot know about it. Unsaid, the model answers
+        # in prose anyway, the run counts as productive, and the routine
+        # reports success every morning while doing a fraction of its job.
+        for nom_absent in (absents or []):
+            ecartes.append((nom_absent, "cet outil n'existe plus ici"))
         append_run(self._cfg, Entree(
             nom=nom or "?", moment=started_at, demande=phrase,
             texte=texte or None, outils=outils, ecartes=ecartes,
@@ -272,8 +290,9 @@ class RoutineRunner:
         ))
         self._record(nom, outcome, rid, phrase,
                      duration_ms=int((time.monotonic() - began) * 1000))
-        self._count(rid, payload, productive=bool(texte))
-        if not texte and self._announce is not None:
+        if count:
+            self._count(rid, payload, productive=bool(texte))
+        if not texte and count and self._announce is not None:
             # Only the mornings that did not work. One that ran and wrote
             # its page is already delivered.
             try:
@@ -281,6 +300,27 @@ class RoutineRunner:
                                stopped=False)
             except Exception as e:
                 debug_log(f"routine trouble not announced: {e}", "tools")
+
+
+def _missing_from_catalogue(scope) -> List[str]:
+    """Names the envelope holds that no longer exist anywhere.
+
+    An MCP server that left the config takes its tools with it. The
+    engine drops those names from the turn without a word — correctly,
+    there is nothing to call — but the routine then quietly does less
+    than the block says it does, for months.
+    """
+    try:
+        from ..tools.registry import BUILTIN_TOOLS, get_cached_mcp_tools
+
+        try:
+            mcp = get_cached_mcp_tools() or {}
+        except Exception:
+            mcp = {}
+        return [n for n in scope.outils if n not in BUILTIN_TOOLS and n not in mcp]
+    except Exception as e:
+        debug_log(f"routine catalogue check skipped: {e}", "tools")
+        return []
 
 
 def payload_of(row: dict) -> dict:

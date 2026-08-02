@@ -1492,6 +1492,9 @@ class ConfirmationSignals(QObject):
 
     raised = pyqtSignal(dict)
     settled = pyqtSignal(str, str)
+    # A routine fires from the runner's own thread, which is neither the
+    # reply-engine worker nor the GUI one.
+    routine_trouble = pyqtSignal(dict)
 
 
 class JarvisSystemTray:
@@ -1583,6 +1586,7 @@ class JarvisSystemTray:
         self._confirm_signals = ConfirmationSignals()
         self._confirm_signals.raised.connect(self.on_confirmation_raised)
         self._confirm_signals.settled.connect(self.on_confirmation_settled)
+        self._confirm_signals.routine_trouble.connect(self.on_routine_trouble)
 
         # Set up status checking timer
         self.status_timer = QTimer()
@@ -2456,6 +2460,10 @@ class JarvisSystemTray:
                         ),
                         on_confirm_settled=lambda rid, outcome:
                             self._confirm_signals.settled.emit(rid, outcome),
+                        on_routine_trouble=lambda nom, raison, stopped:
+                            self._confirm_signals.routine_trouble.emit(
+                                {"nom": nom, "raison": raison, "arretee": stopped}
+                            ),
                     )
                 except Exception as exc:
                     debug_log(f"confirmation callbacks not wired: {exc}", "desktop")

@@ -515,3 +515,75 @@ def test_an_announcer_that_raises_does_not_lose_the_run(db, cfg):
     runner.stop()
 
     assert _steriles(db, rid) == 1
+
+
+# ── A routine the user switched off is not a routine that failed ──────
+
+
+def test_a_suspended_routine_is_not_counted_as_a_failure(db, cfg):
+    """Deleting the block is the off switch the file itself advertises,
+    and the tab calls it « suspendue ». Counting those mornings as
+    sterile means the dispatcher cancels the row after five of them —
+    and a cancelled row is final, so putting the block back revives
+    nothing. A fortnight's holiday would silently destroy the routine,
+    under a message blaming it for producing nothing."""
+    from src.jarvis.routines.scope import routines_path
+
+    routines_path(cfg).write_text("# Routines\n", encoding="utf-8")
+    runner = _runner(db, cfg)
+    rid = _add(db)
+
+    _run_now(runner, db, rid)
+    _run_now(runner, db, rid)
+    runner.stop()
+
+    assert _steriles(db, rid) == 0
+
+
+def test_a_suspended_routine_names_what_to_put_back(db, cfg):
+    """`payload['nom']` is the only key that leads back to the heading
+    they renamed. Without it the journal says a routine is suspended and
+    the file shows six blocks, and nothing says which one is missing."""
+    from src.jarvis.routines.scope import routines_path
+
+    routines_path(cfg).write_text("# Routines\n", encoding="utf-8")
+    runner = _runner(db, cfg)
+
+    _run_now(runner, db, _add(db, nom="matin"))
+    runner.stop()
+
+    assert "matin" in read_day(cfg, datetime.now())
+
+
+# ── A tool that is no longer installed ────────────────────────────────
+
+
+def test_a_tool_that_has_left_the_catalogue_is_named_in_the_journal(db, cfg):
+    """The engine drops it from the turn silently, so no ledger row ever
+    mentions it. The model then answers in prose anyway, the run counts
+    as productive, and the routine reports success every morning while
+    doing a fraction of its job."""
+    from src.jarvis.routines.scope import routines_path
+
+    routines_path(cfg).write_text(
+        "# Routines\n\n## matin\nphrase: x\nquand: x\noutils:\n"
+        "- webSearch\n- mail__list\n",
+        encoding="utf-8",
+    )
+    runner = _runner(db, cfg)
+
+    _run_now(runner, db, _add(db))
+    runner.stop()
+
+    day = read_day(cfg, datetime.now())
+    assert "mail__list" in day
+    assert "webSearch" not in day.split("Écarté")[-1].split("\n")[0]
+
+
+def test_a_tool_still_installed_is_not_reported_as_missing(db, cfg):
+    runner = _runner(db, cfg)
+
+    _run_now(runner, db, _add(db))
+    runner.stop()
+
+    assert "n'existe plus" not in read_day(cfg, datetime.now())

@@ -73,6 +73,8 @@ _global_routine_runner = None
 _confirmation_callbacks: dict = {
     "on_confirm": None,        # Callable[[PendingAction], None]
     "on_confirm_settled": None,  # Callable[[str, str], None] — id, outcome
+    # Callable[[str, str, bool], None] — nom, raison, stopped
+    "on_routine_trouble": None,
 }
 
 # Shutdown timeout for diary update (shorter than normal to allow reasonable quit time)
@@ -716,6 +718,17 @@ def announce_routine_trouble(nom: str, pourquoi: str, *, stopped: bool) -> None:
     except Exception as e:
         debug_log(f"routine trouble not announced: {e}", "tools")
 
+    # Bundled mode pipes no stdout, so the event above reaches nobody
+    # there. Both routes, or the notification silently stops existing in
+    # a packaged build — which is the build the user is least able to
+    # debug.
+    callback = _confirmation_callbacks.get("on_routine_trouble")
+    if callback is not None:
+        try:
+            callback(nom, pourquoi, bool(stopped))
+        except Exception as e:
+            debug_log(f"routine trouble callback failed: {e}", "tools")
+
 
 def nudge_routines() -> None:
     """Wake the dispatcher — a routine closer than a tick was just made."""
@@ -746,10 +759,12 @@ def revoke_pending_confirmation() -> None:
     debug_log(f"    🙋 revoked {action.tool} on shutdown", "tools")
 
 
-def set_confirmation_callbacks(*, on_confirm=None, on_confirm_settled=None) -> None:
+def set_confirmation_callbacks(*, on_confirm=None, on_confirm_settled=None,
+                               on_routine_trouble=None) -> None:
     """Wire the desktop app's surfaces in bundled mode."""
     _confirmation_callbacks["on_confirm"] = on_confirm
     _confirmation_callbacks["on_confirm_settled"] = on_confirm_settled
+    _confirmation_callbacks["on_routine_trouble"] = on_routine_trouble
 
 
 def is_stop_requested() -> bool:
