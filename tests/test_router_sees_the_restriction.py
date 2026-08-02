@@ -159,10 +159,15 @@ def test_the_router_sees_that_a_goal_is_not_a_fact():
     assert "until it is done" in seen
 
 
-@pytest.mark.parametrize("name", ["setGoal", "noteGoal", "closeGoal", "listGoals"])
+@pytest.mark.parametrize("name", ["noteGoal", "closeGoal", "listGoals"])
 def test_each_goal_tool_says_what_it_does_not_do(name):
     """They differ by one verb each on the same object, which is the
-    shape a router confuses most."""
+    shape a router confuses most.
+
+    `setGoal` is absent: its 200 characters are spent on the collision
+    that actually bites, which is with `remember` rather than with its
+    three siblings. Measured — see the xfail on
+    evals/test_a_goal_is_his_not_hers.py."""
     assert "never" in _seen(name).lower()
 
 
