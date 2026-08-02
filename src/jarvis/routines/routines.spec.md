@@ -188,7 +188,11 @@ edited by hand and the live routine would be the copy.
 `cancelRoutine` stops the row and leaves the block, which is the record
 of what that routine was allowed to do and exactly what someone wants to
 read after switching it off. Called with no name it lists what is
-running. An unknown name stops nothing and says what exists: a near-match
+running — and both jobs are stated inside the first 200 characters of its
+description, because that is all the tool router is shown. A second
+capability described in sentence three does not exist as far as routing
+is concerned: asked "what do you do on your own?", the catalogue offered
+nothing that could answer and the turn improvised. An unknown name stops nothing and says what exists: a near-match
 silently stopped is the wrong routine silently stopped, found out a
 morning later at best.
 

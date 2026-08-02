@@ -114,7 +114,26 @@ def test_the_router_sees_that_set_routine_is_not_set_reminder():
 def test_the_router_sees_that_cancel_routine_does_not_create():
     seen = _seen("cancelRoutine").lower()
 
-    assert "stop" in seen or "remove" in seen
+    assert "stop" in seen
+
+
+def test_the_router_sees_that_cancel_routine_also_lists():
+    """It does two jobs, and the second one lived in sentence three —
+    past the cut, so it did not exist as far as the router was
+    concerned. Asked "qu'est-ce que tu fais toute seule ?", the catalogue
+    offered no tool that could answer, and the turn improvised one."""
+    seen = _seen("cancelRoutine").lower()
+
+    assert "list" in seen
+
+
+def test_the_whole_description_survives_the_cut():
+    """Anything past 200 characters is invisible where it matters. For
+    this tool everything has to fit, because both halves are things the
+    user will ask for."""
+    from src.jarvis.tools.registry import BUILTIN_TOOLS
+
+    assert _seen("cancelRoutine") == BUILTIN_TOOLS["cancelRoutine"].description
 
 
 @pytest.mark.parametrize("name", ["setRoutine", "cancelRoutine"])

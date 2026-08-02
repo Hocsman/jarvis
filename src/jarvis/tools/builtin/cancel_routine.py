@@ -49,12 +49,17 @@ class CancelRoutineTool(Tool):
 
     @property
     def description(self) -> str:
+        # Both jobs before the cut. The router is shown the leading
+        # sentences that fit 200 characters and nothing else, so a second
+        # capability described in sentence three does not exist as far as
+        # it is concerned — "what do you do on your own?" reached a
+        # catalogue with no tool that could answer it, and the turn
+        # improvised.
         return (
-            "Stop a repeating routine Yuba has been running on her own, "
-            "ONLY when the user asks to stop or remove one. Called with no "
-            "name it lists what is running, so it is also how to answer "
-            "'what do you do on your own?'. This never creates a routine "
-            "and never cancels a reminder."
+            "Stop a routine Yuba runs on her own, or list the ones she "
+            "runs, ONLY when the user asks to stop one or asks what she "
+            "does on her own. This never creates a routine and never "
+            "cancels a reminder."
         )
 
     @property
