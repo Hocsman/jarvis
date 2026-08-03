@@ -5,6 +5,10 @@ on:
     branches:
       - main
       - develop
+  workflow_dispatch:
+    # Dispatched by release-smoke.yml after it fast-forwards main: GitHub
+    # does not fire on:push workflows for pushes made with GITHUB_TOKEN, so
+    # the release would otherwise never be published automatically.
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}
@@ -84,15 +88,26 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Download every platform artifact that release-smoke.yml produced
-          # for this exact commit (the fast-forwarded develop tip).
+          # for this exact commit (the fast-forwarded develop tip). Fail
+          # loudly if any are missing — publishing a release without its
+          # binaries is worse than a failed job.
+          set -euo pipefail
+          missing=0
           for name in Jarvis-Windows Jarvis-macOS-arm64 Jarvis-macOS-x64 Jarvis-Linux; do
             echo "Downloading $name..."
-            gh run download --repo ${{ github.repository }} \
+            if ! gh run download --repo ${{ github.repository }} \
               --name "$name" \
               --workflow release-smoke.yml \
               --commit ${{ github.sha }} \
-              --dir artifacts || echo "⚠️  $name not found (may have expired or build failed)"
+              --dir artifacts; then
+              echo "::error::Missing artifact $name for commit ${{ github.sha }}"
+              missing=1
+            fi
           done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::One or more smoke-tested artifacts are missing; not publishing a release without binaries."
+            exit 1
+          fi
 
       - name: 📋 List available artifacts
         run: |
