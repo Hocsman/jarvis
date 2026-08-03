@@ -152,6 +152,14 @@ The engine consumes the plan in two phases.
   appended to the initial system message. Empty plan renders nothing.
   Single-step reply-only plans are not rendered either — they are
   noise to the chat model since the plan just says "reply".
+  The block tells the model a step may be skipped when a prior tool
+  result **or the memory already in its system prompt** satisfies it.
+  Scoped to prompt memory rather than "what you already know", so it
+  cannot be read as licence to answer a chained-research step from
+  training priors. The engine drops a step deterministically when every
+  word it would look up is covered; this clause is what reaches the
+  cases no lexical rule can — chiefly a step and a stored note written
+  in different languages.
 - `progress_nudge(steps, tool_results_so_far)` produces a remainder
   hint injected after each tool result, naming the next planned step
   and reminding the model to substitute discovered entities and avoid

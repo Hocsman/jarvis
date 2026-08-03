@@ -486,8 +486,9 @@ def format_plan_block(steps: Sequence[str]) -> str:
     return (
         "\nACTION PLAN for this query (your own pre-committed sub-tasks — "
         "follow them in order; if a step is already satisfied by a prior "
-        "tool result, move to the next; do NOT stop after step 1 if more "
-        "steps remain):\n"
+        "tool result or by the memory already in your system prompt, move "
+        "to the next — do not fetch again what is already in front of you; "
+        "do NOT stop after step 1 if more steps remain):\n"
         + numbered
     )
 
