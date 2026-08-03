@@ -38,6 +38,7 @@ def _cfg(**overrides):
     base = {
         "ollama_base_url": "http://localhost:11434",
         "ollama_chat_model": "gemma4:e2b",
+        "llm_chat_model": "gemma4:e2b",
         "planner_model": "",
         "tool_router_model": "",
         "intent_judge_model": "",
@@ -99,21 +100,38 @@ class TestResolvePlannerModel:
         assert resolve_planner_model(cfg) == "gemma-plan"
 
     def test_tracks_chat_model_by_default(self):
-        cfg = _cfg(ollama_chat_model="gemma4:e2b")
+        cfg = _cfg(llm_chat_model="gemma4:e2b")
         assert resolve_planner_model(cfg) == "gemma4:e2b"
+
+    def test_it_tracks_the_model_the_provider_actually_accepts(self):
+        """`llm_chat_model` is the live chat model; `ollama_chat_model`
+        is what the local backend was last configured with, and it
+        survives a move to a cloud provider as a stale tag.
+
+        Falling back to the stale one posts "gemma4:e2b" to an endpoint
+        that answers 400, `plan_query` swallows it, and the planner is
+        off with nothing to show for it — the whole turn silently loses
+        its plan. `_cloud_safe_model` rescues an explicitly configured
+        override but deliberately leaves empty values to this chain, so
+        the chain has to be the one that is right.
+        """
+        cfg = _cfg(llm_chat_model="deepseek/deepseek-v4-flash",
+                   ollama_chat_model="gemma4:e2b")
+
+        assert resolve_planner_model(cfg) == "deepseek/deepseek-v4-flash"
 
     def test_ignores_tool_router_model(self):
         # Planner must track the chat model — not the router. Upgrading
         # the chat model through setup must upgrade the planner too.
-        cfg = _cfg(tool_router_model="router-x", ollama_chat_model="chat-y")
+        cfg = _cfg(tool_router_model="router-x", llm_chat_model="chat-y")
         assert resolve_planner_model(cfg) == "chat-y"
 
     def test_upgrading_chat_model_upgrades_planner(self):
-        cfg = _cfg(ollama_chat_model="gpt-oss:20b")
+        cfg = _cfg(llm_chat_model="gpt-oss:20b")
         assert resolve_planner_model(cfg) == "gpt-oss:20b"
 
     def test_returns_empty_when_no_candidates(self):
-        cfg = _cfg(ollama_chat_model="")
+        cfg = _cfg(llm_chat_model="", ollama_chat_model="")
         assert resolve_planner_model(cfg) == ""
 
 

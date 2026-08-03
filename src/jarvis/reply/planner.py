@@ -166,7 +166,7 @@ def resolve_planner_model(cfg) -> str:
     override = getattr(cfg, "planner_model", "") or ""
     if override:
         return override
-    return getattr(cfg, "ollama_chat_model", "") or ""
+    return getattr(cfg, "llm_chat_model", "") or ""
 
 
 _PROMPT_TEMPLATE = (
