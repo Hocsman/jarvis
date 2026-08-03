@@ -1,8 +1,9 @@
 ---
 name: review-pr
 description: >
-  Single-pass PR review for code quality, potential issues, CI failures, test
-  coverage, and adherence to project standards. Lighter than `/review-pr-ultra`.
+  Single-pass PR review for code quality, maintainability and simplicity,
+  potential issues, CI failures, test coverage, and adherence to project
+  standards. Lighter than `/review-pr-ultra`.
   Use for routine reviews; use `/review-pr-ultra` for high-risk, security-sensitive,
   or large changes where deeper multi-agent analysis is warranted.
 argument-hint: "[PR number or URL]"
@@ -10,9 +11,9 @@ argument-hint: "[PR number or URL]"
 
 # Pull Request Review
 
-Review a pull request thoroughly for code quality, potential issues, and
-adherence to project standards. Diagnose and fix any CI failures. Verify test
-coverage is appropriate for the repo.
+Review a pull request thoroughly for code quality, maintainability and
+simplicity, potential issues, and adherence to project standards. Diagnose and
+fix any CI failures. Verify test coverage is appropriate for the repo.
 
 ## Step 1 — Gather Context
 
@@ -65,10 +66,20 @@ fits into the module.
 - Memory leaks, unbounded growth (queues, buffers, caches)
 
 #### Maintainability
-- SOLID violations, excessive coupling
+- SOLID violations, excessive coupling, low cohesion
 - Code duplication (DRY violations)
 - Naming clarity (variables, functions, classes)
 - Inconsistency with project conventions (from CLAUDE.md)
+- Missing or misleading comments/docstrings
+
+#### Simplicity
+- Overly complex logic, nested control flow, or cleverness that obscures intent
+- Unnecessary abstraction, indirection, or over-engineering (e.g. frameworks,
+  generics, or layers where a straightforward implementation suffices)
+- Dead code, unused parameters/imports, leftover debug statements
+- Duplicated logic that could be merged or extracted
+- High cognitive load: could the change be expressed more directly without
+  losing correctness or clarity?
 
 #### Completeness
 - Missing test coverage for new/changed code paths
