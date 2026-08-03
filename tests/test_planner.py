@@ -21,7 +21,9 @@ from jarvis.reply.planner import (
     _parse_plan,
     format_plan_block,
     is_search_memory_step,
+    lookup_terms_of,
     memory_topic_of,
+    plan_step_args,
     plan_query,
     plan_requires_memory,
     progress_nudge,
@@ -806,3 +808,45 @@ class TestPlanHasUnresolvedToolSteps:
         assert plan_has_unresolved_tool_steps(
             plan, ["chrome-devtools__navigate_page"]
         ) is False
+
+
+class TestWhatAStepIsLookingUp:
+    """A plan step's own arguments name its subject better than the
+    utterance does.
+
+    The planner composes them against the user's intent with pronouns
+    already resolved to literal entity names (rules 5 and 7), precisely
+    so a tool that never sees the dialogue can still act. That makes
+    them the right search string for asking the graph whether this
+    lookup has already been made.
+    """
+
+    def test_the_argument_value_is_the_search_string(self):
+        assert lookup_terms_of("webSearch query='Kestrel M3 memory'") == "Kestrel M3 memory"
+
+    def test_double_quotes_too(self):
+        assert lookup_terms_of('webSearch query="Kestrel M3 memory"') == "Kestrel M3 memory"
+
+    def test_several_arguments_join(self):
+        terms = lookup_terms_of("getWeather location='Lyon' unit='celsius'")
+
+        assert "Lyon" in terms and "celsius" in terms
+
+    def test_a_step_naming_something_not_yet_known_offers_nothing(self):
+        """An angle-bracket placeholder stands for an entity a later step
+        will reveal. Searching for the literal text would match nothing
+        and, worse, could match something wrong."""
+        assert lookup_terms_of("webSearch query='films by <director from step 1>'") == ""
+
+    def test_a_step_with_no_arguments_offers_nothing(self):
+        assert lookup_terms_of("getWeather") == ""
+
+    def test_prose_offers_nothing(self):
+        assert lookup_terms_of("Reply to the user with the combined findings.") == ""
+
+    def test_the_pairs_are_read_the_same_way_everywhere(self):
+        """One parser, so the reuse check and the direct-exec fast path
+        can never disagree about what a step is asking for."""
+        step = "webSearch query='Kestrel M3' limit=5"
+
+        assert plan_step_args(step) == {"query": "Kestrel M3", "limit": "5"}

@@ -199,30 +199,52 @@ class TestTheGraphAnswersBeforeTheWeb:
         )
 
 
+# The two cases the deterministic drop reaches: a step is dropped only
+# when every word it would look up is already in the memory that reached
+# the prompt, so a step and a note written in the same language can meet
+# and a step written in another cannot.
+_COVERED_DETERMINISTICALLY = {
+    "Hardware she looked up once is not looked up twice",
+    "A local detail she noted is recalled rather than re-searched",
+}
+
+_NETWORK_CASES = [
+    p if p.id in _COVERED_DETERMINISTICALLY else pytest.param(
+        *p.values,
+        id=p.id,
+        marks=pytest.mark.xfail(
+            reason="A step is dropped only when its own argument words are "
+                   "present in the memory that reached the prompt. This step "
+                   "is written in the user's language and the note in the "
+                   "extractor's, so no lexical rule can match them, and "
+                   "whether it searches is left to the model.",
+            strict=False,
+        ),
+    )
+    for p in RECALL_CASES
+]
+
+
 @pytest.mark.eval
 @requires_judge_llm
-class TestSheStillPaysForWhatSheKnows:
-    """The door above the gate, which is still open.
+class TestSheDoesNotPayTwice:
+    """The door above the gate.
 
-    Enrichment runs only when the planner asks for `searchMemory` or
-    returns nothing, and the planner reads a factual question as an
-    errand for the network. Two shapes were measured, both reproducible:
-    it plans `webSearch` alone, so the graph is never consulted; or it
-    plans `searchMemory` *and* `webSearch`, so the graph answers and the
-    round trip is paid anyway ("I already have that on file", after a
-    search).
+    Enrichment used to run only when the planner asked for `searchMemory`,
+    and the planner reads a factual question as an errand for the network.
+    Two things close that. The graph is opened by the concrete arguments
+    the planner composed into its own steps, which name the subject and
+    exist whether or not memory was planned. And a read-only step whose
+    every word is already answered by the memory in front of the model is
+    dropped before the plan is injected.
 
-    Whether the planner should consult memory before the network is a
-    decision about its contract rather than a defect in the gate, so this
-    is pinned rather than fixed. It flips to xpass the day that changes.
+    What is left is the cross-lingual case named in its mark: deciding
+    that an English note answers a French question is a semantic
+    judgement, and no lexical rule makes it. The fact does reach the
+    prompt; whether she searches anyway is the model's call.
     """
 
-    @pytest.mark.xfail(
-        reason="The planner routes factual questions to the network before "
-               "memory; see this class's docstring for the two measured shapes.",
-        strict=False,
-    )
-    @pytest.mark.parametrize("case", RECALL_CASES)
+    @pytest.mark.parametrize("case", _NETWORK_CASES)
     def test_she_does_not_go_out_for_something_she_has(
         self, mock_config, eval_db, eval_dialogue_memory, tmp_path, case: RecallCase,
     ):
@@ -235,4 +257,34 @@ class TestSheStillPaysForWhatSheKnows:
             f"graph: {case.node[1]!r}. The reply may still be correct, which is "
             f"why this is worth pinning — the cost is a network round trip "
             f"nobody sees. Tools called: {capture.tool_names()}"
+        )
+
+    def test_she_still_goes_out_for_the_half_she_does_not_have(
+        self, mock_config, eval_db, eval_dialogue_memory, tmp_path,
+    ):
+        """Coverage has to be total or the rule cancels the wrong search.
+
+        A note about the machine's memory says nothing about its price.
+        This is the test that fails first if anyone loosens full coverage
+        into partial overlap, and it is worth more than the ones above:
+        a saved round trip is money, a suppressed one is a wrong answer.
+        """
+        case = RecallCase(
+            text="Jarvis, what does the Kestrel M3 sell for these days?",
+            node=(
+                "Kestrel M3",
+                "The Kestrel M3 is a compact desktop workstation with 96 GB of "
+                "unified memory and a 2 TB soldered drive.",
+            ),
+            expect=(),
+        )
+
+        _, capture = _ask(mock_config, eval_db, eval_dialogue_memory,
+                          tmp_path, case, planner=True)
+
+        assert LOOKUP_TOOLS.intersection(capture.tool_names()), (
+            "She answered about a price from a note that only records the "
+            "machine's memory and storage. Standing in for a lookup is only "
+            "safe when the stored text answers the whole question; here it "
+            f"answers none of it. Tools called: {capture.tool_names()}"
         )

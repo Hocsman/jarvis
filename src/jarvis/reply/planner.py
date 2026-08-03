@@ -580,6 +580,45 @@ _PLAN_STEP_KV_RE = re.compile(
 )
 
 
+def plan_step_args(step: str) -> dict:
+    """The ``key='value'`` pairs a plan step carries, as a dict.
+
+    One parser for the step-argument shape, shared by the direct-exec
+    fast path and by the engine's check for whether a lookup has already
+    been made. Two parsers would eventually disagree about what a step
+    was asking for, and the disagreement would be invisible.
+    """
+    _, _, rest = step.strip().partition(" ")
+    args: dict = {}
+    for m in _PLAN_STEP_KV_RE.finditer(rest):
+        value = m.group("sq")
+        if value is None:
+            value = m.group("dq")
+        if value is None:
+            value = m.group("bare") or ""
+        args[m.group("key")] = value
+    return args
+
+
+def lookup_terms_of(step: str) -> str:
+    """The concrete argument values of a tool step, as one search string.
+
+    The planner composes arguments against the user's intent with
+    pronouns resolved to literal entity names (rules 5 and 7), because
+    tools never see the dialogue. That makes them a better description
+    of the subject than the raw utterance — and they exist on a turn
+    where the plan never asked for memory at all.
+
+    A step carrying an angle-bracket placeholder describes something a
+    later step will reveal, so it yields nothing: searching for the
+    literal placeholder text would match the wrong thing rather than
+    nothing, which is worse.
+    """
+    if "<" in step and ">" in step:
+        return ""
+    return " ".join(v for v in plan_step_args(step).values() if v)
+
+
 def _parse_plan_step_concrete(
     next_step_text: str,
     allowed_names: Sequence[str],
@@ -616,15 +655,7 @@ def _parse_plan_step_concrete(
     # "omit optional arguments" rule, dispatch with empty args.
     if not rest_stripped:
         return name, {}
-    args: dict = {}
-    for m in _PLAN_STEP_KV_RE.finditer(rest):
-        key = m.group("key")
-        value = m.group("sq")
-        if value is None:
-            value = m.group("dq")
-        if value is None:
-            value = m.group("bare") or ""
-        args[key] = value
+    args = plan_step_args(stripped)
     if not args:
         # Rest has content but no parseable key=value pairs — the step is
         # prose-shaped (e.g. `webSearch for the director's latest film`).

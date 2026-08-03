@@ -176,10 +176,11 @@ LLM failure at any step is non-fatal — the diary update still succeeds, and th
 
 At the start of each reply cycle, the reply engine enriches the system prompt with graph context:
 
-1. **Subject-driven**: the crawl keys off the extractor's `keywords`, which name what the query is about. The graph is a topic index of world facts, so the subject is what addresses it. Extracted `questions` join the search text when present, but they cannot gate it: they are defined as implicit questions *about the user*, and the user lives in the core files, not here.
-2. **Search**: keywords and questions are joined, stop-worded, and used to find matching nodes (up to 5 results with data previews). Fewer than two content words is treated as too thin to search — one generic term against a LIKE match surfaces noise, and noise in the prompt costs more than a search she pays for again.
-3. **Skipped entirely** when the extractor produced neither. A utility query (the time, a sum) has nothing to look up.
-4. Results are injected as things she looked up in earlier conversations, explicitly framed as describing the world rather than the user, and explicitly losing to the core sections above on any conflict.
+1. **Subject-driven**: the crawl keys off whatever names the subject of the query. Two sources feed it. The extractor's `keywords`, when the extractor ran. And the concrete arguments the planner composed into its own tool steps (`lookup_terms_of`), which name the subject with pronouns already resolved to literal entities, and which exist on a turn where no memory was planned at all. Extracted `questions` join the search text when present but cannot gate it: they are defined as implicit questions *about the user*, and the user lives in the core files, not here.
+2. **Not gated on the extractor.** The graph is a SQLite `LIKE` scan, no LLM and no embedding. Reaching it through an LLM call would trade a network round trip for a local one and call it a saving, so a plan that named a lookup opens the graph directly. The recall gate shuts the extractor and the diary; it does not shut the graph.
+3. **Search**: keywords, questions and plan terms are joined, stop-worded, and used to find matching nodes (up to 5 results with data previews). Fewer than two content words is treated as too thin to search — one generic term against a LIKE match surfaces noise, and noise in the prompt costs more than a search she pays for again.
+4. **Skipped entirely** when none of the three produced anything. A utility query (the time, a sum) has nothing to look up.
+5. Results are injected as things she looked up in earlier conversations, explicitly framed as describing the world rather than the user, and explicitly losing to the core sections above on any conflict.
 
 No tool calls needed. The LLM sees relevant graph memories as part of its system context.
 
@@ -257,3 +258,5 @@ Graph extraction ingests diary summaries, so the graph inherits whatever corrupt
 ## Privacy
 
 All data is stored locally in the user's SQLite database. No data leaves the device. The graph store has no network dependencies.
+
+The store is closed after every enrichment read. A read that fails is reported to the user as well as logged: a graph that has silently stopped answering must not be indistinguishable from an empty one.

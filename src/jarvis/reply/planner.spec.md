@@ -114,6 +114,14 @@ The engine consumes the plan in two phases.
 
 **Phase 1 — preparation gating (before the turn loop starts):**
 
+- `plan_step_args(step)` — the `key='value'` pairs a step carries. The
+  single parser for that shape, shared with the direct-exec fast path.
+- `lookup_terms_of(step)` — a step's concrete argument values joined into
+  one search string, or `""` when the step carries an angle-bracket
+  placeholder or no arguments. Arguments are composed against the user's
+  intent with pronouns resolved to literal entities, so they name the
+  subject better than the utterance does; the engine uses them to ask the
+  graph whether this lookup has already been made.
 - `plan_requires_memory(plan)` — true iff any step is a `searchMemory`
   directive. The engine uses it to gate the entire memory-enrichment
   block (keyword extractor LLM call, diary / graph lookups, digest

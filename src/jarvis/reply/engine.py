@@ -69,6 +69,8 @@ from .compound_query import split_compound_query
 from .planner import (
     plan_query,
     format_plan_block,
+    lookup_terms_of,
+    plan_step_args,
     progress_nudge,
     tool_steps_of,
     tool_names_in_plan,
@@ -756,6 +758,62 @@ def _match_question(node_data: str, questions: list[str]) -> str:
             best_q = q
 
     return best_q
+
+
+def _plan_step_lookup_words(step: str) -> set:
+    """Content words of a plan step's own arguments, folded for search."""
+    from ..memory.graph import fold_for_search
+
+    terms = lookup_terms_of(step)
+    if not terms:
+        return set()
+    return {
+        fold_for_search(w)
+        for w in (t.strip("?.,!'\"") for t in terms.lower().split())
+        if _is_content_word(w)
+    }
+
+
+def _memory_already_answers(step: str, memory_text: str) -> bool:
+    """True when every word this step would look up is already in the
+    memory that reaches the model's prompt.
+
+    Total coverage, never partial. A step asking what a machine costs is
+    not answered by a note about its memory, and a rule that accepted
+    the overlap would cancel the one search carrying the missing half.
+    Two content words minimum, for the same reason the graph search has
+    a floor: one generic term coincides with anything.
+    """
+    from ..memory.graph import fold_for_search
+
+    if not memory_text:
+        return False
+    words = _plan_step_lookup_words(step)
+    if len(words) < 2:
+        return False
+    haystack = fold_for_search(memory_text)
+    return all(w in haystack for w in words)
+
+
+def _step_only_reads(step: str) -> bool:
+    """Only a call that reads the world and writes nothing of her own can
+    be stood in for by something already read.
+
+    Reading a fact twice is waste. Declining to write because a similar
+    sentence was already read is losing the user's instruction, which is
+    not the same kind of mistake at all.
+    """
+    from ..tools.policy import RISK_READ, resolve_risk
+    from ..tools.registry import _known_tool
+
+    name = step.strip().partition(" ")[0].rstrip(":")
+    tool = _known_tool(name)
+    if tool is None:
+        # Unclassified is destructive, here as at the tool gate.
+        return False
+    if resolve_risk(name, tool, plan_step_args(step)) != RISK_READ:
+        return False
+    return not getattr(tool, "writes_own_state", False)
 
 
 # ── Live-context helpers ────────────────────────────────────────────────────
@@ -1643,11 +1701,25 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
     # match on, and they annotate the log), but they cannot be the gate: they
     # are defined as implicit questions *about the user*, and gating a
     # world-fact index on those means it is never read.
+    # The plan's own arguments are a second key to this door. The planner
+    # composed them against the user's intent with pronouns resolved to
+    # literal names, because tools never see the dialogue — so they name
+    # the subject better than the utterance does. And unlike `keywords`
+    # they exist on a turn where the plan never asked for memory at all,
+    # which is every factual question the planner reads as an errand for
+    # the network.
+    _plan_lookup_phrases: list[str] = []
+    for _step in tool_steps_of(action_plan):
+        _terms = lookup_terms_of(_step)
+        if _terms:
+            _plan_lookup_phrases.append(_terms)
+
     graph_context = ""
     if enrichment_source in ("all", "graph"):
-        if not keywords and not questions:
+        if not keywords and not questions and not _plan_lookup_phrases:
             debug_log("skipping graph enrichment: nothing to look up", "memory")
         else:
+            graph_store = None
             try:
                 from ..memory.graph import GraphMemoryStore
                 graph_store = GraphMemoryStore(cfg.db_path)
@@ -1661,7 +1733,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 # are the subject, questions only qualify it.
                 search_words: list[str] = []
                 seen: set[str] = set()
-                for phrase in [*keywords, *questions]:
+                for phrase in [*keywords, *questions, *_plan_lookup_phrases]:
                     for w in phrase.lower().split():
                         w = w.strip("?.,!'\"")
                         if _is_content_word(w) and w not in seen:
@@ -1681,7 +1753,10 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                         if data_preview:
                             graph_parts.append(f"[{path}] {data_preview}")
                             # Whichever list drove the search explains the hit.
-                            matched_q = _match_question(data_preview, questions or keywords)
+                            matched_q = _match_question(
+                                data_preview,
+                                questions or keywords or _plan_lookup_phrases,
+                            )
                             node_annotations.append((node.name or path.split(" > ")[-1], matched_q))
                             debug_log(f"graph hit: [{path}] ({node.data_token_count} tokens)", "memory")
 
@@ -1703,7 +1778,16 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                         else:
                             print(f"     · {name}", flush=True)
             except Exception as e:
+                # A graph that has silently stopped answering must not
+                # look the same as an empty one.
                 debug_log(f"graph enrichment failed: {e}", "memory")
+                print("  ⚠️ Knowledge: the graph could not be read this turn", flush=True)
+            finally:
+                if graph_store is not None:
+                    try:
+                        graph_store.close()
+                    except Exception:
+                        pass
 
     # Step 4c: Memory digest for small models.
     #
@@ -1815,6 +1899,55 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         f"  🔧 Tool selection ({_selection_source}): {len(allowed_tools)} tools selected",
         "planning",
     )
+
+    # A lookup she has already made does not need making again. When the
+    # memory that actually reaches the prompt already answers every word
+    # a planned read-only step would look up, the step is dropped: the
+    # fact is in front of the model, and sending it out re-learns a
+    # sentence it is already holding.
+    #
+    # Keyed on what reaches `messages[0]`, not on what the graph returned.
+    # On a small model the digest replaces the raw blocks wholesale, and
+    # it can keep nothing — dropping a step on evidence the model never
+    # sees would leave it with neither the fact nor the means to fetch
+    # it, and direct-exec has no second turn to recover in.
+    #
+    # The tool is never removed from `allowed_tools`, so a wrong drop
+    # costs one turn and never an answer: the model can still make the
+    # call itself. And every drop is printed, so this is not a silent
+    # skip — the whole reason this defect survived was that nothing said
+    # anything.
+    _prompt_memory = graph_context or memory_digest_text
+    if raw_graph_parts and not _prompt_memory:
+        debug_log(
+            f"{len(raw_graph_parts)} graph hit(s) retrieved but nothing survived "
+            "into the prompt — no plan step can be dropped",
+            "memory",
+        )
+    if action_plan and _prompt_memory:
+        _tool_steps = tool_steps_of(action_plan)
+        _kept: list[str] = []
+        for _step in action_plan:
+            if (
+                _step in _tool_steps
+                and _step_only_reads(_step)
+                and _memory_already_answers(_step, _prompt_memory)
+            ):
+                print(
+                    f"    ⏭️ Lookup skipped — already in memory: {_step[:60]}",
+                    flush=True,
+                )
+                debug_log(f"plan step dropped, memory covers it: {_step}", "planning")
+                continue
+            _kept.append(_step)
+        action_plan = _kept
+        _surviving = tool_names_in_plan(action_plan, _full_catalog_names)
+        if _surviving:
+            debug_log(
+                f"planner planned {_surviving} despite stored memory already "
+                "in the prompt for this query",
+                "planning",
+            )
 
     tools_desc = generate_tools_description(allowed_tools, mcp_tools)
     tools_json_schema = generate_tools_json_schema(allowed_tools, mcp_tools)
