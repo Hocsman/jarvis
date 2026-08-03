@@ -606,3 +606,74 @@ class TestAccessDecay:
         top = store.get_top_nodes(limit=5)
         # Should not raise — zero access_count means score is 0
         assert all(n.access_count >= 0 for n in top)
+
+
+class TestSearchIgnoresAccents:
+    """A name typed with its accents finds a node written without them.
+
+    Nodes are filled by an extraction step that works in English and
+    routinely writes "Cafe Rouviere" or "Patricio Guzman". The user asks
+    in his own language and types the accents. SQLite's LIKE compares
+    code points, so the two never meet: the node is there, the search is
+    correct, and nothing is found.
+
+    It fails the way every defect in this area fails — quietly, in the
+    safe direction. She simply searches the web again, and the only
+    visible symptom is a bill.
+
+    Folding is Unicode-general rather than a list of French letters: the
+    same decomposition handles Turkish, Vietnamese, Greek and Cyrillic
+    diacritics, and this assistant has no fixed language.
+    """
+
+    def test_an_accented_query_finds_an_unaccented_node(self, store):
+        store.create_node(
+            name="Cafe Rouviere", description="A roaster",
+            data="Cafe Rouviere is known for its Yirgacheffe filter.",
+            parent_id=store.get_root().id,
+        )
+
+        assert store.search_nodes("rouvière")
+
+    def test_an_unaccented_query_finds_an_accented_node(self, store):
+        """The other direction matters just as much: she writes what he
+        said, and he later asks without bothering with the accents."""
+        store.create_node(
+            name="Café Rouvière", description="Un torréfacteur",
+            data="Le Café Rouvière est réputé pour son filtre Yirgacheffe.",
+            parent_id=store.get_root().id,
+        )
+
+        assert store.search_nodes("rouviere")
+
+    def test_it_is_not_a_list_of_french_letters(self, store):
+        """Turkish, here, because its dotted capital is the classic case
+        a hand-rolled table gets wrong."""
+        store.create_node(
+            name="Bogazici", description="A strait",
+            data="Bogazici is the Turkish name for the Bosphorus.",
+            parent_id=store.get_root().id,
+        )
+
+        assert store.search_nodes("Boğaziçi")
+
+    def test_case_folds_beyond_ascii(self, store):
+        """SQLite's LIKE lowercases ASCII only, so an accented capital
+        never matched its lowercase form either."""
+        store.create_node(
+            name="Ecole", description="A school",
+            data="École normale is in Paris.",
+            parent_id=store.get_root().id,
+        )
+
+        assert store.search_nodes("école")
+
+    def test_a_word_that_is_simply_absent_still_finds_nothing(self, store):
+        """Folding must widen matching, not blur it."""
+        store.create_node(
+            name="Cafe Rouviere", description="A roaster",
+            data="Cafe Rouviere is known for its Yirgacheffe filter.",
+            parent_id=store.get_root().id,
+        )
+
+        assert store.search_nodes("bogazici") == []

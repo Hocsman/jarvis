@@ -105,7 +105,7 @@ All ordering by access frequency uses a **time-decayed score** computed at query
 
 ### Search
 
-- **search_nodes(query, limit)** — Keyword search across name, description, and data fields. Case-insensitive LIKE matching; nodes matching more keywords rank higher. Excludes root. Touches matched nodes for access tracking.
+- **search_nodes(query, limit)** — Keyword search across name, description, and data fields. Nodes matching more keywords rank higher. Excludes root. Touches matched nodes for access tracking. Both sides of the LIKE are passed through `fold_for_search`, so matching ignores case and diacritics in both directions: a query typed "rouvière" finds a node the extractor wrote as "Rouviere", and the reverse. The folding is NFKD decomposition with combining marks dropped, so it is a property of Unicode rather than a table of one language's letters. Without it the miss is silent, since the caller simply falls back to searching the web.
 - **find_node_by_name(name, parent_id)** — Exact name match (case-insensitive), optionally scoped to a parent node. Excludes root when no parent specified.
 
 ## Tree & Graph Queries
@@ -176,9 +176,10 @@ LLM failure at any step is non-fatal — the diary update still succeeds, and th
 
 At the start of each reply cycle, the reply engine enriches the system prompt with graph context:
 
-1. **Question-driven**: Graph enrichment runs only when the query generator produced implicit personal questions. Utility queries (time, maths) and queries whose context is already live skip the graph entirely — the knowledge graph is a Q&A index, not a topic index.
-2. **Question search**: Questions are joined, stop-worded, and used to find matching nodes (up to 5 results with data previews).
-3. Results are injected as "Stored knowledge about the user" — separate from diary history to preserve provenance.
+1. **Subject-driven**: the crawl keys off the extractor's `keywords`, which name what the query is about. The graph is a topic index of world facts, so the subject is what addresses it. Extracted `questions` join the search text when present, but they cannot gate it: they are defined as implicit questions *about the user*, and the user lives in the core files, not here.
+2. **Search**: keywords and questions are joined, stop-worded, and used to find matching nodes (up to 5 results with data previews). Fewer than two content words is treated as too thin to search — one generic term against a LIKE match surfaces noise, and noise in the prompt costs more than a search she pays for again.
+3. **Skipped entirely** when the extractor produced neither. A utility query (the time, a sum) has nothing to look up.
+4. Results are injected as things she looked up in earlier conversations, explicitly framed as describing the world rather than the user, and explicitly losing to the core sections above on any conflict.
 
 No tool calls needed. The LLM sees relevant graph memories as part of its system context.
 

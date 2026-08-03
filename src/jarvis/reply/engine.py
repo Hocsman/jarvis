@@ -1584,8 +1584,10 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 )
                 if dialogue_memory and hasattr(dialogue_memory, "hot_cache_put"):
                     dialogue_memory.hot_cache_put(_extractor_cache_key, search_params)
-            keywords = search_params.get('keywords', [])
-            questions = search_params.get('questions', [])
+            # `or []` rather than a `.get` default: a model that answers
+            # `{"keywords": null}` hands back a None the callers would splat.
+            keywords = search_params.get('keywords') or []
+            questions = search_params.get('questions') or []
             if keywords:
                 print(f"  🔍 Memory search: {', '.join(keywords)}", flush=True)
                 debug_log(f"extracted keywords: {keywords}", "memory")
@@ -1629,16 +1631,22 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         except Exception as e:
             debug_log(f"diary enrichment failed: {e}", "memory")
 
-    # Step 4b: Graph memory enrichment (structured knowledge about the user).
-    # The graph is a question-answer index: each node holds knowledge facts the
-    # assistant can use to answer implicit questions behind a query. If the
-    # extractor produced no questions, the query is either utility (time, maths)
-    # or already fully answerable from live context — no reason to crawl the
-    # knowledge graph.
+    # Step 4b: Graph memory enrichment (what she has already looked up).
+    #
+    # The graph holds world facts kept from earlier searches — films, places,
+    # hardware, techniques — so a question answered once is not paid for twice.
+    # What is true about the *user* lives in the core files, which are the sole
+    # authority on him; the graph is the world, and the core wins on conflict.
+    #
+    # So the crawl keys off `keywords`, which name the subject of the query.
+    # `questions` are welcome when the extractor produces them (more words to
+    # match on, and they annotate the log), but they cannot be the gate: they
+    # are defined as implicit questions *about the user*, and gating a
+    # world-fact index on those means it is never read.
     graph_context = ""
     if enrichment_source in ("all", "graph"):
-        if not questions:
-            debug_log("skipping graph enrichment: no implicit questions to answer", "memory")
+        if not keywords and not questions:
+            debug_log("skipping graph enrichment: nothing to look up", "memory")
         else:
             try:
                 from ..memory.graph import GraphMemoryStore
@@ -1648,30 +1656,32 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 # Track node name + matched question for user-facing logs
                 node_annotations: list[tuple[str, str]] = []  # (node_name, matched_question)
 
-                # Build search text from the questions, stripped of stop words so
-                # LIKE matching keys off the content words.
-                question_words: list[str] = []
+                # Build search text from both, stripped of stop words so LIKE
+                # matching keys off the content words. Keywords come first: they
+                # are the subject, questions only qualify it.
+                search_words: list[str] = []
                 seen: set[str] = set()
-                for q in questions:
-                    for w in q.lower().split():
+                for phrase in [*keywords, *questions]:
+                    for w in phrase.lower().split():
                         w = w.strip("?.,!'\"")
                         if _is_content_word(w) and w not in seen:
                             seen.add(w)
-                            question_words.append(w)
+                            search_words.append(w)
 
                 # Fewer than 2 meaningful words produces noisy LIKE matches against
                 # a single generic term — skip rather than surface irrelevant hits.
-                if len(question_words) < 2:
-                    debug_log(f"skipping graph search: <2 content words after stopwords ({question_words})", "memory")
+                if len(search_words) < 2:
+                    debug_log(f"skipping graph search: <2 content words after stopwords ({search_words})", "memory")
                 else:
-                    graph_nodes = graph_store.search_nodes(" ".join(question_words), limit=5)
+                    graph_nodes = graph_store.search_nodes(" ".join(search_words), limit=5)
                     for node in graph_nodes:
                         ancestors = graph_store.get_ancestors(node.id)
                         path = " > ".join(a.name for a in ancestors)
                         data_preview = node.data[:300] if node.data else ""
                         if data_preview:
                             graph_parts.append(f"[{path}] {data_preview}")
-                            matched_q = _match_question(data_preview, questions)
+                            # Whichever list drove the search explains the hit.
+                            matched_q = _match_question(data_preview, questions or keywords)
                             node_annotations.append((node.name or path.split(" > ")[-1], matched_q))
                             debug_log(f"graph hit: [{path}] ({node.data_token_count} tokens)", "memory")
 

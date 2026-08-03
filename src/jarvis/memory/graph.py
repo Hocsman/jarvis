@@ -84,6 +84,26 @@ def normalise_fact(text: str) -> str:
     return _WS_RE.sub(" ", folded.strip())
 
 
+def fold_for_search(text: str) -> str:
+    """Strip diacritics and case so a search matches across spellings.
+
+    Nodes are filled by an extraction step working in English, which
+    writes "Cafe Rouviere" and "Patricio Guzman". The user asks in his
+    own language, with the accents. LIKE compares code points, so
+    without this the node is present, the search is correct, and nothing
+    is found — the quietest kind of miss, since the only consequence is
+    that she looks it up on the web again.
+
+    NFKD splits a letter from its marks; dropping the combining marks
+    covers every script the decomposition reaches, so this stays a
+    property of Unicode rather than a table of French letters.
+    """
+    if not text:
+        return ""
+    decomposed = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in decomposed if not unicodedata.combining(c)).casefold()
+
+
 # ── Configuration defaults ──────────────────────────────────────────────────
 
 SPLIT_THRESHOLD = 1500       # tokens — when to split a node into children
@@ -253,6 +273,10 @@ class GraphMemoryStore:
         self.db_path = db_path
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        # SQLite compares code points and only lowercases ASCII, so search
+        # folds both sides through Python instead. Deterministic, so the
+        # planner is free to cache it.
+        self.conn.create_function("fold", 1, fold_for_search, deterministic=True)
         self._lock = threading.RLock()
         self._init_schema()
         self._ensure_root()
@@ -684,7 +708,9 @@ class GraphMemoryStore:
     def search_nodes(self, query: str, limit: int = 10) -> list[MemoryNode]:
         """Search nodes by keyword match across name, description, and data.
 
-        Uses case-insensitive LIKE matching on each keyword (split by whitespace).
+        Matching is diacritic- and case-insensitive in both directions
+        (see ``fold_for_search``): a keyword typed with its accents finds a
+        node written without them, and the reverse.
         Scoring weights: name/description matches are worth 3× data matches, so
         specific nodes about a topic rank above broad category nodes that merely
         contain the keyword somewhere in their data blob.
@@ -699,12 +725,13 @@ class GraphMemoryStore:
         params: list[str] = []
         for kw in keywords:
             # Escape LIKE wildcards so literal %, _, \ are matched exactly
-            escaped = kw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            folded = fold_for_search(kw)
+            escaped = folded.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             pattern = f"%{escaped}%"
             score_parts.append(
-                "(CASE WHEN name LIKE ? ESCAPE '\\' THEN 3 ELSE 0 END"
-                " + CASE WHEN description LIKE ? ESCAPE '\\' THEN 3 ELSE 0 END"
-                " + CASE WHEN data LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END)"
+                "(CASE WHEN fold(name) LIKE ? ESCAPE '\\' THEN 3 ELSE 0 END"
+                " + CASE WHEN fold(description) LIKE ? ESCAPE '\\' THEN 3 ELSE 0 END"
+                " + CASE WHEN fold(data) LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END)"
             )
             params.extend([pattern, pattern, pattern])
 
