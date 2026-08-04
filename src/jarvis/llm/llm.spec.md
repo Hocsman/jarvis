@@ -107,6 +107,7 @@ The migration in `_migrate_config` runs once when `_config_version < 2`:
 - Endpoints: `POST /api/chat`, `POST /api/embeddings`, `GET /api/tags`, `POST /api/generate` (used by `warm_up`).
 - Streaming: JSON-lines (`{...}\n`).
 - Tool calls: native `tools` parameter (Ollama 0.4+); arguments returned as a Python dict.
+- Prompt caching: every chat payload (`chat()`, `direct()`, `streaming()`) sets `cache_prompt: true` explicitly so the server retains the request's KV state and reuses it when the next request shares the same prefix. Callers keep prefixes cacheable by keeping system prompts byte-static and pushing per-call data (time, hints) to the tail of the prompt (see `docs/llm_contexts.md` "KV-cache discipline").
 - `extra_options` keys map onto the wire shape: `keep_alive` / `format` / `think` go to the payload root; `max_tokens` (the canonical generation cap across backends) is translated to `num_predict`; everything else (incl. `temperature`, `num_ctx`, `num_predict`) folds into the nested `options` object. Callers can also pass an explicit `options` sub-dict for explicit nesting (its `max_tokens` is likewise translated).
 - `warm_up(model)` first verifies the endpoint is actually an Ollama server via `GET /api/version`, then issues `POST /api/generate` with an empty prompt and `keep_alive: "30m"`; the model stays resident for 30 minutes after each call.
 

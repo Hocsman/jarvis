@@ -318,9 +318,14 @@ def _select_llm(
                 "reply time, so no tool is needed to surface them):\n"
                 f"{raw_hint}\n\n"
             )
+    # KV-cache discipline: the mostly-static tool catalogue opens the user
+    # prompt (it changes only on an MCP refresh), the dynamic hint (time +
+    # dialogue) rides after it, and the query stays the final token. The
+    # dynamic hint first would push the divergence to token 1 of the user
+    # message and defeat prefix reuse across consecutive router calls.
     user_prompt = (
-        f"{hint_section}"
         f"Available tools:\n{catalogue}\n\n"
+        f"{hint_section}"
         f"User query: {query}\n\n"
         "Top tools (comma-separated, max 5, or 'none'):"
     )

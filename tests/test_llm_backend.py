@@ -281,6 +281,50 @@ class TestOllamaBackendChat:
         assert sent["options"] == {"num_ctx": 8192}
 
 
+class TestOllamaBackendPromptCaching:
+    """Every Ollama chat payload must explicitly request prompt caching so
+    the server keeps the KV state of the request and reuses it when the
+    next request starts with the same prefix."""
+
+    @patch("jarvis.llm.requests.post")
+    def test_chat_payload_requests_prompt_caching(self, mock_post):
+        from jarvis.llm import OllamaBackend
+
+        mock_post.return_value = _make_response(json_data={"message": {"content": "ok"}})
+        backend = OllamaBackend("http://localhost:11434")
+
+        backend.chat("any", [{"role": "user", "content": "hi"}])
+
+        sent = mock_post.call_args.kwargs["json"]
+        assert sent["cache_prompt"] is True
+
+    @patch("jarvis.llm.requests.post")
+    def test_direct_payload_requests_prompt_caching(self, mock_post):
+        from jarvis.llm import OllamaBackend
+
+        mock_post.return_value = _make_response(json_data={"message": {"content": "ok"}})
+        backend = OllamaBackend("http://localhost:11434")
+
+        backend.direct("gemma4:e2b", "sys", "user")
+
+        sent = mock_post.call_args.kwargs["json"]
+        assert sent["cache_prompt"] is True
+
+    @patch("jarvis.llm.requests.post")
+    def test_streaming_payload_requests_prompt_caching(self, mock_post):
+        from jarvis.llm import OllamaBackend
+
+        mock_post.return_value = _make_response(
+            iter_lines=[b'{"message": {"content": "hi"}}']
+        )
+        backend = OllamaBackend("http://localhost:11434")
+
+        backend.streaming("gemma4:e2b", "sys", "user")
+
+        sent = mock_post.call_args.kwargs["json"]
+        assert sent["cache_prompt"] is True
+
+
 # ---------------------------------------------------------------------------
 # OllamaBackend — direct edge cases
 # ---------------------------------------------------------------------------

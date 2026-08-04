@@ -133,6 +133,7 @@ class OllamaBackend(LLMBackend):
             "model": chat_model,
             "messages": messages,
             "stream": False,
+            "cache_prompt": True,
             "options": options,
             "think": thinking,
         }
@@ -190,6 +191,7 @@ class OllamaBackend(LLMBackend):
             "model": chat_model,
             "messages": messages,
             "stream": True,
+            "cache_prompt": True,
             "options": {"num_ctx": 4096},
             "think": thinking,
         }
@@ -249,6 +251,7 @@ class OllamaBackend(LLMBackend):
             "model": chat_model,
             "messages": sanitised,
             "stream": False,
+            "cache_prompt": True,
             "options": {"num_ctx": 8192},
             "think": thinking,
         }

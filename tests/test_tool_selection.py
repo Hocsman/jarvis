@@ -578,3 +578,40 @@ class TestLLMStrategy:
 
         assert "KNOWN FACTS" in captured["user"]
         assert "RECENT DIALOGUE" not in captured["user"]
+
+    @pytest.mark.unit
+    def test_catalogue_precedes_dynamic_hint_in_user_prompt(self):
+        """KV-cache discipline: the mostly-static tool catalogue must open
+        the user prompt so consecutive router calls share a long prefix even
+        as the time/dialogue hint drifts. The hint rides after the catalogue,
+        and the query stays the final token."""
+        captured = {}
+
+        def _direct(model, sys, user, timeout_sec=8.0, **kwargs):
+            captured["user"] = user
+            return "getWeather"
+
+        backend = _llm_backend(direct_fn=_direct)
+
+        hint = (
+            "Current local time: Sunday, 2026-04-20 17:42 (Europe/London).\n\n"
+            "Recent dialogue (short-term memory):\n"
+            "- user: what's the weather like?\n"
+            "- assistant: Sure — where should I check?"
+        )
+        select_tools(
+            "I'm in London",
+            _builtin(), {},
+            strategy=ToolSelectionStrategy.LLM,
+            llm_backend=backend,
+            llm_model="test",
+            context_hint=hint,
+        )
+
+        user = captured["user"]
+        assert user.index("Available tools:") < user.index("KNOWN FACTS"), (
+            "catalogue must precede the dynamic hint block"
+        )
+        assert user.index("KNOWN FACTS") < user.index("User query:"), (
+            "hint must precede the query so the query stays the final token"
+        )
