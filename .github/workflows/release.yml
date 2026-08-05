@@ -154,6 +154,23 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: 🧭 Mirror stable build to the develop "latest" channel
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Serve the stable build through the "latest" (develop) channel so
+          # develop builds, and installs mis-stamped as develop (e.g. v2.2.1),
+          # can update to stable through their normal update flow. The next
+          # develop push re-publishes "latest" with a fresh develop build, so
+          # the window closes by itself.
+          FILES=$(find artifacts -type f \( -name "*.zip" -o -name "*.tar.gz" \) | tr '\n' ' ')
+          if [ -z "$FILES" ]; then
+            echo "::warning::No artifacts to mirror to 'latest'"
+            exit 0
+          fi
+          gh release upload latest $FILES --clobber --repo ${{ github.repository }}
+
   # ── Create/update "latest" pre-release (develop only) ──────────────────
   release-develop:
     needs: [build-desktop]
