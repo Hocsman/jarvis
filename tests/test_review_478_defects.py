@@ -10,9 +10,17 @@ pinned by a test that fails without its fix.
 from __future__ import annotations
 
 import threading
-from unittest.mock import MagicMock, patch
+import time
+from types import SimpleNamespace
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
+
+
+# Regression tests for the four blocking review defects. Run in CI via the
+# `unit` marker; the two Qt tests use the shared `qapp` fixture, which is
+# headless-safe (offscreen platform) so this file is CI-safe.
+pytestmark = pytest.mark.unit
 
 
 # ── 1. Stop must reach the process the query runs in ──────────────────
@@ -154,6 +162,11 @@ class TestRuntimeStatusDoesNotBlockTheTray:
     which is exactly when the user reaches for diagnostics."""
 
     def test_the_snapshot_is_collected_off_the_main_thread(self):
+        """``show_runtime_status`` must collect the snapshot on a worker
+        thread and deliver it through the ``ready`` signal. Regression pin:
+        if collection were inlined on the calling (Qt main) thread, the
+        blocking ``check_ollama_server`` request would freeze the tray menu.
+        """
         from desktop_app import app as app_module
 
         collected_on = {}
@@ -162,24 +175,37 @@ class TestRuntimeStatusDoesNotBlockTheTray:
             collected_on["thread"] = threading.current_thread().name
             return True, "0.1.0"
 
-        tray = MagicMock()
-        tray.is_listening = False
-        tray.is_bundled = False
-        tray.daemon_process = None
-        tray.daemon_thread = None
-        tray._ollama_runtime_ownership = None
-
-        app_module._collect_runtime_status_snapshot(
+        ready = Mock()
+        tray = SimpleNamespace(
             is_listening=False,
             is_bundled=False,
             daemon_process=None,
             daemon_thread=None,
-            ollama_runtime_ownership=None,
-            settings_loader=lambda: MagicMock(),
-            ollama_checker=_slow_checker,
+            _ollama_runtime_ownership=None,
+            _runtime_status_signals=SimpleNamespace(ready=ready),
+        )
+        tray.collect_runtime_status = (
+            lambda: app_module._collect_runtime_status_snapshot(
+                is_listening=False,
+                is_bundled=False,
+                daemon_process=None,
+                daemon_thread=None,
+                ollama_runtime_ownership=None,
+                settings_loader=lambda: MagicMock(),
+                ollama_checker=_slow_checker,
+            )
         )
 
-        assert collected_on["thread"] == threading.current_thread().name
+        app_module.JarvisSystemTray.show_runtime_status(tray)
+
+        deadline = time.time() + 5.0
+        while time.time() < deadline and not ready.emit.called:
+            time.sleep(0.01)
+        assert ready.emit.called, "the runtime-status worker never delivered its snapshot"
+        assert collected_on["thread"] != threading.current_thread().name, (
+            "the snapshot must be collected on a worker thread, not the "
+            "calling (Qt main) thread"
+        )
 
     def test_the_settings_are_loaded_once_per_snapshot(self):
         """Two loads meant two file reads and two validations on the
