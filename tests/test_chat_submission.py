@@ -106,11 +106,12 @@ class TestSubmitTextQueryContract:
         dm = _install_dialogue_memory(cfg=object(), db=object())
         captured = {}
 
-        def fake_engine(db, cfg, tts, text, dialogue_memory, language=None):
+        def fake_engine(db, cfg, tts, text, dialogue_memory, language=None, **kwargs):
             captured["tts"] = tts
             captured["dialogue_memory"] = dialogue_memory
             captured["text"] = text
             captured["language"] = language
+            captured["quiet"] = kwargs.get("quiet")
             return "hello from the engine"
 
         monkeypatch.setattr("jarvis.reply.engine.run_reply_engine", fake_engine)
@@ -127,6 +128,29 @@ class TestSubmitTextQueryContract:
         assert captured["dialogue_memory"] is dm
         assert captured["language"] is None
         assert captured["text"] == "hi there"
+
+    def test_engine_called_with_quiet_so_reply_stays_out_of_logs(self, monkeypatch):
+        """Chat queries must run the engine in quiet mode: the engine prints
+        the reply to stdout, which subprocess mode forwards to the desktop
+        app's general log viewer — a surface outside the chat redaction
+        invariant. ``quiet=True`` suppresses that print."""
+        _install_dialogue_memory(cfg=object(), db=object())
+        captured = {}
+
+        def fake_engine(*args, **kwargs):
+            captured["quiet"] = kwargs.get("quiet")
+            return "a reply"
+
+        monkeypatch.setattr("jarvis.reply.engine.run_reply_engine", fake_engine)
+
+        events = []
+        daemon.submit_text_query(
+            "private question",
+            on_complete=lambda r: events.append(("complete", r)),
+        )
+        _wait_for_complete(events)
+
+        assert captured["quiet"] is True
 
     def test_fires_on_start_with_query_then_on_complete_with_reply(self, monkeypatch):
         """on_start fires first with the query, on_complete fires last with
@@ -209,6 +233,34 @@ class TestSubmitTextQueryContract:
         _wait_for_complete(events)
         assert events[-1] == ("complete", None)
         assert called == []
+
+    def test_stop_requested_fires_complete_none_and_keeps_lock_free(
+        self, monkeypatch,
+    ):
+        """While the daemon is shutting down (``is_stop_requested()``), a text
+        query must fail open with complete(None), never spawn a worker that
+        could touch a closed DB, and leave the query lock acquirable for any
+        future submission."""
+        _install_dialogue_memory(cfg=object(), db=object())
+        called = []
+        monkeypatch.setattr(
+            "jarvis.reply.engine.run_reply_engine",
+            lambda *a, **k: called.append(True),
+        )
+        daemon._global_stop_requested = True
+        try:
+            events = []
+            daemon.submit_text_query(
+                "hi", on_complete=lambda r: events.append(("complete", r)),
+            )
+            _wait_for_complete(events)
+            assert events[-1] == ("complete", None)
+            assert called == []
+            # The lock was never taken, so a follow-up submission can proceed.
+            assert daemon._chat_query_lock.acquire(blocking=False)
+            daemon._chat_query_lock.release()
+        finally:
+            daemon._global_stop_requested = False
 
     def test_empty_or_whitespace_does_not_run_engine(self, monkeypatch):
         """Empty / whitespace input is dropped before the worker spawns; no

@@ -27,7 +27,7 @@ used for end-of-session UI updates.
   value. This mirrors how `_check_and_update_diary` is invoked from a worker
   QThread in the existing desktop app.
 - The worker thread runs
-  `run_reply_engine(db, cfg, tts=None, text, _global_dialogue_memory, language=None)`.
+  `run_reply_engine(db, cfg, tts=None, text, _global_dialogue_memory, language=None, quiet=True)`.
 - `tts=None` — text chat never speaks. Audio output stays a voice-only concern.
 - `language=None` — text input has no Whisper-detected language; tools fall
   back to their own defaults, same as a voice query with no language hint.

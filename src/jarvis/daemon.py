@@ -351,6 +351,7 @@ def submit_text_query(
                 text=text,
                 dialogue_memory=dm,
                 language=None,
+                quiet=True,
             )
             if cancel_event.is_set():
                 debug_log("chat query cancelled, dropping reply", "chat")
