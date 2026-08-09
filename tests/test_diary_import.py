@@ -14,37 +14,43 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-# Mock modules that may not be available in the test environment.
-# We attempt a real import first and only fall back to a MagicMock when the
-# module is genuinely unavailable. Mocking unconditionally (or based on
-# ``not in sys.modules``) corrupts PyQt6 for every later test that needs the
-# real Qt classes, because pytest imports this module during collection
-# before any test has loaded PyQt6.
-import importlib
-import logging
-
-_mock_logger = logging.getLogger(__name__)
-
-
-def _ensure_module(name: str) -> None:
-    try:
-        importlib.import_module(name)
-    except Exception:
-        if name not in sys.modules:
-            sys.modules[name] = MagicMock()
-        _mock_logger.debug("module %s unavailable, mocked for tests", name)
-
-
-for _mod in [
+# Stub optional third-party modules that may be missing from the environment.
+# NOTE: this must NOT leak into other test files. Injecting MagicMock objects
+# into sys.modules at module level poisons the whole session: when a later
+# test imports a real package that was stubbed (e.g. PyQt6), the import
+# system reuses the stale mock entry and every Qt widget then subclasses a
+# MagicMock ("issubclass() arg 1 must be a class"). The fixture below
+# scopes the stubs to this file and only stubs modules that are genuinely
+# unavailable.
+_MOCK_MODULES = [
     "PyQt6", "PyQt6.QtWidgets", "PyQt6.QtCore", "PyQt6.QtGui",
     "PyQt6.QtWebEngineWidgets", "PyQt6.sip",
     "requests", "requests.exceptions",
     "psutil",
-]:
-    _ensure_module(_mod)
+]
 
-# Ensure requests.exceptions.Timeout is a proper exception class
-sys.modules["requests"].exceptions.Timeout = type("Timeout", (Exception,), {})
+
+@pytest.fixture(autouse=True)
+def _stub_missing_modules(monkeypatch):
+    """Stub optional modules that are missing, restoring sys.modules after
+    each test so later test files see the real packages."""
+    import importlib.util
+
+    for mod_name in _MOCK_MODULES:
+        if mod_name in sys.modules:
+            continue
+        try:
+            spec = importlib.util.find_spec(mod_name)
+        except (ImportError, ModuleNotFoundError, ValueError):
+            spec = None
+        if spec is not None:
+            continue  # Real package importable; no stubbing needed.
+        monkeypatch.setitem(sys.modules, mod_name, MagicMock())
+
+    # Ensure requests.exceptions.Timeout is a proper exception class
+    requests_mod = sys.modules.get("requests")
+    if requests_mod is not None:
+        requests_mod.exceptions.Timeout = type("Timeout", (Exception,), {})
 
 from src.jarvis.memory.db import Database
 

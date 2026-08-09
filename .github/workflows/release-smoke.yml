@@ -38,6 +38,7 @@ jobs:
 
     permissions:
       contents: write
+      actions: write  # needed to dispatch release.yml (workflow_dispatch)
 
     steps:
       - name: 📥 Checkout full history
@@ -88,3 +89,17 @@ jobs:
           echo "   main is now at: $NEW_MAIN_SHA"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # GitHub does NOT fire on:push workflows for pushes made with
+      # GITHUB_TOKEN, so release.yml would never run after the fast-forward
+      # above and the release would silently not be published. Dispatch it
+      # explicitly: workflow_dispatch is one of the two event types
+      # GITHUB_TOKEN is allowed to trigger. semantic-release inside
+      # release.yml decides whether a new version is warranted; if not, the
+      # run simply finishes without publishing.
+      - name: 🚀 Trigger release workflow
+        run: |
+          gh workflow run release.yml --ref main --repo "${{ github.repository }}"
+          echo "Dispatched release.yml on main — see https://github.com/${{ github.repository }}/actions/workflows/release.yml"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

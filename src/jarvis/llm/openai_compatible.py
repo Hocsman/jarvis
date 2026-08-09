@@ -125,6 +125,7 @@ class OpenAICompatibleBackend(LLMBackend):
         thinking: bool = False,
         num_ctx: int = 4096,
         temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ) -> Optional[str]:
         # ``num_ctx`` and ``thinking`` have no equivalent in the OpenAI
         # shape; servers that need a fixed context window configure it
@@ -142,6 +143,8 @@ class OpenAICompatibleBackend(LLMBackend):
         }
         if temperature is not None:
             payload["temperature"] = temperature
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
 
         try:
             with requests.post(

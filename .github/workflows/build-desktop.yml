@@ -68,9 +68,24 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "=== Smoke Test: Jarvis Desktop (Windows) ==="
-          $result = & dist\Jarvis\Jarvis.exe --smoke-test 2>&1
-          $exitCode = $LASTEXITCODE
-          Write-Host $result
+          # GUI-subsystem (console=False) executables do not attach to
+          # PowerShell's console: `& app.exe 2>&1` captures no output and
+          # leaves $LASTEXITCODE empty, so the smoke test always "failed"
+          # regardless of the app's real result. Start-Process -PassThru
+          # exposes the true exit code, and -RedirectStandardOutput/-Error
+          # give the app real stdout/stderr handles to write into.
+          $outFile = Join-Path $env:RUNNER_TEMP "jarvis-smoke-stdout.txt"
+          $errFile = Join-Path $env:RUNNER_TEMP "jarvis-smoke-stderr.txt"
+          $process = Start-Process -FilePath "dist\Jarvis\Jarvis.exe" `
+            -ArgumentList "--smoke-test" `
+            -Wait -PassThru `
+            -RedirectStandardOutput $outFile `
+            -RedirectStandardError $errFile
+          $exitCode = $process.ExitCode
+          Write-Host "----- stdout -----"
+          Get-Content $outFile -ErrorAction SilentlyContinue
+          Write-Host "----- stderr -----"
+          Get-Content $errFile -ErrorAction SilentlyContinue
           if ($exitCode -ne 0) {
             Write-Host "SMOKE TEST FAILED (exit code: $exitCode)"
             exit 1
@@ -210,7 +225,10 @@ jobs:
       - name: 📦 Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxcb-cursor0 libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 portaudio19-dev binutils
+          # libegl1/libgl1: Qt6 (even the offscreen/xcb platform plugins) dlopens
+          # libEGL.so.1/libGL.so.1 at import time; without them the bundled app
+          # dies with "ImportError: libEGL.so.1: cannot open shared object file"
+          sudo apt-get install -y libegl1 libgl1 libxcb-cursor0 libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 portaudio19-dev binutils
           # xvfb is needed for smoke tests (virtual framebuffer for Qt)
           if [ "${{ inputs.smoke_test }}" = "true" ]; then
             sudo apt-get install -y xvfb

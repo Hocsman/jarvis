@@ -62,13 +62,17 @@ Focus: Efficiency and scalability.
 - Memory leaks, unbounded growth (queues, buffers, caches)
 - Unnecessary I/O, redundant network calls
 
-### Agent 4: Maintainability Reviewer
-Focus: Design quality and readability.
-- SOLID principle violations, excessive coupling
+### Agent 4: Maintainability & Simplicity Reviewer
+Focus: Design quality, readability, and simplicity.
+- SOLID principle violations, excessive coupling, low cohesion
 - Code duplication (DRY violations)
 - Naming clarity (variables, functions, classes)
 - Missing or misleading comments/docstrings
-- Overly complex logic that could be simplified
+- Overly complex logic: nested control flow, cleverness that obscures intent,
+  or high cognitive load where a more direct expression would do
+- Unnecessary abstraction, indirection, or over-engineering (e.g. frameworks,
+  generics, or extra layers a straightforward implementation would avoid)
+- Dead code, unused parameters/imports, leftover debug statements
 - Inconsistency with project conventions (from CLAUDE.md)
 
 ### Agent 5: Completeness Reviewer

@@ -935,3 +935,178 @@ class TestProcessedSegmentFiltering:
         assert "old query" not in prompt
         # Current segment should be present
         assert "what do you think" in prompt
+
+
+class TestReasoningModelHandling:
+    """Reasoning models (e.g. Qwen3.5 on LM Studio) can put the entire
+    output in ``reasoning_content`` with an empty ``content``. The judge
+    must recover the judgment from the reasoning text, prefer real
+    ``content`` when present, and keep sending the canonical cap key."""
+
+    def _run_judge(self, response):
+        judge = IntentJudge()
+        backend = MagicMock()
+        backend.chat.return_value = response
+        segments = [TranscriptSegment("jarvis what time is it", 1000.0, 1002.0)]
+        with patch("jarvis.listening.intent_judge.get_llm_backend", return_value=backend):
+            return judge.judge(segments, wake_timestamp=1000.5)
+
+    def test_extracts_judgment_from_reasoning_content_when_content_empty(self):
+        """LM Studio reasoning output: ``content`` empty, JSON embedded at
+        the end of ``reasoning_content``."""
+        result = self._run_judge({
+            "message": {
+                "content": "",
+                "reasoning_content": (
+                    "The user said the wake word 'jarvis', so this is directed. "
+                    '{"directed": true, "query": "what time is it", "stop": false, '
+                    '"confidence": "high", "reasoning": "wake word detected"}'
+                ),
+            }
+        })
+        assert result is not None
+        assert result.directed is True
+        assert result.query == "what time is it"
+
+    def test_content_takes_priority_over_reasoning_content(self):
+        """When both are present, ``content`` wins — reasoning is only a
+        fallback for models that leave ``content`` empty."""
+        result = self._run_judge({
+            "message": {
+                "content": (
+                    '{"directed": false, "query": "", "stop": false, '
+                    '"confidence": "high", "reasoning": "content answer"}'
+                ),
+                "reasoning_content": (
+                    '{"directed": true, "query": "from thinking", "stop": false, '
+                    '"confidence": "high", "reasoning": "thinking"}'
+                ),
+            }
+        })
+        assert result is not None
+        assert result.directed is False
+        assert result.query == ""
+
+    def test_reasoning_without_json_falls_back_to_top_level_response(self):
+        """Reasoning text with no JSON object: the existing top-level
+        ``response`` fallback still applies."""
+        result = self._run_judge({
+            "message": {"content": "", "reasoning_content": "just thinking aloud"},
+            "response": (
+                '{"directed": true, "query": "what time is it", "stop": false, '
+                '"confidence": "high", "reasoning": "top-level fallback"}'
+            ),
+        })
+        assert result is not None
+        assert result.directed is True
+        assert result.query == "what time is it"
+
+    def test_unparseable_reasoning_returns_none(self):
+        """Reasoning with no usable JSON and no fallback → unparseable."""
+        result = self._run_judge({
+            "message": {"content": "", "reasoning_content": "Hmm, let me think..."},
+        })
+        assert result is None
+
+    def test_truncated_content_recovers_json_from_reasoning(self):
+        """When ``content`` is truncated mid-JSON (reasoning models burn the
+        token budget on thinking, cutting the answer off before the closing
+        brace), the complete JSON answer at the end of ``reasoning_content``
+        must still be recovered."""
+        result = self._run_judge({
+            "message": {
+                "content": (
+                    '```json\n{\n  "directed": true,\n'
+                    '  "query": "No worries, by the way, I said tomorro'
+                ),
+                "reasoning_content": (
+                    "The user is in the hot window, so this is directed. "
+                    "Answer JSON:\n"
+                    '{"directed": true, "query": "No worries, by the way, I said '
+                    'tomorrow what I meant today, because it is after midnight", '
+                    '"stop": false, "confidence": "high", '
+                    '"reasoning": "hot window follow-up"}'
+                ),
+            }
+        })
+        assert result is not None
+        assert result.directed is True
+        assert "tomorrow what I meant today" in result.query
+        assert result.raw_response == (
+            '{"directed": true, "query": "No worries, by the way, I said '
+            'tomorrow what I meant today, because it is after midnight", '
+            '"stop": false, "confidence": "high", '
+            '"reasoning": "hot window follow-up"}'
+        )
+
+    def test_truncated_content_without_reasoning_returns_none(self):
+        """Truncated ``content`` with no reasoning text to recover from is
+        still a hard failure (fail-open to the listener's fallback)."""
+        result = self._run_judge({
+            "message": {
+                "content": (
+                    '```json\n{\n  "directed": true,\n'
+                    '  "query": "No worries, by the way, I said tomorro'
+                ),
+            }
+        })
+        assert result is None
+
+    def test_truncated_content_with_unusable_reasoning_returns_none(self):
+        """Truncated ``content`` plus reasoning without a complete JSON
+        object → unparseable (no partial judgment is fabricated)."""
+        result = self._run_judge({
+            "message": {
+                "content": (
+                    '```json\n{\n  "directed": true,\n'
+                    '  "query": "No worries, by the way, I said tomorro'
+                ),
+                "reasoning_content": "still thinking, no answer yet",
+            }
+        })
+        assert result is None
+
+    def test_recovery_uses_last_json_object_in_reasoning(self):
+        """The reasoning may echo the system prompt's JSON example before
+        writing the real answer; the last balanced object is the verdict."""
+        result = self._run_judge({
+            "message": {
+                "content": (
+                    '```json\n{\n  "directed": true,\n'
+                    '  "query": "No worries, by the way, I said tomorro'
+                ),
+                "reasoning_content": (
+                    "Format reminder: "
+                    '{"directed": true, "query": "what time is it", "stop": false, '
+                    '"confidence": "high", "reasoning": "example from prompt"}. '
+                    "Now the actual answer:\n"
+                    '{"directed": true, "query": "No worries, by the way, I said '
+                    'tomorrow what I meant today", "stop": false, '
+                    '"confidence": "high", "reasoning": "hot window follow-up"}'
+                ),
+            }
+        })
+        assert result is not None
+        assert result.directed is True
+        assert result.query == "No worries, by the way, I said tomorrow what I meant today"
+        assert result.reasoning == "hot window follow-up"
+
+    def test_max_tokens_passed_via_extra_options(self):
+        """The generation cap goes out as the canonical ``max_tokens`` key
+        (no redundant ``num_predict`` — Ollama translates it server-side)."""
+        judge = IntentJudge()
+        backend = MagicMock()
+        backend.chat.return_value = {
+            "message": {
+                "content": (
+                    '{"directed": false, "query": "", "stop": false, '
+                    '"confidence": "high", "reasoning": "ok"}'
+                )
+            }
+        }
+        segments = [TranscriptSegment("hi", 1000.0, 1001.0)]
+        with patch("jarvis.listening.intent_judge.get_llm_backend", return_value=backend):
+            judge.judge(segments)
+        extra = backend.chat.call_args.kwargs["extra_options"]
+        assert extra["max_tokens"] == 1500
+        assert "num_predict" not in extra

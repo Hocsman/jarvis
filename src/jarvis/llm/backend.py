@@ -93,9 +93,12 @@ class LLMBackend(ABC):
         thinking: bool = False,
         num_ctx: int = 4096,
         temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ) -> Optional[str]:
         """Single-shot system+user prompt; returns the assistant text or
-        ``None`` on timeout / error / empty response."""
+        ``None`` on timeout / error / empty response. Pass ``max_tokens``
+        to cap the generation length — essential for small reasoning
+        models that otherwise loop endlessly on classification tasks."""
 
     @abstractmethod
     def streaming(

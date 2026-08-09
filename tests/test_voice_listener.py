@@ -914,13 +914,7 @@ class TestCrossPlatformAudioHealthWarning:
                             # Create a mock stream that is active
                             mock_stream = MagicMock()
                             mock_stream.active = True
-                            stream_entered = [False]
-
-                            def enter_stream():
-                                stream_entered[0] = True
-                                return mock_stream
-
-                            mock_stream.__enter__ = MagicMock(side_effect=enter_stream)
+                            mock_stream.__enter__ = MagicMock(return_value=mock_stream)
                             mock_stream.__exit__ = MagicMock(return_value=False)
                             mock_sd.InputStream.return_value = mock_stream
 
@@ -946,14 +940,16 @@ class TestCrossPlatformAudioHealthWarning:
                             listener._audio_q.get = fake_get
                             listener._callback_count = 0
 
+                            # time.time() is called for the LLM-warmup baseline,
+                            # then for _audio_start_time (both baselines), then in
+                            # the loop for the health check (needs to be 6s later)
                             _base = time.time()
-                            stream_time_calls = [0]
+                            time_calls = [0]
 
                             def advancing_time():
-                                if not stream_entered[0]:
-                                    return _base
-                                stream_time_calls[0] += 1
-                                if stream_time_calls[0] == 1:
+                                time_calls[0] += 1
+                                # First two calls set baselines (LLM warmup + audio start)
+                                if time_calls[0] <= 2:
                                     return _base
                                 return _base + 6
 
@@ -961,7 +957,14 @@ class TestCrossPlatformAudioHealthWarning:
                                 mock_time.time.side_effect = advancing_time
                                 mock_time.sleep = time.sleep
 
-                                listener.run()
+                                # No LLM warmup threads: keeps time.time() call
+                                # counting deterministic (the warmup join would
+                                # consume mock values racy in a full-suite run).
+                                with patch(
+                                    "jarvis.listening.listener.VoiceListener._start_llm_warmup",
+                                    return_value=[],
+                                ):
+                                    listener.run()
 
                             captured = capsys.readouterr()
                             assert "No audio received after 5 seconds" in captured.out

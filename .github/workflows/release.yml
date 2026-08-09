@@ -5,6 +5,10 @@ on:
     branches:
       - main
       - develop
+  workflow_dispatch:
+    # Dispatched by release-smoke.yml after it fast-forwards main: GitHub
+    # does not fire on:push workflows for pushes made with GITHUB_TOKEN, so
+    # the release would otherwise never be published automatically.
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}
@@ -60,7 +64,7 @@ jobs:
 
           cat release_output.log
 
-  # ── Build desktop apps (develop only — main reuses smoke-test artifacts) ─
+  # ── Build desktop apps (develop only; main builds stable-stamped below) ─
   build-desktop:
     if: github.ref == 'refs/heads/develop'
     uses: ./.github/workflows/build-desktop.yml
@@ -69,30 +73,55 @@ jobs:
       channel: develop
       smoke_test: false
 
-  # ── Create versioned GitHub release (main only, from smoke-tested builds) ─
-  release-main:
+  # ── Build stable-stamped desktop apps (main only) ───────────────────────
+  # The version isn't known until semantic-release runs on main, so the
+  # smoke-tested artifacts (built as dev/develop before the fast-forward)
+  # can't be published as the stable release — they would stamp stable
+  # installs onto the develop channel and get them offered develop builds.
+  # Rebuild the same (already smoke-tested) commit with the real version so
+  # stable installs report channel "stable" and only see stable updates.
+  build-stable:
     needs: [semantic-release]
+    if: always() && needs.semantic-release.result == 'success' && needs.semantic-release.outputs.new_release_published == 'true'
+    uses: ./.github/workflows/build-desktop.yml
+    with:
+      version: ${{ needs.semantic-release.outputs.new_release_version }}
+      channel: stable
+      smoke_test: false
+
+  # ── Create versioned GitHub release (main only, from stable-stamped builds) ─
+  release-main:
+    needs: [semantic-release, build-stable]
     runs-on: ubuntu-latest
     if: always() && needs.semantic-release.result == 'success' && needs.semantic-release.outputs.new_release_published == 'true'
 
     permissions:
       contents: write
+      actions: read  # gh run download reads this run's artifacts
 
     steps:
-      - name: 📥 Download artifacts from release-smoke.yml
+      - name: 📥 Download artifacts from build-stable
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Download every platform artifact that release-smoke.yml produced
-          # for this exact commit (the fast-forwarded develop tip).
+          # Download every platform artifact that build-stable produced in
+          # this run. Fail loudly if any are missing — publishing a release
+          # without its binaries is worse than a failed job.
+          set -euo pipefail
+          missing=0
           for name in Jarvis-Windows Jarvis-macOS-arm64 Jarvis-macOS-x64 Jarvis-Linux; do
             echo "Downloading $name..."
-            gh run download --repo ${{ github.repository }} \
+            if ! gh run download ${{ github.run_id }} --repo ${{ github.repository }} \
               --name "$name" \
-              --workflow release-smoke.yml \
-              --commit ${{ github.sha }} \
-              --dir artifacts || echo "⚠️  $name not found (may have expired or build failed)"
+              --dir artifacts; then
+              echo "::error::Missing artifact $name"
+              missing=1
+            fi
           done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::One or more build artifacts are missing; not publishing a release without binaries."
+            exit 1
+          fi
 
       - name: 📋 List available artifacts
         run: |
@@ -124,6 +153,23 @@ jobs:
             | **Linux** | `Jarvis-Linux-x64.tar.gz` | `tar -xzf` → Run `./Jarvis/Jarvis` |
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🧭 Mirror stable build to the develop "latest" channel
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Serve the stable build through the "latest" (develop) channel so
+          # develop builds, and installs mis-stamped as develop (e.g. v2.2.1),
+          # can update to stable through their normal update flow. The next
+          # develop push re-publishes "latest" with a fresh develop build, so
+          # the window closes by itself.
+          FILES=$(find artifacts -type f \( -name "*.zip" -o -name "*.tar.gz" \) | tr '\n' ' ')
+          if [ -z "$FILES" ]; then
+            echo "::warning::No artifacts to mirror to 'latest'"
+            exit 0
+          fi
+          gh release upload latest $FILES --clobber --repo ${{ github.repository }}
 
   # ── Create/update "latest" pre-release (develop only) ──────────────────
   release-develop:
