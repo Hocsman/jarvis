@@ -31,7 +31,7 @@ The entries are in the model's context, so it can quote the one the user means. 
 ## Guardrails
 
 - **Only what the user said.** The entry text restates the user's own statement. The assistant's inferences, summaries of its own advice, and observations about the user's mood or habits are not eligible.
-- **Every entry is dated and attributed.** A line records when it was learnt and how (`dit` for a plain statement, `corrigé` for a correction).
+- **Every entry is dated and attributed.** A line records when it was learnt and how: `dit` for a plain statement, `corrigé` for a correction, `confirmé` for something she noticed in his journal and he ticked in `appris.md`, `migré` for a fact handed over from the graph. A `confirmé` line carries the day of the journal row it came from, not the day he ticked; the day he agreed is stamped in `appris.md`, which is the file whose job is provenance.
 - **Nothing is erased silently.** Superseding an entry retires it: the line stays in the file, struck through, with the date and reason. The user can always see what the assistant used to believe and when it stopped. Deleting a line outright is the user's prerogative, done by hand in the file, and nothing puts it back.
 - **Sensitive values never land here.** User text is redacted before it reaches the model, so "remember my email is x@y.com" arrives at the tool as a placeholder. Storing it would keep nothing worth having while telling the user their email was saved, which is worse than refusing. `rememberTool` refuses any text still carrying a redaction marker and tells the model to say so plainly.
 - **Duplicates are no-ops.** Remembering text already present as an active entry rewrites nothing and reports back that it was already known.
@@ -48,7 +48,7 @@ The entries are in the model's context, so it can quote the one the user means. 
 - Active entry: `- <date> · <source> : <text>`
 - Retired entry: `- ~~<date> · <source> : <text>~~` followed by an optional `· retiré le <date>`, itself followed by an optional `: <reason>`
 - Dates are `YYYY-MM-DD`, UTC.
-- Source is `dit`, `corrigé`, or `migré`.
+- Source is `dit`, `corrigé`, `confirmé`, or `migré`.
 
 **Strikethrough alone retires an entry.** The stamp that follows is bookkeeping the assistant writes; a line the user struck out by hand carries no stamp and is just as retired. The header in every core file says so, and striking a line out is the obvious way to drop a belief when editing by hand, so the parser has to honour it or the file lies to its reader.
 
@@ -81,3 +81,11 @@ Emptying the source is what makes the hand-over honest. Left in place, the text 
 Reading fails open: an unreadable or malformed file yields an empty section and a debug log, never an exception into the reply path. An assistant with no core is a worse assistant, not a broken one.
 
 Writing fails closed and says so: the write goes to a temporary file in the same directory and is moved into place atomically, so a crash mid-write cannot truncate the user's file. If the write fails, `rememberTool` reports the failure rather than claiming success — a user told "noted" about something that was never saved is the one outcome worse than an error message.
+
+## The confirmed path
+
+A third way a line reaches these files, and like the other two it requires the user to have acted. She reads his journal, proposes a line into `yuba/appris.md`, and he ticks it. The tick is the write; nothing else can produce one. See `src/jarvis/appris/appris.spec.md`.
+
+What this changes is who may speak first, not who decides. **Implicit deduction is still not a write path**: a proposal nobody ticks leaves no trace outside `appris.md`, reaches no prompt, and expires into nothing because nothing expires. What lands is the line as he last edited it, so the sentence describing him is one he approved word for word.
+
+A `confirmé` entry retires like any other, keeping its word: losing it would rewrite how he came to agree to it.

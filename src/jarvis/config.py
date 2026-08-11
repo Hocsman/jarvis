@@ -219,6 +219,13 @@ class Settings:
     reminder_late_grace_sec: float
     reminder_max_attempts: int
 
+    # Appris — what she thinks she noticed in his journal, for him to say
+    appris_model: str
+    appris_jours: int
+    appris_max_propositions: int
+    appris_seuil_doublon: int
+    appris_timeout_sec: float
+
     # Routines — what she does at a fixed hour with nobody in the room
     routines_enabled: bool
     routine_tick_sec: float
@@ -637,6 +644,19 @@ def get_default_config() -> Dict[str, Any]:
         "reminder_late_grace_sec": 900.0,
         "reminder_max_attempts": 60,
 
+        # Appris. Empty model = the reminder chain, whose last link is
+        # the chat model; pin one to keep a fortnight of his days local.
+        "appris_model": "",
+        # A fortnight is long enough that a habit shows up twice and
+        # short enough that he recognises what she is quoting.
+        "appris_jours": 14,
+        # Three is what a person will actually read and answer. A list
+        # of twelve is a list nobody resolves, and unresolved proposals
+        # are the failure mode that makes the file feel like a chore.
+        "appris_max_propositions": 3,
+        "appris_seuil_doublon": 90,
+        "appris_timeout_sec": 30.0,
+
         # Routines. The grace window is what separates "the laptop was
         # shut" from "this morning has passed": a digest two hours late
         # is still the thing that was asked for, one at 18:00 is not.
@@ -935,6 +955,13 @@ def load_settings() -> Settings:
     reminder_model = str(merged.get("reminder_model", ""))
     reminder_timeout_sec = min(max(float(merged.get("reminder_timeout_sec", 8.0)), 2.0), 30.0)
     reminder_default_hour = min(max(int(merged.get("reminder_default_hour", 9)), 0), 23)
+    appris_model = str(merged.get("appris_model", "") or "")
+    appris_jours = min(max(int(merged.get("appris_jours", 14)), 1), 365)
+    appris_max_propositions = min(max(int(merged.get("appris_max_propositions", 3)), 1), 10)
+    # Below ~70 `token_set_ratio` starts folding together two different
+    # things he said; above ~97 it stops catching a rephrasing.
+    appris_seuil_doublon = min(max(int(merged.get("appris_seuil_doublon", 90)), 70), 100)
+    appris_timeout_sec = min(max(float(merged.get("appris_timeout_sec", 30.0)), 5.0), 120.0)
     reminder_tick_sec = min(max(float(merged.get("reminder_tick_sec", 5.0)), 1.0), 60.0)
     reminder_late_grace_sec = min(max(float(merged.get("reminder_late_grace_sec", 900.0)), 0.0), 86400.0)
     reminder_max_attempts = min(max(int(merged.get("reminder_max_attempts", 60)), 1), 600)
@@ -1155,6 +1182,11 @@ def load_settings() -> Settings:
         reminders_enabled=reminders_enabled,
         reminder_model=reminder_model,
         reminder_timeout_sec=reminder_timeout_sec,
+        appris_model=appris_model,
+        appris_jours=appris_jours,
+        appris_max_propositions=appris_max_propositions,
+        appris_seuil_doublon=appris_seuil_doublon,
+        appris_timeout_sec=appris_timeout_sec,
         reminder_default_hour=reminder_default_hour,
         reminder_tick_sec=reminder_tick_sec,
         reminder_late_grace_sec=reminder_late_grace_sec,
