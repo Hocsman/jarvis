@@ -202,10 +202,15 @@ class TestTheEntryPhraseStillCollidesWithRemember:
     created, but the ending condition lands as a stored fact rather than
     in `fini quand`, and the follow-up notes go to `remember` too.
 
-    Marked xfail because the fix touches `remember`'s description, which
-    is pinned by an eval that exists because of a production incident,
-    and that is a change to make with its own measurements rather than as
-    a side effect of this one.
+    Kept as a non-strict xfail because the collision is intermittent
+    rather than reliable: measured 10 passes in 11 runs across two
+    states of the tree, so removing the marker would make the eval flake
+    roughly one run in ten, and treating it as fixed would be reading a
+    coin flip as a guarantee.
+
+    What would settle it is `remember`'s description, and that is pinned
+    by an eval which exists because of a production incident. Worth its
+    own measurements rather than a side effect of somebody else's change.
     """
 
     NATUREL = ("Jarvis, garde une trace de ça : je prépare l'entretien chez "
@@ -213,7 +218,8 @@ class TestTheEntryPhraseStillCollidesWithRemember:
                "eu leur retour.")
 
     @pytest.mark.xfail(
-        reason="'garde une trace de ça' is remember's own phrasing",
+        reason="'garde une trace de ça' is remember's own phrasing; the "
+               "collision is intermittent, ~1 run in 10",
         strict=False,
     )
     def test_the_ending_condition_survives_the_natural_phrasing(
