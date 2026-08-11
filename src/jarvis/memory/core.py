@@ -34,6 +34,13 @@ SECTION_RULES = "rules"
 SOURCE_SAID = "dit"
 SOURCE_CORRECTED = "corrigé"
 SOURCE_MIGRATED = "migré"
+# Something she noticed in his journal and he ticked. Written by
+# `appris/recolte.py` and by nothing else, so grepping this word over
+# his files answers exactly one question: what did she suggest that I
+# agreed to. No allow-list guards these four — the parser has never had
+# one, and adding it now would start misreading a file he annotated in
+# his own words.
+SOURCE_CONFIRMED = "confirmé"
 
 CORE_DIRNAME = "yuba"
 

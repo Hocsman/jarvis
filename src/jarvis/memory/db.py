@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from ..debug import debug_log
 
 # Bumped whenever the shape changes, so a later version can migrate.
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 
 _SCHEMA_SQL = """
 PRAGMA journal_mode=WAL;
@@ -124,6 +124,12 @@ CREATE VIRTUAL TABLE IF NOT EXISTS embeddings USING vss0(
   vec FLOAT[768]
 );
 
+CREATE TABLE IF NOT EXISTS journal_lu (
+  date_utc TEXT PRIMARY KEY,
+  digest   TEXT NOT NULL,
+  ts_utc   TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS summary_vec (
   summary_id INTEGER PRIMARY KEY REFERENCES conversation_summaries(id) ON DELETE CASCADE,
   emb_id     INTEGER NOT NULL REFERENCES embeddings(id)
@@ -219,6 +225,72 @@ class Database:
         if existing and "request_id" not in existing:
             cur.execute("ALTER TABLE action_log ADD COLUMN request_id TEXT")
             debug_log("action_log migrated: request_id added", "jarvis")
+
+        # An install that predates the learning step has no `journal_lu`.
+        # The DDL above only runs on a fresh database, so an existing one
+        # reaches it here.
+        cur.execute(
+            "CREATE TABLE IF NOT EXISTS journal_lu ("
+            "  date_utc TEXT PRIMARY KEY,"
+            "  digest   TEXT NOT NULL,"
+            "  ts_utc   TEXT NOT NULL"
+            ")"
+        )
+
+    # ── What she has already been asked about ─────────────────────────
+
+    def journal_deja_lu(self) -> dict:
+        """Which diary rows have been read, and what they said then.
+
+        Keyed on the date, valued on a digest of the summary as it read
+        at the time. The digest is what makes this safe: a diary row is
+        rewritten in place all day (`INSERT OR REPLACE` on its date), so
+        remembering the date alone would mark today covered from the
+        first pass onwards and everything said after it would never be
+        read, permanently and silently. Content moves, the digest stops
+        matching, and the row is offered again.
+
+        Never raises: bookkeeping that cannot be read costs one re-read.
+        """
+        try:
+            with self._lock:
+                rows = self.conn.execute(
+                    "SELECT date_utc, digest FROM journal_lu"
+                ).fetchall()
+            return {r["date_utc"]: r["digest"] for r in rows}
+        except Exception as e:
+            debug_log(f"journal_lu read skipped: {e}", "memory")
+            return {}
+
+    def marquer_journal_lu(self, rows) -> None:
+        """Record ``(date_utc, digest)`` pairs as read.
+
+        Called only after a reading that actually happened. A pass whose
+        model timed out, answered nothing, or answered unparseably has
+        not looked at these days, and recording them would skip them for
+        ever on the strength of a failure.
+
+        Never raises: a lost mark costs one re-read, and raising costs
+        the user their answer.
+        """
+        try:
+            stamp = datetime.now(timezone.utc).isoformat()
+            payload = [
+                (str(date), str(digest), stamp)
+                for date, digest in (rows or [])
+                if date and digest
+            ]
+            if not payload:
+                return
+            with self._lock:
+                self.conn.executemany(
+                    "INSERT OR REPLACE INTO journal_lu (date_utc, digest, ts_utc) "
+                    "VALUES (?, ?, ?)",
+                    payload,
+                )
+                self.conn.commit()
+        except Exception as e:
+            debug_log(f"journal_lu write skipped: {e}", "memory")
 
     # ── Action ledger ─────────────────────────────────────────────────
 
