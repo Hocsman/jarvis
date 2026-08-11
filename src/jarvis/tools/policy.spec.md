@@ -140,3 +140,9 @@ The language cases live there and nowhere else. There is no word list anywhere i
 ## Third consumer: standing in for a lookup
 
 `resolve_risk` is also asked whether a planned step may be dropped because the memory already in the prompt answers it. Only `lecture` qualifies, and only when the tool does not set `writes_own_state`. Reading a fact twice is waste; declining to write because a similar sentence was already read is losing the user's instruction, which is not the same kind of mistake. A tool the catalogue has never heard of resolves to unclassified and is therefore never stood in for, the same as at the gate.
+
+## The file is not reachable by tool
+
+`localFiles` refuses the whole `yuba/` directory, for every operation including `read`. The gate already prices a write there as `destructif`, so it costs a click on a card carrying the exact path; this is the second defence, because a path on a card only protects a reader who recognises what it means, and these files read as ordinary Markdown. A tool able to rewrite the file that lists its own permissions makes those permissions advisory.
+
+The guard resolves the path first, so `..` buys nothing, and it keys off the resolved core directory rather than the name, so a `yuba-sauvegarde` of his own stays readable. When the core directory cannot be located the guard refuses nothing extra: one that cannot find what it protects must not start refusing the whole home instead.

@@ -64,8 +64,52 @@ class LocalFilesTool(Tool):
                     return os.path.join(os.path.expanduser("~"), p[2:])
                 return os.path.expanduser(p)
 
+            def _core_root() -> Optional[Path]:
+                """Where the user's own artefacts live, if it can be found.
+
+                None when the config carries no usable path. The caller
+                treats that as "refuse nothing extra": a guard that
+                cannot locate what it protects must not start refusing
+                the whole home instead.
+                """
+                try:
+                    from ...memory.core import MemoryCore
+
+                    return MemoryCore.for_config(context.cfg).directory.resolve()
+                except Exception:
+                    return None
+
             def _resolve_safe(p: str) -> Path:
                 resolved = Path(_expand_user_path(p)).resolve()
+
+                # `yuba/` is not an ordinary corner of the home. It holds
+                # what she believes about him, the rules he gave her, his
+                # goals, what runs while he sleeps, and — in `outils.md` —
+                # which tools she may run without asking at all.
+                #
+                # The gate already prices a write here as `destructif`, so
+                # it costs a click on a card showing the exact path. That
+                # defence stands; this is the second one. A path on a card
+                # only protects someone who recognises what it means, and
+                # these read as ordinary Markdown unless you happen to know
+                # that a line in one of them becomes something she acts on.
+                #
+                # Reading is refused too, for a different reason: these
+                # files already reach the prompt where they belong, and a
+                # copy arriving as a tool result lands somewhere the
+                # routine envelope and the digests never reasoned about.
+                core = _core_root()
+                if core is not None and (
+                    resolved == core
+                    or str(resolved).startswith(str(core) + os.sep)
+                ):
+                    raise PermissionError(
+                        f"Refusé : {resolved} est dans yuba/, les fichiers "
+                        "que tu possèdes. Ouvre-les toi-même — profil, "
+                        "règles, outils, objectifs et routines ne se "
+                        "modifient pas par un outil."
+                    )
+
                 try:
                     # Allow exactly the home root or its descendants
                     if resolved == home_root or str(resolved).startswith(str(home_root) + os.sep):
