@@ -1341,6 +1341,12 @@ Create a summary that:
      GOOD: "The user asked about the movie Possessor; the assistant said it is a 2020 science-fiction horror film directed by Brandon Cronenberg. Separately, the user asked about the name Jarvis; the assistant said the MCU character Jarvis is an AI created by Tony Stark and later embodied by Vision."
 
    This rule applies in any language.
+9. CRITICAL language rule — write the summary in the language the conversation was held in, not the language of these instructions. These instructions are in English; that says nothing about what you should write. A conversation held in French is summarised in French, one held in Turkish in Turkish, and so on for every language, including ones not named anywhere in this prompt.
+   - Never translate. The words the user chose are part of what happened, and a translated summary quietly replaces them with yours.
+   - When the conversation mixed languages, use the one the user spoke most; keep quoted phrases in their original language whatever you choose.
+   - This applies to the summary. The topic keywords follow the same language.
+
+   The reason is not stylistic. This diary is read by the user directly, and it is read by other parts of the assistant that write into files the user keeps in their own language. A summary in the wrong language hands them sentences about themselves that they did not say.
 
 Also extract 3-5 main topics as comma-separated keywords."""
 

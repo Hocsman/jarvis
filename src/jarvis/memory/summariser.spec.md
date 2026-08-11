@@ -41,6 +41,14 @@ Unrelated topics must never be welded into one grammatical clause. No shared "an
 
 All three rules apply in any language, not only English. The prompt states this explicitly because small models otherwise assume the rule is keyed to the English phrases it names.
 
+### The summary is written in the language it was spoken in
+
+The prompt is in English and says so, then says that this decides nothing about the output: a conversation held in French is summarised in French, one held in Turkish in Turkish, and so on for languages the prompt never names. Translation is forbidden outright, because the words the user chose are part of what happened and a translated summary replaces them with the model's own. A mixed conversation follows whichever language the user spoke most, with quoted phrases left as they were said. The topics follow the summary.
+
+Without the rule the model answers in the language of its instructions, which is English. Measured on a real French-speaking machine before the rule existed: two of the ten most recent rows were in French, and one of the English ones read *"The user conversed in French with the assistant, who responded in French."*
+
+It is not a matter of style. Three readers consume these rows and none of them is indifferent: the user opens the file himself, the graph extractor turns them into stored knowledge that comes back inside a reply, and the learning step reads them to propose lines for a core file the user keeps in his own language. A summary in the wrong language hands him sentences about himself that he never said.
+
 ## LLM Rewrite Sweep
 
 `rewrite_all_diary_summaries(db, ollama_base_url, ollama_chat_model, ...)` is a user-triggered bulk operation that walks every row in `conversation_summaries` and asks the chat model to remove deflection narration from each. It exists for cleaning **historical** poisoning from rows written before the summariser prompt was tightened. There is no equivalent on the write path — new writes rely on the prompt alone.
