@@ -24,7 +24,15 @@ Run: EVAL_JUDGE_MODEL=gemma4:e2b pytest evals/test_memory_digest_identity.py -v
 import pytest
 
 from conftest import requires_judge_llm
-from helpers import JUDGE_BASE_URL, JUDGE_MODEL
+from helpers import JUDGE_BASE_URL, JUDGE_MODEL, MockConfig
+
+
+def _cfg():
+    """A config whose chat model is the judge, for the live call."""
+    cfg = MockConfig()
+    cfg.llm_chat_model = JUDGE_MODEL
+    return cfg
+
 
 
 @pytest.mark.eval
@@ -38,8 +46,8 @@ class TestMemoryDigestSurfacesIdentityFacts:
             query=query,
             diary_entries=diary_entries,
             graph_parts=[],
-            ollama_base_url=JUDGE_BASE_URL,
-            ollama_chat_model=JUDGE_MODEL,
+            cfg=_cfg(),
+            chat_model=JUDGE_MODEL,
             timeout_sec=60.0,
         )
 

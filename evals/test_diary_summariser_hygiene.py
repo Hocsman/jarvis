@@ -18,7 +18,7 @@ Run: EVAL_JUDGE_MODEL=gemma4:e2b ./scripts/run_evals.sh test_diary_summariser
 import pytest
 
 from conftest import requires_judge_llm
-from helpers import JUDGE_BASE_URL, JUDGE_MODEL
+from helpers import JUDGE_MODEL, MockConfig
 
 
 # Exact deflection phrases the summariser must not preserve verbatim.
@@ -53,11 +53,13 @@ class TestDiarySummariserHygieneLive:
 
     def _summarise(self, chunks: list[str]) -> tuple[str, str]:
         from jarvis.memory.conversation import generate_conversation_summary
+
+        cfg = MockConfig()
+        cfg.llm_chat_model = JUDGE_MODEL
         summary, topics = generate_conversation_summary(
             recent_chunks=chunks,
             previous_summary=None,
-            ollama_base_url=JUDGE_BASE_URL,
-            ollama_chat_model=JUDGE_MODEL,
+            cfg=cfg,
             timeout_sec=60.0,
         )
         return summary or "", topics or ""
