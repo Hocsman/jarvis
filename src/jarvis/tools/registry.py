@@ -24,6 +24,7 @@ from .builtin.forget import ForgetTool
 from .builtin.set_reminder import SetReminderTool
 from .builtin.set_routine import SetRoutineTool
 from .builtin.cancel_routine import CancelRoutineTool
+from .builtin.review_learnings import ReviewLearningsTool
 from .builtin.goals import (
     CloseGoalTool,
     ListGoalsTool,
@@ -58,6 +59,7 @@ BUILTIN_TOOLS = {
     "noteGoal": NoteGoalTool(),
     "closeGoal": CloseGoalTool(),
     "listGoals": ListGoalsTool(),
+    "reviewLearnings": ReviewLearningsTool(),
     "stop": StopTool(),
     "toolSearchTool": ToolSearchTool(),
 }
@@ -480,7 +482,7 @@ def _refusal(name: str, verdict: str, risk: str) -> ToolExecutionResult:
 def _out_of_scope(name, scope, risk, verdict):
     """Whether an unattended call steps outside its routine's envelope.
 
-    Four checks, and the last three are re-run on every call because the
+    Five checks, and the last four are re-run on every call because the
     envelope was written weeks ago and the world moved.
 
     Returns a refusal, or None to carry on. The refusal deliberately does
@@ -505,6 +507,11 @@ def _out_of_scope(name, scope, risk, verdict):
         why = "il ne se contente pas de lire"
     elif getattr(tool, "writes_own_state", False):
         why = "il écrit la mémoire de Yuba, et personne n'est là pour relire"
+    elif getattr(tool, "reads_his_life", False):
+        # Deliberately not the `writes_own_state` wording: this one may
+        # write nothing at all and still be wrong unattended, because
+        # what it does is read his days and form an opinion about him.
+        why = "il lit ta vie et se fait une idée de toi, sans toi"
     elif getattr(tool, "needs_a_human", False):
         # It would not fail, it would *wait* — holding the runner's one
         # slot, which every other routine queues on, until a restart.

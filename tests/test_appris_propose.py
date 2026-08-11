@@ -62,7 +62,14 @@ def _lire(cfg, db, core, reponse):
 
 
 def _ok(items):
-    return {"message": {"content": json.dumps(items, ensure_ascii=False)}}
+    """What the backend actually hands back: the text, not an envelope.
+
+    `LLMBackend.direct` returns `Optional[str]`. A helper that built the
+    chat path's `{"message": {"content": …}}` here would make every test
+    in this file pass against a module that reads nothing at all — which
+    is how it was written the first time, and what running it for real
+    against a live model caught."""
+    return json.dumps(items, ensure_ascii=False)
 
 
 UN_FAIT = [{"genre": "fait",
@@ -273,10 +280,9 @@ def test_a_proposal_that_cannot_be_rendered_is_dropped(tmp_path):
 
 @pytest.mark.parametrize("reponse", [
     None,
-    {"message": {"content": ""}},
-    {"message": {"content": "I found three things about the user."}},
-    {"message": {"content": "{\"genre\": \"fait\"}"}},
-    {"message": {"content": "[\"une chaîne nue\"]"}},
+    "",
+    "I found three things about the user.",
+    '{"genre": "fait"}',
 ])
 def test_an_unreadable_answer_is_not_a_reading(tmp_path, reponse):
     """Each of these is a different way to fail, and every one of them
@@ -380,3 +386,22 @@ def test_an_empty_journal_is_not_a_failed_reading(tmp_path):
 
     assert lecture.gardes == []
     assert lecture.lues == []
+
+
+def test_it_reads_the_shape_the_backend_actually_returns(tmp_path):
+    """`LLMBackend.direct` returns the text, not the chat path's
+    `{"message": {"content": …}}` envelope. Reading for the envelope
+    fails silently: every answer parses as empty, the module reports "I
+    could not read your journal" for ever, and that is a legal state so
+    nothing anywhere says otherwise."""
+    import inspect
+
+    from src.jarvis.appris.propose import _texte_du_modele
+    from src.jarvis.llm.backend import LLMBackend
+
+    retour = inspect.signature(LLMBackend.direct).return_annotation
+    assert "str" in str(retour)
+
+    assert _texte_du_modele('[{"genre": "fait"}]') == '[{"genre": "fait"}]'
+    assert _texte_du_modele(None) == ""
+    assert _texte_du_modele({"message": {"content": "[]"}}) == ""

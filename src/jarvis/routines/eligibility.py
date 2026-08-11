@@ -32,6 +32,10 @@ POURQUOI_POLITIQUE = "tu as demandé à être consulté pour cet outil"
 POURQUOI_ECRIT = "il ne se contente pas de lire"
 POURQUOI_MEMOIRE = "il écrit la mémoire de Yuba, et personne n'est là pour relire"
 POURQUOI_HUMAIN = "il attend que quelqu'un fasse un geste, et personne n'est là"
+POURQUOI_SA_VIE = (
+    "il lit ton journal et se fait une idée de toi : ça ne se fait "
+    "pas pendant que tu dors"
+)
 
 
 def refuse_reason(cfg, name: str) -> Optional[str]:
@@ -58,6 +62,8 @@ def refuse_reason(cfg, name: str) -> Optional[str]:
         return POURQUOI_ECRIT
     if getattr(tool, "writes_own_state", False):
         return POURQUOI_MEMOIRE
+    if getattr(tool, "reads_his_life", False):
+        return POURQUOI_SA_VIE
     if getattr(tool, "needs_a_human", False):
         return POURQUOI_HUMAIN
     return None

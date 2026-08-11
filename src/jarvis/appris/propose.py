@@ -206,12 +206,15 @@ def _fenetre(cfg, db) -> tuple:
 
 
 def _texte_du_modele(reponse) -> str:
-    if not isinstance(reponse, dict):
-        return ""
-    message = reponse.get("message")
-    if isinstance(message, dict):
-        return str(message.get("content") or "")
-    return str(reponse.get("content") or "")
+    """The assistant's text.
+
+    `LLMBackend.direct` returns the text itself, or None on timeout,
+    error or an empty response — not the `{"message": {"content": …}}`
+    envelope the chat path uses. Getting this wrong is silent: every
+    answer parses as empty and the module reports "I could not read your
+    journal" for ever, which is a legal state and therefore invisible.
+    """
+    return reponse if isinstance(reponse, str) else ""
 
 
 def propositions(cfg, db, *, core, deja: Sequence) -> Lecture:

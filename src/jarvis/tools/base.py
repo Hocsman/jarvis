@@ -94,6 +94,15 @@ class Tool(ABC):
     # justification assumes somebody is there.
     needs_a_human: bool = False
 
+    # Whether running this reads his own life rather than the world.
+    #
+    # A third axis for the same reason as the other two: the hazard is
+    # not that the call is dangerous, it is that its justification
+    # assumes somebody is there. Forming an opinion about him out of a
+    # fortnight of his journal is only defensible because he is in the
+    # room to hear it and say no.
+    reads_his_life: bool = False
+
     @property
     @abstractmethod
     def name(self) -> str:
