@@ -46,6 +46,25 @@ class ReviewLearningsTool(Tool):
     # Not that it writes her memory — that it reads his life.
     reads_his_life = True
 
+    def risk_for(self, args):
+        """Reading, so free.
+
+        A tool that declares nothing falls to the gate's default, which
+        is destructive, and destructive is settled by a click on a card
+        and never by a spoken word. By voice that makes the feature
+        unreachable, and unreachable silently: the router stops offering
+        it and nothing says why.
+
+        Free is the honest price. Its own writes go through the harvest,
+        whose input is a checkbox he ticked by hand in his own editor —
+        there is no sentence any model can emit that reaches `profil.md`
+        through this call. And a question that costs a card is a
+        question nobody asks.
+        """
+        from ..policy import RISK_READ
+
+        return RISK_READ
+
     @property
     def name(self) -> str:
         return "reviewLearnings"

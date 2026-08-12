@@ -263,3 +263,42 @@ def test_its_job_fits_inside_the_routers_slice():
 
     assert len(resume) <= _ROUTER_SUMMARY_CHARS
     assert "journal" in resume.lower()
+
+
+# ── What it costs to ask ──────────────────────────────────────────────
+
+
+def test_asking_what_she_noticed_costs_nothing(tmp_path):
+    """`lecture`, so free by default.
+
+    A tool that declares no risk falls to the gate's default, which is
+    destructive, and destructive is settled by a click on a card and
+    never by a spoken word. By voice that makes the whole feature
+    unreachable — and unreachable in the quietest possible way, because
+    the router simply never offers it and nothing anywhere says why.
+
+    Its own writes go through the harvest, whose input is a checkbox he
+    ticked by hand in his own editor. There is no sentence a model can
+    emit that reaches `profil.md` through this call, so the read pricing
+    is the honest one.
+    """
+    from src.jarvis.tools.policy import RISK_READ, resolve_risk
+
+    assert resolve_risk("reviewLearnings", _tool(), {}) == RISK_READ
+
+
+def test_it_is_free_under_a_policy_that_never_heard_of_it(tmp_path):
+    """His `outils.md` was generated before this tool existed and the
+    file is his — nothing rewrites it. A `lecture` tool absent from it
+    must still be free, or every tool shipped after his file was written
+    would silently need a card."""
+    from unittest.mock import patch
+
+    from src.jarvis.tools.policy import FREE, RISK_READ
+    from src.jarvis.tools.registry import load_tool_policy
+
+    cfg = _Cfg(tmp_path)
+    with patch("src.jarvis.tools.registry.ensure_policy_file"):
+        politique = load_tool_policy(cfg)
+
+    assert politique.verdict("reviewLearnings", RISK_READ) == FREE
