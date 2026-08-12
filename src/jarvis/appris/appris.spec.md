@@ -196,9 +196,34 @@ re-opens it.
 She reads the page aloud, the summariser records the reading, and the
 next pass finds those sentences in his journal. Each round arrives better
 grounded than the last, because by then the citation genuinely is in the
-notes. The prompt forbids proposing anything the assistant said and
-cannot be relied on to win, so a citation matching something already on
-the page is dropped deterministically.
+notes.
+
+**Observed live, not anticipated.** He struck three English proposals;
+she read them out; the summariser wrote the reading down in French; the
+next pass proposed all three back. Two promises broke together — the loop
+itself, and the one that matters more, that *a refusal is as durable as
+an acceptance*. A struck proposal returning is consent by attrition,
+which is precisely what that rule exists to prevent.
+
+Neither the prompt's ban on proposing what the assistant said nor the
+lexical citation guard stopped it, and they could not: the struck lines
+were English and the returning ones French, so nothing matched. Writing
+proposals in his language, shipped an hour earlier, is what put them in
+different languages.
+
+So the day is excluded rather than the sentence. **A day she spoke her
+proposals on is never read**, recorded in `appris_parole` before the tool
+does anything else, so an early return cannot skip it. This is the only
+guard in the module that never looks at a word, and therefore the only
+one that cannot be defeated by a language.
+
+The citation check against the page stays as a second line, for the
+same-language case it does catch.
+
+The cost is stated plainly: whatever else he said that day is not mined.
+He was talking to her about her proposals, so the loss is small, and it
+is a great deal smaller than a refused belief coming back until it
+catches him tired.
 
 The digest, rather than the date, is what makes this safe. A diary row is
 rewritten in place all day (`INSERT OR REPLACE` on its date), so

@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from ..debug import debug_log
 
 # Bumped whenever the shape changes, so a later version can migrate.
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 
 _SCHEMA_SQL = """
 PRAGMA journal_mode=WAL;
@@ -124,6 +124,10 @@ CREATE VIRTUAL TABLE IF NOT EXISTS embeddings USING vss0(
   vec FLOAT[768]
 );
 
+CREATE TABLE IF NOT EXISTS appris_parole (
+  date_utc TEXT PRIMARY KEY
+);
+
 CREATE TABLE IF NOT EXISTS journal_lu (
   date_utc TEXT PRIMARY KEY,
   digest   TEXT NOT NULL,
@@ -230,6 +234,9 @@ class Database:
         # The DDL above only runs on a fresh database, so an existing one
         # reaches it here.
         cur.execute(
+            "CREATE TABLE IF NOT EXISTS appris_parole (date_utc TEXT PRIMARY KEY)"
+        )
+        cur.execute(
             "CREATE TABLE IF NOT EXISTS journal_lu ("
             "  date_utc TEXT PRIMARY KEY,"
             "  digest   TEXT NOT NULL,"
@@ -261,6 +268,48 @@ class Database:
         except Exception as e:
             debug_log(f"journal_lu read skipped: {e}", "memory")
             return {}
+
+    def jours_ou_elle_a_parle(self) -> set:
+        """The days she said out loud what she had noticed.
+
+        A summary of such a day carries her own voice: she read her
+        proposals aloud, the summariser wrote the reading down, and a
+        later pass would find those sentences in his journal and offer
+        them back — better grounded each round, because by then the
+        citation genuinely is in the notes.
+
+        Observed live, and the lexical guard could not stop it: the
+        struck lines were English and the returning ones French. So the
+        day is excluded instead, which never looks at a word and
+        therefore names no language.
+        """
+        try:
+            with self._lock:
+                rows = self.conn.execute(
+                    "SELECT date_utc FROM appris_parole"
+                ).fetchall()
+            return {r["date_utc"] for r in rows}
+        except Exception as e:
+            debug_log(f"appris_parole read skipped: {e}", "memory")
+            return set()
+
+    def marquer_jour_de_parole(self, date_utc: str) -> None:
+        """Record that she spoke about her proposals on this day.
+
+        Never raises: losing a mark costs one contaminated reading, and
+        raising costs the user their answer.
+        """
+        try:
+            if not date_utc:
+                return
+            with self._lock:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO appris_parole (date_utc) VALUES (?)",
+                    (str(date_utc),),
+                )
+                self.conn.commit()
+        except Exception as e:
+            debug_log(f"appris_parole write skipped: {e}", "memory")
 
     def marquer_journal_lu(self, rows) -> None:
         """Record ``(date_utc, digest)`` pairs as read.

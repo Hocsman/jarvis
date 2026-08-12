@@ -89,10 +89,23 @@ class ReviewLearningsTool(Tool):
         return {"type": "object", "properties": {}, "required": []}
 
     def run(self, args: Optional[Dict[str, Any]], context: ToolContext) -> ToolExecutionResult:
+        from datetime import datetime, timezone
+
         from ...appris import propose as _propose
 
         cfg, db = context.cfg, context.db
         parts: list = []
+
+        # Whatever this call returns, she is about to say something about
+        # it out loud, and the summariser will write that down. Today's
+        # summary therefore carries her voice, and she must never mine it
+        # back. Recorded first so an early return cannot skip it.
+        try:
+            db.marquer_jour_de_parole(
+                datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            )
+        except Exception as e:
+            debug_log(f"appris: today not marked as hers: {e}", "tools")
 
         # 1. What he already agreed to, before anything new is offered.
         recolte = recolter(cfg)

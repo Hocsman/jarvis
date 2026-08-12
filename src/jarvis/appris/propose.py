@@ -223,11 +223,22 @@ def _fenetre(cfg, db) -> tuple:
     except Exception:
         deja_lu = {}
 
+    # A day she spoke her proposals on is a day whose summary carries her
+    # own voice. Skipped whole, which is the only guard here that never
+    # looks at a word and therefore never depends on a language.
+    try:
+        sa_parole = db.jours_ou_elle_a_parle() or set()
+    except Exception:
+        sa_parole = set()
+
     retenues, total, tronquee = [], 0, False
     for row in rows:
         date = row["date_utc"]
         resume = row["summary"] or ""
         if not resume:
+            continue
+        if date in sa_parole:
+            debug_log(f"appris: {date} is a day she spoke on, not read", "memory")
             continue
         if deja_lu.get(date) == _digest(resume):
             continue
