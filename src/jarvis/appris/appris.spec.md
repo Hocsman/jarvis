@@ -253,11 +253,33 @@ different sentences with per-reason counts. A test asserts they are not
 equal. A component whose suppressions are invisible is a component that
 starts failing quietly, which this codebase has been bitten by repeatedly.
 
+## The tab
+
+`/api/appris` lists the page; `retenir` accepts one; `refuser` strikes
+one. A second door onto the same file, never a copy of it: every request
+re-reads the page and writes back through the same guarded write the tool
+uses, so his editor and the window can be open at once without either
+losing the other's work.
+
+What the tab buys is timing, and nothing else. A tick in the file lands
+on his next ask, because nothing watches the file and a watcher is the
+schedule this step deliberately does not have. A click lands now.
+Accepting goes through the same harvest with the same guards — the same
+refusal to write a redaction placeholder, the same refusal under an
+unknown heading, and the same durable refusal, so a struck proposal
+cannot be resurrected through this door either.
+
+Refusing writes a bare strike with no stamp, which is exactly what he
+writes by hand, so the file reads the same whichever door it came
+through. A stamp is therefore what distinguishes an acceptance from a
+refusal after the fact, and the tab shows which: telling him he refused
+something he agreed to is a small lie that makes the record useless.
+
+To reword a proposal he opens the file, because what the harvest writes
+is the line as it currently reads.
+
 ## What this slice deliberately does not have
 
-- **No tab.** He hand-edits six Markdown files already. A tab would make
-  a tick land immediately instead of on his next ask, which is a latency
-  fix rather than a capability, and it is the first thing after this.
 - **No `## Outils` section.** Proposing that a tool move to `## Libre`
   grants strictly more than a confirmation card does — a card authorises
   one attended execution, `## Libre` authorises every future one

@@ -124,6 +124,11 @@ class Proposition:
     # The line exactly as written, so a mark can find and replace it
     # without reformatting anything he typed himself.
     ligne: str = ""
+    # What follows a struck line, when anything does. A stamp means the
+    # harvest took it; a bare strike means he refused it. Both are
+    # `rayée`, and losing the difference would tell him he refused
+    # something he agreed to.
+    tampon: str = ""
 
 
 def _fold(text: str) -> str:
@@ -193,9 +198,11 @@ def parse_appris(texte: str) -> List[Proposition]:
 
         # Struck first. He may have crossed a line out while leaving its
         # tick in place, and what he crossed out is what he meant.
+        tampon = ""
         raye = _RAYE_RE.match(ligne)
         if raye:
             etat, corps = ETAT_RAYEE, raye.group("inner").strip()
+            tampon = (raye.group("tampon") or "").strip(" ·")
         else:
             case = _CASE_RE.match(ligne)
             if case:
@@ -223,6 +230,7 @@ def parse_appris(texte: str) -> List[Proposition]:
             citation=citation,
             etat=etat,
             ligne=ligne,
+            tampon=tampon,
         ))
 
     return out
@@ -380,6 +388,37 @@ def ajouter_propositions(
                 fin -= 1
             out[fin:fin] = bloc.splitlines(keepends=True)
         return out
+
+    return _write_guarded(cfg, compose)
+
+
+def marquer_refusee(cfg, ligne: str) -> bool:
+    """Strike one proposal through, with no stamp.
+
+    A struck line carrying no stamp is exactly what he writes by hand,
+    so the file reads the same whichever door the refusal came through.
+    The strike alone is the refusal; the stamp is bookkeeping the harvest
+    adds when it takes something.
+
+    Returns False when the line is gone, which is what happens when he
+    deleted it in his editor between the page loading and the click.
+    """
+    cible = (ligne or "").rstrip("\n")
+    if not cible:
+        return False
+
+    def compose(lignes: List[str]) -> Optional[List[str]]:
+        out = list(lignes)
+        for i, l in enumerate(out):
+            if l.rstrip("\n") != cible:
+                continue
+            case = _CASE_RE.match(l)
+            if not case:
+                return None
+            fin = "\n" if l.endswith("\n") else ""
+            out[i] = f"- ~~{case.group('corps')}~~{fin}"
+            return out
+        return None
 
     return _write_guarded(cfg, compose)
 

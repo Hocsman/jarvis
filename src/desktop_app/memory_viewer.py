@@ -594,6 +594,78 @@ def objectifs_close(nom: str) -> Response:
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/appris")
+def appris_get() -> Response:
+    """What she thinks she noticed, and what he has done about each.
+
+    The file is the artefact; this re-reads it every time rather than
+    holding a copy, so his editor and this window can be open at once
+    without either losing the other's work.
+    """
+    from jarvis.appris.page import (
+        appris_path, invalidate_appris_cache, load_appris,
+    )
+
+    try:
+        cfg = load_settings()
+        invalidate_appris_cache()
+        out = [
+            {
+                "ligne": p.ligne,
+                "texte": p.texte,
+                "citation": p.citation,
+                "section": p.section,
+                "date": p.date,
+                "etat": p.etat,
+                "tampon": p.tampon,
+            }
+            for p in load_appris(cfg)
+        ]
+        return jsonify({"propositions": out, "chemin": str(appris_path(cfg))})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/appris/retenir", methods=["POST"])
+def appris_retenir() -> Response:
+    """Agree to one, from here, now.
+
+    The same act as ticking the box in the file and the same code behind
+    it. What the click buys is timing: a tick waits for his next ask,
+    because nothing watches the file and a watcher is the schedule this
+    step deliberately does not have.
+    """
+    from jarvis.appris.recolte import recolter_une
+
+    data = request.get_json(silent=True) or {}
+    ligne = str(data.get("ligne") or "")
+    if not ligne:
+        return jsonify({"error": "ligne manquante"}), 400
+    try:
+        return jsonify({"retenue": bool(recolter_une(load_settings(), ligne))})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/appris/refuser", methods=["POST"])
+def appris_refuser() -> Response:
+    """Strike one out, from here.
+
+    Written exactly as he would write it by hand: struck, no stamp. It is
+    never offered again, through either door.
+    """
+    from jarvis.appris.page import marquer_refusee
+
+    data = request.get_json(silent=True) or {}
+    ligne = str(data.get("ligne") or "")
+    if not ligne:
+        return jsonify({"error": "ligne manquante"}), 400
+    try:
+        return jsonify({"refusee": bool(marquer_refusee(load_settings(), ligne))})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/journal")
 def journal_get() -> Response:
     """The mornings, newest first.
@@ -2757,6 +2829,9 @@ def index() -> str:
             <button class="tab" data-tab="objectifs">
                 <span>🎯</span> Objectifs
             </button>
+            <button class="tab" data-tab="appris">
+                <span>🧠</span> Appris
+            </button>
             <button class="tab" data-tab="graph">
                 <span>🧠</span> Knowledge
             </button>
@@ -2882,6 +2957,28 @@ def index() -> str:
                 </div>
             </div>
 
+            <div id="appris-content" class="tab-pane" style="display: none;">
+                <div class="core-intro">
+                    <p>
+                        🧠 Ce que Yuba a cru remarquer dans ton journal, et que tu ne lui as
+                        jamais dit. <strong>Rien ici n'est une croyance</strong> : tant qu'une
+                        ligne est là, elle ne la sait pas et ne la lit dans aucune de ses
+                        réponses.
+                        <br>
+                        <code>Je confirme</code> l'écrit dans ton profil ou tes règles, avec la
+                        source <code>confirmé</code>. <code>Non</code> la barre : elle ne te la
+                        reproposera jamais.
+                        <br>
+                        Le fichier est <code>yuba/appris.md</code> et il est à toi. Pour
+                        reformuler une phrase avant de l'accepter, ouvre-le et modifie-la : c'est
+                        la ligne telle qu'elle y est écrite qui part.
+                    </p>
+                </div>
+                <div class="core-files" id="appris-list">
+                    <div class="loading"><div class="spinner"></div></div>
+                </div>
+            </div>
+
             <div id="rappels-content" class="tab-pane" style="display: none;">
                 <div class="core-intro">
                     <p>
@@ -2999,6 +3096,7 @@ def index() -> str:
         const rappelsPane = document.getElementById('rappels-content');
         const routinesPane = document.getElementById('routines-content');
         const objectifsPane = document.getElementById('objectifs-content');
+        const apprisPane = document.getElementById('appris-content');
         const memoriesContent = memoriesPane.querySelector('.memory-list');
         const mealsContent = mealsPane.querySelector('.memory-list');
         const tabs = document.querySelectorAll('.tab');
@@ -3645,6 +3743,90 @@ def index() -> str:
             });
         }
 
+        async function loadAppris() {
+            const container = document.getElementById('appris-list');
+            let propositions = [];
+            try {
+                propositions = (await (await fetch('/api/appris')).json()).propositions || [];
+            } catch (e) {
+                container.innerHTML = "<div class='core-empty'>Fichier illisible.</div>";
+                return;
+            }
+
+            const attente = propositions.filter(p => p.etat === 'attente');
+            const reglees = propositions.filter(p => p.etat !== 'attente');
+
+            if (!propositions.length) {
+                container.innerHTML = "<div class='core-empty'>Rien pour l'instant. " +
+                    "Demande-lui ce qu'elle a appris sur toi.</div>";
+                return;
+            }
+
+            const carte = (p, agissable) => {
+                const ou = p.section === 'regles' ? 'tes règles'
+                         : p.section === 'profil' ? 'ton profil'
+                         : 'nulle part : titre inconnu';
+                const boutons = agissable
+                    ? `<button class="rappel-cancel" data-retenir="${escapeHtml(p.ligne)}">Je confirme</button>
+                       <button class="rappel-cancel" data-refuser="${escapeHtml(p.ligne)}">Non</button>`
+                    : `<span class="routine-flag">${
+                        p.etat === 'rayée'
+                          ? (p.tampon ? escapeHtml(p.tampon) : 'refusée')
+                          : escapeHtml(p.etat)}</span>`;
+                return `<div class="routine-row">
+                    <span class="routine-phrase">${escapeHtml(p.texte || '')}</span>
+                    <span class="routine-quand">${escapeHtml(p.date || '')}</span>
+                    <span class="routine-flag" title="Où elle irait si tu confirmes">${escapeHtml(ou)}</span>
+                    ${boutons}
+                    <span class="routine-outils" title="La phrase de ton journal d'où elle vient">📖 ${escapeHtml(p.citation || 'sans citation')}</span>
+                </div>`;
+            };
+
+            container.innerHTML =
+                (attente.length
+                    ? '<div class="core-files">' + attente.map(p => carte(p, true)).join('') + '</div>'
+                    : "<div class='core-empty'>Rien en attente.</div>") +
+                (reglees.length
+                    ? '<div class="core-intro"><p>Déjà réglées, gardées pour la trace :</p></div>' +
+                      '<div class="core-files">' + reglees.map(p => carte(p, false)).join('') + '</div>'
+                    : '');
+
+            container.querySelectorAll('[data-retenir]').forEach(button => {
+                button.addEventListener('click', async () => {
+                    button.disabled = true;
+                    try {
+                        await fetch('/api/appris/retenir', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ ligne: button.dataset.retenir }),
+                        });
+                    } catch (e) {
+                        button.disabled = false;
+                        return;
+                    }
+                    loadAppris();
+                });
+            });
+
+            container.querySelectorAll('[data-refuser]').forEach(button => {
+                button.addEventListener('click', async () => {
+                    if (!confirm("Elle ne te la reproposera jamais. C'est bien ça ?")) return;
+                    button.disabled = true;
+                    try {
+                        await fetch('/api/appris/refuser', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ ligne: button.dataset.refuser }),
+                        });
+                    } catch (e) {
+                        button.disabled = false;
+                        return;
+                    }
+                    loadAppris();
+                });
+            });
+        }
+
         async function loadJournal() {
             const container = document.getElementById('journal-list');
             let pages = [];
@@ -3742,6 +3924,7 @@ def index() -> str:
             rappelsPane.style.display = 'none';
             routinesPane.style.display = 'none';
             objectifsPane.style.display = 'none';
+            apprisPane.style.display = 'none';
 
             if (currentTab === 'memories') {
                 memoriesPane.style.display = '';
@@ -3759,6 +3942,9 @@ def index() -> str:
                 routinesPane.style.display = '';
                 loadRoutines();
                 loadJournal();
+            } else if (currentTab === 'appris') {
+                apprisPane.style.display = '';
+                loadAppris();
             } else if (currentTab === 'objectifs') {
                 objectifsPane.style.display = '';
                 loadObjectifs();

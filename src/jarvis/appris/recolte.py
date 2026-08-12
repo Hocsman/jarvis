@@ -35,6 +35,7 @@ from ..memory.core import (
 )
 from ..utils.redact import contains_redaction_placeholder
 from .page import (
+    ETAT_ATTENTE,
     ETAT_COCHEE,
     SECTION_PROFIL,
     SECTION_REGLES,
@@ -64,6 +65,54 @@ class Recolte:
 
 def _today_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def recolter_une(cfg, ligne: str) -> bool:
+    """Write one named proposal into the core, now.
+
+    The tab's door onto the same act. A tick in the file waits for his
+    next ask because nothing watches the file; a click here does not.
+    Everything else is identical — the same guards, the same order (core
+    first, page second), and the same refusal to store a line carrying a
+    redaction placeholder.
+
+    A struck proposal is never written, whatever was clicked: refusal is
+    as durable through this door as through the other, or the tab becomes
+    a way for a refused belief to come back.
+    """
+    cible = (ligne or "").rstrip("\n")
+    if not cible:
+        return False
+
+    candidate = next(
+        (p for p in load_appris(cfg)
+         # Waiting or already ticked, never struck: refusal is as
+         # durable through this door as through the other.
+         if p.ligne.rstrip("\n") == cible
+         and p.etat in (ETAT_ATTENTE, ETAT_COCHEE)),
+        None,
+    )
+    if candidate is None:
+        return False
+
+    section = _VERS_LE_NOYAU.get(candidate.section or "")
+    if section is None:
+        debug_log("appris: accepted under an unknown heading, nothing written", "tools")
+        return False
+    if contains_redaction_placeholder(candidate.texte):
+        debug_log("appris: accepted line carries a redaction placeholder", "tools")
+        return False
+
+    try:
+        core = MemoryCore.for_config(cfg)
+        core.remember(section, candidate.texte,
+                      on_date=candidate.date, source=SOURCE_CONFIRMED)
+    except (OSError, ValueError) as e:
+        debug_log(f"appris: core write failed from the tab: {e}", "tools")
+        return False
+
+    marquer_retenue(cfg, candidate.ligne, _today_utc())
+    return True
 
 
 def recolter(cfg) -> Recolte:
