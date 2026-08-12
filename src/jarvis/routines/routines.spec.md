@@ -523,3 +523,11 @@ it lives in `routines.md` where the user can read it.
 | `yuba/routines.md` | the envelopes, generated once then owned by the user |
 | `yuba/journal/AAAA-MM-JJ.md` | one page per day, 90-day window |
 | `rappels` rows with `kind='routine'` | when each one next fires |
+
+## The write-up reads the ledger back
+
+The engine hands back text and nothing else, so what a run reached — and what the gate turned away — is read out of the action ledger afterwards, scoped to `origin=routine` and to the window the run began in. Reading it back rather than recording it as she goes is what stops the journal claiming a call the ledger never saw.
+
+Every reader of the ledger hands back plain dicts. `recent_actions` alone used to return raw `sqlite3.Row`, which indexes like a mapping but has no `.get`, so this read-back raised on its first line, a bare `except` swallowed it, and every morning reported using no tools and turning nothing away. An empty list is exactly what a quiet morning looks like, so nothing anywhere said otherwise.
+
+The half that matters is the second one. A routine silently stopped from reaching most of its envelope reads, in the journal, identically to one that simply had nothing to do.

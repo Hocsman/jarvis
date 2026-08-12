@@ -391,13 +391,22 @@ class Database:
             debug_log(f"action log write failed (non-fatal): {e}", "tools")
 
     def recent_actions(self, limit: int = 200) -> list:
-        """The most recent calls, newest first."""
+        """The most recent calls, newest first, as plain dicts.
+
+        Dicts rather than `sqlite3.Row`, like `pending_rappels` and
+        `due_rappels` beside it. A `Row` indexes like a mapping but has
+        no `.get` and raises `IndexError` on a column it does not carry,
+        so a reader written against the other two would raise on its
+        first line — which is exactly what happened to the routine
+        write-up, where a bare `except` swallowed it and every morning
+        reported using no tools at all.
+        """
         with self._lock:
             cur = self.conn.execute(
                 "SELECT * FROM action_log ORDER BY ts_utc DESC, id DESC LIMIT ?",
                 (int(limit),),
             )
-            return cur.fetchall()
+            return [dict(row) for row in cur.fetchall()]
 
     def prune_actions(self, max_age_days: int = 90) -> int:
         """Drop entries older than the retention window."""

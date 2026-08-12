@@ -279,18 +279,20 @@ class RoutineRunner:
         outils, ecartes = [], []
         if not since:
             return outils, ecartes
+
         try:
             for r in self._db.recent_actions(200):
-                if r.get("origin") != ORIGIN or r.get("ts_utc", "") < since:
+                if r.get("origin") != ORIGIN or str(r.get("ts_utc") or "") < since:
                     continue
                 tool = str(r.get("tool") or "")
-                if tool.startswith(LEDGER_PREFIX):
+                if not tool or tool.startswith(LEDGER_PREFIX):
                     continue
-                if r.get("outcome") == OUTCOME_OK:
+                outcome = str(r.get("outcome") or "")
+                if outcome == OUTCOME_OK:
                     if tool not in outils:
                         outils.append(tool)
                 else:
-                    pourquoi = _POURQUOI.get(str(r.get("outcome")), str(r.get("outcome")))
+                    pourquoi = _POURQUOI.get(outcome, outcome)
                     if (tool, pourquoi) not in ecartes:
                         ecartes.append((tool, pourquoi))
         except Exception as e:
