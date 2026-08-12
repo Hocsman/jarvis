@@ -140,6 +140,46 @@ policy or this page ever crosses the wire.
 digest recorded in `journal_lu`, newest first, capped at ten rows and
 12,000 characters. The cap sets `tronquee` and the tool says so.
 
+### A window is retired only when the pass finished with it
+
+`journal_lu` has no expiry, so a row recorded as read is never offered
+again. Every premature record is therefore a permanent, silent loss of
+something she could have proposed and he will never learn existed. That
+is the asymmetry the whole module rests on: a duplicate costs him one
+character to strike, a lost proposal costs him the proposal.
+
+Three passes are not finished, and none of them records:
+
+- **The cap truncated the list.** What is past `appris_max_propositions`
+  is deferred to his next ask, not dropped. `Lecture.debordee` says so
+  and the tool tells him.
+- **The write lost.** `ajouter_propositions` returns False on a missing
+  heading or a file that changed underneath, and the page's own contract
+  calls a concurrent edit ordinary.
+- **Everything the model produced failed on shape or grounding.** On a
+  small model that is the ordinary outcome, not an edge case, and
+  retiring the days would empty the backlog before he ever points a
+  better model at it.
+
+A pass whose every item was suppressed as *already known* or *already
+refused* **is** finished: those suppressions are correct and permanent,
+and re-reading would only repeat them.
+
+Deferral is bounded twice over. By progress, since what was kept is on
+the page and the page suppresses it next time; and by a ceiling — once
+`appris.md` holds `3 × appris_max_propositions` unanswered proposals she
+stops reading the journal at all and says that answering some is what
+re-opens it.
+
+### She does not mine her own voice
+
+She reads the page aloud, the summariser records the reading, and the
+next pass finds those sentences in his journal. Each round arrives better
+grounded than the last, because by then the citation genuinely is in the
+notes. The prompt forbids proposing anything the assistant said and
+cannot be relied on to win, so a citation matching something already on
+the page is dropped deterministically.
+
 The digest, rather than the date, is what makes this safe. A diary row is
 rewritten in place all day (`INSERT OR REPLACE` on its date), so
 remembering the date alone would mark today covered from the first pass
@@ -191,6 +231,32 @@ starts failing quietly, which this codebase has been bitten by repeatedly.
   carries four. Headers are written only at file creation and his files
   already exist; rewriting them would break the rule that these files are
   his. Unfixable, and stated here rather than hidden.
-- **Cross-language suppression does not work.** A proposal in English and
-  the same belief already recorded in French will not match, so he may be
-  offered something he has already agreed to in another language.
+- **Cross-language suppression does not work, and will not be built.**
+  A proposal in English and the same belief already recorded in French do
+  not match, so he may be offered something he has already agreed to.
+  Measured on the real machine before deciding, and the numbers close the
+  question rather than deferring it:
+
+  | | worst duplicate | best genuinely new | corridor |
+  |---|---|---|---|
+  | lexical, same language | 60.9 | 57.6 | 3 points |
+  | embedding, cross-language | 0.559 | 0.424 | 0.135 |
+  | embedding, same language | 0.871 | 0.641 | 0.23 |
+
+  The lexical corridor is noise: "Il court le mardi matin **avant** le
+  travail" scores 57.6 against "tu demandes mon accord **avant**", two
+  unrelated sentences meeting on a function word.
+
+  Embeddings look better until they are asked the question that matters.
+  A *contradiction* scores higher than a duplicate: "Il n'habite plus
+  Bagneux" against "Il habite Bagneux, en France" is 0.913, and "Il ne
+  parle pas français" against "Il parle français" is 0.916, both above
+  the 0.874 of a true duplicate. Cosine does not see negation. Any
+  threshold that suppressed duplicates would suppress corrections
+  harder — and a correction is the single most valuable thing she can
+  offer him.
+
+  So the cost model stands as designed: he strikes a duplicate in one
+  character, and a struck proposal is never offered again. This would be
+  reopened only by a method that can tell a restatement from a
+  contradiction, which neither of the two measured here can.

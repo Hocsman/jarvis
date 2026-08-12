@@ -27,6 +27,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 from ...appris.page import (
+    ETAT_ATTENTE,
     SECTION_PROFIL,
     SECTION_REGLES,
     ajouter_propositions,
@@ -119,10 +120,23 @@ class ReviewLearningsTool(Tool):
                 f"so plainly and do not claim they were saved."
             )
 
-        # 2. Then the journal.
-        lecture = _propose.propositions(
-            cfg, db, core=_core(cfg), deja=load_appris(cfg),
-        )
+        # 2. Then the journal — unless the page is already full of
+        # questions he has not answered. Without this the deferral below
+        # re-reads the same window on every ask for ever, and the page
+        # grows into a list nobody resolves.
+        deja = load_appris(cfg)
+        en_attente = [p for p in deja if p.etat == ETAT_ATTENTE]
+        plafond = 3 * int(getattr(cfg, "appris_max_propositions", 3) or 3)
+        if len(en_attente) >= plafond:
+            parts.append(
+                f"{len(en_attente)} proposals are already waiting unanswered in "
+                f"the user's appris.md, so the journal was not read this time. "
+                f"Say so, and that ticking or crossing some out is what lets "
+                f"you look again."
+            )
+            return ToolExecutionResult(success=True, reply_text=" ".join(parts))
+
+        lecture = _propose.propositions(cfg, db, core=_core(cfg), deja=deja)
 
         if not lecture.appelee:
             parts.append(
@@ -132,19 +146,40 @@ class ReviewLearningsTool(Tool):
             )
             return ToolExecutionResult(success=True, reply_text=" ".join(parts))
 
-        # Only a reading that happened is recorded, or a failure would
-        # skip those days for ever.
-        try:
-            db.marquer_journal_lu(lecture.lues)
-        except Exception as e:
-            debug_log(f"appris: window not recorded as read: {e}", "tools")
+        # A window is retired only when this pass finished with it.
+        # `journal_lu` has no expiry, so anything recorded here can never
+        # be offered again — and what was never proposed is something he
+        # will never learn existed. Three passes are not finished, and
+        # each sets this False below: the cap truncated the list, the
+        # write lost, or everything the model produced fell on the shape
+        # and grounding guards.
+        finie = True
+        if lecture.debordee:
+            finie = False
+        if lecture.bruts and not lecture.gardes and (
+            lecture.mal_formes or lecture.infondes
+        ):
+            # Everything it produced was unusable. On a small model this
+            # is the ordinary outcome rather than an edge case, and
+            # retiring the days means the backlog is gone by the time he
+            # points a better model at it.
+            finie = False
+            parts.append(
+                f"The journal was read but nothing it produced was usable "
+                f"({lecture.mal_formes} malformed, {lecture.infondes} not "
+                f"actually in the journal), so those days were left to be "
+                f"looked at again."
+            )
 
         if lecture.gardes:
             items = [
                 (_VERS_LA_PAGE.get(c.genre, SECTION_PROFIL), c.date, c.texte, c.citation)
                 for c in lecture.gardes
             ]
-            if ajouter_propositions(cfg, items):
+            ecrit = ajouter_propositions(cfg, items)
+            if not ecrit:
+                finie = False
+            if ecrit:
                 parts.append(
                     f"{len(lecture.gardes)} new proposal(s) are waiting in the "
                     f"user's appris.md file: "
@@ -174,6 +209,18 @@ class ReviewLearningsTool(Tool):
                 )
             else:
                 parts.append("Nothing in the journal qualified this time.")
+
+        if lecture.debordee:
+            parts.append(
+                "There was more than one reading's worth; the rest are waiting "
+                "for the next time he asks. Say so."
+            )
+
+        if finie:
+            try:
+                db.marquer_journal_lu(lecture.lues)
+            except Exception as e:
+                debug_log(f"appris: window not recorded as read: {e}", "tools")
 
         if lecture.tronquee:
             parts.append(

@@ -128,6 +128,11 @@ class Lecture:
     appelee: bool = False
     lues: List[tuple] = field(default_factory=list)
     tronquee: bool = False
+    # The model offered more than the cap allows to be kept. The rest are
+    # deferred to his next ask, which is only possible if the days they
+    # came from stay readable — `journal_lu` has no expiry, so a window
+    # recorded here is gone for good.
+    debordee: bool = False
     gardes: List[Candidat] = field(default_factory=list)
     bruts: int = 0
     connus: int = 0
@@ -266,10 +271,23 @@ def propositions(cfg, db, *, core, deja: Sequence) -> Lecture:
          getattr(p, "etat", ""))
         for p in (deja or [])
     ]
+    # Her own voice, as it comes back to her. She reads the page aloud,
+    # the summariser records the reading, and the next pass finds those
+    # sentences in his journal and proposes them again — each round
+    # arriving with better grounding than the last, because by then the
+    # citation really is in the notes. The prompt forbids proposing
+    # anything the assistant said and cannot be relied on to win, so the
+    # citation is checked against what she has already put on the page.
+    _sa_voix = [normalise_fact(getattr(p, "texte", "") or "")
+                for p in (deja or []) if getattr(p, "texte", "")]
     notes_normalisees = [(date, normalise_fact(resume)) for date, resume in fenetre]
 
+    debordee = False
     for item in items:
         if len(gardes) >= cap:
+            # Not dropped: deferred. The caller must not retire the
+            # window, or everything past the cap is lost for ever.
+            debordee = True
             break
         if not isinstance(item, dict):
             mal_formes += 1
@@ -302,6 +320,16 @@ def propositions(cfg, db, *, core, deja: Sequence) -> Lecture:
             debug_log(
                 f"appris: a citation was not in the notes, dropped: "
                 f"{citation_nette[:60]}",
+                "memory",
+            )
+            continue
+
+        citation_pliee = normalise_fact(citation_nette)
+        if any(v and (v in citation_pliee or citation_pliee in v) for v in _sa_voix):
+            infondes += 1
+            debug_log(
+                "appris: the citation quotes something she proposed herself, "
+                "dropped",
                 "memory",
             )
             continue
@@ -342,7 +370,7 @@ def propositions(cfg, db, *, core, deja: Sequence) -> Lecture:
                                citation=citation_nette, date=date))
 
     return Lecture(
-        appelee=True, lues=lues, tronquee=tronquee, gardes=gardes,
+        appelee=True, lues=lues, tronquee=tronquee, debordee=debordee, gardes=gardes,
         bruts=len(items), connus=connus, refuses=refuses, infondes=infondes,
         masques=masques, mal_formes=mal_formes,
     )
