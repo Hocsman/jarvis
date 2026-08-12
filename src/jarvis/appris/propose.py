@@ -266,7 +266,12 @@ def propositions(cfg, db, *, core, deja: Sequence) -> Lecture:
     """Read the journal rows he has not been asked about, and propose."""
     fenetre, tronquee = _fenetre(cfg, db)
     if not fenetre:
-        return Lecture(appelee=False, tronquee=tronquee)
+        # A finished pass, not a failed one. Every eligible day was
+        # already read, or was a day she spoke on. Reporting this as
+        # "I could not read your journal" gets the module's one real
+        # distinction backwards, and tells him something untrue about
+        # his own machine.
+        return Lecture(appelee=True, tronquee=tronquee)
 
     if not resolve_appris_model(cfg):
         debug_log("appris: no model configured, the journal was not read", "memory")

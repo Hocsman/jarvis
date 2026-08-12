@@ -358,7 +358,12 @@ def test_a_row_already_read_is_not_read_again(tmp_path):
         lecture = propositions(cfg, db, core=_core(tmp_path), deja=[])
 
     assert not appel.called
-    assert lecture.appelee is False
+    # A finished pass with nothing left to look at, not a failed one.
+    # Reporting an empty window as "I could not read your journal" gets
+    # this module's one real distinction backwards — observed live, on a
+    # day when every eligible row had already been read.
+    assert lecture.appelee is True
+    assert lecture.lues == []
 
 
 def test_a_row_rewritten_since_it_was_read_is_read_again(tmp_path):

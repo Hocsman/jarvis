@@ -164,3 +164,52 @@ def test_a_reading_that_did_not_happen_still_marks_the_day(tmp_path):
         BUILTIN_TOOLS["reviewLearnings"].run({}, ctx)
 
     assert ctx.db.marquer_jour_de_parole.called
+
+
+# ── Nothing to read is not the same as could not read ─────────────────
+
+
+def test_an_empty_window_is_a_reading_that_found_nothing_to_read(tmp_path):
+    """Observed live: every eligible row was already read, and she told
+    him she "could NOT read your journal". That is the one distinction
+    this module exists to carry, reported backwards.
+
+    An empty window is a finished pass. Nothing was looked at because
+    there was nothing left to look at, which is an ordinary, correct
+    outcome — unlike a timeout, where days went unexamined and must stay
+    readable."""
+    from src.jarvis.appris.propose import propositions
+    from src.jarvis.memory.core import MemoryCore
+
+    lecture = propositions(_Cfg(tmp_path), _fenetre_db([]),
+                           core=MemoryCore(tmp_path / "yuba"), deja=[])
+
+    assert lecture.appelee is True
+    assert lecture.gardes == []
+    assert lecture.lues == []
+
+
+def test_the_tool_does_not_claim_it_could_not_look(tmp_path):
+    from src.jarvis.appris.propose import Lecture
+    from src.jarvis.tools.registry import BUILTIN_TOOLS
+
+    cfg = _Cfg(tmp_path)
+
+    with patch("src.jarvis.appris.propose.propositions",
+               return_value=Lecture(appelee=True, lues=[])):
+        texte = BUILTIN_TOOLS["reviewLearnings"].run({}, _ctx(cfg)).reply_text
+
+    assert "could NOT" not in texte
+
+
+def test_a_real_failure_still_says_it_could_not_look(tmp_path):
+    from src.jarvis.appris.propose import Lecture
+    from src.jarvis.tools.registry import BUILTIN_TOOLS
+
+    cfg = _Cfg(tmp_path)
+
+    with patch("src.jarvis.appris.propose.propositions",
+               return_value=Lecture(appelee=False)):
+        texte = BUILTIN_TOOLS["reviewLearnings"].run({}, _ctx(cfg)).reply_text
+
+    assert "could NOT" in texte
