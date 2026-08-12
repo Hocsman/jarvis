@@ -388,48 +388,21 @@ def find_best_node(
 
 
 _MERGE_SYSTEM_PROMPT = (
-    "You curate a knowledge store. You are given the CURRENT facts on "
-    "a node and a NEW fact to incorporate. Produce the REVISED set of "
-    "facts that should replace the node's contents.\n\n"
-    "Apply these rules in order:\n"
-    "1. CONTRADICTION / REVERSAL: if the new fact contradicts, negates, "
-    "or updates the current value of the same attribute as an existing "
-    "fact, drop the old version. Examples: 'User dislikes coffee' "
-    "replaces 'User likes coffee'. 'User lives in Berlin' replaces "
-    "'User lives in Hackney'. 'User does not need a daily check-in' "
-    "replaces 'User has a need for a daily check-in' AND any line that "
-    "lists that same need as an interest.\n"
-    "2. DUPLICATION: drop existing lines that say the same thing as the "
-    "new fact, even with different wording, casing, or punctuation. "
-    "Keep one canonical phrasing.\n"
-    "3. CONSOLIDATION: when several existing facts describe the same "
-    "repeated activity across different days (e.g. 'ate sushi on "
-    "Monday', 'ate sushi on Thursday'), merge them into a pattern "
-    "('regularly eats sushi'). Preserve dates only for significant "
-    "one-off events (a job change, a move).\n"
-    "4. INDEPENDENCE: keep existing facts that describe a different "
-    "attribute, even if related. 'User ate a Big Mac' does NOT replace "
-    "'User is vegetarian' — leave both visible so the inconsistency "
-    "stays inspectable. Past-tense historical events ('Visited Paris "
-    "in 2023') coexist with current-state facts.\n"
-    "5. PRUNING: drop facts that are common knowledge already in your "
-    "training data (general nutrition trivia, well-known places, "
-    "public-figure basics). Only keep what is novel to you: user-"
-    "specific details, local / niche information, recent events after "
-    "your cutoff, corrections to default assumptions.\n"
-    "6. META-NARRATIVE: drop any line whose SUBJECT is the assistant "
-    "itself ('The assistant ...', 'I (the assistant) ...'). Verb "
-    "doesn't matter — said / suggested / recommended / advised / "
-    "is unable to / cannot — the subject is the tell. Drop e.g. "
-    "'The assistant is unable to navigate to a web page' and "
-    "'The assistant suggested grilled salmon'. Keep imperatives "
-    "addressed AT the assistant ('Always reply in British English') "
-    "— those are directives, not narration.\n"
-    "7. ORDER: keep the most enduring, identity-defining facts near "
-    "the top; transient / specific facts below.\n\n"
-    "Respond with ONLY a JSON object of shape `{\"facts\": [\"fact 1\", "
-    "\"fact 2\", ...]}`. Each fact is a self-contained sentence. No "
-    "prose outside the JSON, no explanations, no markdown fences."
+    "You curate a knowledge store. You are given the CURRENT facts on a node, and usually a NEW fact to incorporate. Write out the REVISED set of facts that replaces the node's contents, deciding line by line what you write. When no new fact is given, the job is the same rewrite with nothing to incorporate.\n"
+    '\n'
+    'Apply these rules in order:\n'
+    "1. CONTRADICTION / REVERSAL: if the new fact contradicts, negates, or updates the current value of the same attribute as an existing fact, drop the old version. Examples: 'User dislikes coffee' replaces 'User likes coffee'. 'User lives in Berlin' replaces 'User lives in Hackney'. 'User does not need a daily check-in' replaces 'User has a need for a daily check-in' AND any line that lists that same need as an interest.\n"
+    '2. DUPLICATION: drop existing lines that say the same thing as the new fact, even with different wording, casing, or punctuation. Keep one canonical phrasing.\n'
+    "3. CONSOLIDATION: when several existing facts describe the same repeated activity across different days (e.g. 'ate sushi on Monday', 'ate sushi on Thursday'), merge them into a pattern ('regularly eats sushi'). Preserve dates only for significant one-off events (a job change, a move).\n"
+    "4. INDEPENDENCE: keep existing facts that describe a different attribute, even if related. 'User ate a Big Mac' does NOT replace 'User is vegetarian' — leave both visible so the inconsistency stays inspectable. Past-tense historical events ('Visited Paris in 2023') coexist with current-state facts.\n"
+    '5. PRUNING: drop facts that are common knowledge already in your training data (general nutrition trivia, well-known places, public-figure basics). Only keep what is novel to you: user-specific details, local / niche information, recent events after your cutoff, corrections to default assumptions.\n'
+    '6. ORDER: keep the most enduring, identity-defining facts near the top; transient / specific facts below.\n'
+    '\n'
+    "Then, as you write each line of the revised set, check it as you write it — whose sentence is this? If the line you are about to write has the assistant as its SUBJECT ('The assistant suggested grilled salmon', 'The assistant is unable to navigate to a web page', 'The assistant said / recommended / advised ...', 'I (the assistant) ...', or that same shape in any other language), do not write it. Just omit it. The revised set is shorter — that is correct. The verb does not matter; the subject is the tell.\n"
+    '\n'
+    "The check fires on the subject and nothing else: a line whose subject is the user, a person, a place, a film, a product or anything else in the world gets written, even if the assistant once looked it up; a line addressed AT the assistant in the imperative ('Always reply in British English') is a directive, not narration, and gets written.\n"
+    '\n'
+    'Respond with ONLY a JSON object of shape `{"facts": ["fact 1", "fact 2", ...]}`. Each fact is a self-contained sentence. No prose outside the JSON, no explanations, no markdown fences.'
 )
 
 

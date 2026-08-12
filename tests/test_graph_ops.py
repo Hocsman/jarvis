@@ -1075,42 +1075,33 @@ class TestMergeSystemPromptInvariants:
         from src.jarvis.memory.graph_ops import _MERGE_SYSTEM_PROMPT
         assert "PRUNING" in _MERGE_SYSTEM_PROMPT
 
-    def test_prompt_lists_meta_narrative_rule_with_assistant_examples(self):
-        """The META-NARRATIVE rule must be present and must give the
-        picker model concrete examples of the verb forms to drop. The
-        bug it exists to fix was a 'The assistant is unable to ...'
-        line surviving consolidate-all sweeps because no rule covered
-        capability denials. If the rule label or its trigger phrasings
-        get edited away, this test fails. Scoped to the rule's own
-        section (META-NARRATIVE up to the next numbered rule) so the
-        assertions can't be satisfied by unrelated text elsewhere in
-        the prompt."""
-        from src.jarvis.memory.graph_ops import _MERGE_SYSTEM_PROMPT
-        assert "META-NARRATIVE" in _MERGE_SYSTEM_PROMPT
-        rule_start = _MERGE_SYSTEM_PROMPT.index("META-NARRATIVE")
-        # Bound the section by the next numbered rule (e.g. '\n7. ')
-        # OR the response-format trailer ('\nRespond with ...') that
-        # follows the rule list. The trailer fallback matters when
-        # META-NARRATIVE is the LAST numbered rule — without it the
-        # section would balloon to include the JSON schema text and
-        # the in-section keyword checks could pass on a future prompt
-        # that no longer mentions those keywords inside the rule
-        # itself.
-        end_pattern = re.search(
-            r"\n\d+\. |\nRespond with\b",
-            _MERGE_SYSTEM_PROMPT[rule_start:],
-        )
-        rule_end = rule_start + (
-            end_pattern.start() if end_pattern else len(_MERGE_SYSTEM_PROMPT) - rule_start
-        )
-        section = _MERGE_SYSTEM_PROMPT[rule_start:rule_end]
-        # The two shapes the bug report surfaced explicitly must be
-        # named in this rule's section, not just somewhere else.
-        assert "The assistant" in section
-        assert "unable to" in section
-        # Counter-protection: the rule must not over-prune real
-        # directives, so an exception clause is required in-section.
-        assert "directive" in section.lower()
+    def test_the_prompt_still_refuses_to_write_the_assistant_as_a_subject(self):
+        """The rule that drops lines narrating the assistant, pinned by
+        what it must say rather than by where it sits.
+
+        It exists because 'The assistant is unable to navigate to a web
+        page' survived consolidate-all sweeps when no rule covered
+        capability denials. It was a numbered rule and lost 18 runs in
+        25, measured with the arms interleaved; it is now a self-check
+        performed while writing each output line, in the register the
+        summariser's equivalent rule uses, and it wins 43 out of 43.
+
+        Pinned on the subject test, the two shapes the bug report
+        surfaced, and the carve-out that stops it eating real
+        directives — never on a label or a rule number, because the fix
+        was precisely to stop it being one rule among seven.
+        """
+        from src.jarvis.memory.graph_ops import _MERGE_SYSTEM_PROMPT as prompt
+
+        assert "SUBJECT" in prompt
+        assert "The assistant suggested grilled salmon" in prompt
+        assert "unable to navigate" in prompt
+        # The act, not the category: it must tell the model what to do
+        # at the moment it would otherwise write the line.
+        assert "do not write it" in prompt.lower()
+        # Counter-protection: it must not over-prune real directives.
+        assert "directive" in prompt.lower()
+        assert "British English" in prompt
 
 
 @pytest.mark.unit
