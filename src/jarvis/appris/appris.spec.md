@@ -66,6 +66,26 @@ on every later pass, so nothing wins by attrition: a proposal that came
 back weekly would eventually catch him on a tired day, and that is
 consent by erosion rather than by decision.
 
+### It is written in his language
+
+The proposal is written in whatever `response_language` names, not in the
+language of the note. The codebase names no language: that setting is his
+own, and with it empty the note's language is kept, which is the older
+behaviour and the right default for somebody who never asked to be
+translated.
+
+The reason "never translate" does not apply here is that there is nothing
+of his left to preserve. The note is not his words, it is the
+summariser's paraphrase, and until LLM #9 learned to keep the
+conversation's language it answered in the language of its own English
+instructions. What *is* downstream is his file, which he corrects by hand
+and which the suppression guards compare against, so a proposal in
+another language is one he must translate before he can judge whether it
+is even true.
+
+Measured: the language tests failed one to two of three on every run
+before, and pass three of three on each of three runs after.
+
 ### He can rewrite it first
 
 What the harvest writes is the line **as it currently reads**, not as she

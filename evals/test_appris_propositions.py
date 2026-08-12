@@ -290,3 +290,70 @@ class TestItDoesNotTranslateHim:
             f"to translate back before he can judge whether it is true. "
             f"Proposals: {textes!r}"
         )
+
+
+@pytest.mark.eval
+@requires_judge_llm
+class TestItWritesInTheLanguageHeAsksFor:
+    """The proposal is written in his language, not the note's.
+
+    The note is not his words. It is LLM #9's paraphrase of what he said,
+    and until today that context wrote English for French conversations —
+    measured, two of his ten most recent rows were French. So "never
+    translate, keep his words" protects nothing one layer down: there is
+    nothing of his left to keep.
+
+    What is downstream is his file, which he reads and corrects by hand,
+    and which the suppression guards compare against. A proposal arriving
+    in another language is one he must translate before he can judge
+    whether it is even true, and one that no lexical guard can match
+    against what he already believes.
+
+    The code names no language. `response_language` is his own setting;
+    when it is empty the note's language is kept, which is the old
+    behaviour and the right default for someone who never set it.
+    """
+
+    def _cfg_langue(self, tmp_path, langue):
+        cfg = _cfg(tmp_path)
+        cfg.response_language = langue
+        return cfg
+
+    def _textes(self, tmp_path, langue):
+        from jarvis.appris.propose import propositions
+
+        case = MirrorCase(summary=(
+            "The user mentioned they live in Brighton and have two cats, "
+            "Miso and Kuma. They've been vegetarian for five years."
+        ))
+        lecture = propositions(self._cfg_langue(tmp_path, langue), _db(case),
+                               core=_core(tmp_path), deja=[])
+        return " ".join(c.texte for c in lecture.gardes).lower()
+
+    def test_an_english_note_yields_french_proposals_when_he_asks_for_french(self, tmp_path):
+        textes = self._textes(tmp_path, "français")
+
+        print(f"\n  [français] {textes}")
+        assert textes, "nothing was proposed at all"
+        assert any(m in textes for m in ("il ", "brighton", "chats", "végétarien")), textes
+        assert "they " not in textes, (
+            f"The proposal is still in the note's language. He reads this in a "
+            f"file of his own and corrects it by hand. Proposals: {textes!r}")
+
+    def test_it_names_no_language_of_its_own(self, tmp_path):
+        """Set to something the codebase has never heard of. If it works,
+        nothing was hardcoded; if only French works, something was."""
+        textes = self._textes(tmp_path, "español")
+
+        print(f"\n  [español] {textes}")
+        assert textes
+        assert any(m in textes for m in ("el ", "vive", "gatos", "vegetariano")), textes
+
+    def test_with_no_setting_the_notes_language_is_kept(self, tmp_path):
+        """The old behaviour, and the right default: somebody who never
+        set a language has not asked to be translated."""
+        textes = self._textes(tmp_path, "")
+
+        print(f"\n  [aucun réglage] {textes}")
+        assert textes
+        assert "brighton" in textes
