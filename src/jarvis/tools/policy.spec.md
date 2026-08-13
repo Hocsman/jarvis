@@ -146,3 +146,9 @@ The language cases live there and nowhere else. There is no word list anywhere i
 `localFiles` refuses the whole `yuba/` directory, for every operation including `read`. The gate already prices a write there as `destructif`, so it costs a click on a card carrying the exact path; this is the second defence, because a path on a card only protects a reader who recognises what it means, and these files read as ordinary Markdown. A tool able to rewrite the file that lists its own permissions makes those permissions advisory.
 
 The guard resolves the path first, so `..` buys nothing, and it keys off the resolved core directory rather than the name, so a `yuba-sauvegarde` of his own stays readable. When the core directory cannot be located the guard refuses nothing extra: one that cannot find what it protects must not start refusing the whole home instead.
+
+## A heading he annotated is still a heading
+
+The file is his and it invites him to edit it, so `## Jamais (jamais, vraiment)` is an ordinary thing to find in it. A heading carries its name plus whatever note follows.
+
+And **a line opening with `##` that this file does not understand ends the current section** rather than continuing it. That inheritance was the defect, not the annotation: an unrecognised heading left the previous verdict in force, so everything he filed under `## Jamais` inherited `## Libre` and the tools he most wanted stopped ran without asking. Tools under a heading nobody understands fall back to their risk default, which for anything but `lecture` means asking.

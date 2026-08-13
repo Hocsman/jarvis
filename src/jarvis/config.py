@@ -342,6 +342,16 @@ class Settings:
     # "français". Layered into the system prompt by build_system_prompt.
     response_language: str
 
+    # Offered in the defaults and written by the settings window, so they
+    # have to arrive: every consumer reads them with a `getattr` fallback,
+    # and a missing field means the fallback wins and his choice does
+    # nothing at all, quietly.
+    llm_thinking_enabled: bool
+    intent_judge_thinking_enabled: bool
+    dictation_thinking_enabled: bool
+    stop_commands: list
+    stop_command_fuzzy_ratio: float
+
     # City shown on the dashboard weather card (Open-Meteo geocoded).
     # Empty falls back to "Paris".
     weather_city: str
@@ -1055,6 +1065,21 @@ def load_settings() -> Settings:
     dictation_custom_dictionary = list(raw_dict) if isinstance(raw_dict, list) else []
     mcps = _ensure_dict(merged.get("mcps"))
     response_language = str(merged.get("response_language", "") or "").strip()
+    llm_thinking_enabled = bool(merged.get("llm_thinking_enabled", False))
+    intent_judge_thinking_enabled = bool(
+        merged.get("intent_judge_thinking_enabled", False))
+    dictation_thinking_enabled = bool(merged.get("dictation_thinking_enabled", False))
+    _mots = merged.get("stop_commands")
+    stop_commands = (
+        [str(m) for m in _mots if str(m).strip()]
+        if isinstance(_mots, list) and any(str(m).strip() for m in _mots)
+        else ["stop", "quiet", "shush", "silence", "enough", "shut up"]
+    )
+    # Below ~0.5 a stop word matches most short utterances; above 1.0 is
+    # not a ratio. An empty or unusable list falls back rather than
+    # leaving him unable to interrupt her at all.
+    stop_command_fuzzy_ratio = min(
+        max(float(merged.get("stop_command_fuzzy_ratio", 0.8)), 0.5), 1.0)
     weather_city = str(merged.get("weather_city", "") or "").strip()
 
     # Parse ui subsection. ``orb_particles_enabled`` defaults to True;
@@ -1247,6 +1272,11 @@ def load_settings() -> Settings:
         # MCP Integration
         mcps=mcps,
         response_language=response_language,
+        llm_thinking_enabled=llm_thinking_enabled,
+        intent_judge_thinking_enabled=intent_judge_thinking_enabled,
+        dictation_thinking_enabled=dictation_thinking_enabled,
+        stop_commands=stop_commands,
+        stop_command_fuzzy_ratio=stop_command_fuzzy_ratio,
         weather_city=weather_city,
 
         # Desktop UI

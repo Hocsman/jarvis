@@ -639,7 +639,14 @@ class VoiceListener(threading.Thread):
         if self.tts and self.tts.enabled and self.tts.is_speaking():
             # Stop command detection (fast, text-based)
             stop_commands = getattr(self.cfg, "stop_commands", ["stop", "quiet", "shush", "silence", "enough", "shut up"])
-            if is_stop_command(text_lower, stop_commands):
+            # The threshold travels with the words. It was configurable,
+            # exported and settable, and never reached this call, so
+            # `is_stop_command`'s own signature default decided how hard
+            # it was to interrupt her — whatever he had chosen.
+            if is_stop_command(
+                text_lower, stop_commands,
+                fuzzy_ratio=float(getattr(self.cfg, "stop_command_fuzzy_ratio", 0.8)),
+            ):
                 debug_log(f"stop command detected during TTS: {text_lower} (energy: {utterance_energy:.4f})", "voice")
                 self.tts.interrupt()
                 try:

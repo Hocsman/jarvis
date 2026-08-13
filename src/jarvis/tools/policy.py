@@ -73,7 +73,17 @@ _DEFAULT_VERDICT = {
     RISK_DESTRUCTIVE: ASK,
 }
 
-_HEADING_RE = re.compile(r"^\s*##\s+(?P<name>\S+)\s*$", re.IGNORECASE)
+# The name, plus whatever note he wrote beside it. The file is his and
+# it invites him to edit it, so `## Jamais (jamais, vraiment)` is an
+# ordinary thing to find there. Requiring a bare word meant such a line
+# matched nothing at all, and a non-heading leaves the section above in
+# force — so everything he filed under `## Jamais` inherited `## Libre`.
+_HEADING_RE = re.compile(r"^\s*##\s+(?P<name>\S+)\s*(?P<note>.*)$", re.IGNORECASE)
+
+# Anything else opening with `##`. Not a heading this file understands,
+# and therefore the end of the current section rather than part of it:
+# the inheritance is what turned a typo into a permission.
+_PSEUDO_HEADING_RE = re.compile(r"^\s*##(\s|$)")
 _ENTRY_RE = re.compile(r"^\s*-\s+(?P<name>\S+)\s*$")
 _COMMENT_OPEN, _COMMENT_CLOSE = "<!--", "-->"
 
@@ -157,6 +167,12 @@ class ToolPolicy:
             heading = _HEADING_RE.match(line)
             if heading:
                 verdict = _SECTIONS.get(heading.group("name").strip().lower())
+                continue
+            if _PSEUDO_HEADING_RE.match(line):
+                # `## Divers`, `## Ne jamais`, a bare `##`. Whatever he
+                # meant, the tools below it are not in the section above,
+                # so they fall back to their risk default.
+                verdict = None
                 continue
 
             entry = _ENTRY_RE.match(line)
