@@ -64,7 +64,7 @@ Provider-aware fields in `Settings` (see [src/jarvis/config.py](../config.py)):
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `llm_provider` | `"ollama"` | `"ollama"` or `"openai_compatible"`. Unknown values fall back to `"ollama"`. |
-| `llm_base_url` | (OpenAI-compatible only) | The OpenAI-compatible server's URL, e.g. `http://localhost:1234/v1` (LM Studio default). Read only when `llm_provider == openai_compatible`; the Ollama path always uses `ollama_base_url`. |
+| `llm_base_url` | (OpenAI-compatible only) | The OpenAI-compatible server's URL, e.g. `http://localhost:1234/v1` (LM Studio default). Read only when `llm_provider == openai_compatible`; the Ollama path always uses `ollama_base_url`. It is also what tells a local OpenAI-compatible server apart from a remote one: auxiliary model pins are honoured on a loopback or private-network endpoint and replaced by the chat model on a remote one, which is announced. |
 | `llm_api_key` | `""` | Optional bearer token. Sent only when non-empty. |
 | `llm_chat_model` | (OpenAI-compatible only) | The model name the OpenAI-compatible server exposes. Read only when `llm_provider == openai_compatible` (falling back to `ollama_chat_model` if blank); the Ollama path uses `ollama_chat_model`. |
 | `llm_extra_body` | `{}` | Provider-specific request fields merged into every OpenAI-compatible chat payload (`direct` / `streaming` / `chat`). Example: `{"provider": {"sort": "throughput"}}` to pin the fastest upstream for an OpenRouter model served by several providers. Never overrides the keys the backend owns (`model` / `messages` / `stream`). No effect on the Ollama path. |

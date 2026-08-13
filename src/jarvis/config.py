@@ -1,9 +1,11 @@
+import ipaddress
 import os
 import sys
 import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 
 
@@ -472,28 +474,82 @@ def load_config() -> Dict[str, Any]:
     return {**defaults, **cfg_json}
 
 
-def _cloud_safe_model(value: str, provider: str, fallback: str) -> str:
-    """Keep auxiliary model names valid for the active provider.
+# Pins already discarded in this process. `debug_log` reloads the settings
+# every couple of seconds, and a warning repeated at that rate is a
+# warning the user learns to scroll past.
+_discarded_pins: set = set()
+
+
+def _is_local_endpoint(base_url: str) -> bool:
+    """Whether this URL points at a server on this machine or this network.
+
+    The OpenAI-compatible provider covers both ends of the range: a
+    remote cloud endpoint, whose model IDs are namespaced
+    ``vendor/model``, and a server on the user's own machine (LM Studio,
+    oMLX, ``llama-server``, vLLM, LocalAI), whose model IDs are bare
+    names. The host separates them; the provider name does not.
+
+    Literals and ``localhost`` only, resolved without DNS: the settings
+    are loaded on every debug check, and a resolver call here would block
+    startup. A remote endpoint reached by hostname is therefore treated
+    as remote, which is the safe direction — the pin is discarded, and
+    the announcement tells the user to write the address as an IP if it
+    was actually theirs.
+    """
+    raw = (base_url or "").strip()
+    if not raw:
+        return False
+    try:
+        host = urlparse(raw if "//" in raw else f"//{raw}").hostname
+    except Exception:
+        return False
+    if not host:
+        return False
+    host = host.lower()
+    if host == "localhost" or host.endswith(".localhost") or host.endswith(".local"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return bool(ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_unspecified)
+
+
+def _cloud_safe_model(value: str, field: str, provider: str,
+                      base_url: str, fallback: str) -> str:
+    """Keep auxiliary model names valid for the endpoint actually in use.
 
     Jarvis runs several small LLM tasks (intent judge, tool router,
-    evaluator, planner) on their own configured model. Those configs
-    commonly hold a local Ollama tag like ``gemma4:e2b``. When the
-    active provider is the cloud OpenAI-compatible one, sending an
-    Ollama tag to the remote endpoint fails with HTTP 400 ("X is not a
-    valid model ID"), because cloud model IDs are namespaced as
-    ``vendor/model`` (e.g. ``deepseek/deepseek-v4-flash``).
+    evaluator, planner) on their own configured model. A remote cloud
+    endpoint namespaces its model IDs as ``vendor/model`` and answers
+    HTTP 400 ("X is not a valid model ID") to a bare local tag like
+    ``gemma4:e2b``, so the auxiliary task dies for no gain: those get the
+    chat model instead.
 
-    Heuristic: under ``openai_compatible``, a non-empty model name with
-    no ``/`` is a stale local tag — fall back to the cloud chat model so
-    the auxiliary task works instead of 400-ing. Names that already look
-    like cloud IDs (contain ``/``) and empty values (which resolve via
-    the engine's own fallback chain) are left untouched.
+    A local OpenAI-compatible server is the opposite case. A bare name is
+    the only shape it accepts, and the pin is the whole reason the user
+    set a small model for a small task. So the endpoint decides rather
+    than the provider name, and a discarded pin is announced: nothing
+    downstream ever shows the effective value, and three of these four
+    fields have no field in the settings window at all.
     """
     if not value:
         return value
-    if provider == "openai_compatible" and "/" not in value:
-        return fallback
-    return value
+    if provider != "openai_compatible" or "/" in value:
+        return value
+    if _is_local_endpoint(base_url):
+        return value
+    if not fallback or fallback == value:
+        return value
+    mark = (field, value, fallback)
+    if mark not in _discarded_pins:
+        _discarded_pins.add(mark)
+        print(f"⚠️ Pinned model ignored: {field}", flush=True)
+        print(f"   📌 pinned: {value}", flush=True)
+        print(f"   ☁️ remote endpoint: {base_url}", flush=True)
+        print(f"   ↪️ used instead: {fallback}", flush=True)
+    return fallback
 
 
 def _ensure_list(value: Any) -> list[str]:
@@ -990,7 +1046,8 @@ def load_settings() -> Settings:
 
     # Intent Judge - always used when available
     intent_judge_model = str(merged.get("intent_judge_model", "gemma4:e2b"))
-    intent_judge_model = _cloud_safe_model(intent_judge_model, llm_provider, llm_chat_model)
+    intent_judge_model = _cloud_safe_model(
+        intent_judge_model, "intent_judge_model", llm_provider, llm_base_url, llm_chat_model)
     intent_judge_timeout_sec = float(merged.get("intent_judge_timeout_sec", 10.0))
 
     # Transcript Buffer - ambient speech context for intent judge (separate from dialogue)
@@ -1021,9 +1078,11 @@ def load_settings() -> Settings:
     if tool_selection_strategy not in ("all", "keyword", "embedding", "llm"):
         tool_selection_strategy = "llm"
     tool_router_model = str(merged.get("tool_router_model", "") or "").strip()
-    tool_router_model = _cloud_safe_model(tool_router_model, llm_provider, llm_chat_model)
+    tool_router_model = _cloud_safe_model(
+        tool_router_model, "tool_router_model", llm_provider, llm_base_url, llm_chat_model)
     evaluator_model = str(merged.get("evaluator_model", "") or "").strip()
-    evaluator_model = _cloud_safe_model(evaluator_model, llm_provider, llm_chat_model)
+    evaluator_model = _cloud_safe_model(
+        evaluator_model, "evaluator_model", llm_provider, llm_base_url, llm_chat_model)
     _eval_raw = merged.get("evaluator_enabled", None)
     evaluator_enabled: Optional[bool]
     if _eval_raw is None:
@@ -1031,7 +1090,8 @@ def load_settings() -> Settings:
     else:
         evaluator_enabled = bool(_eval_raw)
     planner_model = str(merged.get("planner_model", "") or "").strip()
-    planner_model = _cloud_safe_model(planner_model, llm_provider, llm_chat_model)
+    planner_model = _cloud_safe_model(
+        planner_model, "planner_model", llm_provider, llm_base_url, llm_chat_model)
     planner_enabled = bool(merged.get("planner_enabled", True))
     try:
         planner_timeout_sec = float(merged.get("planner_timeout_sec", 6.0))
