@@ -2807,13 +2807,26 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
             # In native-tools mode results carry role="tool"; in text-tools mode they carry
             # role="user" with a "tool_name" key — check both to make the guard effective
             # in small-model paths where direct-exec is most likely to loop.
+            # Only results produced during THIS reply count. Tool results
+            # replayed from dialogue carryover sit before `user_msg_index`
+            # and belong to earlier queries, so counting them refuses the
+            # first call of a turn: ask about London twice, then ask about
+            # Tokyo, and the model is told to use results it never got.
+            # Same split `_maybe_record_tool_carryover` and the end-of-loop
+            # digest already use.
+            _this_turn = messages[user_msg_index + 1:]
             duplicate_tool_count = sum(
-                1 for msg in messages[-10:]
+                1 for msg in _this_turn[-10:]
                 if msg.get("tool_name") == tool_name
                 and msg.get("role") in ("tool", "user")
             )
             if duplicate_tool_count >= 2:
                 debug_log(f"  ⚠️ Too many {tool_name} calls ({duplicate_tool_count}) - returning guidance", "planning")
+                print(
+                    f"    ⚠️ Refused: {tool_name} already returned "
+                    f"{duplicate_tool_count} results this turn",
+                    flush=True,
+                )
                 if use_text_tools:
                     messages.append({"role": "user", "content": f"[Tool: {tool_name}] You have already called this tool {duplicate_tool_count} times. Use the results from those calls to answer the user's question."})
                 else:

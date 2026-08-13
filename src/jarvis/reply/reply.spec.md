@@ -143,6 +143,7 @@ Design principles enforced by the engine:
    - Internal reasoning uses the `thinking` field (not shown to user)
    - Allowed tools: all builtin tools plus MCP (if configured)
    - Duplicate suppression: the engine returns a tool error response for repeated calls with identical args, guiding the model to use prior results
+   - Repeat suppression: a third invocation of the same tool within one reply is refused with a tool error and announced on stdout. The count covers only the messages appended after the current user message — tool results replayed from dialogue carryover belong to earlier queries, and counting them refuses the first call of a turn, telling the model to use results it never received. Work done inside this turn still counts, including a tool the user approved.
    - Tool results: native path appends `{role: "tool", tool_call_id: "<id>", content: "<text>"}` messages; text-based fallback appends `{role: "user", content: "[Tool result: name]\n<text>"}` messages
    - No system message injection: The engine does NOT add system messages during the loop as this breaks native tool calling; instead, guidance is provided via tool error responses when needed
 
