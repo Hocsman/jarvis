@@ -430,3 +430,15 @@ decides nothing: the detector and the intent judge both still apply.
 Everything else stays dropped. In one afternoon's logs, 38 segments went
 to this filter and 36 were a television and a conversation in the room —
 lifting the bar for all of them would send every one to the intent judge.
+
+## Salvaging his speech out of a merged echo chunk
+
+Whisper sometimes hands back one segment holding the tail of her reply and the start of his. `salvage_after_echo_tail` finds the rightmost five-word window resembling her last twenty words and keeps what follows.
+
+**What is discarded has to look like her, not just the seam.** Checking only the seam was a destructive defect: when he corrects her he necessarily reuses her wording, so the winning window is found inside his own sentence and the correction is thrown away. Measured, "no my next meeting is at three o'clock can you check again" came back as "can you check again".
+
+The prefix test uses `ratio`, not `partial_ratio`: the discarded half must be substantially the same string as her tail rather than merely contain a fragment of it. Over two replies, real echo prefixes score 57-60 and his own words 34-52, where `partial_ratio` puts them at 94-95 against 81-88 and separates nothing. The threshold sits at 55 and ties lean towards keeping — her words left at the front of his sentence are noise the intent judge reads past, while a wrong cut destroys the correction and the caller overwrites the transcript buffer, so nothing downstream can recover it.
+
+The trigger upstream is purely temporal: he began speaking within the echo tolerance of her finishing. "There was no echo" is therefore exactly the case this fires on, which is why the text-level test has to carry the decision.
+
+A known, measured limit: the scan takes the rightmost matching window, so it eats the first word of his real speech — "who else is coming" comes back as "else is coming". Left alone deliberately, and pinned by a test so a future change has something to compare against.

@@ -42,6 +42,11 @@ class EchoDetector:
         # natural follow-ups ("tell me more please") while high enough to
         # reject Whisper's echo-tail hallucinations ("…regions like Steneti").
         self.min_salvage_words: int = 3
+        # How much the half being discarded must resemble what she just
+        # said, as a whole-string ratio. Measured band: real echo 57-60,
+        # his own words 34-52. Set between them, leaning high because
+        # over-cutting destroys and under-cutting only leaves noise.
+        self.echo_prefix_threshold: int = 55
         # Backwards-compat alias — older callers used the overlap name.
         self._min_overlap_accept_words: int = self.min_salvage_words
         
@@ -364,9 +369,15 @@ class EchoDetector:
         window_size = 5
         echo_threshold = 85  # partial_ratio score that counts as "echo-like"
 
-        # Scan boundaries right-to-left so we find the RIGHTMOST echo window.
-        # The salvage is heard_words[boundary:], so a higher boundary means
-        # more echo stripped and more follow-up preserved.
+        # Scan boundaries right-to-left so we find the RIGHTMOST echo
+        # window. The salvage is heard_words[boundary:], so a higher
+        # boundary strips more — which costs the first word or two of his
+        # real speech when the seam sits inside it ("who else is coming"
+        # comes back as "else is coming"). Pinned in
+        # tests/test_echo_ne_coupe_pas_sa_correction.py rather than
+        # changed: an interrogative lost is a shade of meaning the intent
+        # judge reads past, and moving which window wins moves every
+        # salvage in the system.
         best_boundary: Optional[int] = None
         min_suffix_words = self.min_salvage_words
         # Boundary must leave at least min_suffix_words after it, and have
@@ -387,6 +398,32 @@ class EchoDetector:
             suffix_normalized = self._normalize_for_comparison(" ".join(suffix_words))
             suffix_score = fuzz.partial_ratio(suffix_normalized, tts_tail_normalized)
             if suffix_score >= 70:
+                continue
+
+            # And the half about to be DESTROYED must itself be her voice.
+            #
+            # Checking only the seam was the whole defect: when he corrects
+            # her he necessarily reuses her wording, so a five-word window
+            # scoring 85 is found inside his own sentence and everything
+            # before it — the correction — is thrown away. Measured, "no my
+            # next meeting is at three o'clock can you check again" came
+            # back as "can you check again".
+            #
+            # `ratio` rather than `partial_ratio`, deliberately: the prefix
+            # has to be substantially the SAME STRING as her tail, not
+            # merely contain a fragment of it. Measured over two replies,
+            # real echo prefixes score 57-60 and his own words 34-52, where
+            # `partial_ratio` puts them 94-95 against 81-88 and cannot
+            # separate them at all.
+            prefix_normalized = self._normalize_for_comparison(
+                " ".join(heard_words[:boundary])
+            )
+            if fuzz.ratio(prefix_normalized, tts_tail_normalized) < self.echo_prefix_threshold:
+                # Ties lean towards keeping. Leaving her words at the front
+                # of his sentence is noise the intent judge reads past;
+                # cutting his correction destroys it, and the caller
+                # overwrites the transcript buffer, so nothing downstream
+                # can recover it.
                 continue
 
             best_boundary = boundary
