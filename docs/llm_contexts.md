@@ -44,12 +44,12 @@ Every distinct LLM call in Jarvis, what feeds it, what consumes it, and how it i
 
 - **File**: [src/jarvis/reply/enrichment.py](src/jarvis/reply/enrichment.py) — `extract_search_params_for_memory()` (~line 71).
 - **Trigger**: once per reply, **only when the pre-flight planner (#12) emitted a `searchMemory` directive or returned an empty plan (fail-open)**. Pure reply-only plans skip this entirely — saves one LLM call per greeting / small-talk turn.
-- **Model / gating**: resolved via `resolve_tool_router_model(cfg)` — `tool_router_model → intent_judge_model → llm_chat_model`. Factory-dispatched. Small classification task; rides the same small/warm model as the router. Silent empty-dict on failure (early-return when no chat model is configured — no wasted LLM round-trip).
+- **Model / gating**: resolved via `resolve_tool_router_model(cfg)` — `tool_router_model → intent_judge_model → llm_chat_model`. Factory-dispatched. Small classification task; rides the same small/warm model as the router. Returns `None` when the pass could not run (no chat model configured — early return, no wasted LLM round-trip; nothing usable after both attempts; unexpected error). `None` is distinct from `{"keywords": []}`, which is the extractor deciding the query needs no memory search, and the engine prints a warning line for it.
 - **Inputs**: user query (with the planner's `topic` hint appended when present), optional context hint (live-context compact summary), UTC now.
 - **System prompt**: inline at [enrichment.py:35-63](src/jarvis/reply/enrichment.py:35).
 - **Output**: `{keywords, from?, to?, questions?}`. Consumed by memory search in the reply engine. Not the graph's only key: the concrete arguments of the plan's own tool steps also open it, so the graph is reachable on a turn where this context never fired. `keywords` drive both the diary search and the graph crawl; `questions` are optional and additive — they widen the graph's search text and annotate the hit in the log, but the graph is a world-fact index and they ask about the user, so they never gate it.
 - **Limits**: up to 2 retries; timeout from `llm_tools_timeout_sec`.
-- **Caching**: result cached in `DialogueMemory._hot_cache` under key `enrichment:{redacted_query[+topic_hint]}` for the lifetime of the active conversation. Identical follow-ups within the same conversation reuse the dict and skip the LLM hop. Cleared by `clear_hot_cache()` on the `stop` signal and on new-conversation entry.
+- **Caching**: result cached in `DialogueMemory._hot_cache` under key `enrichment:{redacted_query[+topic_hint]}` for the lifetime of the active conversation. Identical follow-ups within the same conversation reuse the dict and skip the LLM hop. Cleared by `clear_hot_cache()` on the `stop` signal and on new-conversation entry. A failed extraction is never cached — the hot cache has no age-based expiry, so caching it would make one outage last the whole conversation.
 
 ## 3b. Recall Gate (pre-enrichment short-circuit)
 
@@ -68,7 +68,7 @@ Every distinct LLM call in Jarvis, what feeds it, what consumes it, and how it i
 - **Model / gating**: `cfg.llm_chat_model` via `get_llm_backend(cfg)`. Gated by `memory_digest_enabled`; the auto-on path reads the same chat model so model-size detection follows the active provider.
 - **Inputs**: user query, raw diary entries, raw graph nodes.
 - **System prompt**: `_DIGEST_SYSTEM_PROMPT` at [enrichment.py:122](src/jarvis/reply/enrichment.py:122). Teaches relevance filtering, preference-signal detection, attribution preservation, `NONE` sentinel, identity queries.
-- **Output**: ≤400 chars text per batch (`_DIGEST_MAX_CHARS`) injected as reference-only memory context into the main loop's system message. Empty on failure.
+- **Output**: ≤400 chars text per batch (`_DIGEST_MAX_CHARS`) injected as reference-only memory context into the main loop's system message. Empty only when the distil judged nothing relevant, which is what licenses the caller to drop the raw diary and graph blocks. Raises `MemoryDigestError` when a call could not be made; the caller then keeps those blocks and prints a fallback line.
 - **Limits**: `llm_digest_timeout_sec` (8s, shared).
 
 ## 5. Tool-Result Digest (optional, opt-in)

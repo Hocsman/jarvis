@@ -23,7 +23,7 @@ def call_llm_direct(*, cfg, chat_model, system_prompt, user_content,
 def extract_search_params_for_memory(query: str, cfg, chat_model: str,
                                    timeout_sec: float = 8.0,
                                    thinking: bool = False,
-                                   context_hint: Optional[str] = None) -> dict:
+                                   context_hint: Optional[str] = None) -> Optional[dict]:
     """
     Extract search keywords and time parameters for memory recall.
 
@@ -33,15 +33,24 @@ def extract_search_params_for_memory(query: str, cfg, chat_model: str,
     whose answers are already available there — no point pulling those from
     long-term memory. When absent, the extractor gets a UTC timestamp fallback
     so it can still resolve relative time expressions.
+
+    Returns the extracted parameters, or ``None`` when the extraction could
+    not run at all: no model configured, nothing usable after both attempts,
+    or an unexpected error. ``None`` is not the same answer as
+    ``{"keywords": []}`` — the latter is the extractor reading the query and
+    deciding it needs no memory search, which the prompt trains it to do for
+    "what time is it?". The caller has to be able to tell a query that needs
+    no memory from a memory pass that has stopped answering, and only the
+    caller can put that on screen.
     """
     if not (chat_model or "").strip():
         # Mirror the planner/evaluator gate: no model configured ⇒ skip the
         # round-trip. Without this guard the OpenAI/Ollama backends would burn
         # one HTTP call per reply that lands here, cost a "model is required"
-        # error, and silently fall through to ``return {}`` after the broad
+        # error, and silently fall through to ``return None`` after the broad
         # except below.
         debug_log("search parameter extraction skipped: no chat model configured", "memory")
-        return {}
+        return None
     try:
         if context_hint and context_hint.strip():
             hint_block = (
@@ -114,14 +123,26 @@ Examples:
 
             if attempts == 1:
                 debug_log("search parameter extraction: first attempt returned no usable result, retrying", "memory")
+            else:
+                debug_log("search parameter extraction: no usable result after 2 attempts", "memory")
 
     except Exception as e:
         debug_log(f"search parameter extraction failed: {e}", "memory")
 
-    return {}
+    return None
 
 
 # ── Memory digest ───────────────────────────────────────────────────────────
+
+
+class MemoryDigestError(Exception):
+    """The distil pass could not run.
+
+    Distinct from an empty digest: empty means the distil read the snippets
+    and judged none of them relevant, so the caller may drop its raw blocks.
+    This means nothing was read at all, and the caller must keep them.
+    """
+
 
 # Below this size, skip the distil round-trip entirely — the raw text is
 # already cheap to feed to the main model.
@@ -275,7 +296,13 @@ def _distil_batch(
     timeout_sec: float,
     thinking: bool,
 ) -> str:
-    """Run one distil LLM call over ``raw_block``; returns the relevance note or ""."""
+    """Run one distil LLM call over ``raw_block``.
+
+    Returns the relevance note, or "" when the distil read the snippets and
+    judged none of them relevant. Raises ``MemoryDigestError`` when the call
+    could not be made at all — the caller drops its raw memory blocks on an
+    empty note, so the two must not collapse into the same value.
+    """
     user_content = (
         f"CURRENT QUERY: {query}\n\n"
         f"PAST MEMORY SNIPPETS:\n{raw_block}\n\n"
@@ -292,10 +319,14 @@ def _distil_batch(
         )
     except Exception as e:
         debug_log(f"memory digest batch failed: {e}", "memory")
-        return ""
+        raise MemoryDigestError(str(e)) from e
 
     if not response:
-        return ""
+        # The backends hand back None on timeout and on transport error
+        # rather than raising, so this is what a dead distil looks like
+        # most of the time. "NONE" is a verdict; no answer is a fault.
+        debug_log("memory digest batch failed: no response from backend", "memory")
+        raise MemoryDigestError("no response from backend")
 
     cleaned = response.strip().strip('"').strip("'")
     if not cleaned or cleaned.upper().rstrip(".") in _NONE_SENTINELS:
@@ -335,11 +366,16 @@ def digest_memory_for_query(
     Returns:
       - A short string (usually ≤ _DIGEST_MAX_CHARS, up to one per batch)
         when memory is relevant.
-      - Empty string when the distil decides nothing is relevant, when
-        inputs are empty, or when every LLM call fails.
+      - Empty string when the distil decides nothing is relevant, or when
+        inputs are empty.
       - The raw block unchanged when it's already below
         ``_DIGEST_MIN_CHARS`` — digestion wouldn't save enough context to
         justify the round-trip.
+
+    Raises:
+      MemoryDigestError: when a distil call could not be made. The caller
+        keeps its raw memory blocks rather than reading the failure as a
+        verdict that none of them mattered.
     """
     diary_entries = [e for e in (diary_entries or []) if e and e.strip()]
     graph_parts = [p for p in (graph_parts or []) if p and p.strip()]

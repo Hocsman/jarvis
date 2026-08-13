@@ -1654,8 +1654,25 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                     thinking=getattr(cfg, 'llm_thinking_enabled', False),
                     context_hint=context_hint,
                 )
-                if dialogue_memory and hasattr(dialogue_memory, "hot_cache_put"):
+                # Don't cache a failed extraction. `None` means the pass
+                # could not run at all, and the hot cache has no age-based
+                # expiry, so storing it pins one bad minute to this query
+                # for the rest of the conversation — every repeat of the
+                # question stays memory-blind long after the backend came
+                # back. Same reasoning as the tool router's fall-open
+                # guard: re-rolling next turn is cheap and recovers.
+                if (search_params is not None
+                        and dialogue_memory
+                        and hasattr(dialogue_memory, "hot_cache_put")):
                     dialogue_memory.hot_cache_put(_extractor_cache_key, search_params)
+            if search_params is None:
+                # A memory search that could not run must not look like a
+                # query that needed no memory. Both end with no keywords,
+                # and the only other difference is a debug channel that is
+                # off by default.
+                debug_log("keyword extraction produced nothing: this turn runs memory-blind", "memory")
+                print("  ⚠️ 🔍 Memory search: keywords could not be read this turn", flush=True)
+                search_params = {}
             # `or []` rather than a `.get` default: a model that answers
             # `{"keywords": null}` hands back a None the callers would splat.
             keywords = search_params.get('keywords') or []
@@ -1848,7 +1865,14 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
             conversation_context = ""
             graph_context = ""
         except Exception as e:
+            # A digest that could not run must not look like a digest that
+            # found nothing. The clearing above sits inside the `try`, so
+            # the raw blocks stay in the prompt; and the fallback is
+            # printed rather than only logged, so it is visible without
+            # JARVIS_VOICE_DEBUG — same rule as the graph guard above.
             debug_log(f"memory digest step failed (non-fatal): {e}", "memory")
+            print("  ⚠️ 🧩 Memory digest: unavailable this turn — keeping raw memory",
+                  flush=True)
 
     # Step 6: Tool allow-list for this turn.
     #

@@ -145,12 +145,12 @@ class TestExtractorPromptRendering:
         assert fallback_signature in no_hint_prompt
         assert fallback_signature not in hint_prompt
 
-    def test_extract_returns_empty_dict_when_no_usable_response(self):
+    def test_extract_returns_none_when_no_usable_response(self):
         with patch("jarvis.reply.enrichment.call_llm_direct", return_value=""):
             result = extract_search_params_for_memory(
                 "q", _cfg(), "m", timeout_sec=0.1,
             )
-        assert result == {}
+        assert result is None
 
     def test_short_circuits_when_chat_model_is_empty(self):
         """No chat model configured ⇒ no LLM call burned. A confused or
@@ -162,7 +162,7 @@ class TestExtractorPromptRendering:
             result = extract_search_params_for_memory(
                 "q", _cfg(), "", timeout_sec=0.1,
             )
-        assert result == {}
+        assert result is None
         mock_call.assert_not_called()
 
     def test_short_circuits_when_chat_model_is_whitespace(self):
@@ -172,7 +172,7 @@ class TestExtractorPromptRendering:
             result = extract_search_params_for_memory(
                 "q", _cfg(), "   ", timeout_sec=0.1,
             )
-        assert result == {}
+        assert result is None
         mock_call.assert_not_called()
 
     def test_braces_in_hint_do_not_break_format(self):
@@ -465,19 +465,6 @@ class TestDigestMemoryForQuery:
             )
         assert len(result) <= _DIGEST_MAX_CHARS + 1  # +1 for the ellipsis
         assert result.endswith("…")
-
-    def test_llm_failure_returns_empty(self):
-        from jarvis.reply.enrichment import digest_memory_for_query
-
-        big_entry = "[2026-04-20] " + ("x " * 300)
-        with patch(
-            "jarvis.reply.enrichment.call_llm_direct",
-            side_effect=RuntimeError("boom"),
-        ):
-            result = digest_memory_for_query(
-                diary_entries=[big_entry], graph_parts=[], **self._base_kwargs()
-            )
-        assert result == ""
 
     def test_batches_when_total_exceeds_cap(self):
         """Dumps larger than _DIGEST_BATCH_MAX_CHARS get split into batches."""
