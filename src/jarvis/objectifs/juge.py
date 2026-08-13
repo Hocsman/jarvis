@@ -33,6 +33,7 @@ import json
 from typing import List, Optional
 
 from ..debug import debug_log
+from ..llm import get_private_backend
 from ..reminders.extract import _parse_body, _resolve_reminder_model
 from ..utils.redact import contains_redaction_placeholder
 
@@ -74,9 +75,10 @@ def juge_disponible(cfg) -> bool:
 
 
 def _ask(cfg, system: str, user: str, timeout_sec: float) -> Optional[str]:
-    from ..llm import get_llm_backend
 
-    response = get_llm_backend(cfg).chat(
+    response = get_private_backend(
+        cfg, str(getattr(cfg, "reminder_model", "") or "").strip()
+    ).chat(
         _resolve_reminder_model(cfg),
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
         timeout_sec=timeout_sec,

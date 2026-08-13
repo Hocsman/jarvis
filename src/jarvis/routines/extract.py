@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from ..debug import debug_log
+from ..llm import get_private_backend
 from ..reminders.extract import (
     ExtractionFailed,
     _parse_body,
@@ -88,9 +89,10 @@ def _resolve_model(cfg) -> str:
 
 
 def _ask_model(cfg, system: str, user: str, timeout_sec: float) -> Optional[str]:
-    from ..llm import get_llm_backend
 
-    response = get_llm_backend(cfg).chat(
+    response = get_private_backend(
+        cfg, str(getattr(cfg, "reminder_model", "") or "").strip()
+    ).chat(
         _resolve_model(cfg),
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
         timeout_sec=timeout_sec,

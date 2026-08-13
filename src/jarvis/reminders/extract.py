@@ -26,6 +26,7 @@ from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from ..debug import debug_log
+from ..llm import get_private_backend
 from ..utils.redact import contains_redaction_placeholder
 from ..utils.time_context import format_reference_moment
 
@@ -118,9 +119,10 @@ def reminder_channel_available(cfg) -> bool:
 
 
 def _ask_model(cfg, system: str, user: str, timeout_sec: float) -> Optional[str]:
-    from ..llm import get_llm_backend
 
-    response = get_llm_backend(cfg).chat(
+    response = get_private_backend(
+        cfg, str(getattr(cfg, "reminder_model", "") or "").strip()
+    ).chat(
         _resolve_reminder_model(cfg),
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
         timeout_sec=timeout_sec,

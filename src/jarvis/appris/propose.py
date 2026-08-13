@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Sequence
 
 from ..debug import debug_log
+from ..llm import get_private_backend
 from ..memory.core import SECTION_PROFILE, SECTION_RULES
 from ..memory.graph import fold_for_search, normalise_fact
 from ..utils.redact import contains_redaction_placeholder
@@ -195,9 +196,10 @@ def resolve_appris_model(cfg) -> str:
 
 def _appeler_modele(*, cfg, system_prompt, user_content, timeout_sec):
     """Local indirection, patched wholesale by this module's tests."""
-    from ..llm import get_llm_backend
 
-    return get_llm_backend(cfg).direct(
+    return get_private_backend(
+        cfg, str(getattr(cfg, "appris_model", "") or "").strip()
+    ).direct(
         resolve_appris_model(cfg), system_prompt, user_content,
         timeout_sec=timeout_sec, thinking=False, num_ctx=8192,
         temperature=0.0,

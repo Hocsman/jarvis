@@ -161,3 +161,46 @@ def get_embedding_backend(settings: Any) -> LLMBackend:
     # backend-resolution unit tests that pass bare mocks.
     redact = bool(getattr(settings, "auto_redact_before_cloud", False))
     return _build(provider, base_url, api_key, redact=redact)
+
+
+class _SurLaMachine:
+    """`settings`, read as if the provider were the local one.
+
+    A thin view rather than a copy: `Settings` is frozen, callers pass
+    mocks, and the factory reads a dozen attributes it should keep
+    reading from the original.
+    """
+
+    __slots__ = ("_vrai",)
+
+    def __init__(self, vrai: Any):
+        object.__setattr__(self, "_vrai", vrai)
+
+    def __getattr__(self, nom: str) -> Any:
+        if nom == "llm_provider":
+            return "ollama"
+        return getattr(object.__getattribute__(self, "_vrai"), nom)
+
+
+def get_private_backend(settings: Any, pinned: str) -> LLMBackend:
+    """The backend for a prompt carrying the user's own life.
+
+    Four contexts read his own sentences: the time he said out loud, the
+    routine he described, the goal he is working towards, and the
+    fortnight of diary the learning step mines. Each specifies that
+    pinning a model is how he keeps that sentence off the network.
+
+    A name never did that. :func:`get_llm_backend` picks the endpoint
+    from ``llm_provider`` and never looks at the model, so a pinned local
+    tag was sent to the cloud — verified, the request reached
+    ``https://openrouter.ai/api/v1`` carrying his sentence, and the tag
+    would have been rejected there anyway. The setting changed a name and
+    nothing else while its documentation promised privacy.
+
+    So a pin decides the destination too. With nothing pinned there is
+    nothing to honour and the ordinary provider applies: a user who never
+    asked for this is not quietly moved off the one he chose.
+    """
+    if not (pinned or "").strip():
+        return get_llm_backend(settings)
+    return get_llm_backend(_SurLaMachine(settings))
