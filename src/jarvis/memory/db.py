@@ -217,6 +217,57 @@ class Database:
                 cur.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             self.conn.commit()
 
+    def _check_diary_index(self, cur) -> None:
+        """Make the diary's search index say how many days it really holds.
+
+        A day's row is rewritten on every flush, and a rewrite that
+        deleted and re-inserted handed the row a new id, leaving the old
+        terms in the index under an id no row carries any more. Nothing
+        on the surface shows it: `COUNT(*)` on the index reads the
+        content table and answers with the number of days, and FTS5's own
+        integrity-check passes on a polluted index. Only bm25 knows, and
+        it answers with the wrong day first — the day he mentioned
+        something once ahead of the day he talked about it for hours.
+
+        The shadow `_docsize` table holds one row per indexed document,
+        stale ones included, so the two counts disagreeing is the whole
+        test. Checked on every start rather than once behind a schema
+        bump: an index that drifts again must not be silent again.
+        """
+        try:
+            jours = cur.execute(
+                "SELECT COUNT(*) FROM conversation_summaries"
+            ).fetchone()[0]
+            indexes = cur.execute(
+                "SELECT COUNT(*) FROM summaries_fts_docsize"
+            ).fetchone()[0]
+        except Exception as e:
+            debug_log(f"diary index count unavailable: {e}", "memory")
+            print(f"  ⚠️ 📓 Diary search index could not be counted ({e}) — "
+                  "searching your past days may rank the wrong day first.",
+                  flush=True)
+            return
+
+        if indexes == jours:
+            return
+
+        try:
+            cur.execute("INSERT INTO summaries_fts(summaries_fts) VALUES('rebuild')")
+            debug_log(
+                f"diary index rebuilt: {indexes} entries held for {jours} days",
+                "memory",
+            )
+            perimees = indexes - jours
+            print(f"  📓 Diary search index rebuilt — {perimees} stale "
+                  f"entr{'y' if perimees == 1 else 'ies'} dropped. "
+                  f"All {jours} of your days were kept.", flush=True)
+        except Exception as e:
+            debug_log(f"diary index rebuild failed: {e}", "memory")
+            print(f"  ⚠️ 📓 Diary search index is broken and could not be rebuilt "
+                  f"({e}) — {indexes} entries for {jours} days. Searching your "
+                  "past days will rank the wrong day first until this is "
+                  "repaired.", flush=True)
+
     def _migrate(self, cur) -> None:
         """Bring an existing database up to the current shape.
 
@@ -229,7 +280,13 @@ class Database:
         Activity tab presents this table as a record of what Yuba did; a
         migration that discarded rows when the shape surprised it would
         make that claim false the first time the shape changed.
+
+        It also checks that the diary's search index holds one document
+        per diary row, and rebuilds it when it does not. Nothing is lost
+        by a rebuild: the index is derived from the table.
         """
+        self._check_diary_index(cur)
+
         try:
             existing = {
                 row[1] for row in cur.execute("PRAGMA table_info(action_log)").fetchall()
@@ -860,20 +917,47 @@ class Database:
         existing row's content without changing what it represents (e.g.
         the deflection scrub bulk sweep) should pass through the row's
         original ``ts_utc`` so the audit trail is preserved.
+
+        One row per ``(date_utc, source_app)``, rewritten in place, and
+        its id never changes: the FTS index, the search join and the
+        embedding row are all keyed on it.
         """
         if ts_utc is None:
             ts_utc = datetime.now(timezone.utc).isoformat()
         with self._lock:
             cur = self.conn.cursor()
+            # Updated rather than replaced. Resolving the UNIQUE clash by
+            # REPLACE deletes and re-inserts, which hands the row a new id
+            # on every flush — and SQLite skips the DELETE trigger for a
+            # REPLACE unless `recursive_triggers` is on, so the old terms
+            # stay in the FTS index under an id no row carries any more.
+            # Updating in place keeps the id, and `summaries_au` retires
+            # the old terms under it.
             cur.execute(
                 """
-                INSERT OR REPLACE INTO conversation_summaries(date_utc, ts_utc, summary, topics, source_app)
-                VALUES (?, ?, ?, ?, ?)
+                UPDATE conversation_summaries
+                SET ts_utc = ?, summary = ?, topics = ?
+                WHERE date_utc = ? AND source_app = ?
                 """,
-                (date_utc, ts_utc, summary, topics, source_app),
+                (ts_utc, summary, topics, date_utc, source_app),
             )
+            if cur.rowcount == 0:
+                cur.execute(
+                    """
+                    INSERT INTO conversation_summaries(date_utc, ts_utc, summary, topics, source_app)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (date_utc, ts_utc, summary, topics, source_app),
+                )
+                self.conn.commit()
+                return int(cur.lastrowid)
+            row = cur.execute(
+                "SELECT id FROM conversation_summaries "
+                "WHERE date_utc = ? AND source_app = ?",
+                (date_utc, source_app),
+            ).fetchone()
             self.conn.commit()
-            return int(cur.lastrowid)
+            return int(row[0])
 
     def get_conversation_summary(self, date_utc: str, source_app: str = "jarvis") -> Optional[sqlite3.Row]:
         """Get conversation summary for a specific date."""

@@ -12,7 +12,7 @@ The summariser prompt is the only write-time defence. There is no post-process s
 
 - Input: recent conversation chunks (last 10) plus, if present, the previous summary for the same day.
 - Output: a free-form summary (≤ 200 words) and 3–5 comma-separated topic keywords.
-- Storage: one row per `(date_utc, source_app)` in `conversation_summaries`, upserted on each update.
+- Storage: one row per `(date_utc, source_app)` in `conversation_summaries`, updated in place on each flush. The row keeps its id for the life of the day, because the FTS index, the search join and the embedding row are all keyed on it: a row that changed id would leave its old terms behind in the index, where nothing but bm25 can see them.
 - Embedding: the concatenation of summary + topics is embedded and stored for vector retrieval.
 - LLM failure is non-fatal — the summariser returns `(None, None)` and the update is skipped entirely. Pending messages remain queued for the next cycle.
 
@@ -122,4 +122,5 @@ Live evals target the smallest supported model (gemma4:e2b) and `xfail` softly o
 ## Relationship to Other Systems
 
 - **Diary retrieval** (`engine.py`): injects retrieved summaries under a "reference only" framing, not as authoritative instructions. This partially mitigates corrupted summaries, but the primary defence is the summariser itself — see `reply.spec.md`.
+- **Diary search** (`db.py::search_hybrid`): bm25 over `summaries_fts` is the only ranking on a default install, since the vector path is gated on sqlite-vss. Start-up checks that the index holds one document per diary row and rebuilds it when it does not, saying so on standard output. An index it cannot count or cannot rebuild is announced as a failure rather than passed over: a wrongly ranked diary looks exactly like a correctly ranked one from the outside.
 - **Knowledge graph** (`graph.spec.md`): ingests summaries via `update_graph_from_dialogue()`. Graph extraction inherits whatever corruption the summary contains; hygiene at the summariser is the only place to fix this at source.
