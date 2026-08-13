@@ -30,7 +30,7 @@ Every distinct LLM call in Jarvis, what feeds it, what consumes it, and how it i
 
 - **File**: [src/jarvis/listening/intent_judge.py](src/jarvis/listening/intent_judge.py) — `IntentJudge.evaluate()`.
 - **Trigger**: on a speech segment *only if* there is an engagement signal (wake word detected, hot-window active, or TTS playing). Pure ambient speech skips it.
-- **Model / gating**: `cfg.intent_judge_model` (default `gemma4:e2b`, ~2B) via `get_llm_backend(cfg).chat(...)`. The backend re-raises `ConnectionError` so the judge can apply a 30s cooldown after the server actively refuses; falls back to text-based wake detection while the cooldown is active.
+- **Model / gating**: `cfg.intent_judge_model` (default `gemma4:e2b`, ~2B) via `get_llm_backend(cfg).chat(...)`. The backend re-raises `ConnectionError` so the judge can apply a 30s cooldown after the server actively refuses. The cooldown suppresses the backend call, not the fallback: `judge()` returns `None` immediately and the listener takes its no-verdict path — hot-window override inside a hot window, text-based wake detection outside it — and prints the unavailability to standard output.
 - **Inputs**:
   - Rolling transcript buffer (last 120s, with timestamps)
   - Wake-word timestamp (if any), normalised aliases

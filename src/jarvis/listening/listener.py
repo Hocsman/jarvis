@@ -763,11 +763,17 @@ class VoiceListener(threading.Thread):
                 "voice",
             )
 
+        # The error back-off lives inside ``judge()``: during the cooldown it
+        # returns None without touching the backend. The listener still
+        # enters this block so the no-verdict branch below runs — it prints
+        # the unavailability and keeps hot-window speech. A judge that cannot
+        # answer is not the same thing as speech that was never addressed to
+        # us, and gating entry on ``available`` made the two identical for
+        # thirty seconds at a time.
         if (
             not skip_intent_judge_during_tts
             and has_engagement_signal
             and self._intent_judge is not None
-            and self._intent_judge.available
         ):
             # Get recent transcript segments for context (full buffer)
             context_segments = self._transcript_buffer.get_last_seconds(self._buffer_duration)
