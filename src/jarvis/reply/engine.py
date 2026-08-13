@@ -1587,7 +1587,21 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                     _wp_cache_key, (_core_stamp, warm_profile_block),
                 )
         except Exception as e:
+            # Not fatal, and not silent either. The core is what makes her
+            # his assistant: his name, where he lives, the rules he gave
+            # her. Answering without it is answering a stranger, and until
+            # this line existed the only trace was a debug channel nobody
+            # reads — so "she has forgotten me" looked exactly like a model
+            # having a bad day.
             debug_log(f"core profile load failed (non-fatal): {e}", "memory")
+            print("  ⚠️ 🪨 Core profile could not be read this turn", flush=True)
+            warm_profile_block = (
+                "Your notes about this user could not be read this turn, so "
+                "you are working without them. If they ask something that "
+                "depends on knowing them, say plainly that you cannot reach "
+                "your notes right now rather than answering as though they "
+                "had never told you anything."
+            )
 
     # Step 4: Memory enrichment — controlled by cfg.memory_enrichment_source
     # "all" = diary + graph, "diary" = diary only, "graph" = graph only

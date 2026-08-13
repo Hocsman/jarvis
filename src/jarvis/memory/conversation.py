@@ -1541,7 +1541,13 @@ def search_conversation_memory_by_keywords(
         debug_log(f"      🔍 Keyword-based search for: {clean_keywords}", "memory")
 
         # Build FTS OR query for better recall
-        fts_query = " OR ".join(clean_keywords[:5])  # Limit to 5 keywords
+        # Words, not syntax. `_normalize_fts_query` builds the FTS5
+        # expression, and joining with " OR " here handed it an operator
+        # it lowercases into a search term: "boxing OR club" became the
+        # phrase "boxing or club" and matched nothing. It went unseen
+        # while the builder was unreachable, because the fallback passed
+        # the operator through untouched and the accident worked.
+        fts_query = " ".join(clean_keywords[:5])  # Limit to 5 keywords
 
         # For embedding, combine keywords to get semantic meaning of the topic cluster
         embed_query = " ".join(clean_keywords)

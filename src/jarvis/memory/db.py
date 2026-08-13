@@ -142,14 +142,26 @@ CREATE TABLE IF NOT EXISTS summary_vec (
 
 
 def _normalize_fts_query(raw: str) -> str:
-    # Use improved fuzzy search query generation
+    """Turn what he typed into something FTS5 will accept.
+
+    The import below read `.fuzzy_search` — this package — while the
+    module has always lived in `jarvis.utils`. So it raised on every
+    call, the `except` swallowed it, and the bare tokenise underneath ran
+    every time. Nothing failed; searching his diary simply worked less
+    well than it was built to, for as long as this file has existed, and
+    the only trace was a `pass`.
+
+    The fallback stays, for a builder that declines or breaks, but it is
+    the safety net rather than the normal path.
+    """
     try:
-        from .fuzzy_search import generate_flexible_fts_query
+        from ..utils.fuzzy_search import generate_flexible_fts_query
         flexible_query = generate_flexible_fts_query(raw)
         if flexible_query:
             return flexible_query
-    except ImportError:
-        pass
+    except Exception as e:
+        debug_log(f"flexible FTS query unavailable, using bare tokens: {e}", "memory")
+
     
     # Fallback: Extract alphanumeric tokens and join them with spaces (logical AND)
     tokens = re.findall(r"[A-Za-z0-9_]+", raw)
