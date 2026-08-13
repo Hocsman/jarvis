@@ -152,7 +152,11 @@ class RoutineDispatcher:
 
     def _pass_over(self, row: dict, regle: Regle, nom: str) -> None:
         """Too late to be worth doing. Move on and say so."""
-        self._advance(row, regle)
+        if not self._advance(row, regle):
+            # The same reasoning already applied to a rule that cannot be
+            # read: a row that cannot be moved is due forever.
+            self._disarm(row, nom, "je n'ai pas su placer son prochain passage")
+            return
         self._write(
             row, nom,
             "ce passage était trop en retard pour être encore utile",
@@ -196,15 +200,19 @@ class RoutineDispatcher:
         except Exception as e:
             debug_log(f"routine ledger row not written: {e}", "tools")
 
-    def _advance(self, row: dict, regle: Regle) -> None:
-        from ..utils.time_context import to_utc_iso
+    def _advance(self, row: dict, regle: Regle) -> bool:
+        """False when the row did not move, and so is owed forever."""
+        from ..utils.time_context import now_in, to_utc_iso
 
         tz = str(row.get("tz") or "")
         try:
-            nxt = next_occurrence(regle, datetime.now(), tz)
+            # The row's own zone on both sides — see the runner's twin.
+            nxt = next_occurrence(regle, now_in(tz), tz)
             self._db.advance_rappel(
                 row.get("id"), due_utc=to_utc_iso(nxt, tz),
                 due_local=nxt.isoformat(), tz=tz,
             )
         except Exception as e:
             debug_log(f"routine not advanced: {e}", "tools")
+            return False
+        return True

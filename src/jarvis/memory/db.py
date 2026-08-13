@@ -594,7 +594,20 @@ class Database:
         Guarded on `prévu`, so advancing something cancelled cannot
         revive it — cancelling has to be final or the user cannot stop a
         routine.
+
+        Guarded on the clock too. Backwards is not a smaller step
+        forward: a row moved onto an instant already past is owed again
+        on the very next tick, and on every tick after it, so it is no
+        move at all wearing the shape of one. Refusing raises, because
+        the caller's only alternative is to run the same morning forever.
         """
+        try:
+            devant = datetime.fromisoformat(due_utc) > datetime.now(timezone.utc)
+        except Exception:
+            devant = False
+        if not devant:
+            raise ValueError(f"échéance non future : {due_utc!r}")
+
         self._write(
             "UPDATE rappels SET due_utc = ?, due_local = ?, tz = ?, "
             "attempts = 0, last_try_utc = NULL WHERE id = ? AND etat = ?",

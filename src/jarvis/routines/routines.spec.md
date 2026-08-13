@@ -21,13 +21,28 @@ There is no shape finer than a day: a routine that fires on a tick
 empties a rate limit and a wallet overnight, so the vocabulary simply
 cannot express it.
 
-`next_occurrence(regle, apres)` is calendar arithmetic in the machine's
-local zone, never `apres + 86400`. Adding a fixed number of seconds
+`next_occurrence(regle, apres, tz)` is calendar arithmetic in the row's
+own zone — the one stored beside its due time, never the machine's.
+`now_in(tz)` is what reads that clock, and it is the exact counterpart of
+`to_utc_iso`: one takes a wall-clock reading to an instant, the other
+brings the instant back to a reading. A row whose zone and whose clock
+come from two different places has an occurrence that belongs to neither,
+and east of the machine it lands behind the run that produced it. It is
+never `apres + 86400` either. Adding a fixed number of seconds
 drifts an hour twice a year, and a 07:00 routine that starts arriving at
 06:00 in November looks like a bug in the alarm rather than in the maths.
 When a wall-clock time does not exist on a given date — the spring-
 forward hour — `_real_instant` nudges forward to the first instant that
 does, rather than raising or silently skipping the day.
+
+An advance that does not move the row forward is refused rather than
+written: `advance_rappel` rejects a due time that is not strictly ahead
+of now. A row sitting on an instant already past is owed again on the
+very next tick and on every tick after it, so a backwards advance is no
+advance at all wearing the shape of one. When the advance fails, the
+morning is skipped rather than run, and the user is told on the same
+channel a failed morning uses — the dispatcher stops the routine
+outright, since a row it cannot move is due forever.
 
 `should_run(regle, prevu, maintenant)` returns `RUN` or `SKIP`. A run
 that is late by less than `staleness_window` still runs; later than that

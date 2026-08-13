@@ -137,6 +137,29 @@ def to_utc_iso(due_local: datetime, tz_name: str) -> str:
     return due_local.astimezone().astimezone(timezone.utc).isoformat()
 
 
+def now_in(tz_name: str) -> datetime:
+    """The wall clock a zone reads right now, naive.
+
+    The counterpart of `to_utc_iso`: that one takes a wall-clock reading
+    in `tz_name` to an instant, this one brings the instant back to a
+    reading. Recurrence arithmetic is wall-clock arithmetic, so an
+    occurrence computed from one zone's clock and then stored under
+    another zone's name belongs to neither, and can land behind the run
+    that produced it.
+
+    With no zone, the machine's own clock — the same fallback
+    `to_utc_iso` makes, so the pair stays symmetrical.
+    """
+    if tz_name and ZoneInfo is not None:
+        try:
+            return datetime.now(timezone.utc).astimezone(
+                ZoneInfo(tz_name)
+            ).replace(tzinfo=None)
+        except Exception:
+            pass
+    return datetime.now()
+
+
 def local_timezone_name() -> str:
     """The zone a reminder is resolved and fired in, or empty.
 

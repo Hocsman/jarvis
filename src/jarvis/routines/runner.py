@@ -138,7 +138,17 @@ class RoutineRunner:
         began = time.monotonic()
 
         self._record(nom, OUTCOME_STARTED, rid, phrase)
-        self._advance(row, payload)
+        if not self._advance(row, payload):
+            # Owed again on the very next tick, and on every tick after
+            # it: running now buys one morning and a loop. One morning
+            # missed out loud is the cheaper of the two.
+            self._settle(
+                nom, rid, phrase, started_at, began, payload,
+                erreur=("je n'ai pas su placer son prochain passage — "
+                        "ce matin est sauté plutôt que répété"),
+                outcome=OUTCOME_FAILED, texte=None,
+            )
+            return
 
         bloc = block_for(self._cfg, nom) if nom else None
         # The file is the control surface, for the sentence as much as
@@ -220,25 +230,36 @@ class RoutineRunner:
 
     # ── The row ───────────────────────────────────────────────────────
 
-    def _advance(self, row: dict, payload: dict) -> None:
-        """Move to the next occurrence before the work, not after."""
-        from ..utils.time_context import to_utc_iso
+    def _advance(self, row: dict, payload: dict) -> bool:
+        """Move to the next occurrence before the work, not after.
+
+        False when the row did not move. A row that did not move is owed
+        again on the very next tick, and on every tick after it, so it is
+        the one failure here worse than the run it guards.
+        """
+        from ..utils.time_context import now_in, to_utc_iso
 
         try:
             regle = Regle.from_json(payload.get("regle"))
         except Exception as e:
             debug_log(f"routine rule unreadable, not advancing: {e}", "tools")
-            return
+            return False
 
         tz = str(row.get("tz") or "")
         try:
-            nxt = next_occurrence(regle, datetime.now(), tz)
+            # The row's own zone on both sides. Reading the machine clock
+            # here and storing the answer under `tz` produces an
+            # occurrence that belongs to neither, and east of the machine
+            # it lands behind the run that just fired.
+            nxt = next_occurrence(regle, now_in(tz), tz)
             self._db.advance_rappel(
                 row.get("id"), due_utc=to_utc_iso(nxt, tz),
                 due_local=nxt.isoformat(), tz=tz,
             )
         except Exception as e:
             debug_log(f"routine not advanced: {e}", "tools")
+            return False
+        return True
 
     def _count(self, rid: str, payload: dict, *, productive: bool) -> None:
         """Consecutive mornings that produced nothing.

@@ -152,7 +152,7 @@ class SetRoutineTool(Tool):
 
     def run(self, args: Optional[Dict[str, Any]],
             context: ToolContext) -> ToolExecutionResult:
-        from ...utils.time_context import local_timezone_name, to_utc_iso
+        from ...utils.time_context import local_timezone_name, now_in, to_utc_iso
 
         cfg = context.cfg
         args = args or {}
@@ -286,7 +286,7 @@ class SetRoutineTool(Tool):
 
         tz = local_timezone_name()
         try:
-            premiere = next_occurrence(lecture.regle, datetime.now(), tz)
+            premiere = next_occurrence(lecture.regle, now_in(tz), tz)
             due_utc = to_utc_iso(premiere, tz)
         except Exception as e:
             return self._refuse(f"je n'ai pas su placer ce moment : {e}")

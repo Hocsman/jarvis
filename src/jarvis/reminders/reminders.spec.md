@@ -52,6 +52,8 @@ A dedicated thread, ticking on `reminder_tick_sec`, woken early when something c
 
 **Wall clock, not monotonic — the opposite of the confirmation TTL, for the mirror reason.** `PendingAction.has_expired` uses `time.monotonic()` because a deadline that can move backwards is a resurrectable approval. A confirmation TTL is an attention span; a reminder is an appointment with the world. Polling against the wall clock is correct across a sleep by construction: the comparison happens at tick time, so a laptop shut from 09:00 to 14:00 finds the row due the moment it wakes.
 
+`advance_rappel` moves a recurring row to its next occurrence, and refuses a due time that is not strictly ahead of now. The guard sits beside the `prévu` one: that keeps a cancelled row cancelled, this keeps a moved row moved. A row placed on an instant already past is owed again on the very next tick and on every one after it, which is a loop rather than a schedule.
+
 Its own thread rather than the daemon's main loop, which calls the diary pass synchronously and can block for up to 45 seconds — a 09:00 reminder would land anywhere inside that, and never during shutdown. It is stopped and joined **before the listener dies**, because the diary pass takes another 45 seconds after that and the database outlives both: a reminder firing in that window would be settled as said with nothing able to say it.
 
 **Defer, never drop.** Past `reminder_late_grace_sec` she still says it — she says how late she is. Silently discarding something owed since Thursday would leave one ledger line in a tab nobody has a reason to open.
