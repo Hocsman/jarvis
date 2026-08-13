@@ -370,17 +370,49 @@ class GraphMemoryStore:
             if not root_has_data and rogue_child is None:
                 return False
 
-            reason = (
-                "root holds pre-taxonomy data"
-                if root_has_data
-                else f"found non-conforming root child: {rogue_child['id']!r}"
-            )
-            debug_log(
-                f"wiping knowledge graph ({reason}); will re-seed fixed branches",
-                "memory",
-            )
-            self.conn.execute("DELETE FROM memory_nodes")
+            # Remove what is unreachable, and only that.
+            #
+            # The reason this exists is that a node sitting directly under
+            # root, from before the taxonomy, can never be reached by
+            # branch-pinned traversal — carrying it is dead weight. That
+            # justifies deleting those nodes. It does not justify deleting
+            # the table, which is what used to happen: one stray child, and
+            # every correctly-filed fact he had looked up went with it.
+            enleves: list = []
+            for ligne in self.conn.execute(
+                "SELECT id, name FROM memory_nodes "
+                "WHERE parent_id = 'root' AND id NOT IN ({})".format(
+                    ",".join("?" * len(expected_ids))
+                ),
+                tuple(expected_ids),
+            ).fetchall():
+                # The subtree beneath a stray is unreachable for the same
+                # reason the stray is.
+                a_faire = [ligne["id"]]
+                while a_faire:
+                    nid = a_faire.pop()
+                    a_faire.extend(
+                        r["id"] for r in self.conn.execute(
+                            "SELECT id FROM memory_nodes WHERE parent_id = ?", (nid,)
+                        ).fetchall()
+                    )
+                    self.conn.execute("DELETE FROM memory_nodes WHERE id = ?", (nid,))
+                enleves.append(ligne["name"] or ligne["id"])
+
+            if root_has_data:
+                self.conn.execute("UPDATE memory_nodes SET data = '' WHERE id = 'root'")
+
             self.conn.commit()
+
+            quoi = []
+            if root_has_data:
+                quoi.append("pre-taxonomy data on the root")
+            if enleves:
+                quoi.append(f"{len(enleves)} unreachable node(s): "
+                            + ", ".join(str(n)[:24] for n in enleves[:4]))
+            debug_log("graph migration removed " + "; ".join(quoi), "memory")
+            print(f"  🧠 Knowledge graph tidied — removed {'; '.join(quoi)}. "
+                  f"Everything filed under the branches was kept.", flush=True)
 
         # Re-seed root + fixed branches from scratch.
         self._ensure_root()

@@ -119,7 +119,7 @@ class TestMigrateLegacyShape:
         assert store.migrate_legacy_shape() is False
         assert store.get_node_count() == BOOTSTRAP_NODE_COUNT
 
-    def test_no_wipe_when_only_descendants_of_fixed_branches(self, store):
+    def test_nothing_removed_when_only_descendants_of_fixed_branches(self, store):
         """Children grown under User/Directives/World are fine — the shape
         check only looks at direct root children."""
         store.create_node(
@@ -132,14 +132,15 @@ class TestMigrateLegacyShape:
             n.name == "Identity" for n in store.get_all_nodes()
         )
 
-    def test_wipes_when_root_has_rogue_child(self, store):
-        """Pre-taxonomy nodes sitting directly under root trigger a wipe."""
+    def test_removes_a_rogue_child_of_root(self, store):
+        """Pre-taxonomy nodes sitting directly under root are unreachable,
+        so the migration takes them out."""
         store.create_node(
             name="People", description="pre-taxonomy category",
             data="Alice is a friend.", parent_id="root",
         )
         assert store.migrate_legacy_shape() is True
-        # After wipe: only root + seeded branches, no rogue child
+        # Only root + seeded branches are left, and no rogue child
         names = {n.name for n in store.get_all_nodes()}
         assert "People" not in names
         assert store.get_node_count() == BOOTSTRAP_NODE_COUNT
@@ -156,8 +157,8 @@ class TestMigrateLegacyShape:
         root = store.get_root()
         assert root.data == ""
 
-    def test_reseeds_fixed_branches_after_wipe(self, store):
-        """After a wipe the three fixed branches are present again."""
+    def test_reseeds_missing_fixed_branches(self, store):
+        """The three fixed branches are present after the migration."""
         store.create_node(
             name="Rogue", description="x", data="y", parent_id="root",
         )

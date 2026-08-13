@@ -22,11 +22,15 @@ These branches are created idempotently via `INSERT OR IGNORE` on stable IDs. Th
 
 Extraction writes to `world` only. The `user` and `directives` branches stay seeded so existing nodes remain visible in the memory viewer and readable by the one-time core migration, but nothing new lands there and nothing in them reaches the prompt.
 
-### Legacy-Shape Migration (destructive)
+### Legacy-Shape Migration
 
-`GraphMemoryStore.migrate_legacy_shape()` checks the on-disk graph against the expected shape at daemon start-up. The graph is considered non-conforming if root has any direct child that isn't one of the fixed branches, or if root's own `data` column is non-empty (cold-start writes that landed on root before the taxonomy existed). In either case the entire `memory_nodes` table is wiped and root + the three fixed branches are re-seeded.
+`GraphMemoryStore.migrate_legacy_shape()` checks the on-disk graph against the expected shape at daemon start-up. The graph is non-conforming if root has any direct child that isn't one of the fixed branches, or if root's own `data` column is non-empty (cold-start writes that landed on root before the taxonomy existed).
 
-Why destructive: pre-taxonomy nodes sitting under root would remain unreachable by traversal forever. Carrying them as dead weight is worse than a clean slate. The diary is untouched, so users can re-populate via "Import from Diary" in the memory viewer once the wipe completes. Knowledge nodes are in beta — the structure and classification are now stable but the extractor quality is still being tuned.
+What it removes is exactly what traversal can no longer reach: root's own data, and each stray child together with its subtree. Everything filed under `user`, `directives`, or `world` is kept. Root and any missing fixed branch are then re-seeded.
+
+The reason a stray goes is that branch-pinned traversal starts at the fixed branches, so a node hanging directly off root is unreachable forever and carrying it is dead weight. That reasoning covers the stray and nothing else: a correctly-filed fact is reachable, was put there deliberately, and has no business being collateral. Removal is announced on stdout as well as in the debug log, so a graph that shrinks at start-up says so rather than looking like a graph that was never written to.
+
+The diary is untouched either way, so "Import from Diary" in the memory viewer remains the way to re-populate after a genuine loss.
 
 Called **only** from the daemon start-up path in `daemon.main()`. The memory viewer and reply engine instantiate `GraphMemoryStore` without triggering the migration, so a mid-session open never wipes anything.
 
