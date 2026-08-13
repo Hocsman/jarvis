@@ -13,7 +13,7 @@ The summariser prompt is the only write-time defence. There is no post-process s
 - Input: recent conversation chunks (last 10) plus, if present, the previous summary for the same day.
 - Output: a free-form summary (≤ 200 words) and 3–5 comma-separated topic keywords.
 - Storage: one row per `(date_utc, source_app)` in `conversation_summaries`, updated in place on each flush. The row keeps its id for the life of the day, because the FTS index, the search join and the embedding row are all keyed on it: a row that changed id would leave its old terms behind in the index, where nothing but bm25 can see them.
-- Embedding: the concatenation of summary + topics is embedded and stored for vector retrieval.
+- Embedding: the concatenation of summary + topics is embedded and stored for vector retrieval, in whichever store exists — sqlite-vss when its extension loaded, the Python vector store otherwise. Both sides are gated on `db.stores_embeddings`: writing follows the same rule the reader already uses, and a query vector with nothing to compare it against is not computed at all. Gating the write on sqlite-vss alone left the fallback store built, searched on every query and never written to, so the hybrid search's semantic sixty per cent weighed nothing while the round-trip was paid.
 - LLM failure is non-fatal — the summariser returns `(None, None)` and the update is skipped entirely. Pending messages remain queued for the next cycle.
 
 ## Hygiene Rules

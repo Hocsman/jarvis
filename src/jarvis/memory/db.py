@@ -1005,6 +1005,19 @@ class Database:
             ).fetchall()
             return rows
 
+    @property
+    def stores_embeddings(self) -> bool:
+        """Whether an embedding written here could be searched for again.
+
+        Two implementations answer yes: sqlite-vss when its extension
+        loaded, and the Python store built in its place otherwise. The
+        reader already consults whichever exists; gating the writers on
+        sqlite-vss alone left the fallback store built, searched on every
+        query and never once written to, so the search's semantic sixty
+        per cent weighed nothing while the round-trip was paid anyway.
+        """
+        return bool(self.is_vss_enabled or self._python_vector_store)
+
     def upsert_summary_embedding(self, summary_id: int, vec: Sequence[float]) -> Optional[int]:
         """Store or update embedding for a conversation summary."""
         if self.is_vss_enabled:

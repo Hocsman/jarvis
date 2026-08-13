@@ -195,7 +195,7 @@ def rewrite_all_diary_summaries(
 
     Mirrors ``optimise_diary_topics`` for shape and privacy guarantees.
     """
-    can_reembed = bool(cfg.embedding_model and db.is_vss_enabled)
+    can_reembed = bool(cfg.embedding_model and db.stores_embeddings)
 
     rows = db.get_all_conversation_summaries()
     for row in rows:
@@ -484,7 +484,7 @@ def optimise_diary_topics(
         return
 
     # Apply the mapping to each row.
-    can_reembed = bool(cfg.embedding_model and db.is_vss_enabled)
+    can_reembed = bool(cfg.embedding_model and db.stores_embeddings)
     for row in rows:
         date_utc = row["date_utc"]
         original_topics = row["topics"] or ""
@@ -1483,10 +1483,12 @@ def update_daily_conversation_summary(
             source_app=source_app,
         )
 
-        # Generate and store embedding for semantic search. Gate on a
-        # configured embedding model too (matching the search paths) so an
-        # empty model never burns a doomed embed round-trip.
-        if db.is_vss_enabled and cfg.embedding_model:
+        # Generate and store embedding for semantic search. Gated on
+        # somewhere to put it as well as a model to make it with: the
+        # search reads whichever store exists, so writing has to follow
+        # the same rule, and an embedding nothing can hold is a
+        # round-trip paid for nothing.
+        if db.stores_embeddings and cfg.embedding_model:
             # Combine summary and topics for embedding
             text_for_embedding = f"{summary} {topics}"
             vec = _embed_text(text_for_embedding, cfg, timeout_sec=15.0)
@@ -1555,7 +1557,10 @@ def search_conversation_memory_by_keywords(
         debug_log(f"      📝 FTS query: '{fts_query}'", "memory")
         debug_log(f"      📝 Embed query: '{embed_query}'", "memory")
 
-        if cfg.embedding_model:
+        # Same rule as the write side: no store, no round-trip. A query
+        # vector with nothing to compare it against costs a hop per turn
+        # and changes no result.
+        if cfg.embedding_model and db.stores_embeddings:
             try:
                 vec = _embed_text(embed_query, cfg, timeout_sec=timeout_sec)
                 vec_json = json.dumps(vec) if vec is not None else None
