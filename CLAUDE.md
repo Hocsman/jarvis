@@ -105,6 +105,14 @@ Run evals after finalising a change that can affect agent accuracy.
 
 Any change to LLM prompts (system prompts, tool incentives, constraints, etc.) must be verified against a relevant eval case. If no eval exists for the behaviour being changed, write one first. The eval should demonstrate the improvement — i.e. it should fail or show worse results before the prompt change and pass or improve after.
 
+### Comparing prompt variants: interleave the arms, never run them in sequence
+
+A remote provider's behaviour drifts within a single session, so two arms measured one after the other are not comparable. Measured on this repo: a merge-prompt rule scored 6/8, then 7/8, then 15/15 across three sequential rounds, and on the strength of the last one it would have been declared healthy and nothing shipped. Interleaved call-by-call against its replacement, sharing the same window, the same prompt scored 7/25 against 25/25.
+
+So a variant comparison alternates arms inside one loop, one call each per iteration. Anything else measures the hour rather than the prompt. The same trap sits under a plain before/after: change the prompt, re-run, and you have compared two different hours.
+
+Sample sizes: three runs settle nothing. A one-line clause that measured 1/3 both before and after turned out to be a real 54% against 15% (p = 0.0078) once it had 26 runs an arm. Below about twenty an arm, expect to learn nothing and say so rather than reporting a number.
+
 Commit your changes when you finish a fix or feature before moving on to the next task.
 
 Before running `git commit --amend`, always check `git log --oneline -3` first to verify you're amending the correct commit.
