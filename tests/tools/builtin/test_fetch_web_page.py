@@ -125,7 +125,13 @@ class TestFetchWebPageTool:
         result = self.tool.run(args, self.context)
         assert isinstance(result, ToolExecutionResult)
         assert result.success is False
-        assert "failed" in result.reply_text.lower() or "error" in result.reply_text.lower()
+        # "not-a-url" becomes "https://not-a-url", whose DNS does not
+        # resolve, so the public-web guard turns it away before any
+        # request is made. What matters is that it is refused and says
+        # so, not which of the two wordings it used.
+        texte = result.reply_text.lower()
+        assert ("failed" in texte or "error" in texte
+                or "not on the public web" in texte)
 
     @patch('requests.get')
     def test_run_with_links_extraction(self, mock_get):
