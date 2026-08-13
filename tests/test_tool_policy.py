@@ -167,7 +167,7 @@ def test_comments_and_blank_lines_are_ignored():
 
 
 def test_the_generated_file_lists_the_real_inventory():
-    text = render_policy_file(
+    text, _ = render_policy_file(
         {"webSearch": RISK_READ, "localFiles": RISK_DESTRUCTIVE},
         {"chrome__click": RISK_ACTION},
     )
@@ -178,7 +178,7 @@ def test_the_generated_file_lists_the_real_inventory():
 
 
 def test_the_generated_file_sorts_tools_into_the_three_sections():
-    text = render_policy_file({"webSearch": RISK_READ, "localFiles": RISK_DESTRUCTIVE}, {})
+    text, _ = render_policy_file({"webSearch": RISK_READ, "localFiles": RISK_DESTRUCTIVE}, {})
 
     # Past the explanatory header, which names the sections too.
     body = text.split("-->", 1)[1]
@@ -188,7 +188,7 @@ def test_the_generated_file_sorts_tools_into_the_three_sections():
 
 
 def test_the_generated_file_round_trips_through_the_parser():
-    text = render_policy_file({"webSearch": RISK_READ, "localFiles": RISK_DESTRUCTIVE}, {})
+    text, _ = render_policy_file({"webSearch": RISK_READ, "localFiles": RISK_DESTRUCTIVE}, {})
 
     policy = ToolPolicy.parse(text)
 
@@ -197,7 +197,7 @@ def test_the_generated_file_round_trips_through_the_parser():
 
 
 def test_the_generated_file_explains_itself():
-    text = render_policy_file({"webSearch": RISK_READ}, {})
+    text, _ = render_policy_file({"webSearch": RISK_READ}, {})
 
     assert text.lstrip().startswith("#")
     assert "<!--" in text
@@ -210,7 +210,7 @@ def test_the_generated_file_says_that_libre_reaches_into_the_night():
     `## Demande` puts it out of every routine's reach, since a routine
     has nobody to ask. The header has to say so, or the second effect is
     a surprise found months later in a journal page."""
-    text = render_policy_file({"webSearch": RISK_READ}, {})
+    text, _ = render_policy_file({"webSearch": RISK_READ}, {})
 
     header = text.split("-->", 1)[0].lower()
     assert "routine" in header

@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # What a tool does to the world.
 RISK_READ = "lecture"
@@ -87,6 +87,21 @@ _PSEUDO_HEADING_RE = re.compile(r"^\s*##(\s|$)")
 _ENTRY_RE = re.compile(r"^\s*-\s+(?P<name>\S+)\s*$")
 _COMMENT_OPEN, _COMMENT_CLOSE = "<!--", "-->"
 
+# What a name may look like on its way *into* this file, and what it must
+# look like to be believed about itself. The reader has no such class:
+# the file is the user's, and a line they typed by hand — a wildcard
+# included — means what it says.
+#
+# The writer's source is not theirs. An MCP name is `f"{server}__{tool}"`
+# built from whatever a server announced in its `tools/list` reply, with
+# only emptiness checked between the wire and here. A newline in one
+# opens a second `## Libre` heading that stays in force to the end of the
+# section, so everything sorted after it inherits that heading; a name
+# that is just `*` writes a wildcard on the empty prefix, which frees the
+# whole catalogue. Same class the confirmation card and the routine
+# envelope apply to the same names.
+_WRITABLE_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
 
 def resolve_risk(name: str, tool: Any, args: Optional[Dict[str, Any]]) -> str:
     """What the tool about to run does to the world.
@@ -100,6 +115,17 @@ def resolve_risk(name: str, tool: Any, args: Optional[Dict[str, Any]]) -> str:
     otherwise walk a completely unclassified tool straight through.
     """
     if tool is None:
+        return RISK_DESTRUCTIVE
+
+    # A name this catalogue cannot write into `outils.md` is a name the
+    # user cannot rule on, so nothing it announces about itself is taken
+    # at face value. Refusing to write it is not enough on its own: an
+    # absent name falls back to its risk default, and the server picks
+    # that default by announcing `readOnlyHint`, whose default is free.
+    # One line in a reply, and the forged name walks the gate. A server
+    # that spells its own name with a newline is not the one to be
+    # believed about how harmless it is.
+    if not _WRITABLE_NAME.match(name or ""):
         return RISK_DESTRUCTIVE
 
     # Builtins declare their own, and may read their arguments to do it:
@@ -238,15 +264,25 @@ _HEADER = (
 
 def render_policy_file(
     builtin_risks: Dict[str, str], mcp_risks: Dict[str, str],
-) -> str:
+) -> Tuple[str, List[str]]:
     """Write the starting policy from the tools actually installed.
 
     Generated rather than shipped as a default, so the user opens it and
     sees their own catalogue — their 29 Chrome tools by name — instead of
     a list that may not match what they have.
+
+    Returns the file and the names it would not write. Filtered here
+    rather than at the call site, so no future caller can route round it.
+    The caller is handed the list because absent is silent, and the user
+    would otherwise meet a tool asking every single time with nothing
+    anywhere saying why.
     """
     buckets: Dict[str, list] = {FREE: [], ASK: [], NEVER: []}
+    refuses: List[str] = []
     for name, risk in sorted({**builtin_risks, **mcp_risks}.items()):
+        if not _WRITABLE_NAME.match(name):
+            refuses.append(name)
+            continue
         buckets[_DEFAULT_VERDICT.get(risk, ASK)].append(name)
 
     out = [_HEADER]
@@ -256,4 +292,4 @@ def render_policy_file(
             out.extend(f"- {n}\n" for n in buckets[verdict])
         elif verdict == NEVER:
             out.append("\n<!-- vide : ajoute ici ce que tu veux interdire pour de bon -->\n")
-    return "".join(out)
+    return "".join(out), refuses

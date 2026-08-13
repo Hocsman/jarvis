@@ -430,15 +430,31 @@ def ensure_policy_file(cfg: Settings) -> None:
             for name, spec in get_cached_mcp_tools().items()
         }
 
+        texte, refuses = render_policy_file(builtin_risks, mcp_risks)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            render_policy_file(builtin_risks, mcp_risks), encoding="utf-8",
-        )
+        path.write_text(texte, encoding="utf-8")
         debug_log(
             f"policy file written: {len(builtin_risks)} builtins, "
-            f"{len(mcp_risks)} MCP tools",
+            f"{len(mcp_risks)} MCP tools, {len(refuses)} names refused",
             "tools",
         )
+        if refuses:
+            print(
+                f"  ⚠️ {len(refuses)} outil(s) écarté(s) d'outils.md : leur nom "
+                "ne peut pas s'écrire sur une ligne.",
+                flush=True,
+            )
+            for name in refuses:
+                # Escaped, and on one line: an unwritable name is
+                # unwritable here too, and a newline in one would forge a
+                # second line of this very report.
+                montre = name.encode("unicode_escape").decode("ascii")
+                print(f"     • {montre[:120]}", flush=True)
+            print(
+                "     ↳ traités comme destructifs : elle demandera avant "
+                f"chaque appel. Fichier : {path}",
+                flush=True,
+            )
     except Exception as e:
         debug_log(f"policy file not written: {e}", "tools")
 
