@@ -1014,6 +1014,13 @@ def main() -> None:
     from .tools.registry import ensure_policy_file
     ensure_policy_file(cfg)
 
+    # A question whose card died with the process that raised it. Swept
+    # here rather than in `Database.__init__`, because the memory viewer
+    # opens the same file from another process and would close the
+    # running daemon's live question on his behalf.
+    from .memory.db import close_orphan_questions
+    close_orphan_questions(db)
+
     # Initialize dialogue memory with timeout
     print("💾 Initializing dialogue memory...", flush=True)
     _global_dialogue_memory = DialogueMemory(

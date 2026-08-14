@@ -884,6 +884,25 @@ class DialogueMemory:
             self._pending = None
             return held
 
+    def take_expired_pending(self):
+        """Claim the held question if its deadline has passed.
+
+        Returns it and lets it go, or None when nothing is held and when
+        what is held can still be answered. The caller settles it: this
+        object has no database, and a question that ends with no ledger
+        row is a question the Activity tab still shows as waiting.
+
+        `raise_pending` overwrites a stale card, so without this the
+        displaced episode leaves with the object and its `demandé` row
+        stays open for ever.
+        """
+        with self._lock:
+            held = self._pending
+            if held is None or not held.has_expired():
+                return None
+            self._pending = None
+            return held
+
     def clear_pending(self) -> None:
         """Drop the waiting question, unanswered."""
         with self._lock:

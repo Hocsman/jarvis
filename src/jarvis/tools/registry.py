@@ -582,10 +582,30 @@ def _ask(db, cfg, confirmation, *, name, args, risk, verdict, origin,
     into a swallowed exception.
     """
     from .confirmation import PendingAction, channel_for_call
-    from .policy import OUTCOME_ASKED, OUTCOME_REFUSED
+    from .policy import OUTCOME_ASKED, OUTCOME_EXPIRED, OUTCOME_REFUSED
 
     store = confirmation.store
     channel = channel_for_call(risk, _known_tool(name), name, args)
+
+    # Close whatever this question is about to displace. `raise_pending`
+    # overwrites a card past its deadline, and the episode would leave
+    # with the object: one `demandé` row and nothing after it, which the
+    # Activity tab reads as a question still waiting on him.
+    perimee = getattr(store, "take_expired_pending", None)
+    if callable(perimee):
+        try:
+            morte = perimee()
+        except Exception as e:
+            debug_log(f"expired question not claimed: {e}", "tools")
+            morte = None
+        if morte is not None:
+            debug_log(f"    🚪 {morte.tool} expired unanswered", "tools")
+            _log_action(
+                db, tool=morte.tool, args=morte.args, risk=morte.risk,
+                verdict="demande", outcome=OUTCOME_EXPIRED,
+                query=morte.query_redacted, origin=morte.origin,
+                request_id=morte.request_id,
+            )
 
     action = PendingAction.create(
         tool=name, args=args, risk=risk, channel=channel, origin=origin,

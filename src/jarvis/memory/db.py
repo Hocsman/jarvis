@@ -168,6 +168,65 @@ def _normalize_fts_query(raw: str) -> str:
     return " ".join(tokens)
 
 
+def close_orphan_questions(db) -> int:
+    """Close question episodes whose card died with the process holding it.
+
+    A pending confirmation deliberately never reaches disk: an approval
+    that outlived the process would be given without the context that
+    produced it. The consequence is that a `demandé` row still open when
+    the daemon starts belongs to a question nobody can answer any more —
+    a force quit, a flat battery, a crash. It is closed as `expiré`, the
+    word the clean-shutdown path already uses for the same thing.
+
+    Called from the daemon's start-up only, never from `Database.__init__`:
+    the memory viewer opens the same file from another process, and a
+    sweep there would answer the running daemon's live question for him.
+
+    Returns how many were closed, and says so when there were any. A
+    silent repair of something he was actually asked about is the failure
+    this exists to stop.
+    """
+    try:
+        lignes = db.recent_actions(500)
+    except Exception as e:
+        debug_log(f"open questions not read: {e}", "tools")
+        return 0
+
+    demandees: dict = {}
+    reglees: set = set()
+    for ligne in lignes:
+        rid = ligne.get("request_id")
+        if not rid:
+            continue
+        if ligne.get("outcome") == "demandé":
+            demandees.setdefault(rid, ligne)
+        else:
+            reglees.add(rid)
+
+    orphelines = [l for rid, l in demandees.items() if rid not in reglees]
+    if not orphelines:
+        return 0
+
+    fermees = 0
+    for ligne in orphelines:
+        try:
+            db.record_action(
+                tool=ligne.get("tool") or "?", args=None,
+                risk=ligne.get("risk") or "action", verdict="demande",
+                outcome="expiré", origin=ligne.get("origin"),
+                query=ligne.get("query"), request_id=ligne.get("request_id"),
+            )
+            fermees += 1
+        except Exception as e:
+            debug_log(f"open question not closed: {e}", "tools")
+
+    if fermees:
+        debug_log(f"{fermees} unanswered question(s) closed at start-up", "tools")
+        print(f"  ⏳ {fermees} question(s) sans réponse, fermée(s) : "
+              f"leur carte est partie avec la session précédente.", flush=True)
+    return fermees
+
+
 class Database:
     def __init__(self, db_path: str, sqlite_vss_path: Optional[str] = None) -> None:
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
