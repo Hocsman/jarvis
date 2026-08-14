@@ -41,6 +41,7 @@ from typing import List, Optional, Sequence, Tuple
 
 from ..debug import debug_log
 from ..llm import get_llm_backend
+from ..tools.naming import is_plain_name, one_line
 
 
 def call_llm_direct(*, cfg, chat_model, system_prompt, user_content,
@@ -252,7 +253,14 @@ def _build_user_message(
 ) -> str:
     parts = []
     if tools:
-        tool_lines = "\n".join(f"- {name}: {desc}" for name, desc in tools)
+        # One entry per line, and a name or description carrying a line
+        # break would write an entry of its own. The name is dropped —
+        # a tool that cannot be named cannot be called either — while
+        # the description is flattened, since prose is legitimate.
+        tool_lines = "\n".join(
+            f"- {name}: {one_line(desc)}"
+            for name, desc in tools if is_plain_name(str(name))
+        )
         parts.append(f"AVAILABLE TOOLS:\n{tool_lines}")
     else:
         parts.append("AVAILABLE TOOLS: (none — plan a direct reply)")
@@ -720,9 +728,17 @@ def resolve_next_tool_call(
             prop_keys = set()
             keys = ""
         allowed_props[str(name)] = prop_keys
-        desc = (fn.get("description") or "").strip().splitlines()
-        first = desc[0] if desc else ""
-        schema_lines.append(f"- {name} (args: {keys}) — {first[:120]}")
+        if not is_plain_name(str(name)):
+            # Same rule as the plan catalogue above: this list is read one
+            # entry per line, so a name carrying a break offers the model a
+            # tool nobody installed.
+            debug_log("tool omitted from resolver schema, unwritable name", "planning")
+            allowed_names.pop()
+            allowed_props.pop(str(name), None)
+            continue
+        schema_lines.append(
+            f"- {name} (args: {keys}) — {one_line(fn.get('description') or '', 120)}"
+        )
 
     # Fast path: fully-concrete plan step parses deterministically.
     fast = _parse_plan_step_concrete(

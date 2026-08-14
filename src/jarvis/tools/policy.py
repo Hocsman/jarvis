@@ -22,6 +22,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+from .naming import is_plain_name
+
 # What a tool does to the world.
 RISK_READ = "lecture"
 RISK_ACTION = "action"
@@ -90,17 +92,8 @@ _COMMENT_OPEN, _COMMENT_CLOSE = "<!--", "-->"
 # What a name may look like on its way *into* this file, and what it must
 # look like to be believed about itself. The reader has no such class:
 # the file is the user's, and a line they typed by hand — a wildcard
-# included — means what it says.
-#
-# The writer's source is not theirs. An MCP name is `f"{server}__{tool}"`
-# built from whatever a server announced in its `tools/list` reply, with
-# only emptiness checked between the wire and here. A newline in one
-# opens a second `## Libre` heading that stays in force to the end of the
-# section, so everything sorted after it inherits that heading; a name
-# that is just `*` writes a wildcard on the empty prefix, which frees the
-# whole catalogue. Same class the confirmation card and the routine
-# envelope apply to the same names.
-_WRITABLE_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+# included — means what it says. See `naming.py` for the class itself and
+# why a name outside it forges lines everywhere it is written.
 
 
 def resolve_risk(name: str, tool: Any, args: Optional[Dict[str, Any]]) -> str:
@@ -125,7 +118,7 @@ def resolve_risk(name: str, tool: Any, args: Optional[Dict[str, Any]]) -> str:
     # One line in a reply, and the forged name walks the gate. A server
     # that spells its own name with a newline is not the one to be
     # believed about how harmless it is.
-    if not _WRITABLE_NAME.match(name or ""):
+    if not is_plain_name(name):
         return RISK_DESTRUCTIVE
 
     # Builtins declare their own, and may read their arguments to do it:
@@ -280,7 +273,7 @@ def render_policy_file(
     buckets: Dict[str, list] = {FREE: [], ASK: [], NEVER: []}
     refuses: List[str] = []
     for name, risk in sorted({**builtin_risks, **mcp_risks}.items()):
-        if not _WRITABLE_NAME.match(name):
+        if not is_plain_name(name):
             refuses.append(name)
             continue
         buckets[_DEFAULT_VERDICT.get(risk, ASK)].append(name)

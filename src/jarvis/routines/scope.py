@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..debug import debug_log
+from ..tools.naming import is_plain_name
 
 ROUTINES_FILENAME = "routines.md"
 
@@ -48,7 +49,8 @@ _COMMENT_OPEN, _COMMENT_CLOSE = "<!--", "-->"
 # of its own — and since the last block of a given name wins, a routine
 # the user had tightened comes back widened, with `mémoire: oui`, sending
 # their whole profile to a remote model every morning.
-_NOM_OUTIL = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
+# The class itself lives in `tools/naming.py`, shared with everything
+# else that writes a tool name onto a line.
 
 
 # Three names an envelope can never contain, whatever the file says.
@@ -162,7 +164,7 @@ def parse_routines(text: str) -> Dict[str, RoutineBlock]:
                 # Same shape on the way back in. A hand-typed line that
                 # cannot be a tool name is a typo, and admitting it would
                 # only produce a refusal at 07:00 with no reader.
-                if _NOM_OUTIL.match(name):
+                if is_plain_name(name):
                     current.outils.append(name)
             elif line.strip():
                 in_tools = False
@@ -438,14 +440,14 @@ def render_block(*, nom: str, phrase: str, quand: str, outils: List[str],
     """
     # Filtered here rather than only at the call sites, so no future
     # caller can route round it.
-    outils = [n for n in (outils or []) if _NOM_OUTIL.match(str(n))]
+    outils = [n for n in (outils or []) if is_plain_name(str(n))]
 
     lines = [f"## {nom}", f"phrase: {phrase}", f"quand: {quand}", "outils:"]
     lines.extend(f"- {name}" for name in outils)
     if not outils:
         lines.append("<!-- vide : cette routine ne peut rien atteindre -->")
-    ecartes = [(n, w) for n, w in (ecartes or []) if _NOM_OUTIL.match(str(n))]
-    impossibles = [(n, w) for n, w in (impossibles or []) if _NOM_OUTIL.match(str(n))]
+    ecartes = [(n, w) for n, w in (ecartes or []) if is_plain_name(str(n))]
+    impossibles = [(n, w) for n, w in (impossibles or []) if is_plain_name(str(n))]
 
     if ecartes:
         lines.append("")

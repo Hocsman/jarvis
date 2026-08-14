@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 from .policy import RISK_ACTION, RISK_DESTRUCTIVE, RISK_READ
+from .naming import is_plain_name
 
 # Which door an answer may arrive through.
 CHANNEL_GESTE = "geste"   # a deliberate click on a card showing the call
@@ -367,8 +368,9 @@ LIKELY_ANSWERS = (
 )
 
 # A tool name we would be comfortable reading aloud and printing as a
-# card heading. Anything else is still shown, escaped, and flagged.
-_PLAIN_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+# card heading. Anything else is still shown, escaped, and flagged. The
+# class lives in `naming.py`, shared with everything else that writes a
+# tool name onto a line.
 
 
 def _would_swallow_the_answer(spoken: str) -> bool:
@@ -421,7 +423,7 @@ def describe_action(
     # server put in its `tools/list` reply, with no character class, no
     # length bound and no normalisation between the wire and here. A
     # newline in it forges a second line of the card's heading.
-    plain_name = bool(_PLAIN_NAME.match(tool or ""))
+    plain_name = is_plain_name(tool or "")
     safe_tool = (
         _escape_invisibles(tool or "").replace("\r", "\\r").replace("\n", "\\n")
     )

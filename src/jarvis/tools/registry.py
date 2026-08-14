@@ -34,6 +34,7 @@ from .builtin.goals import (
 from .builtin.stop import StopTool
 from .builtin.tool_search import ToolSearchTool
 from .types import ToolExecutionResult
+from .naming import is_plain_name
 from ..config import Settings
 from .external.mcp_client import MCPClient
 from ..debug import debug_log
@@ -186,6 +187,23 @@ def discover_mcp_tools(mcps_config: Dict[str, Any]) -> Tuple[Dict[str, ToolSpec]
 
                     # Create a unique tool name: server__toolname
                     full_tool_name = f"{server_name}__{tool_name}"
+
+                    if not is_plain_name(full_tool_name):
+                        # Dropped here rather than filtered at each of the
+                        # places that write it onto a line, so a name that
+                        # cannot be written is also a name that cannot be
+                        # called. Said out loud once, at discovery: a
+                        # capability quietly missing looks exactly like a
+                        # server that never offered it.
+                        montre = full_tool_name.encode(
+                            "unicode_escape").decode("ascii")[:120]
+                        debug_log(
+                            f"MCP tool dropped, name outside the plain class: {montre}",
+                            "mcp",
+                        )
+                        print(f"  ⚠️ 🔌 Tool ignored — its name cannot be written "
+                              f"on a line: {montre}", flush=True)
+                        continue
 
                     discovered_tools[full_tool_name] = _spec_from_tool_info(
                         server_name, tool_info,

@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, TYPE_CHECKING
 
 from ..debug import debug_log
 from ..llm import LLMBackend
+from .naming import is_plain_name, one_line
 
 if TYPE_CHECKING:
     from .base import Tool
@@ -255,7 +256,11 @@ def _router_summary(description: str) -> str:
     long first sentence read whole is still truthful, where the same
     sentence cut is not.
     """
-    text = (description or "").strip()
+    # Flattened first. A description is third-party text read from a
+    # list where one entry is one line, so its own line breaks would
+    # open an entry of its own — a tool that does not exist, described
+    # however the server likes.
+    text = one_line(description)
     if len(text) <= _ROUTER_SUMMARY_CHARS:
         return text
 
@@ -294,6 +299,13 @@ def _select_llm(
             continue
         catalogue_lines.append(f"- {name}: {_router_summary(tool.description)}")
     for name, spec in mcp_tools.items():
+        # Filtered here as well as at discovery, so no future source of
+        # tools can route round it. A name that cannot be written on a
+        # line writes a second one instead, offering the model a tool
+        # nobody installed.
+        if not is_plain_name(name):
+            debug_log(f"tool omitted from router catalogue, unwritable name", "planning")
+            continue
         catalogue_lines.append(f"- {name}: {_router_summary(spec.description)}")
     catalogue = "\n".join(catalogue_lines)
 
