@@ -27,7 +27,7 @@ class DummyDB:
 
 
 @pytest.mark.unit
-def test_delete_meal_success(monkeypatch):
+def test_delete_meal_success(monkeypatch, tools_unrestricted):
     db = DummyDB()
     cfg = DummyCfg()
     res = run_tool_with_retries(
@@ -116,7 +116,7 @@ def test_local_files_list_and_read(tmp_path):
 
 
 @pytest.mark.unit
-def test_local_files_write_append_delete(tmp_path):
+def test_local_files_write_append_delete(tmp_path, tools_unrestricted):
     db = DummyDB()
     cfg = DummyCfg()
     import jarvis.tools.registry as tools_mod
@@ -200,7 +200,13 @@ def test_fetch_web_page_success(monkeypatch):
             </html>
             '''
             self.text = self.content.decode()
-        
+            self.encoding = "utf-8"
+
+        # The body is streamed under a byte ceiling, so the double
+        # streams too.
+        def iter_content(self, chunk_size=8192):
+            yield self.content
+
         def raise_for_status(self):
             pass
 

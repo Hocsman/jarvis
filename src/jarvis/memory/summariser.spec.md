@@ -12,8 +12,8 @@ The summariser prompt is the only write-time defence. There is no post-process s
 
 - Input: recent conversation chunks (last 10) plus, if present, the previous summary for the same day.
 - Output: a free-form summary (≤ 200 words) and 3–5 comma-separated topic keywords.
-- Storage: one row per `(date_utc, source_app)` in `conversation_summaries`, upserted on each update.
-- Embedding: the concatenation of summary + topics is embedded and stored for vector retrieval.
+- Storage: one row per `(date_utc, source_app)` in `conversation_summaries`, updated in place on each flush. The row keeps its id for the life of the day, because the FTS index, the search join and the embedding row are all keyed on it: a row that changed id would leave its old terms behind in the index, where nothing but bm25 can see them.
+- Embedding: the concatenation of summary + topics is embedded and stored for vector retrieval, in whichever store exists — sqlite-vss when its extension loaded, the Python vector store otherwise. Both sides are gated on `db.stores_embeddings`: writing follows the same rule the reader already uses, and a query vector with nothing to compare it against is not computed at all. Gating the write on sqlite-vss alone left the fallback store built, searched on every query and never written to, so the hybrid search's semantic sixty per cent weighed nothing while the round-trip was paid.
 - LLM failure is non-fatal — the summariser returns `(None, None)` and the update is skipped entirely. Pending messages remain queued for the next cycle.
 
 ## Hygiene Rules
@@ -40,6 +40,14 @@ Unrelated topics must never be welded into one grammatical clause. No shared "an
 ## Applicability
 
 All three rules apply in any language, not only English. The prompt states this explicitly because small models otherwise assume the rule is keyed to the English phrases it names.
+
+### The summary is written in the language it was spoken in
+
+The prompt is in English and says so, then says that this decides nothing about the output: a conversation held in French is summarised in French, one held in Turkish in Turkish, and so on for languages the prompt never names. Translation is forbidden outright, because the words the user chose are part of what happened and a translated summary replaces them with the model's own. A mixed conversation follows whichever language the user spoke most, with quoted phrases left as they were said. The topics follow the summary.
+
+Without the rule the model answers in the language of its instructions, which is English. Measured on a real French-speaking machine before the rule existed: two of the ten most recent rows were in French, and one of the English ones read *"The user conversed in French with the assistant, who responded in French."*
+
+It is not a matter of style. Three readers consume these rows and none of them is indifferent: the user opens the file himself, the graph extractor turns them into stored knowledge that comes back inside a reply, and the learning step reads them to propose lines for a core file the user keeps in his own language. A summary in the wrong language hands him sentences about himself that he never said.
 
 ## LLM Rewrite Sweep
 
@@ -114,4 +122,5 @@ Live evals target the smallest supported model (gemma4:e2b) and `xfail` softly o
 ## Relationship to Other Systems
 
 - **Diary retrieval** (`engine.py`): injects retrieved summaries under a "reference only" framing, not as authoritative instructions. This partially mitigates corrupted summaries, but the primary defence is the summariser itself — see `reply.spec.md`.
+- **Diary search** (`db.py::search_hybrid`): bm25 over `summaries_fts` is the only ranking on a default install, since the vector path is gated on sqlite-vss. Start-up checks that the index holds one document per diary row and rebuilds it when it does not, saying so on standard output. An index it cannot count or cannot rebuild is announced as a failure rather than passed over: a wrongly ranked diary looks exactly like a correctly ranked one from the outside.
 - **Knowledge graph** (`graph.spec.md`): ingests summaries via `update_graph_from_dialogue()`. Graph extraction inherits whatever corruption the summary contains; hygiene at the summariser is the only place to fix this at source.

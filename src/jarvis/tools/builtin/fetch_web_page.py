@@ -7,8 +7,21 @@ from ..base import Tool, ToolContext
 from ..types import ToolExecutionResult
 
 
+# One guard, not two. `webSearch` has carried it since the tool existed;
+# this one had none, and a copy would be the one that drifts.
+from urllib.parse import urljoin
+
+from .web_search import _MAX_FETCH_BYTES, _is_public_url
+
+
 class FetchWebPageTool(Tool):
     """Tool for fetching and extracting content from web pages."""
+
+    def risk_for(self, args):
+        """Looks at the world without changing it."""
+        from ..policy import RISK_READ
+
+        return RISK_READ
 
     @property
     def name(self) -> str:
@@ -41,6 +54,22 @@ class FetchWebPageTool(Tool):
                 return ToolExecutionResult(success=False, reply_text="fetchWebPage requires a valid 'url'.")
             if not url.startswith(('http://', 'https://')):
                 url = 'https://' + url
+
+            # The URL came out of a model that has been reading the web
+            # all turn, so a page it fetched a moment ago can propose the
+            # next address. And this tool is `lecture`, so it is free by
+            # default: nothing stands between that sentence and the
+            # request except this line.
+            if not _is_public_url(url):
+                debug_log(f"fetchWebPage refused non-public {url}", "web")
+                return ToolExecutionResult(
+                    success=False,
+                    reply_text=(
+                        "That address is not on the public web, so it was not "
+                        "fetched. Tell the user plainly and do not try a "
+                        "variant of it."
+                    ),
+                )
             debug_log(f"fetchWebPage: fetching {url}", "web")
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -50,12 +79,70 @@ class FetchWebPageTool(Tool):
                 'Connection': 'keep-alive',
                 'Upgrade-Insecure-Requests': '1',
             }
+            # Redirects are followed by hand so every hop is checked: the
+            # first address can be public and the second not, which is the
+            # ordinary shape of this attack.
+            current, response = url, None
+            for _ in range(5):
+                response = requests.get(current, headers=headers, timeout=15,
+                                        allow_redirects=False)
+                # `is True` rather than truthiness: on a real response
+                # these are bools, and anything else — a stub, a mock, a
+                # library that grew a property — must read as "not a
+                # redirect" rather than sending the request round again.
+                redirige = (getattr(response, "is_redirect", False) is True
+                            or getattr(response, "is_permanent_redirect", False) is True)
+                if not redirige:
+                    break
+                suivant = response.headers.get("Location", "")
+                response.close()
+                if not suivant:
+                    break
+                suivant = urljoin(current, suivant)
+                if not _is_public_url(suivant):
+                    debug_log(f"fetchWebPage refused redirect to {suivant}", "web")
+                    return ToolExecutionResult(
+                        success=False,
+                        reply_text=(
+                            "That page redirected somewhere off the public web, "
+                            "so nothing was read. Say so plainly."
+                        ),
+                    )
+                current = suivant
+            else:
+                return ToolExecutionResult(
+                    success=False,
+                    reply_text="That page redirected too many times; nothing was read.",
+                )
+
             # ``with`` releases the connection back to the pool deterministically
             # even if BeautifulSoup or the link extraction raises midway.
-            with requests.get(url, headers=headers, timeout=15, allow_redirects=True) as response:
+            with response:
                 response.raise_for_status()
-                response_content = response.content
-                response_text = response.text
+                # Streamed under the same ceiling `webSearch` uses, and
+                # shared rather than copied for the reason `_is_public_url`
+                # was: the two tools fetch the same web with the same
+                # trust in it. `response.content` held the whole body,
+                # `response.text` held a second copy of it, and the
+                # truncation to `max_chars` only happened afterwards —
+                # measured, an endless page read 164 MB. What that costs
+                # is not this tool: the daemon holds the reminder thread
+                # and the routine runner, so an exhausted process takes
+                # promises down with it.
+                morceaux: list[bytes] = []
+                lus = 0
+                for morceau in response.iter_content(chunk_size=8192):
+                    if not morceau:
+                        continue
+                    morceaux.append(morceau)
+                    lus += len(morceau)
+                    if lus >= _MAX_FETCH_BYTES:
+                        debug_log(
+                            f"fetchWebPage: page truncated at {lus} bytes", "tools")
+                        break
+                response_content = b"".join(morceaux)
+                response_text = response_content.decode(
+                    response.encoding or "utf-8", "replace")
             try:
                 from bs4 import BeautifulSoup
                 soup = BeautifulSoup(response_content, 'html.parser')

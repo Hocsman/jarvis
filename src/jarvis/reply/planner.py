@@ -40,7 +40,24 @@ import re
 from typing import List, Optional, Sequence, Tuple
 
 from ..debug import debug_log
-from ..llm import call_llm_direct
+from ..llm import get_llm_backend
+from ..tools.naming import is_plain_name, one_line
+
+
+def call_llm_direct(*, cfg, chat_model, system_prompt, user_content,
+                    timeout_sec=10.0, thinking=False, num_ctx=4096,
+                    temperature=None):
+    """Local indirection: route the planner's chat call through the
+    backend configured by ``cfg.llm_provider``.
+
+    Kept module-level so tests can patch this single symbol to intercept
+    every planner LLM call without reaching into the backend ABC.
+    """
+    return get_llm_backend(cfg).direct(
+        chat_model, system_prompt, user_content,
+        timeout_sec=timeout_sec, thinking=thinking,
+        num_ctx=num_ctx, temperature=temperature,
+    )
 
 
 # Hard cap on plan length. Small models happily emit 10+ step plans that
@@ -150,7 +167,7 @@ def resolve_planner_model(cfg) -> str:
     override = getattr(cfg, "planner_model", "") or ""
     if override:
         return override
-    return getattr(cfg, "ollama_chat_model", "") or ""
+    return getattr(cfg, "llm_chat_model", "") or ""
 
 
 _PROMPT_TEMPLATE = (
@@ -236,7 +253,14 @@ def _build_user_message(
 ) -> str:
     parts = []
     if tools:
-        tool_lines = "\n".join(f"- {name}: {desc}" for name, desc in tools)
+        # One entry per line, and a name or description carrying a line
+        # break would write an entry of its own. The name is dropped —
+        # a tool that cannot be named cannot be called either — while
+        # the description is flattened, since prose is legitimate.
+        tool_lines = "\n".join(
+            f"- {name}: {one_line(desc)}"
+            for name, desc in tools if is_plain_name(str(name))
+        )
         parts.append(f"AVAILABLE TOOLS:\n{tool_lines}")
     else:
         parts.append("AVAILABLE TOOLS: (none — plan a direct reply)")
@@ -419,9 +443,8 @@ def plan_query(
     if not getattr(cfg, "planner_enabled", True):
         return []
 
-    base_url = getattr(cfg, "ollama_base_url", "") or ""
     model = resolve_planner_model(cfg)
-    if not base_url or not model:
+    if not model:
         return []
 
     effective_timeout = float(
@@ -435,7 +458,7 @@ def plan_query(
 
     try:
         raw = call_llm_direct(
-            base_url=base_url,
+            cfg=cfg,
             chat_model=model,
             system_prompt=system_prompt,
             user_content=user_content,
@@ -471,8 +494,9 @@ def format_plan_block(steps: Sequence[str]) -> str:
     return (
         "\nACTION PLAN for this query (your own pre-committed sub-tasks — "
         "follow them in order; if a step is already satisfied by a prior "
-        "tool result, move to the next; do NOT stop after step 1 if more "
-        "steps remain):\n"
+        "tool result or by the memory already in your system prompt, move "
+        "to the next — do not fetch again what is already in front of you; "
+        "do NOT stop after step 1 if more steps remain):\n"
         + numbered
     )
 
@@ -565,6 +589,45 @@ _PLAN_STEP_KV_RE = re.compile(
 )
 
 
+def plan_step_args(step: str) -> dict:
+    """The ``key='value'`` pairs a plan step carries, as a dict.
+
+    One parser for the step-argument shape, shared by the direct-exec
+    fast path and by the engine's check for whether a lookup has already
+    been made. Two parsers would eventually disagree about what a step
+    was asking for, and the disagreement would be invisible.
+    """
+    _, _, rest = step.strip().partition(" ")
+    args: dict = {}
+    for m in _PLAN_STEP_KV_RE.finditer(rest):
+        value = m.group("sq")
+        if value is None:
+            value = m.group("dq")
+        if value is None:
+            value = m.group("bare") or ""
+        args[m.group("key")] = value
+    return args
+
+
+def lookup_terms_of(step: str) -> str:
+    """The concrete argument values of a tool step, as one search string.
+
+    The planner composes arguments against the user's intent with
+    pronouns resolved to literal entity names (rules 5 and 7), because
+    tools never see the dialogue. That makes them a better description
+    of the subject than the raw utterance — and they exist on a turn
+    where the plan never asked for memory at all.
+
+    A step carrying an angle-bracket placeholder describes something a
+    later step will reveal, so it yields nothing: searching for the
+    literal placeholder text would match the wrong thing rather than
+    nothing, which is worse.
+    """
+    if "<" in step and ">" in step:
+        return ""
+    return " ".join(v for v in plan_step_args(step).values() if v)
+
+
 def _parse_plan_step_concrete(
     next_step_text: str,
     allowed_names: Sequence[str],
@@ -601,15 +664,7 @@ def _parse_plan_step_concrete(
     # "omit optional arguments" rule, dispatch with empty args.
     if not rest_stripped:
         return name, {}
-    args: dict = {}
-    for m in _PLAN_STEP_KV_RE.finditer(rest):
-        key = m.group("key")
-        value = m.group("sq")
-        if value is None:
-            value = m.group("dq")
-        if value is None:
-            value = m.group("bare") or ""
-        args[key] = value
+    args = plan_step_args(stripped)
     if not args:
         # Rest has content but no parseable key=value pairs — the step is
         # prose-shaped (e.g. `webSearch for the director's latest film`).
@@ -673,9 +728,17 @@ def resolve_next_tool_call(
             prop_keys = set()
             keys = ""
         allowed_props[str(name)] = prop_keys
-        desc = (fn.get("description") or "").strip().splitlines()
-        first = desc[0] if desc else ""
-        schema_lines.append(f"- {name} (args: {keys}) — {first[:120]}")
+        if not is_plain_name(str(name)):
+            # Same rule as the plan catalogue above: this list is read one
+            # entry per line, so a name carrying a break offers the model a
+            # tool nobody installed.
+            debug_log("tool omitted from resolver schema, unwritable name", "planning")
+            allowed_names.pop()
+            allowed_props.pop(str(name), None)
+            continue
+        schema_lines.append(
+            f"- {name} (args: {keys}) — {one_line(fn.get('description') or '', 120)}"
+        )
 
     # Fast path: fully-concrete plan step parses deterministically.
     fast = _parse_plan_step_concrete(
@@ -689,9 +752,8 @@ def resolve_next_tool_call(
         )
         return fast
 
-    base_url = getattr(cfg, "ollama_base_url", "") or ""
     model = resolve_planner_model(cfg)
-    if not base_url or not model:
+    if not model:
         return None
 
     effective_timeout = float(
@@ -710,7 +772,7 @@ def resolve_next_tool_call(
 
     try:
         raw = call_llm_direct(
-            base_url=base_url,
+            cfg=cfg,
             chat_model=model,
             system_prompt=_STEP_RESOLVER_SYSTEM,
             user_content=user_content,

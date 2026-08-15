@@ -251,3 +251,11 @@ Regression tests assert:
 - JS rendering — we fetch raw HTML only. SPA-heavy pages may return
   nothing useful; the cascade handles this by trying the next result.
 - User-agent rotation — a single desktop Chrome UA is used.
+
+## The guard belongs to both tools
+
+`_is_public_url` lives here and `fetchWebPage` imports it rather than carrying a copy: two copies drift, and the one that drifts is the one nobody is looking at. `fetchWebPage` had no copy at all until it was noticed, and reaching `http://127.0.0.1:11434/api/tags` on the developer's own machine returned his model list into the agentic loop with `success=True`.
+
+Both tools follow redirects by hand, one hop at a time, re-checking each: the first address can be public and the second not, which is the ordinary shape of the attack. The redirect test reads `is True` rather than truthiness, so a stub or a mock is treated as *not* a redirect instead of sending the request round again.
+
+This matters more for `fetchWebPage` than for `webSearch`. It is `lecture`, so free by default — no card, no question — and the URL it is handed comes out of a model that has been reading the web all turn, so a page it fetched a moment ago can propose the next address.

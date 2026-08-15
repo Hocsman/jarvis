@@ -12,7 +12,7 @@ assistant pipeline (no wake words, intent judge, profiles, or TTS).
 |--------------------------------|--------|------------------------------------------------|-------------------------------------------------|
 | `dictation_enabled`           | bool   | `true`                                         | Master switch for the feature                   |
 | `dictation_hotkey`            | string | Win: `"ctrl+cmd"`, macOS/Linux: `"ctrl+alt"`   | Hold-to-record hotkey combination               |
-| `dictation_filler_removal`    | bool   | `false`                                        | LLM-based filler word removal via Ollama        |
+| `dictation_filler_removal`    | bool   | `false`                                        | LLM filler word removal, always on the machine  |
 | `dictation_custom_dictionary` | list   | `[]`                                           | Custom replacements in `"wrong -> right"` format|
 
 Defaults are aligned with WisprFlow. Modifier-only combos are supported
@@ -56,9 +56,11 @@ After transcription, text passes through these stages in order:
 
 1. **Custom dictionary** — case-insensitive whole-word regex replacements
    from `dictation_custom_dictionary`. Each entry is `"wrong -> right"`.
+**Dictation never leaves the machine.** The cleanup pass is pinned to the local backend rather than following `llm_provider`, unlike the four contexts that read his own sentences and honour a pin. Those carry one sentence he addressed to the assistant; this carries everything he dictates, all day, into applications that have nothing to do with her. Nothing local answering costs the cleanup and nothing else: the raw transcript is what comes back, as it already does for a timeout or an unparseable reply.
+
 2. **LLM filler removal** (optional) — when `dictation_filler_removal` is
-   enabled, sends the text to the local Ollama instance (same model as the
-   assistant) with a prompt to remove filler words (um, uh, like, you know,
+   enabled, sends the text to the local backend (same model as the
+   assistant), whatever `llm_provider` is set to with a prompt to remove filler words (um, uh, like, you know,
    etc.) while preserving meaning. Uses a 5-second timeout; falls back to the
    unprocessed text on failure.
 

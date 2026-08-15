@@ -46,3 +46,7 @@ The planner is an LLM call and runs once per turn regardless. Adding "is the hot
 ## Failure mode
 
 `should_recall()` returns `True` on every exception path. The gate cannot make a turn worse by failing — at most it stops being an optimisation.
+
+## What the gate does not shut
+
+The gate short-circuits the memory extractor (LLM #4) and, through it, the diary search. It does not shut the graph. Reading the graph costs a local `LIKE` scan, so there is nothing to save by skipping it, and the plan's own arguments can open it on a turn where the extractor never ran.

@@ -97,19 +97,33 @@ class TestGreetingNoToolsLive:
 
     @pytest.mark.eval
     @requires_judge_llm
-    @pytest.mark.parametrize("query,should_use_tools", [
-        pytest.param("always use Celsius when telling me temperatures", False, id="Instruction: use Celsius"),
-        pytest.param("be more brief in your responses", False, id="Instruction: be more brief"),
+    @pytest.mark.parametrize("query", [
+        pytest.param("always use Celsius when telling me temperatures", id="Instruction: use Celsius"),
+        pytest.param("be more brief in your responses", id="Instruction: be more brief"),
     ])
-    def test_user_instructions_no_tools_live(
+    def test_a_standing_instruction_reaches_for_remember_and_nothing_else(
         self,
         query: str,
-        should_use_tools: bool,
         mock_config,
         eval_db,
         eval_dialogue_memory
     ):
-        """Live test: user instructions about behaviour should not trigger tool calls."""
+        """A standing instruction is written down, and nothing else happens.
+
+        This case used to demand no tools at all, and it was right when
+        it was written: there was nowhere to put a standing instruction,
+        so calling anything was waste. The core changed that. "Always use
+        Celsius" belongs in `regles.md`, and answering "noted" without
+        writing it down saves nothing — which is exactly what
+        `evals/test_remember_tool_is_called.py` pins, on the same shape
+        of sentence, in the opposite direction. Two evals were requiring
+        opposite behaviour of the same utterance, and this one had been
+        red ever since.
+
+        What the file is actually for survives intact: not reaching for
+        tools it does not need. `remember` is needed here; the weather,
+        the web and the screen are not.
+        """
         from jarvis.reply.engine import run_reply_engine
         from helpers import JUDGE_MODEL
 
@@ -133,7 +147,23 @@ class TestGreetingNoToolsLive:
         print(f"  Response: {(response or '')[:100]}...")
         print(f"  Model size: {'small' if is_small else 'large'}")
 
-        _assert_no_tools(capture, query, is_small, JUDGE_MODEL)
+        appeles = capture.tool_names()
+        if "remember" not in appeles:
+            message = (
+                f"A standing instruction was not written down for {query!r}. "
+                f"Answering 'noted' and storing nothing means the next "
+                f"conversation has never heard of it. Called: {appeles or 'none'}"
+            )
+            if is_small:
+                pytest.xfail(f"Small model {JUDGE_MODEL}: {message}")
+            pytest.fail(message)
+
+        de_trop = [t for t in appeles if t not in ("remember", "stop")]
+        assert not de_trop, (
+            f"{de_trop} were called for {query!r}. Writing the instruction "
+            f"down is the whole job — the weather, the web and the screen "
+            f"have nothing to do with it."
+        )
 
     @pytest.mark.eval
     @requires_judge_llm

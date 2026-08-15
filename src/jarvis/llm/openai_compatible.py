@@ -85,9 +85,31 @@ def _normalise_response(data: Dict[str, Any]) -> Dict[str, Any]:
 class OpenAICompatibleBackend(LLMBackend):
     """:class:`LLMBackend` implementation for OpenAI-compatible servers."""
 
-    def __init__(self, base_url: str, api_key: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: Optional[str] = None,
+        extra_body: Optional[Dict[str, Any]] = None,
+    ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key or None
+        # Provider-specific request fields merged into every chat payload
+        # (e.g. OpenRouter's ``{"provider": {"sort": "throughput"}}`` to
+        # pin the fastest upstream provider for a model served by several).
+        # These are non-standard extensions to the OpenAI shape, so they're
+        # opt-in via config rather than baked in. Never overrides the keys
+        # the backend sets itself (model / messages / stream).
+        self._extra_body: Dict[str, Any] = dict(extra_body or {})
+        # One persistent HTTP session per backend: keeps the TCP + TLS
+        # connection to the provider alive across calls (HTTP keep-alive)
+        # so each request skips the handshake. On a remote cloud endpoint
+        # that handshake is a large share of a short request's latency.
+        self._session = requests.Session()
+
+    def _apply_extra_body(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        for key, value in self._extra_body.items():
+            payload.setdefault(key, value)
+        return payload
 
     @property
     def base_url(self) -> str:
@@ -110,6 +132,7 @@ class OpenAICompatibleBackend(LLMBackend):
         thinking: bool = False,
         num_ctx: int = 4096,
         temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ) -> Optional[str]:
         # ``num_ctx`` and ``thinking`` have no equivalent in the OpenAI
         # shape; servers that need a fixed context window configure it
@@ -127,11 +150,13 @@ class OpenAICompatibleBackend(LLMBackend):
         }
         if temperature is not None:
             payload["temperature"] = temperature
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
 
         try:
-            with requests.post(
+            with self._session.post(
                 f"{self._base_url}/chat/completions",
-                json=payload,
+                json=self._apply_extra_body(payload),
                 headers=self._headers(),
                 timeout=timeout_sec,
             ) as resp:
@@ -151,6 +176,19 @@ class OpenAICompatibleBackend(LLMBackend):
                 )
         except requests.exceptions.Timeout:
             debug_log(f"OpenAICompatibleBackend.direct: timeout after {timeout_sec}s", "llm")
+            return None
+        except requests.exceptions.HTTPError as e:
+            body = ""
+            if e.response is not None:
+                try:
+                    body = e.response.text[:500]
+                except Exception:
+                    body = ""
+            status = e.response.status_code if e.response is not None else "?"
+            debug_log(
+                f"OpenAICompatibleBackend.direct: HTTP {status} body: {body}",
+                "llm",
+            )
             return None
         except Exception as e:
             debug_log(f"OpenAICompatibleBackend.direct: request failed — {e}", "llm")
@@ -178,9 +216,9 @@ class OpenAICompatibleBackend(LLMBackend):
         }
 
         try:
-            with requests.post(
+            with self._session.post(
                 f"{self._base_url}/chat/completions",
-                json=payload,
+                json=self._apply_extra_body(payload),
                 headers=self._headers(),
                 timeout=timeout_sec,
                 stream=True,
@@ -221,6 +259,80 @@ class OpenAICompatibleBackend(LLMBackend):
         except Exception:
             return None
 
+    def _consume_chat_stream(
+        self,
+        resp: Any,
+        on_token: Callable[[str], None],
+    ) -> Dict[str, Any]:
+        """Reassemble a streamed chat completion into the buffered shape.
+
+        Content deltas are forwarded to ``on_token`` as they arrive and also
+        accumulated; tool-call deltas are keyed by ``index`` and their
+        ``arguments`` fragments concatenated (a single call's JSON arrives
+        split across chunks). The result is returned in the server's
+        non-streaming ``{"choices": [{"message": ...}]}`` shape so the same
+        :func:`_normalise_response` handles it — callers cannot tell the two
+        paths apart, which keeps the reply engine's tool loop unchanged.
+
+        A raising ``on_token`` never costs the reply: UI errors are swallowed
+        so the fully accumulated message is still returned.
+        """
+        content: List[str] = []
+        # index -> partial tool call (arguments accumulated as a string)
+        tool_calls: Dict[int, Dict[str, Any]] = {}
+
+        for raw in resp.iter_lines():
+            if not raw:
+                continue
+            line = raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else raw
+            if not line.startswith("data:"):
+                continue  # SSE comments (``: ping``) and unrelated lines
+            payload_str = line[len("data:"):].strip()
+            if payload_str == "[DONE]":
+                break
+            try:
+                chunk = json.loads(payload_str)
+            except json.JSONDecodeError:
+                continue
+            choices = chunk.get("choices") if isinstance(chunk, dict) else None
+            if not isinstance(choices, list) or not choices:
+                continue
+            delta = choices[0].get("delta") if isinstance(choices[0], dict) else None
+            if not isinstance(delta, dict):
+                continue
+
+            text = delta.get("content")
+            if isinstance(text, str) and text:
+                content.append(text)
+                try:
+                    on_token(text)
+                except Exception as e:
+                    debug_log(f"OpenAICompatibleBackend: on_token raised — {e}", "llm")
+
+            for tc in delta.get("tool_calls") or []:
+                if not isinstance(tc, dict):
+                    continue
+                idx = tc.get("index", 0)
+                slot = tool_calls.setdefault(
+                    idx, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
+                )
+                if tc.get("id"):
+                    slot["id"] = tc["id"]
+                if tc.get("type"):
+                    slot["type"] = tc["type"]
+                func = tc.get("function")
+                if isinstance(func, dict):
+                    if func.get("name"):
+                        slot["function"]["name"] = func["name"]
+                    args = func.get("arguments")
+                    if isinstance(args, str):
+                        slot["function"]["arguments"] += args
+
+        message: Dict[str, Any] = {"role": "assistant", "content": "".join(content)}
+        if tool_calls:
+            message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
+        return {"choices": [{"message": message}]}
+
     def chat(
         self,
         chat_model: str,
@@ -229,46 +341,91 @@ class OpenAICompatibleBackend(LLMBackend):
         extra_options: Optional[Dict[str, Any]] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         thinking: bool = False,
+        on_token: Optional[Callable[[str], None]] = None,
     ) -> Optional[Dict[str, Any]]:
+        # Streaming is opt-in per call: it exists so a UI can render the reply
+        # while it generates. The return value is identical either way.
+        streaming = on_token is not None
         payload: Dict[str, Any] = {
             "model": chat_model,
             "messages": messages,
-            "stream": False,
+            "stream": streaming,
         }
         if extra_options and isinstance(extra_options, dict):
             # ``temperature``, ``max_tokens``, ``top_p`` etc. live at the
             # payload root in the OpenAI shape, not under an ``options``
-            # nest. Merge shallowly so callers can override any field.
-            payload.update(extra_options)
+            # nest. Ollama-only knobs (``keep_alive``, ``num_ctx``,
+            # ``num_predict``, ``think``) are silently dropped — they have
+            # no equivalent in the OpenAI shape and would 400 against most
+            # servers. Sampling fields nested under ``options`` are lifted
+            # to the payload root.
+            for key, value in extra_options.items():
+                if key in {"keep_alive", "num_ctx", "num_predict", "think"}:
+                    continue
+                if key == "options" and isinstance(value, dict):
+                    for inner_key, inner_value in value.items():
+                        if inner_key in {"num_ctx", "num_predict"}:
+                            continue
+                        payload[inner_key] = inner_value
+                else:
+                    payload[key] = value
         if tools and isinstance(tools, list) and len(tools) > 0:
             payload["tools"] = tools
 
         try:
-            with requests.post(
+            with self._session.post(
                 f"{self._base_url}/chat/completions",
-                json=payload,
+                json=self._apply_extra_body(payload),
                 headers=self._headers(),
                 timeout=timeout_sec,
+                stream=streaming,
             ) as resp:
                 resp.raise_for_status()
-                data = resp.json()
+                data = (
+                    self._consume_chat_stream(resp, on_token)
+                    if streaming else resp.json()
+                )
             if isinstance(data, dict):
                 return _normalise_response(data)
         except requests.exceptions.Timeout:
             print("  ⏱️ LLM request timed out", flush=True)
             return None
-        except requests.exceptions.ConnectionError as e:
-            print(f"  ❌ LLM connection error: {e}", flush=True)
-            return None
+        except requests.exceptions.ConnectionError:
+            # ConnectionError messages embed the configured URL via the
+            # underlying urllib3 exception, which can leak account-bearing
+            # query strings to stdout. Print only the failure mode and
+            # bubble the exception so callers (e.g. the intent judge) can
+            # distinguish "server unreachable" from a transient HTTP error.
+            print("  ❌ LLM connection error", flush=True)
+            raise
         except requests.exceptions.HTTPError as e:
             if e.response is not None and e.response.status_code == 400 and tools:
                 raise ToolsNotSupportedError(
                     f"Model {chat_model!r} returned HTTP 400 — native tools API not supported"
                 )
-            print(f"  ❌ LLM HTTP error: {e}", flush=True)
+            # ``str(e)`` includes "for url: <full URL>" — keep the status code
+            # for diagnosis and drop the URL.
+            status = e.response.status_code if e.response is not None else "?"
+            print(f"  ❌ LLM HTTP error (status {status})", flush=True)
+            # The response BODY is the provider's own error message (e.g.
+            # "model X requires parameter Y", a rejected tool schema, etc.).
+            # It carries no URL/token, so it's safe to surface for diagnosis
+            # — without it a 400 is undebuggable.
+            if e.response is not None:
+                try:
+                    debug_log(
+                        f"OpenAICompatibleBackend.chat: HTTP {status} body: "
+                        f"{e.response.text[:600]}",
+                        "llm",
+                    )
+                except Exception:
+                    pass
             return None
         except Exception as e:
-            print(f"  ❌ LLM error: {e}", flush=True)
+            # Generic exception messages can carry whatever the caller embedded
+            # (URLs, tokens). Print only the exception class so the user knows
+            # *something* failed without leaking what.
+            print(f"  ❌ LLM error ({type(e).__name__})", flush=True)
             return None
 
         return None
@@ -282,7 +439,7 @@ class OpenAICompatibleBackend(LLMBackend):
         timeout_sec: float = 15.0,
     ) -> Optional[List[float]]:
         try:
-            resp = requests.post(
+            resp = self._session.post(
                 f"{self._base_url}/embeddings",
                 json={"model": model, "input": text},
                 headers=self._headers(),
@@ -301,7 +458,7 @@ class OpenAICompatibleBackend(LLMBackend):
 
     def list_models(self, timeout_sec: float = 5.0) -> List[str]:
         try:
-            resp = requests.get(
+            resp = self._session.get(
                 f"{self._base_url}/models",
                 headers=self._headers(),
                 timeout=timeout_sec,
@@ -318,3 +475,42 @@ class OpenAICompatibleBackend(LLMBackend):
             return names
         except Exception:
             return []
+
+    def warm_up(
+        self,
+        model: str,
+        timeout_sec: float = 60.0,
+        keep_alive: str = "30m",
+    ) -> bool:
+        """Establish the persistent session's connection and warm the
+        provider ahead of the first real query.
+
+        There's nothing to page into memory on a remote endpoint, but the
+        first request to a cold connection pays the TLS handshake and the
+        provider's routing/cold-start — on a cloud endpoint that's several
+        seconds, the dominant share of the first reply's latency. Firing
+        one minimal (1-token) request at startup absorbs that cost up front
+        so the user's first query lands on a warm path. The session is
+        reused (the backend is cached), so the warm connection persists.
+        """
+        if not model:
+            return False
+        try:
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 1,
+                "stream": False,
+            }
+            with self._session.post(
+                f"{self._base_url}/chat/completions",
+                json=self._apply_extra_body(payload),
+                headers=self._headers(),
+                timeout=timeout_sec,
+            ) as resp:
+                resp.raise_for_status()
+                resp.json()
+            return True
+        except Exception as e:
+            debug_log(f"OpenAICompatibleBackend.warm_up: {e}", "llm")
+            return False

@@ -12,6 +12,17 @@ from ..types import ToolExecutionResult
 class ScreenshotTool(Tool):
     """Tool for capturing screenshots and performing OCR."""
 
+    # `screencapture -i` waits for a rectangle to be dragged, with no
+    # timeout. Unattended it waits forever, and the routine runner's
+    # single slot with it.
+    needs_a_human = True
+
+    def risk_for(self, args):
+        """Looks at the world without changing it."""
+        from ..policy import RISK_READ
+
+        return RISK_READ
+
     @property
     def name(self) -> str:
         return "screenshot"

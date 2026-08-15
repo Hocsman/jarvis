@@ -48,7 +48,11 @@ class MockConfig:
     llm_provider: str = "ollama"
     llm_base_url: str = "http://localhost:11434"
     llm_api_key: str = ""
-    llm_chat_model: str = "gemma4:e2b"
+    # ``llm_chat_model`` defaults to empty so tests that pin
+    # ``ollama_chat_model = "gpt-oss:20b"`` to exercise the LARGE-model
+    # branch get the legacy alias promoted into ``llm_chat_model`` by
+    # ``__post_init__`` — same shape ``load_settings()`` produces.
+    llm_chat_model: str = ""
     embedding_provider: str = ""
     embedding_base_url: str = ""
     embedding_api_key: str = ""
@@ -95,6 +99,35 @@ class MockConfig:
     mcps: Dict[str, Any] = field(default_factory=dict)
     use_stdin: bool = True
 
+    def __post_init__(self) -> None:
+        # Mirror ``load_settings``: when the provider-aware fields are
+        # left empty, promote the legacy ``ollama_*`` aliases. Tests can
+        # set either pair and end up with consistent reads on either side.
+        if not self.llm_chat_model:
+            self.llm_chat_model = self.ollama_chat_model
+        if not self.llm_base_url:
+            self.llm_base_url = self.ollama_base_url
+        if not self.embedding_model:
+            self.embedding_model = self.ollama_embed_model
+
+
+@pytest.fixture(autouse=True)
+def _isolate_user_config_path(tmp_path_factory, monkeypatch):
+    """Redirect ``default_config_path`` to a per-session tempfile so a test
+    that calls ``load_settings`` (or any other code path that resolves the
+    user's config) cannot read or overwrite ``~/.config/jarvis/config.json``.
+
+    Tests that need to exercise the loader against specific JSON should
+    monkey-patch ``_load_json`` (and ``_save_json`` if the migration would
+    trigger a write) directly. This fixture is a belt-and-braces guard so
+    a half-mocked test cannot reach the real config file.
+    """
+    sandbox = tmp_path_factory.mktemp("jarvis_config_sandbox")
+    monkeypatch.setattr(
+        "jarvis.config.default_config_path", lambda: sandbox / "config.json"
+    )
+    monkeypatch.setenv("JARVIS_CONFIG_PATH", str(sandbox / "config.json"))
+
 
 @pytest.fixture
 def mock_config():
@@ -132,3 +165,35 @@ def qapp():
         app = QApplication([])
     yield app
 
+@pytest.fixture
+def tools_unrestricted(monkeypatch):
+    """Run tool calls with the policy gate standing aside.
+
+    For tests that exercise what a tool DOES, not whether it is allowed
+    to. Every call goes through ``run_tool_with_retries``, which now
+    consults the user's policy first, so a test about `localFiles`
+    deleting a file would otherwise be a test about the gate refusing it.
+
+    The gate has its own suite in ``test_tool_gate.py``; this fixture
+    makes the separation explicit at each call site rather than hiding
+    the gate from the whole suite with an autouse override.
+    """
+    class _AllowAll:
+        def verdict(self, name, risk):
+            return "libre"
+
+    # The suite imports the registry both as ``jarvis.tools.registry`` and
+    # as ``src.jarvis.tools.registry``, which are two distinct module
+    # objects. Patching one leaves the other gated, so the fixture would
+    # appear to do nothing in half the tests that ask for it.
+    import importlib
+
+    patched = 0
+    for path in ("jarvis.tools.registry", "src.jarvis.tools.registry"):
+        try:
+            module = importlib.import_module(path)
+        except ImportError:
+            continue
+        monkeypatch.setattr(module, "load_tool_policy", lambda cfg: _AllowAll())
+        patched += 1
+    assert patched, "neither registry module could be imported"

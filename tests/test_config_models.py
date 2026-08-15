@@ -94,6 +94,27 @@ class TestDefaultConfigUsesModelConstant:
         assert model in SUPPORTED_CHAT_MODELS
 
 
+class TestLowPowerModeConfig:
+    """Tests for the low-power runtime setting."""
+
+    def test_default_config_keeps_low_power_mode_off(self):
+        """The default runtime favours warm responses over energy saving."""
+        config = get_default_config()
+        assert config["low_power_mode"] is False
+
+    def test_settings_dataclass_round_trips_low_power_mode(self, tmp_path, monkeypatch):
+        """A config override should parse into Settings.low_power_mode."""
+        import json as _json
+        from jarvis.config import load_settings
+
+        cfg_path = tmp_path / "config.json"
+        cfg_path.write_text(_json.dumps({"low_power_mode": True}))
+        monkeypatch.setenv("JARVIS_CONFIG_PATH", str(cfg_path))
+
+        settings = load_settings()
+        assert settings.low_power_mode is True
+
+
 class TestWhisperHallucinationFilterDefaults:
     """Pin defaults for the Whisper hallucination-filter thresholds.
 

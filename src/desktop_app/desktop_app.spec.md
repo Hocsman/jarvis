@@ -22,6 +22,7 @@ src/desktop_app/
 ├── face_widget.py       # Animated face visualization
 ├── themes.py            # Qt stylesheets and color palette
 ├── diary_dialog.py      # End-of-session diary update dialog
+├── chat_window.py       # Text chat interface (see chat_window.spec.md)
 ├── memory_viewer.py     # Flask-based memory browser
 ├── updater.py           # Update checking logic
 ├── update_dialog.py     # Update notification dialogs
@@ -44,8 +45,10 @@ flowchart TD
     B -->|OK| C[Show Splash Screen]
     C --> D{Setup Completed Before?}
     D -->|No| E[Show Setup Wizard]
-    D -->|Yes| F{Ollama Running?}
-    E --> F
+    D -->|Yes| PR{Ollama in use?}
+    E --> PR
+    PR -->|No, OpenAI-compatible| M[Initialize Tray]
+    PR -->|Yes| F{Ollama Running?}
     F -->|No| G[Auto-Start Ollama]
     G --> H[Wait for Ollama]
     H --> I{Started?}
@@ -64,9 +67,10 @@ flowchart TD
 ### Key Startup Features
 
 1. **Splash Screen**: Shows immediately to provide visual feedback while loading
-2. **Ollama Auto-Start**: If Ollama isn't running, automatically starts it (up to 15s wait)
-3. **Single Instance Lock**: Prevents multiple copies from running simultaneously. If another instance is detected, shows a dialog offering to close the existing instance and start fresh.
-4. **Crash Detection**: Detects previous crashes and offers to submit bug reports
+2. **Provider-aware Ollama gating** (`_ollama_runtime_flags` in `app.py`): The Ollama server-start and model-verification steps run only when a local provider actually uses Ollama. A pure OpenAI-compatible setup (chat and embeddings both remote) skips them entirely. `get_required_models()` is provider-aware, so model verification pulls exactly the models that run locally: chat + intent-judge when chat is on Ollama, and the embedding model when embeddings are on Ollama. When chat is on Ollama, a missing model opens the setup wizard; when only embeddings are local (remote chat), a missing embedding model surfaces a clear non-blocking instruction (memory search falls back to keyword matching until it is pulled). The unsupported-chat-model check runs only on the Ollama chat path. `should_show_setup_wizard()` returns False for an OpenAI-compatible chat provider.
+3. **Ollama Auto-Start**: When Ollama is in use and not running, automatically starts it (up to 15s wait). The desktop app records ownership only for an Ollama runtime it launches in this session. On app exit, it stops that owned runtime and leaves any pre-existing user-managed Ollama process running.
+4. **Single Instance Lock**: Prevents multiple copies from running simultaneously. If another instance is detected, shows a dialog offering to close the existing instance and start fresh.
+5. **Crash Detection**: Detects previous crashes and offers to submit bug reports
 
 ## Main Components
 
@@ -78,6 +82,8 @@ The central controller that manages:
 - **Daemon lifecycle** (start/stop the Jarvis voice assistant)
 - **Window management** (log viewer, memory viewer, face window)
 - **Update checking** on startup and on-demand
+- **Runtime diagnostics** (`🩺 Runtime Status`): shows whether the assistant is listening, the daemon mode/PID, whether Low Power Mode is active, whether Ollama is needed/running, whether Jarvis owns the current Ollama runtime, active chat/embedding models, and configured MCP server count. The dialog is informational and never starts or stops services.
+- **Fast stop** (`⚡ Stop Now (Skip Diary)`): available only while the daemon is running. It stops the voice daemon without the final shutdown diary LLM pass so local model resources are released quickly. Normal `⏸️ Stop Listening` still performs the shutdown diary save.
 
 ### Windows
 
@@ -89,6 +95,7 @@ The central controller that manages:
 | **SettingsWindow** | Auto-generated config editor with tabbed categories |
 | **SetupWizard** | First-run configuration (Ollama, models, profile) |
 | **DictationHistoryWindow** | Scrollable list of past dictations with copy/delete/clear actions |
+| **ChatWindow** | Text chat interface alongside voice; shares one conversation with the voice path and is enabled only while the daemon is running (see `chat_window.spec.md`) |
 
 ### Tray Menu: GPU Library Recovery (Windows)
 
@@ -156,6 +163,7 @@ The desktop app registers callbacks with the daemon for:
 
 - **Diary updates**: Shows DiaryUpdateDialog when session ends
 - **Clean shutdown**: Ensures graceful exit with diary save
+- **Fast shutdown**: Calls `request_stop(skip_diary_update=True)` in bundled mode, or sends `SHUTDOWN_SKIP_DIARY` over daemon stdin in subprocess mode. This skips only the final forced diary update; dictation, voice, TTS, MCP runtime, and database cleanup still run.
 
 #### Bundled Mode (QThread)
 
@@ -168,9 +176,12 @@ In bundled mode, the daemon runs in the same process, so callbacks can be set di
 #### Subprocess Mode (Development)
 
 In subprocess mode, the daemon runs as a separate process. IPC is achieved via stdout:
-- Daemon emits JSON events prefixed with `__DIARY__:` (e.g., `__DIARY__:{"type":"token","data":"Hello"}`)
+- **Diary updates**: Daemon emits JSON events prefixed with `__DIARY__:` (e.g., `__DIARY__:{"type":"token","data":"Hello"}`)
+- **Chat events**: Daemon emits `__CHAT__:` events (start/complete/busy); the desktop app sends queries in via `__CHAT_QUERY__:` lines on the daemon's stdin (see `chat_window.spec.md`)
 - Desktop app intercepts these lines from the log stream
 - DiaryUpdateDialog's `process_log_line()` parses and emits signals
+- Chat IPC lines are marshalled onto the Qt main thread via `ChatIpcSignals`, then `_on_chat_ipc_line()` forwards them to `ChatWindow.process_ipc_line()`
+- When the daemon starts, stops, or a subprocess exits unexpectedly, the tray updates any open ChatWindow lifecycle banner and clears or refreshes its subprocess stdin submit function so the window never writes to a dead pipe.
 - Same UI experience as bundled mode
 
 ## Theme System
@@ -243,12 +254,18 @@ sequenceDiagram
 
 ## Memory Viewer
 
-A Flask-based web interface for browsing conversation history:
+A Flask-based web interface for browsing what the assistant holds:
 
 - Runs on `localhost:5050`
 - **Bundled mode**: Flask runs in a daemon thread
 - **Development mode**: Flask runs as subprocess
 - Opens in embedded QWebEngineView or system browser (macOS fallback)
+
+Four tabs: **Diary** (conversation summaries), **Core**, **Knowledge** (the graph), **Meals**.
+
+The Core tab is the surface for the user's own memory files (see `src/jarvis/memory/core.spec.md`). Each file shows its entries as the assistant reads them, retired ones struck through with the date and reason still legible, and its path so it can be found outside the app. Editing swaps to the raw Markdown and saves it back byte for byte: the file belongs to the user, and an editor that reformats what they typed, or drops a line its parser did not recognise, is one they stop trusting with the thing it holds.
+
+The Knowledge tab hides the `user` and `directives` branches once they are empty. The core took them over, so a tab whose contents reach replies must not invite corrections to a line nothing consults. They stay visible while they still hold text, which is the window before the daemon next starts and hands it over.
 
 ## Error Handling
 

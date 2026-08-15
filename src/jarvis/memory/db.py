@@ -4,9 +4,12 @@ import re
 from typing import Sequence, Optional
 from pathlib import Path
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from ..debug import debug_log
+
+# Bumped whenever the shape changes, so a later version can migrate.
+_SCHEMA_VERSION = 5
 
 _SCHEMA_SQL = """
 PRAGMA journal_mode=WAL;
@@ -29,6 +32,59 @@ CREATE TABLE IF NOT EXISTS meals (
   micros_json   TEXT,
   confidence    REAL
 );
+
+-- What the assistant DID, one row per tool call. Never what it SAW:
+-- there is deliberately no column for tool output. A ledger that kept
+-- results would accumulate the contents of every page fetched and every
+-- file read, which is a different and far larger thing than a list of
+-- actions, and it would put that content somewhere the user reads
+-- casually.
+CREATE TABLE IF NOT EXISTS action_log (
+  id          INTEGER PRIMARY KEY,
+  ts_utc      TEXT NOT NULL,
+  origin      TEXT,           -- chat, voice, or an unattended runner later
+  tool        TEXT NOT NULL,
+  args        TEXT,           -- redacted JSON
+  risk        TEXT NOT NULL,  -- lecture / action / destructif
+  verdict     TEXT NOT NULL,  -- libre / demande / jamais
+  outcome     TEXT NOT NULL,  -- ok / échec / refusé / demandé / décliné / expiré
+  duration_ms INTEGER,
+  query       TEXT,           -- redacted, so a row can be placed in context
+  request_id  TEXT            -- ties a question to whatever settled it
+);
+
+CREATE INDEX IF NOT EXISTS idx_action_log_ts ON action_log(ts_utc DESC);
+
+-- Promises: things to say at a time, kept across restarts.
+--
+-- The one part of the assistant that MUST reach disk. A pending
+-- confirmation deliberately never does, because an approval that
+-- outlives the process was given without the context that produced it.
+-- A reminder is the opposite: if a restart loses it, it was never a
+-- reminder.
+--
+-- `kind` and `payload` carry defaults and exist so that recurring
+-- routines — the next thing built on this — need no ALTER. `due_utc` is
+-- what fires it; `due_local` and `tz` are what she reads back, kept
+-- alongside so a timezone change cannot silently rewrite either.
+CREATE TABLE IF NOT EXISTS rappels (
+  id           TEXT PRIMARY KEY,   -- also the action_log request_id
+  created_utc  TEXT NOT NULL,
+  origin       TEXT,               -- voix / chat / fichier
+  kind         TEXT NOT NULL DEFAULT 'rappel',
+  texte        TEXT NOT NULL,      -- said aloud, so kept in the user's words
+  payload      TEXT NOT NULL DEFAULT '{}',
+  due_utc      TEXT NOT NULL,
+  due_local    TEXT NOT NULL,
+  tz           TEXT NOT NULL,
+  query        TEXT,               -- redacted, like the ledger's
+  etat         TEXT NOT NULL,      -- prévu / fini / annulé
+  attempts     INTEGER NOT NULL DEFAULT 0,
+  last_try_utc TEXT,
+  said_utc     TEXT                -- non-NULL once actually spoken
+);
+
+CREATE INDEX IF NOT EXISTS idx_rappels_due ON rappels(etat, due_utc);
 
 -- Conversation summaries for diary/memory system
 CREATE TABLE IF NOT EXISTS conversation_summaries (
@@ -68,6 +124,16 @@ CREATE VIRTUAL TABLE IF NOT EXISTS embeddings USING vss0(
   vec FLOAT[768]
 );
 
+CREATE TABLE IF NOT EXISTS appris_parole (
+  date_utc TEXT PRIMARY KEY
+);
+
+CREATE TABLE IF NOT EXISTS journal_lu (
+  date_utc TEXT PRIMARY KEY,
+  digest   TEXT NOT NULL,
+  ts_utc   TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS summary_vec (
   summary_id INTEGER PRIMARY KEY REFERENCES conversation_summaries(id) ON DELETE CASCADE,
   emb_id     INTEGER NOT NULL REFERENCES embeddings(id)
@@ -76,18 +142,89 @@ CREATE TABLE IF NOT EXISTS summary_vec (
 
 
 def _normalize_fts_query(raw: str) -> str:
-    # Use improved fuzzy search query generation
+    """Turn what he typed into something FTS5 will accept.
+
+    The import below read `.fuzzy_search` — this package — while the
+    module has always lived in `jarvis.utils`. So it raised on every
+    call, the `except` swallowed it, and the bare tokenise underneath ran
+    every time. Nothing failed; searching his diary simply worked less
+    well than it was built to, for as long as this file has existed, and
+    the only trace was a `pass`.
+
+    The fallback stays, for a builder that declines or breaks, but it is
+    the safety net rather than the normal path.
+    """
     try:
-        from .fuzzy_search import generate_flexible_fts_query
+        from ..utils.fuzzy_search import generate_flexible_fts_query
         flexible_query = generate_flexible_fts_query(raw)
         if flexible_query:
             return flexible_query
-    except ImportError:
-        pass
+    except Exception as e:
+        debug_log(f"flexible FTS query unavailable, using bare tokens: {e}", "memory")
+
     
     # Fallback: Extract alphanumeric tokens and join them with spaces (logical AND)
     tokens = re.findall(r"[A-Za-z0-9_]+", raw)
     return " ".join(tokens)
+
+
+def close_orphan_questions(db) -> int:
+    """Close question episodes whose card died with the process holding it.
+
+    A pending confirmation deliberately never reaches disk: an approval
+    that outlived the process would be given without the context that
+    produced it. The consequence is that a `demandé` row still open when
+    the daemon starts belongs to a question nobody can answer any more —
+    a force quit, a flat battery, a crash. It is closed as `expiré`, the
+    word the clean-shutdown path already uses for the same thing.
+
+    Called from the daemon's start-up only, never from `Database.__init__`:
+    the memory viewer opens the same file from another process, and a
+    sweep there would answer the running daemon's live question for him.
+
+    Returns how many were closed, and says so when there were any. A
+    silent repair of something he was actually asked about is the failure
+    this exists to stop.
+    """
+    try:
+        lignes = db.recent_actions(500)
+    except Exception as e:
+        debug_log(f"open questions not read: {e}", "tools")
+        return 0
+
+    demandees: dict = {}
+    reglees: set = set()
+    for ligne in lignes:
+        rid = ligne.get("request_id")
+        if not rid:
+            continue
+        if ligne.get("outcome") == "demandé":
+            demandees.setdefault(rid, ligne)
+        else:
+            reglees.add(rid)
+
+    orphelines = [l for rid, l in demandees.items() if rid not in reglees]
+    if not orphelines:
+        return 0
+
+    fermees = 0
+    for ligne in orphelines:
+        try:
+            db.record_action(
+                tool=ligne.get("tool") or "?", args=None,
+                risk=ligne.get("risk") or "action", verdict="demande",
+                outcome="expiré", origin=ligne.get("origin"),
+                query=ligne.get("query"), request_id=ligne.get("request_id"),
+            )
+            fermees += 1
+        except Exception as e:
+            debug_log(f"open question not closed: {e}", "tools")
+
+    if fermees:
+        debug_log(f"{fermees} unanswered question(s) closed at start-up", "tools")
+        print(f"  ⏳ {fermees} question(s) sans réponse, fermée(s) : "
+              f"leur carte est partie avec la session précédente.", flush=True)
+    return fermees
 
 
 class Database:
@@ -129,7 +266,494 @@ class Database:
             cur.executescript(_SCHEMA_SQL)
             if self.is_vss_enabled:
                 cur.executescript(_VSS_SCHEMA_SQL)
+            self._migrate(cur)
+            # Stamp the shape so a later change can migrate rather than
+            # guess. The only migration precedent in this project wipes
+            # its table when the shape surprises it, which is not an
+            # acceptable inheritance for tables that will hold things the
+            # user asked to keep.
+            if cur.execute("PRAGMA user_version").fetchone()[0] < _SCHEMA_VERSION:
+                cur.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             self.conn.commit()
+
+    def _check_diary_index(self, cur) -> None:
+        """Make the diary's search index say how many days it really holds.
+
+        A day's row is rewritten on every flush, and a rewrite that
+        deleted and re-inserted handed the row a new id, leaving the old
+        terms in the index under an id no row carries any more. Nothing
+        on the surface shows it: `COUNT(*)` on the index reads the
+        content table and answers with the number of days, and FTS5's own
+        integrity-check passes on a polluted index. Only bm25 knows, and
+        it answers with the wrong day first — the day he mentioned
+        something once ahead of the day he talked about it for hours.
+
+        The shadow `_docsize` table holds one row per indexed document,
+        stale ones included, so the two counts disagreeing is the whole
+        test. Checked on every start rather than once behind a schema
+        bump: an index that drifts again must not be silent again.
+        """
+        try:
+            jours = cur.execute(
+                "SELECT COUNT(*) FROM conversation_summaries"
+            ).fetchone()[0]
+            indexes = cur.execute(
+                "SELECT COUNT(*) FROM summaries_fts_docsize"
+            ).fetchone()[0]
+        except Exception as e:
+            debug_log(f"diary index count unavailable: {e}", "memory")
+            print(f"  ⚠️ 📓 Diary search index could not be counted ({e}) — "
+                  "searching your past days may rank the wrong day first.",
+                  flush=True)
+            return
+
+        if indexes == jours:
+            return
+
+        try:
+            cur.execute("INSERT INTO summaries_fts(summaries_fts) VALUES('rebuild')")
+            debug_log(
+                f"diary index rebuilt: {indexes} entries held for {jours} days",
+                "memory",
+            )
+            perimees = indexes - jours
+            print(f"  📓 Diary search index rebuilt — {perimees} stale "
+                  f"entr{'y' if perimees == 1 else 'ies'} dropped. "
+                  f"All {jours} of your days were kept.", flush=True)
+        except Exception as e:
+            debug_log(f"diary index rebuild failed: {e}", "memory")
+            print(f"  ⚠️ 📓 Diary search index is broken and could not be rebuilt "
+                  f"({e}) — {indexes} entries for {jours} days. Searching your "
+                  "past days will rank the wrong day first until this is "
+                  "repaired.", flush=True)
+
+    def _migrate(self, cur) -> None:
+        """Bring an existing database up to the current shape.
+
+        Additive only, and idempotent: startup runs this every time, not
+        once. `CREATE TABLE IF NOT EXISTS` leaves a table that already
+        exists untouched, so a column added to the DDL above reaches an
+        existing install only through here.
+
+        Columns are added, never dropped, and no row is ever deleted. The
+        Activity tab presents this table as a record of what Yuba did; a
+        migration that discarded rows when the shape surprised it would
+        make that claim false the first time the shape changed.
+
+        It also checks that the diary's search index holds one document
+        per diary row, and rebuilds it when it does not. Nothing is lost
+        by a rebuild: the index is derived from the table.
+        """
+        self._check_diary_index(cur)
+
+        try:
+            existing = {
+                row[1] for row in cur.execute("PRAGMA table_info(action_log)").fetchall()
+            }
+        except Exception as e:  # table absent on a database we cannot read
+            debug_log(f"schema inspection skipped: {e}", "jarvis")
+            return
+
+        if existing and "request_id" not in existing:
+            cur.execute("ALTER TABLE action_log ADD COLUMN request_id TEXT")
+            debug_log("action_log migrated: request_id added", "jarvis")
+
+        # An install that predates the learning step has no `journal_lu`.
+        # The DDL above only runs on a fresh database, so an existing one
+        # reaches it here.
+        cur.execute(
+            "CREATE TABLE IF NOT EXISTS appris_parole (date_utc TEXT PRIMARY KEY)"
+        )
+        cur.execute(
+            "CREATE TABLE IF NOT EXISTS journal_lu ("
+            "  date_utc TEXT PRIMARY KEY,"
+            "  digest   TEXT NOT NULL,"
+            "  ts_utc   TEXT NOT NULL"
+            ")"
+        )
+
+    # ── What she has already been asked about ─────────────────────────
+
+    def journal_deja_lu(self) -> dict:
+        """Which diary rows have been read, and what they said then.
+
+        Keyed on the date, valued on a digest of the summary as it read
+        at the time. The digest is what makes this safe: a diary row is
+        rewritten in place all day (`INSERT OR REPLACE` on its date), so
+        remembering the date alone would mark today covered from the
+        first pass onwards and everything said after it would never be
+        read, permanently and silently. Content moves, the digest stops
+        matching, and the row is offered again.
+
+        Never raises: bookkeeping that cannot be read costs one re-read.
+        """
+        try:
+            with self._lock:
+                rows = self.conn.execute(
+                    "SELECT date_utc, digest FROM journal_lu"
+                ).fetchall()
+            return {r["date_utc"]: r["digest"] for r in rows}
+        except Exception as e:
+            debug_log(f"journal_lu read skipped: {e}", "memory")
+            return {}
+
+    def jours_ou_elle_a_parle(self) -> set:
+        """The days she said out loud what she had noticed.
+
+        A summary of such a day carries her own voice: she read her
+        proposals aloud, the summariser wrote the reading down, and a
+        later pass would find those sentences in his journal and offer
+        them back — better grounded each round, because by then the
+        citation genuinely is in the notes.
+
+        Observed live, and the lexical guard could not stop it: the
+        struck lines were English and the returning ones French. So the
+        day is excluded instead, which never looks at a word and
+        therefore names no language.
+        """
+        try:
+            with self._lock:
+                rows = self.conn.execute(
+                    "SELECT date_utc FROM appris_parole"
+                ).fetchall()
+            return {r["date_utc"] for r in rows}
+        except Exception as e:
+            debug_log(f"appris_parole read skipped: {e}", "memory")
+            return set()
+
+    def marquer_jour_de_parole(self, date_utc: str) -> None:
+        """Record that she spoke about her proposals on this day.
+
+        Never raises: losing a mark costs one contaminated reading, and
+        raising costs the user their answer.
+        """
+        try:
+            if not date_utc:
+                return
+            with self._lock:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO appris_parole (date_utc) VALUES (?)",
+                    (str(date_utc),),
+                )
+                self.conn.commit()
+        except Exception as e:
+            debug_log(f"appris_parole write skipped: {e}", "memory")
+
+    def marquer_journal_lu(self, rows) -> None:
+        """Record ``(date_utc, digest)`` pairs as read.
+
+        Called only after a reading that actually happened. A pass whose
+        model timed out, answered nothing, or answered unparseably has
+        not looked at these days, and recording them would skip them for
+        ever on the strength of a failure.
+
+        Never raises: a lost mark costs one re-read, and raising costs
+        the user their answer.
+        """
+        try:
+            stamp = datetime.now(timezone.utc).isoformat()
+            payload = [
+                (str(date), str(digest), stamp)
+                for date, digest in (rows or [])
+                if date and digest
+            ]
+            if not payload:
+                return
+            with self._lock:
+                self.conn.executemany(
+                    "INSERT OR REPLACE INTO journal_lu (date_utc, digest, ts_utc) "
+                    "VALUES (?, ?, ?)",
+                    payload,
+                )
+                self.conn.commit()
+        except Exception as e:
+            debug_log(f"journal_lu write skipped: {e}", "memory")
+
+    # ── Action ledger ─────────────────────────────────────────────────
+
+    def record_action(
+        self,
+        *,
+        tool: str,
+        args: Optional[dict],
+        risk: str,
+        verdict: str,
+        outcome: str,
+        duration_ms: Optional[int] = None,
+        origin: Optional[str] = None,
+        query: Optional[str] = None,
+        request_id: Optional[str] = None,
+    ) -> None:
+        """Record one tool call. Bookkeeping: never raises into the caller.
+
+        Arguments and the originating query are redacted on the way in,
+        because a tool call carries whatever the user just said.
+
+        ``request_id`` ties a question to whatever settled it: the gate
+        writes one row when it asks and one when the answer arrives, and
+        nothing but this id says they are the same episode.
+        """
+        import json
+        from ..utils.redact import redact
+
+        try:
+            try:
+                args_text = redact(json.dumps(args or {}, ensure_ascii=False, default=str))
+            except Exception:
+                args_text = "<non sérialisable>"
+            with self._lock:
+                self.conn.execute(
+                    "INSERT INTO action_log "
+                    "(ts_utc, origin, tool, args, risk, verdict, outcome, "
+                    "duration_ms, query, request_id) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        datetime.now(timezone.utc).isoformat(),
+                        origin, tool, args_text, risk, verdict, outcome,
+                        duration_ms, redact(query) if query else None,
+                        request_id,
+                    ),
+                )
+                self.conn.commit()
+        except Exception as e:
+            debug_log(f"action log write failed (non-fatal): {e}", "tools")
+
+    def recent_actions(self, limit: int = 200) -> list:
+        """The most recent calls, newest first, as plain dicts.
+
+        Dicts rather than `sqlite3.Row`, like `pending_rappels` and
+        `due_rappels` beside it. A `Row` indexes like a mapping but has
+        no `.get` and raises `IndexError` on a column it does not carry,
+        so a reader written against the other two would raise on its
+        first line — which is exactly what happened to the routine
+        write-up, where a bare `except` swallowed it and every morning
+        reported using no tools at all.
+        """
+        with self._lock:
+            cur = self.conn.execute(
+                "SELECT * FROM action_log ORDER BY ts_utc DESC, id DESC LIMIT ?",
+                (int(limit),),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+    def prune_actions(self, max_age_days: int = 90) -> int:
+        """Drop entries older than the retention window."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+        with self._lock:
+            cur = self.conn.execute("DELETE FROM action_log WHERE ts_utc < ?", (cutoff,))
+            self.conn.commit()
+            return cur.rowcount
+
+    def clear_actions(self) -> None:
+        """Erase the ledger at the user's request."""
+        with self._lock:
+            self.conn.execute("DELETE FROM action_log")
+            self.conn.commit()
+
+    # ── Reminders ─────────────────────────────────────────────────────
+    #
+    # Two processes open this file — the daemon and the memory viewer —
+    # on a WAL database opened without a busy timeout, so a write can
+    # lose a race it would win a moment later. Each one retries once.
+
+    ETAT_PENDING = "prévu"
+    ETAT_DONE = "fini"
+    ETAT_CANCELLED = "annulé"
+
+    def _write(self, sql: str, params: tuple) -> int:
+        """Run one write, retrying once if the file was momentarily busy."""
+        import time as _time
+
+        for attempt in (0, 1):
+            try:
+                with self._lock:
+                    cur = self.conn.execute(sql, params)
+                    self.conn.commit()
+                    return cur.rowcount
+            except sqlite3.OperationalError as e:
+                if "locked" not in str(e).lower() or attempt:
+                    raise
+                debug_log("database busy, retrying once", "jarvis")
+                _time.sleep(0.1)
+        return 0
+
+    def add_rappel(
+        self, *, texte: str, due_utc: str, due_local: str, tz: str,
+        origin: Optional[str] = None, query: Optional[str] = None,
+        kind: str = "rappel", payload: Optional[dict] = None,
+    ) -> str:
+        """Record one promise. Returns its id, which is also its ledger key.
+
+        ``texte`` is kept as the user said it, because it is read back
+        aloud — redacting it would have her say a placeholder to their
+        face. ``query`` is redacted, like the ledger's, because it is
+        bookkeeping rather than speech.
+        """
+        import json
+        import uuid
+
+        from ..utils.redact import redact
+
+        rid = uuid.uuid4().hex
+        self._write(
+            "INSERT INTO rappels "
+            "(id, created_utc, origin, kind, texte, payload, due_utc, "
+            " due_local, tz, query, etat) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                rid, datetime.now(timezone.utc).isoformat(), origin, kind,
+                texte, json.dumps(payload or {}, ensure_ascii=False),
+                due_utc, due_local, tz,
+                redact(query) if query else None, self.ETAT_PENDING,
+            ),
+        )
+        return rid
+
+    def due_rappels(self, now_utc: str, limit: int = 20,
+                    kind: Optional[str] = None) -> list:
+        """Rows owed at ``now_utc``, oldest first.
+
+        ``kind`` separates the two things this table holds. A routine
+        read out by the reminder scheduler would be spoken as a sentence
+        — which is not what a routine is — and then settled, so it would
+        never run again.
+        """
+        clause = "etat = ? AND due_utc <= ?"
+        params: list = [self.ETAT_PENDING, now_utc]
+        if kind is not None:
+            clause += " AND kind = ?"
+            params.append(kind)
+        params.append(int(limit))
+        with self._lock:
+            cur = self.conn.execute(
+                f"SELECT * FROM rappels WHERE {clause} ORDER BY due_utc ASC LIMIT ?",
+                tuple(params),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+    def pending_rappels(self, kind: Optional[str] = None) -> list:
+        """Everything still owed, soonest first — what the user is shown."""
+        clause = "etat = ?"
+        params: list = [self.ETAT_PENDING]
+        if kind is not None:
+            clause += " AND kind = ?"
+            params.append(kind)
+        with self._lock:
+            cur = self.conn.execute(
+                f"SELECT * FROM rappels WHERE {clause} ORDER BY due_utc ASC",
+                tuple(params),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+    def all_rappels(self, limit: int = 200) -> list:
+        with self._lock:
+            cur = self.conn.execute(
+                "SELECT * FROM rappels ORDER BY due_utc DESC LIMIT ?", (int(limit),),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+    def last_cancelled_rappel(self, kind: str, nom: str) -> Optional[dict]:
+        """The most recently created cancelled row of a given name.
+
+        Read only. `annulé` stays final for every write — nothing here
+        revives it — but a routine the user is restarting still has its
+        old recurrence recorded, and taking the hour from there beats
+        inventing one.
+        """
+        import json
+
+        with self._lock:
+            cur = self.conn.execute(
+                "SELECT * FROM rappels WHERE kind = ? AND etat = ? "
+                "ORDER BY created_utc DESC",
+                (kind, self.ETAT_CANCELLED),
+            )
+            for row in cur.fetchall():
+                row = dict(row)
+                try:
+                    if json.loads(row.get("payload") or "{}").get("nom") == nom:
+                        return row
+                except Exception:
+                    continue
+        return None
+
+    def mark_rappel_tried(self, rappel_id: str, now_utc: str) -> None:
+        """One more attempt at delivering it. Bounds a failing loop."""
+        self._write(
+            "UPDATE rappels SET attempts = attempts + 1, last_try_utc = ? "
+            "WHERE id = ?",
+            (now_utc, rappel_id),
+        )
+
+    def settle_rappel(self, rappel_id: str, *, said_utc: str) -> None:
+        """It was actually said. Only delivery settles a promise."""
+        self._write(
+            "UPDATE rappels SET etat = ?, said_utc = ? WHERE id = ?",
+            (self.ETAT_DONE, said_utc, rappel_id),
+        )
+
+    def cancel_rappel(self, rappel_id: str) -> bool:
+        """The user does not want it any more. Returns whether one matched."""
+        return self._write(
+            "UPDATE rappels SET etat = ? WHERE id = ? AND etat = ?",
+            (self.ETAT_CANCELLED, rappel_id, self.ETAT_PENDING),
+        ) > 0
+
+    def advance_rappel(self, rappel_id: str, *, due_utc: str,
+                       due_local: str, tz: str) -> None:
+        """Move a recurring row to its next occurrence.
+
+        Attempts reset, because they bound a *current* failure rather
+        than a lifetime: a routine that failed twice in March must not
+        arrive in December one failure from being switched off.
+
+        Guarded on `prévu`, so advancing something cancelled cannot
+        revive it — cancelling has to be final or the user cannot stop a
+        routine.
+
+        Guarded on the clock too. Backwards is not a smaller step
+        forward: a row moved onto an instant already past is owed again
+        on the very next tick, and on every tick after it, so it is no
+        move at all wearing the shape of one. Refusing raises, because
+        the caller's only alternative is to run the same morning forever.
+        """
+        try:
+            devant = datetime.fromisoformat(due_utc) > datetime.now(timezone.utc)
+        except Exception:
+            devant = False
+        if not devant:
+            raise ValueError(f"échéance non future : {due_utc!r}")
+
+        self._write(
+            "UPDATE rappels SET due_utc = ?, due_local = ?, tz = ?, "
+            "attempts = 0, last_try_utc = NULL WHERE id = ? AND etat = ?",
+            (due_utc, due_local, tz, rappel_id, self.ETAT_PENDING),
+        )
+
+    def set_rappel_payload(self, rappel_id: str, payload: dict) -> None:
+        """Replace the row's payload.
+
+        Guarded on `prévu` like `advance_rappel`, so bookkeeping written
+        after a cancellation cannot touch a row the user has stopped.
+        """
+        import json
+
+        self._write(
+            "UPDATE rappels SET payload = ? WHERE id = ? AND etat = ?",
+            (json.dumps(payload, ensure_ascii=False), rappel_id, self.ETAT_PENDING),
+        )
+
+    def prune_rappels(self, max_age_days: int = 90) -> int:
+        """Drop old settled and cancelled ones.
+
+        Never anything still owed, however old: pruning a promise is
+        losing it, and a reminder set for next year is still a promise.
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+        return self._write(
+            "DELETE FROM rappels WHERE etat != ? AND created_utc < ?",
+            (self.ETAT_PENDING, cutoff),
+        )
 
     
 
@@ -352,20 +976,47 @@ class Database:
         existing row's content without changing what it represents (e.g.
         the deflection scrub bulk sweep) should pass through the row's
         original ``ts_utc`` so the audit trail is preserved.
+
+        One row per ``(date_utc, source_app)``, rewritten in place, and
+        its id never changes: the FTS index, the search join and the
+        embedding row are all keyed on it.
         """
         if ts_utc is None:
             ts_utc = datetime.now(timezone.utc).isoformat()
         with self._lock:
             cur = self.conn.cursor()
+            # Updated rather than replaced. Resolving the UNIQUE clash by
+            # REPLACE deletes and re-inserts, which hands the row a new id
+            # on every flush — and SQLite skips the DELETE trigger for a
+            # REPLACE unless `recursive_triggers` is on, so the old terms
+            # stay in the FTS index under an id no row carries any more.
+            # Updating in place keeps the id, and `summaries_au` retires
+            # the old terms under it.
             cur.execute(
                 """
-                INSERT OR REPLACE INTO conversation_summaries(date_utc, ts_utc, summary, topics, source_app)
-                VALUES (?, ?, ?, ?, ?)
+                UPDATE conversation_summaries
+                SET ts_utc = ?, summary = ?, topics = ?
+                WHERE date_utc = ? AND source_app = ?
                 """,
-                (date_utc, ts_utc, summary, topics, source_app),
+                (ts_utc, summary, topics, date_utc, source_app),
             )
+            if cur.rowcount == 0:
+                cur.execute(
+                    """
+                    INSERT INTO conversation_summaries(date_utc, ts_utc, summary, topics, source_app)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (date_utc, ts_utc, summary, topics, source_app),
+                )
+                self.conn.commit()
+                return int(cur.lastrowid)
+            row = cur.execute(
+                "SELECT id FROM conversation_summaries "
+                "WHERE date_utc = ? AND source_app = ?",
+                (date_utc, source_app),
+            ).fetchone()
             self.conn.commit()
-            return int(cur.lastrowid)
+            return int(row[0])
 
     def get_conversation_summary(self, date_utc: str, source_app: str = "jarvis") -> Optional[sqlite3.Row]:
         """Get conversation summary for a specific date."""
@@ -412,6 +1063,19 @@ class Database:
                 """,
             ).fetchall()
             return rows
+
+    @property
+    def stores_embeddings(self) -> bool:
+        """Whether an embedding written here could be searched for again.
+
+        Two implementations answer yes: sqlite-vss when its extension
+        loaded, and the Python store built in its place otherwise. The
+        reader already consults whichever exists; gating the writers on
+        sqlite-vss alone left the fallback store built, searched on every
+        query and never once written to, so the search's semantic sixty
+        per cent weighed nothing while the round-trip was paid anyway.
+        """
+        return bool(self.is_vss_enabled or self._python_vector_store)
 
     def upsert_summary_embedding(self, summary_id: int, vec: Sequence[float]) -> Optional[int]:
         """Store or update embedding for a conversation summary."""

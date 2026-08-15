@@ -53,7 +53,7 @@ integration in `src/jarvis/reply/engine.py`.
 ### Model resolution
 
 1. `cfg.planner_model` (explicit override, for benchmarking)
-2. `cfg.ollama_chat_model`
+2. `cfg.llm_chat_model`
 
 The planner must track the chat model. The plan is the scaffolding the
 chat model follows; a weaker planner on top of a stronger chat model
@@ -114,6 +114,14 @@ The engine consumes the plan in two phases.
 
 **Phase 1 — preparation gating (before the turn loop starts):**
 
+- `plan_step_args(step)` — the `key='value'` pairs a step carries. The
+  single parser for that shape, shared with the direct-exec fast path.
+- `lookup_terms_of(step)` — a step's concrete argument values joined into
+  one search string, or `""` when the step carries an angle-bracket
+  placeholder or no arguments. Arguments are composed against the user's
+  intent with pronouns resolved to literal entities, so they name the
+  subject better than the utterance does; the engine uses them to ask the
+  graph whether this lookup has already been made.
 - `plan_requires_memory(plan)` — true iff any step is a `searchMemory`
   directive. The engine uses it to gate the entire memory-enrichment
   block (keyword extractor LLM call, diary / graph lookups, digest
@@ -144,6 +152,14 @@ The engine consumes the plan in two phases.
   appended to the initial system message. Empty plan renders nothing.
   Single-step reply-only plans are not rendered either — they are
   noise to the chat model since the plan just says "reply".
+  The block tells the model a step may be skipped when a prior tool
+  result **or the memory already in its system prompt** satisfies it.
+  Scoped to prompt memory rather than "what you already know", so it
+  cannot be read as licence to answer a chained-research step from
+  training priors. The engine drops a step deterministically when every
+  word it would look up is covered; this clause is what reaches the
+  cases no lexical rule can — chiefly a step and a stored note written
+  in different languages.
 - `progress_nudge(steps, tool_results_so_far)` produces a remainder
   hint injected after each tool result, naming the next planned step
   and reminding the model to substitute discovered entities and avoid

@@ -17,6 +17,7 @@ from flask import Flask, jsonify, request, Response
 
 from jarvis.config import load_settings
 from jarvis.debug import debug_log
+from jarvis.memory.core import SECTION_PROFILE, SECTION_RULES, MemoryCore
 from jarvis.memory.graph import FIXED_BRANCH_IDS, GraphMemoryStore
 
 
@@ -25,6 +26,8 @@ app = Flask(__name__)
 # Global database connection
 _db_conn: Optional[sqlite3.Connection] = None
 _graph_store: Optional[GraphMemoryStore] = None
+_core: Optional[MemoryCore] = None
+_activity_db = None
 
 
 def _get_db_path() -> str:
@@ -46,6 +49,49 @@ def get_db() -> sqlite3.Connection:
         _db_conn = sqlite3.connect(db_path, check_same_thread=False)
         _db_conn.row_factory = sqlite3.Row
     return _db_conn
+
+
+def get_core() -> MemoryCore:
+    """Get or create the core reader, rooted beside the database."""
+    global _core
+    if _core is None:
+        try:
+            _core = MemoryCore.for_config(load_settings())
+        except Exception:
+            _core = MemoryCore(Path(_get_db_path()).parent / "yuba")
+    return _core
+
+
+# The two halves of the core, in the order the tab shows them.
+_CORE_SECTIONS = (SECTION_PROFILE, SECTION_RULES)
+
+
+def _core_section_payload(section: str) -> dict[str, Any]:
+    """Everything the tab needs for one file: the entries as parsed, and
+    the raw text, because the file is the user's and editing it directly
+    is the point."""
+    core = get_core()
+    path = core.path_for(section)
+    try:
+        raw = path.read_text(encoding="utf-8") if path.exists() else ""
+    except OSError as e:
+        debug_log(f"core read failed for {path.name}: {e}", "memory")
+        raw = ""
+    return {
+        "path": str(path),
+        "raw": raw,
+        "entries": [
+            {
+                "text": entry.text,
+                "date": entry.date,
+                "source": entry.source,
+                "retired": entry.retired,
+                "retired_on": entry.retired_on,
+                "retired_reason": entry.retired_reason,
+            }
+            for entry in core.entries(section)
+        ],
+    }
 
 
 def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -316,6 +362,425 @@ def get_graph_store() -> GraphMemoryStore:
     return _graph_store
 
 
+def get_activity_db():
+    """Open the database the action ledger lives in."""
+    global _activity_db
+    if _activity_db is None:
+        from jarvis.memory.db import Database
+
+        _activity_db = Database(_get_db_path(), sqlite_vss_path=None)
+    return _activity_db
+
+
+@app.route("/api/activity")
+def activity_get() -> Response:
+    """What the assistant has done, newest first.
+
+    Note what is absent: no tool output. The ledger does not store it,
+    so this cannot leak it. The tab shows actions, not their contents.
+    """
+    try:
+        db = get_activity_db()
+        db.prune_actions(max_age_days=90)
+        return jsonify({
+            "actions": [
+                {
+                    "ts_utc": r["ts_utc"],
+                    "origin": r["origin"],
+                    "tool": r["tool"],
+                    "args": r["args"],
+                    "risk": r["risk"],
+                    "verdict": r["verdict"],
+                    "outcome": r["outcome"],
+                    "duration_ms": r["duration_ms"],
+                    "query": r["query"],
+                    "request_id": r["request_id"],
+                }
+                for r in db.recent_actions(limit=300)
+            ],
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/rappels")
+def rappels_get() -> Response:
+    """What is still owed, soonest first.
+
+    The price of keeping reminders in a database. Every other artefact
+    the user owns here is a text file they open and correct by hand;
+    reminders could not be, because a promise needs a write on a clock
+    and the core is only safe because nothing writes to it in the
+    background. So the readability is rebuilt here.
+    """
+    try:
+        return jsonify({
+            "rappels": [
+                {
+                    "id": r["id"],
+                    "texte": r["texte"],
+                    "due_local": r["due_local"],
+                    "tz": r["tz"],
+                    "origin": r["origin"],
+                    "created_utc": r["created_utc"],
+                }
+                # Reminders only: a routine listed here invites the user
+                # to cancel it and find it back the next morning.
+                for r in get_activity_db().pending_rappels(kind="rappel")
+            ],
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/rappels/<rappel_id>", methods=["DELETE"])
+def rappels_cancel(rappel_id: str) -> Response:
+    """Call one off.
+
+    Reports honestly: saying it was cancelled when it will still fire is
+    the worst answer available here.
+    """
+    try:
+        return jsonify({"cancelled": get_activity_db().cancel_rappel(rappel_id)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/routines")
+def routines_get() -> Response:
+    """What runs while nobody is watching, and what it may reach.
+
+    The row says when; `routines.md` says what it is allowed to do. Both
+    are shown together because neither answers the question on its own,
+    and the user should not have to open a text editor to find out
+    whether the thing firing at 07:00 can read their files.
+
+    A routine whose block has gone is listed as suspended rather than
+    hidden: it still holds a slot in the table, and it comes back the
+    moment the block does.
+    """
+    from jarvis.routines.runner import (
+        missing_from_catalogue, payload_of, quand_fichier_pour,
+    )
+    from jarvis.routines.scope import load_routines
+
+    try:
+        cfg = load_settings()
+        blocs = load_routines(cfg)
+        out = []
+        vus = set()
+        for r in get_activity_db().pending_rappels(kind="routine"):
+            payload = payload_of(r)
+            nom = str(payload.get("nom") or "")
+            bloc = blocs.get(nom)
+            scope = bloc.scope() if bloc is not None else None
+            vus.add(nom)
+            attendu = quand_fichier_pour(payload)
+            out.append({
+                "id": r["id"],
+                "nom": nom,
+                # The block's phrase is what actually runs, so it is the
+                # one to show. The row keeps what was first asked.
+                "texte": (bloc.phrase.strip() if bloc and bloc.phrase.strip()
+                          else r["texte"]),
+                "due_local": r["due_local"],
+                "tz": r["tz"],
+                "origin": r["origin"],
+                "outils": list(scope.outils) if scope else [],
+                "memoire": bool(scope.memoire) if scope else False,
+                "suspendue": scope is None,
+                "arretee": False,
+                # Named in the block, gone from the machine. Without this
+                # the row keeps advertising a capability that stopped
+                # existing in October, and the only trace anywhere is a
+                # debug line nobody has switched on.
+                "introuvables": missing_from_catalogue(scope) if scope else [],
+                # An editor buffer saved after the schedule line was
+                # rewritten puts the file and the rule out of step, and
+                # the file is the thing the user reads.
+                "horaire_divergent": bool(
+                    bloc is not None and attendu
+                    and bloc.quand.strip() != attendu
+                ),
+                "steriles": int(payload.get("steriles", 0) or 0),
+            })
+
+        # Blocks with no live row: routines that were stopped. Listed,
+        # because the block is the durable record of what that routine
+        # was allowed to do and saying the same request again restarts
+        # it — and until now the only surface holding that was a file the
+        # desktop app never opened, under an empty state reading "aucune
+        # routine" over a routines.md that held one.
+        for nom, bloc in blocs.items():
+            if nom in vus:
+                continue
+            scope = bloc.scope()
+            out.append({
+                "id": None, "nom": nom, "texte": bloc.phrase,
+                "due_local": "", "tz": "", "origin": None,
+                "outils": list(scope.outils), "memoire": bool(scope.memoire),
+                "suspendue": False, "arretee": True,
+                "introuvables": missing_from_catalogue(scope),
+                "horaire_divergent": False, "steriles": 0,
+            })
+        return jsonify({"routines": out})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/routines/<routine_id>", methods=["DELETE"])
+def routines_cancel(routine_id: str) -> Response:
+    """Stop one for good.
+
+    The block stays in `routines.md`, so the user can read what it was
+    allowed to do afterwards and say the sentence again if they change
+    their mind.
+    """
+    try:
+        return jsonify({"cancelled": get_activity_db().cancel_rappel(routine_id)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/objectifs")
+def objectifs_get() -> Response:
+    """What the user is working towards, and everything recorded about it.
+
+    The whole page, not a summary: this is the artefact, and the reason
+    it exists is that he can read in October what he said in August. Open
+    ones first, because a closed goal is a record and an open one is a
+    question.
+    """
+    from jarvis.objectifs.page import invalidate_objectifs_cache, load_objectifs
+
+    try:
+        cfg = load_settings()
+        invalidate_objectifs_cache()
+        out = []
+        for o in load_objectifs(cfg).values():
+            out.append({
+                "nom": o.nom,
+                "phrase": o.phrase,
+                "fini_quand": o.fini_quand,
+                "clos": o.clos,
+                "ouvert": o.est_ouvert,
+                "points": [
+                    {"date": p.date, "source": p.source, "texte": p.texte}
+                    for p in o.points
+                ],
+            })
+        out.sort(key=lambda o: (not o["ouvert"], o["nom"]))
+        return jsonify({"objectifs": out})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/objectifs/<nom>", methods=["DELETE"])
+def objectifs_close(nom: str) -> Response:
+    """End one from here.
+
+    The same act the tool performs and the same one it reserves for him:
+    a click is him. The block stays in the file with everything it
+    recorded, because that is what somebody wants to read afterwards.
+    """
+    from datetime import datetime
+
+    from jarvis.objectifs.page import close_objectif
+
+    try:
+        valeur = f"{datetime.now().strftime('%Y-%m-%d')} · terminé"
+        return jsonify({"closed": bool(close_objectif(load_settings(), nom, valeur))})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/appris")
+def appris_get() -> Response:
+    """What she thinks she noticed, and what he has done about each.
+
+    The file is the artefact; this re-reads it every time rather than
+    holding a copy, so his editor and this window can be open at once
+    without either losing the other's work.
+    """
+    from jarvis.appris.page import (
+        appris_path, invalidate_appris_cache, load_appris,
+    )
+
+    try:
+        cfg = load_settings()
+        invalidate_appris_cache()
+        out = [
+            {
+                "ligne": p.ligne,
+                "texte": p.texte,
+                "citation": p.citation,
+                "section": p.section,
+                "date": p.date,
+                "etat": p.etat,
+                "tampon": p.tampon,
+            }
+            for p in load_appris(cfg)
+        ]
+        return jsonify({"propositions": out, "chemin": str(appris_path(cfg))})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/appris/retenir", methods=["POST"])
+def appris_retenir() -> Response:
+    """Agree to one, from here, now.
+
+    The same act as ticking the box in the file and the same code behind
+    it. What the click buys is timing: a tick waits for his next ask,
+    because nothing watches the file and a watcher is the schedule this
+    step deliberately does not have.
+    """
+    from jarvis.appris.recolte import recolter_une
+
+    data = request.get_json(silent=True) or {}
+    ligne = str(data.get("ligne") or "")
+    if not ligne:
+        return jsonify({"error": "ligne manquante"}), 400
+    try:
+        return jsonify({"retenue": bool(recolter_une(load_settings(), ligne))})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/appris/refuser", methods=["POST"])
+def appris_refuser() -> Response:
+    """Strike one out, from here.
+
+    Written exactly as he would write it by hand: struck, no stamp. It is
+    never offered again, through either door.
+    """
+    from jarvis.appris.page import marquer_refusee
+
+    data = request.get_json(silent=True) or {}
+    ligne = str(data.get("ligne") or "")
+    if not ligne:
+        return jsonify({"error": "ligne manquante"}), 400
+    try:
+        return jsonify({"refusee": bool(marquer_refusee(load_settings(), ligne))})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/journal")
+def journal_get() -> Response:
+    """The mornings, newest first.
+
+    This is the delivery, not a log of it: a routine runs with nobody in
+    the room, so the write-up itself is here or it reached nobody. Served
+    as the raw Markdown the file holds, because that file is also
+    openable in any editor and the two must not disagree.
+    """
+    from datetime import datetime, timedelta
+
+    from jarvis.routines.journal import read_day
+
+    try:
+        cfg = load_settings()
+        days = max(1, min(int(request.args.get("days", 14)), 90))
+        pages = []
+        for back in range(days):
+            jour = datetime.now() - timedelta(days=back)
+            texte = read_day(cfg, jour)
+            if texte.strip():
+                pages.append({"date": jour.strftime("%Y-%m-%d"), "texte": texte})
+        return jsonify({"pages": pages})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/rappels", methods=["POST"])
+def rappels_create() -> Response:
+    """Type one in directly.
+
+    Reaches no model. A date, a time and a sentence are already
+    unambiguous, and sending the user's own typed request through an
+    extractor would only add a way to be wrong.
+    """
+    from datetime import datetime, timezone
+
+    from jarvis.utils.time_context import local_timezone_name
+
+    try:
+        body = request.get_json(silent=True) or {}
+        texte = str(body.get("texte") or "").strip()
+        due_local = str(body.get("due_local") or "").strip()
+        if not texte:
+            return jsonify({"error": "il n'y a rien à rappeler"}), 400
+        try:
+            when = datetime.fromisoformat(due_local)
+        except Exception:
+            return jsonify({"error": "date ou heure illisible"}), 400
+
+        tz = local_timezone_name()
+        if tz:
+            from zoneinfo import ZoneInfo
+
+            due_utc = when.replace(tzinfo=ZoneInfo(tz)).astimezone(timezone.utc)
+        else:
+            due_utc = when.astimezone().astimezone(timezone.utc)
+        if due_utc <= datetime.now(timezone.utc):
+            return jsonify({"error": "ce moment est déjà passé"}), 400
+
+        rappel_id = get_activity_db().add_rappel(
+            texte=texte, due_utc=due_utc.isoformat(),
+            due_local=when.strftime("%Y-%m-%dT%H:%M"), tz=tz,
+            origin="fichier", query=None,
+        )
+        return jsonify({"id": rappel_id})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/activity", methods=["DELETE"])
+def activity_clear() -> Response:
+    """Erase the ledger. The user's to keep and the user's to drop."""
+    try:
+        get_activity_db().clear_actions()
+        return jsonify({"cleared": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/core")
+def core_get() -> Response:
+    """Both core files: what is believed, what was retired, and the raw text."""
+    try:
+        return jsonify({section: _core_section_payload(section) for section in _CORE_SECTIONS})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/core/<section>", methods=["PUT"])
+def core_save(section: str) -> Response:
+    """Write a core file back exactly as the user typed it.
+
+    No reformatting and no dropping of lines the parser does not
+    recognise: the file belongs to the user, and an editor that rewrites
+    what you typed is one you stop trusting with the thing it holds.
+    """
+    if section not in _CORE_SECTIONS:
+        return jsonify({"error": f"unknown section: {section}"}), 404
+
+    data = request.get_json(silent=True) or {}
+    raw = data.get("raw")
+    if not isinstance(raw, str):
+        return jsonify({"error": "missing 'raw' text"}), 400
+
+    core = get_core()
+    try:
+        core.write_raw(section, raw)
+    except OSError as e:
+        debug_log(f"core save failed for {section}: {e}", "memory")
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify(_core_section_payload(section))
+
+
 @app.route("/api/graph/nodes")
 def graph_get_all_nodes() -> Response:
     """Get all nodes for the graph visualisation."""
@@ -329,6 +794,35 @@ def graph_get_all_nodes() -> Response:
         return jsonify({"error": str(e)}), 500
 
 
+# The branches the core took over. They stay seeded so the one-time
+# hand-over has somewhere to read from, but the Knowledge tab is about
+# what the assistant looked up, and a tab that says its contents reach
+# every reply must not show a branch nothing consults. They reappear only
+# while they still hold something, which is the window before the daemon
+# next starts and moves it.
+_SUPERSEDED_BRANCHES = ("user", "directives")
+
+
+def _subtree_holds_data(subtree: dict) -> bool:
+    node = subtree.get("node") or {}
+    if (node.get("data") or "").strip():
+        return True
+    return any(_subtree_holds_data(child) for child in subtree.get("children") or [])
+
+
+def _hide_superseded_branches(tree: dict) -> dict:
+    """Drop the branches the core superseded, unless they still hold text."""
+    children = tree.get("children")
+    if not children:
+        return tree
+    tree["children"] = [
+        child for child in children
+        if (child.get("node") or {}).get("id") not in _SUPERSEDED_BRANCHES
+        or _subtree_holds_data(child)
+    ]
+    return tree
+
+
 @app.route("/api/graph/tree")
 def graph_get_tree() -> Response:
     """Get the full tree structure for the sidebar."""
@@ -337,6 +831,8 @@ def graph_get_tree() -> Response:
         root_id = request.args.get("root", "root")
         max_depth = min(int(request.args.get("max_depth", 10)), 20)
         tree = store.get_subtree(root_id, max_depth=max_depth)
+        if root_id == "root":
+            tree = _hide_superseded_branches(tree)
         return jsonify(tree)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -530,8 +1026,8 @@ def graph_import_diary() -> Response:
                     result = update_graph_from_dialogue(
                         store=store,
                         summary=summary_text,
-                        ollama_base_url=settings.ollama_base_url,
-                        ollama_chat_model=settings.ollama_chat_model,
+                        cfg=settings,
+                        chat_model=settings.llm_chat_model,
                         timeout_sec=settings.llm_chat_timeout_sec,
                         thinking=getattr(settings, 'llm_thinking_enabled', False),
                         date_utc=date_utc,
@@ -621,8 +1117,8 @@ def graph_consolidate_all() -> Response:
             # nodes — buffering the full sweep would defeat NDJSON.
             for name, before, after in consolidate_all_populated_nodes(
                 store=store,
-                ollama_base_url=settings.ollama_base_url,
-                ollama_chat_model=settings.ollama_chat_model,
+                cfg=settings,
+                chat_model=settings.llm_chat_model,
                 timeout_sec=20.0,
                 thinking=getattr(settings, 'llm_thinking_enabled', False),
                 picker_model=picker_model,
@@ -708,12 +1204,7 @@ def diary_scrub_deflections() -> Response:
             rows_seen = 0
             embeddings_refreshed = 0
 
-            for event in rewrite_all_diary_summaries(
-                db,
-                ollama_base_url=settings.ollama_base_url,
-                ollama_chat_model=settings.ollama_chat_model,
-                ollama_embed_model=settings.ollama_embed_model,
-            ):
+            for event in rewrite_all_diary_summaries(db, settings):
                 rows_seen += 1
                 if event.get("rewritten"):
                     rows_rewritten += 1
@@ -799,12 +1290,7 @@ def diary_optimise_topics() -> Response:
             topics_merged = 0
             topics_expanded = 0
 
-            for event in optimise_diary_topics(
-                db,
-                ollama_base_url=settings.ollama_base_url,
-                ollama_chat_model=settings.ollama_chat_model,
-                ollama_embed_model=settings.ollama_embed_model,
-            ):
+            for event in optimise_diary_topics(db, settings):
                 rows_seen += 1
                 if event.get("topics_changed"):
                     rows_changed += 1
@@ -1051,6 +1537,248 @@ def index() -> str:
             min-height: 0;
         }
 
+        .rappel-new {
+            display: flex; gap: 8px; align-items: center; margin-bottom: 14px;
+            flex-wrap: wrap;
+        }
+        .rappel-new input {
+            background: var(--bg-tertiary); color: var(--text-primary);
+            border: 1px solid var(--border-color); border-radius: 6px;
+            padding: 7px 10px; font-size: 13px;
+        }
+        .rappel-new input#rappel-texte { flex: 1; min-width: 220px; }
+        .rappel-new input:focus { border-color: var(--accent-primary); outline: none; }
+        .rappel-error { color: var(--error); font-size: 12px; }
+        .rappel-row {
+            display: flex; gap: 12px; align-items: baseline;
+            padding: 9px 14px; font-size: 13px;
+            border-bottom: 1px solid rgba(128, 128, 128, 0.12);
+        }
+        .rappel-row:last-child { border-bottom: none; }
+        .rappel-when {
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 12px; color: var(--accent-primary); white-space: nowrap;
+            min-width: 130px;
+        }
+        .rappel-texte { flex: 1; overflow-wrap: anywhere; }
+        .rappel-origin { font-size: 11px; opacity: 0.45; white-space: nowrap; }
+        .rappel-cancel {
+            background: transparent; border: 1px solid var(--border-color);
+            color: var(--text-muted); border-radius: 6px; cursor: pointer;
+            font-size: 12px; padding: 3px 10px; white-space: nowrap;
+        }
+        .rappel-cancel:hover { border-color: var(--error); color: var(--error); }
+
+        /* Routines: the row says when, routines.md says what it may
+           reach. Both on one line, because neither answers the question
+           on its own. */
+        .routine-row {
+            display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap;
+            padding: 11px 14px; font-size: 13px;
+            border-bottom: 1px solid rgba(128, 128, 128, 0.12);
+        }
+        .routine-row:last-child { border-bottom: none; }
+        .routine-nom {
+            font-weight: 600; min-width: 110px; white-space: nowrap;
+        }
+        .routine-quand {
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 12px; color: var(--accent-primary); white-space: nowrap;
+            min-width: 130px;
+        }
+        .routine-phrase { flex: 1; min-width: 200px; overflow-wrap: anywhere; }
+        .routine-outils {
+            flex-basis: 100%; font-size: 11px; opacity: 0.6;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        }
+        .routine-flag {
+            font-size: 11px; border-radius: 5px; padding: 1px 7px;
+            border: 1px solid var(--border-color); white-space: nowrap;
+        }
+        .routine-flag.warn { border-color: var(--error); color: var(--error); }
+
+        .objectif-carte {
+            background: var(--bg-secondary); border-radius: 10px;
+            padding: 14px 16px; margin-bottom: 12px;
+            border: 1px solid var(--border-color);
+        }
+        .objectif-carte.close { opacity: 0.55; }
+        .objectif-tete {
+            display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap;
+            margin-bottom: 4px;
+        }
+        .objectif-nom { font-weight: 600; }
+        .objectif-phrase { flex: 1; min-width: 200px; overflow-wrap: anywhere; }
+        .objectif-fin {
+            font-size: 12px; opacity: 0.65; margin-bottom: 10px;
+        }
+        .objectif-point {
+            display: flex; gap: 10px; align-items: baseline; font-size: 13px;
+            padding: 4px 0; border-top: 1px solid rgba(128, 128, 128, 0.12);
+        }
+        .objectif-date {
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 12px; color: var(--accent-primary); white-space: nowrap;
+        }
+        .objectif-source {
+            font-size: 11px; opacity: 0.5; white-space: nowrap; min-width: 44px;
+        }
+        .objectif-texte { flex: 1; overflow-wrap: anywhere; }
+
+        .journal-page { margin-bottom: 18px; }
+        .journal-date {
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 12px; color: var(--accent-primary); margin-bottom: 6px;
+        }
+        .journal-texte {
+            white-space: pre-wrap; overflow-wrap: anywhere;
+            font-size: 13px; line-height: 1.55;
+            background: var(--bg-tertiary); border-radius: 8px; padding: 12px 14px;
+        }
+
+        .activity-clear {
+            align-self: flex-start;
+            padding: 6px 12px;
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-sm);
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 0.8rem;
+            transition: all 0.1s ease;
+        }
+
+        .activity-clear:hover {
+            background: var(--bg-hover);
+            border-color: var(--error);
+            color: var(--text-primary);
+        }
+
+        .activity-row {
+            display: flex;
+            gap: 12px;
+            align-items: baseline;
+            padding: 9px 14px;
+            border-bottom: 1px solid rgba(128, 128, 128, 0.12);
+            font-size: 13px;
+        }
+        .activity-row:last-child { border-bottom: none; }
+        .activity-when {
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 11px; opacity: 0.5; white-space: nowrap;
+        }
+        .activity-origin {
+            font-size: 11px; opacity: 0.45; white-space: nowrap;
+            min-width: 34px;
+        }
+        .activity-tool { font-weight: 600; min-width: 210px; overflow-wrap: anywhere; }
+        .activity-args {
+            flex: 1; opacity: 0.6; font-size: 12px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            overflow-wrap: anywhere;
+        }
+        .activity-badge {
+            font-size: 11px; padding: 2px 8px; border-radius: 999px;
+            white-space: nowrap; border: 1px solid var(--border-color);
+        }
+        .activity-ok       { color: var(--success); border-color: var(--success); }
+        .activity-échec    { color: var(--error);   border-color: var(--error); }
+        /* The policy said no, and nobody was asked. */
+        .activity-refusé   { color: var(--warning); border-color: var(--warning); }
+        /* You were asked, and you said no. A different fact, and it should
+           not look like the machine's own refusal. */
+        .activity-décliné  { color: var(--text-secondary); border-color: var(--text-secondary); }
+        /* Asked and never answered. */
+        .activity-expiré   { color: var(--text-muted); border-color: var(--text-muted);
+                             border-style: dashed; }
+        .activity-demandé  { color: var(--accent-primary); border-color: var(--accent-primary); }
+        .activity-asked    { opacity: 0.65; }
+        .core-intro {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-md);
+            padding: 14px 18px;
+            margin-bottom: 18px;
+            line-height: 1.55;
+        }
+        .core-file {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-md);
+            margin-bottom: 22px;
+            overflow: hidden;
+        }
+        .core-file-head {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 18px;
+            border-bottom: 1px solid var(--border-color);
+            flex-wrap: wrap;
+        }
+        .core-file-title { font-weight: 600; font-size: 15px; }
+        .core-file-path {
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 12px;
+            opacity: 0.55;
+            flex: 1;
+            min-width: 200px;
+            overflow-wrap: anywhere;
+        }
+        .core-entries { padding: 8px 18px 16px; }
+        .core-entry {
+            display: flex;
+            gap: 10px;
+            align-items: baseline;
+            padding: 7px 0;
+            border-bottom: 1px solid rgba(128, 128, 128, 0.12);
+        }
+        .core-entry:last-child { border-bottom: none; }
+        .core-entry-meta {
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 11px;
+            opacity: 0.5;
+            white-space: nowrap;
+        }
+        .core-entry-text { flex: 1; line-height: 1.5; }
+        .core-entry.retired .core-entry-body {
+            text-decoration: line-through;
+            opacity: 0.45;
+        }
+        /* The annotation explains why the line is struck out, so it must
+           not be struck out itself. */
+        .core-entry-why {
+            font-size: 11px;
+            opacity: 0.75;
+            font-style: italic;
+            text-decoration: none;
+            display: inline-block;
+        }
+        .core-empty { padding: 18px; opacity: 0.6; }
+        .core-editor {
+            display: none;
+            padding: 0 18px 16px;
+        }
+        .core-editor textarea {
+            width: 100%;
+            min-height: 280px;
+            background: var(--bg-primary);
+            color: inherit;
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-sm);
+            padding: 12px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 13px;
+            line-height: 1.55;
+            resize: vertical;
+        }
+        .core-editor-actions {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin-top: 10px;
+        }
+        .core-status { font-size: 12px; opacity: 0.7; }
         .tab-pane.with-sidebar {
             display: grid;
             grid-template-columns: 280px 1fr;
@@ -2086,6 +2814,24 @@ def index() -> str:
             <button class="tab active" data-tab="memories">
                 <span>💭</span> Diary
             </button>
+            <button class="tab" data-tab="core">
+                <span>🪨</span> Core
+            </button>
+            <button class="tab" data-tab="activity">
+                <span>📋</span> Activity
+            </button>
+            <button class="tab" data-tab="rappels">
+                <span>⏰</span> Rappels
+            </button>
+            <button class="tab" data-tab="routines">
+                <span>🌅</span> Routines
+            </button>
+            <button class="tab" data-tab="objectifs">
+                <span>🎯</span> Objectifs
+            </button>
+            <button class="tab" data-tab="appris">
+                <span>🧠</span> Appris
+            </button>
             <button class="tab" data-tab="graph">
                 <span>🧠</span> Knowledge
             </button>
@@ -2132,9 +2878,11 @@ def index() -> str:
                     <span class="alpha-badge">Beta</span>
                     <div class="alpha-body">
                         <p>
-                            🧪 The knowledge graph is on by default: a compact <strong>warm profile</strong>
-                            (User + Directives branches) is injected into every reply, and query-driven graph
-                            recall runs alongside the diary via <code>Enrichment Source = all</code>.
+                            🧪 The knowledge graph holds what the assistant has <strong>looked up</strong>:
+                            films, businesses, recipes, events. Query-driven graph recall runs alongside
+                            the diary via <code>Enrichment Source = all</code>. What the assistant knows
+                            about <em>you</em> lives in the <strong>🪨 Core</strong> tab instead, in files
+                            you can open and edit by hand.
                         </p>
                         <p>
                             👉 Structure and classification are stable; extractor quality is still being tuned.
@@ -2173,6 +2921,133 @@ def index() -> str:
                             <p>Select a node to view its details</p>
                         </div>
                     </div>
+                </div>
+            </div>
+
+            <div id="core-content" class="tab-pane" style="display: none;">
+                <div class="core-intro">
+                    <p>
+                        🪨 What the assistant knows about <strong>you</strong>, and the rules you
+                        have given it. These are two Markdown files on your disk: nothing is
+                        written here by inference, only what you asked it to remember or
+                        corrected. Edit them freely, here or in any text editor.
+                    </p>
+                </div>
+                <div class="core-files" id="core-files">
+                    <div class="loading"><div class="spinner"></div></div>
+                </div>
+            </div>
+
+            <div id="activity-content" class="tab-pane" style="display: none;">
+                <div class="core-intro">
+                    <p>
+                        📋 Ce que Yuba a <strong>fait</strong> : un appel d'outil par ligne, avec
+                        son niveau de risque, le verdict de <code>outils.md</code> et le résultat.
+                        Ce qu'elle a <em>vu</em> n'est jamais enregistré : aucun contenu de page,
+                        de fichier ou de réponse d'outil. Conservé 90 jours.
+                        <br>
+                        <code>refusé</code> : la politique a dit non, on ne t'a rien demandé.
+                        <code>décliné</code> : on t'a demandé, tu as dit non.
+                        <code>demandé</code> seul : personne n'a répondu.
+                    </p>
+                    <button class="activity-clear" id="btn-clear-activity">🗑️ Effacer le registre</button>
+                </div>
+                <div class="core-files" id="activity-list">
+                    <div class="loading"><div class="spinner"></div></div>
+                </div>
+            </div>
+
+            <div id="appris-content" class="tab-pane" style="display: none;">
+                <div class="core-intro">
+                    <p>
+                        🧠 Ce que Yuba a cru remarquer dans ton journal, et que tu ne lui as
+                        jamais dit. <strong>Rien ici n'est une croyance</strong> : tant qu'une
+                        ligne est là, elle ne la sait pas et ne la lit dans aucune de ses
+                        réponses.
+                        <br>
+                        <code>Je confirme</code> l'écrit dans ton profil ou tes règles, avec la
+                        source <code>confirmé</code>. <code>Non</code> la barre : elle ne te la
+                        reproposera jamais.
+                        <br>
+                        Le fichier est <code>yuba/appris.md</code> et il est à toi. Pour
+                        reformuler une phrase avant de l'accepter, ouvre-le et modifie-la : c'est
+                        la ligne telle qu'elle y est écrite qui part.
+                    </p>
+                </div>
+                <div class="core-files" id="appris-list">
+                    <div class="loading"><div class="spinner"></div></div>
+                </div>
+            </div>
+
+            <div id="rappels-content" class="tab-pane" style="display: none;">
+                <div class="core-intro">
+                    <p>
+                        ⏰ Ce que Yuba te dira plus tard. Un rappel survit à un
+                        redémarrage — c'est la seule chose ici qui doit y survivre.
+                        Tu peux en annuler un, ou en poser un directement : saisi
+                        ici, aucun modèle n'intervient.
+                    </p>
+                </div>
+
+                <div class="rappel-new">
+                    <input type="text" id="rappel-texte"
+                           placeholder="Ce qu'elle doit te dire…" />
+                    <input type="datetime-local" id="rappel-quand" />
+                    <button class="activity-clear" id="btn-rappel-add">＋ Poser</button>
+                    <span class="rappel-error" id="rappel-error"></span>
+                </div>
+
+                <div class="core-files" id="rappels-list">
+                    <div class="loading"><div class="spinner"></div></div>
+                </div>
+            </div>
+
+            <div id="routines-content" class="tab-pane" style="display: none;">
+                <div class="core-intro">
+                    <p>
+                        🌅 Ce que Yuba fait toute seule, à heure fixe, sans que
+                        tu sois là. Chaque routine ne peut atteindre que les
+                        outils listés sous elle, et seulement pour lire. Le
+                        périmètre s'édite dans <code>yuba/routines.md</code> :
+                        retire une ligne et elle est resserrée, supprime le bloc
+                        et elle est suspendue.
+                    </p>
+                </div>
+
+                <div class="core-files" id="routines-list">
+                    <div class="loading"><div class="spinner"></div></div>
+                </div>
+
+                <div class="core-intro" style="margin-top: 22px;">
+                    <p>
+                        📓 Le journal. C'est la livraison, pas un compte rendu de
+                        la livraison : personne n'est là à 07:00, donc ce qu'elle
+                        a trouvé est écrit ici ou n'est arrivé à personne. Les
+                        pages sont dans <code>yuba/journal/</code> et se gardent
+                        90 jours.
+                    </p>
+                </div>
+
+                <div id="journal-list">
+                    <div class="loading"><div class="spinner"></div></div>
+                </div>
+            </div>
+
+            <div id="objectifs-content" class="tab-pane" style="display: none;">
+                <div class="core-intro">
+                    <p>
+                        🎯 Ce vers quoi tu travailles, sur plusieurs
+                        conversations. Chaque ligne est datée et porte sa
+                        source : rien ici n'est déduit, la seule source qu'elle
+                        sait produire est « dit », c'est-à-dire toi. Le fichier
+                        est <code>yuba/objectifs.md</code> et il est à toi :
+                        corrige, réécris, supprime. Rien de tout ceci ne tourne
+                        tout seul.
+                    </p>
+                </div>
+
+                <div id="objectifs-list">
+                    <div class="loading"><div class="spinner"></div></div>
                 </div>
             </div>
 
@@ -2216,6 +3091,12 @@ def index() -> str:
         const memoriesPane = document.getElementById('memories-content');
         const mealsPane = document.getElementById('meals-content');
         const graphContent = document.getElementById('graph-content');
+        const corePane = document.getElementById('core-content');
+        const activityPane = document.getElementById('activity-content');
+        const rappelsPane = document.getElementById('rappels-content');
+        const routinesPane = document.getElementById('routines-content');
+        const objectifsPane = document.getElementById('objectifs-content');
+        const apprisPane = document.getElementById('appris-content');
         const memoriesContent = memoriesPane.querySelector('.memory-list');
         const mealsContent = mealsPane.querySelector('.memory-list');
         const tabs = document.querySelectorAll('.tab');
@@ -2537,6 +3418,498 @@ def index() -> str:
             loadMeals();
         });
 
+        // ── Core tab ────────────────────────────────────────────────
+        //
+        // Two views of the same file: the entries as the assistant reads
+        // them, and the raw Markdown. The raw view is the one that saves,
+        // because the file is the user's — an editor that rewrites what
+        // you typed is one you stop trusting with the thing it holds.
+
+        const CORE_SECTIONS = [
+            { key: 'profile', title: '🪨 Profil', blurb: 'What it knows about you' },
+            { key: 'rules', title: '📏 Règles', blurb: 'Rules you have given it' },
+        ];
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text == null ? '' : text;
+            return div.innerHTML;
+        }
+
+        function renderCoreEntries(entries) {
+            if (!entries.length) {
+                return '<div class="core-empty">Nothing yet. Say "remember that…" and it lands here.</div>';
+            }
+            return '<div class="core-entries">' + entries.map(e => {
+                const meta = [e.date, e.source].filter(Boolean).join(' · ');
+                const why = e.retired
+                    ? `<span class="core-entry-why">retiré${e.retired_on ? ' le ' + escapeHtml(e.retired_on) : ''}${e.retired_reason ? ' : ' + escapeHtml(e.retired_reason) : ''}</span>`
+                    : '';
+                return `<div class="core-entry${e.retired ? ' retired' : ''}">
+                    <span class="core-entry-meta">${escapeHtml(meta)}</span>
+                    <span class="core-entry-text"><span class="core-entry-body">${escapeHtml(e.text)}</span> ${why}</span>
+                </div>`;
+            }).join('') + '</div>';
+        }
+
+        function renderCoreFile(section, payload) {
+            return `<div class="core-file" data-section="${section.key}">
+                <div class="core-file-head">
+                    <span class="core-file-title">${section.title}</span>
+                    <span class="core-file-path" title="${escapeHtml(payload.path)}">${escapeHtml(payload.path)}</span>
+                    <button class="graph-btn" data-core-edit="${section.key}" title="Edit the file directly">✏️</button>
+                </div>
+                <div class="core-rendered">${renderCoreEntries(payload.entries)}</div>
+                <div class="core-editor">
+                    <textarea spellcheck="false"></textarea>
+                    <div class="core-editor-actions">
+                        <button class="graph-btn" data-core-save="${section.key}" title="Save">💾</button>
+                        <button class="graph-btn" data-core-cancel="${section.key}" title="Cancel">✖️</button>
+                        <span class="core-status"></span>
+                    </div>
+                </div>
+            </div>`;
+        }
+
+        let coreData = {};
+
+        async function loadCore() {
+            const container = document.getElementById('core-files');
+            try {
+                const resp = await fetch('/api/core');
+                coreData = await resp.json();
+            } catch (e) {
+                container.innerHTML = '<div class="core-empty">Could not read the core files.</div>';
+                return;
+            }
+            container.innerHTML = CORE_SECTIONS
+                .map(section => renderCoreFile(section, coreData[section.key] || { path: '', raw: '', entries: [] }))
+                .join('');
+        }
+
+        function coreFileEl(key) {
+            return document.querySelector(`.core-file[data-section="${key}"]`);
+        }
+
+        document.getElementById('core-files').addEventListener('click', async (ev) => {
+            const editKey = ev.target.dataset && ev.target.dataset.coreEdit;
+            const saveKey = ev.target.dataset && ev.target.dataset.coreSave;
+            const cancelKey = ev.target.dataset && ev.target.dataset.coreCancel;
+
+            if (editKey) {
+                const el = coreFileEl(editKey);
+                el.querySelector('textarea').value = (coreData[editKey] || {}).raw || '';
+                el.querySelector('.core-rendered').style.display = 'none';
+                el.querySelector('.core-editor').style.display = 'block';
+                return;
+            }
+
+            if (cancelKey) {
+                const el = coreFileEl(cancelKey);
+                el.querySelector('.core-editor').style.display = 'none';
+                el.querySelector('.core-rendered').style.display = '';
+                el.querySelector('.core-status').textContent = '';
+                return;
+            }
+
+            if (saveKey) {
+                const el = coreFileEl(saveKey);
+                const status = el.querySelector('.core-status');
+                status.textContent = 'Saving…';
+                try {
+                    const resp = await fetch('/api/core/' + saveKey, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ raw: el.querySelector('textarea').value }),
+                    });
+                    if (!resp.ok) {
+                        const err = await resp.json().catch(() => ({}));
+                        status.textContent = 'Not saved: ' + (err.error || resp.status);
+                        return;
+                    }
+                    const payload = await resp.json();
+                    coreData[saveKey] = payload;
+                    el.querySelector('.core-rendered').innerHTML = renderCoreEntries(payload.entries);
+                    el.querySelector('.core-editor').style.display = 'none';
+                    el.querySelector('.core-rendered').style.display = '';
+                    status.textContent = '';
+                } catch (e) {
+                    status.textContent = 'Not saved: ' + e;
+                }
+            }
+        });
+
+        // ── Activity tab ────────────────────────────────────────────
+        //
+        // One row per tool call. There is no expand-to-see-the-result,
+        // because the result was never stored: the ledger records what
+        // was done, not what was seen.
+
+        async function loadActivity() {
+            const container = document.getElementById('activity-list');
+            let actions = [];
+            try {
+                actions = (await (await fetch('/api/activity')).json()).actions || [];
+            } catch (e) {
+                container.innerHTML = '<div class="core-empty">Registre illisible.</div>';
+                return;
+            }
+            if (!actions.length) {
+                container.innerHTML = "<div class='core-empty'>Rien pour l'instant. Chaque outil appelé apparaîtra ici.</div>";
+                return;
+            }
+            // A confirmed action is two rows sharing a request id: the
+            // question, and whatever settled it. Shown as one episode,
+            // because "she asked" and "you said no" are one event to the
+            // person reading this, not two.
+            const settledIds = new Set(
+                actions.filter(a => a.request_id && a.outcome !== 'demandé')
+                       .map(a => a.request_id)
+            );
+
+            container.innerHTML = '<div class="core-file">' + actions.map(a => {
+                // The ask is folded into its outcome, unless nobody ever
+                // answered — an unanswered question is the only trace a
+                // decision never taken leaves, so it keeps its own row.
+                if (a.outcome === 'demandé' && settledIds.has(a.request_id)) return '';
+
+                const when = (a.ts_utc || '').replace('T', ' ').slice(0, 19);
+                const ms = a.duration_ms != null ? ` ${a.duration_ms} ms` : '';
+                const origin = a.origin ? escapeHtml(a.origin) : '—';
+                // On an outcome row, the badge says the episode began with
+                // a question. On the ask row itself it would just repeat
+                // the outcome beside it.
+                const asked = (a.request_id && a.outcome !== 'demandé')
+                    ? '<span class="activity-badge activity-asked" title="Yuba a demandé ta permission">demandé</span>'
+                    : '';
+                return `<div class="activity-row">
+                    <span class="activity-when">${escapeHtml(when)}</span>
+                    <span class="activity-origin" title="D'où venait la demande">${origin}</span>
+                    <span class="activity-tool">${escapeHtml(a.tool)}</span>
+                    <span class="activity-args" title="${escapeHtml(a.query || '')}">${escapeHtml(a.args || '')}</span>
+                    <span class="activity-badge">${escapeHtml(a.risk)}</span>
+                    <span class="activity-badge">${escapeHtml(a.verdict)}</span>
+                    ${asked}
+                    <span class="activity-badge activity-${escapeHtml(a.outcome)}">${escapeHtml(a.outcome)}${ms}</span>
+                </div>`;
+            }).join('') + '</div>';
+        }
+
+        // ── Reminders tab ───────────────────────────────────────────
+        //
+        // The price of keeping reminders in a database rather than in a
+        // file the user edits by hand. A scheduled thing you cannot see
+        // or call off is a thing you stop creating.
+
+        async function loadRappels() {
+            const container = document.getElementById('rappels-list');
+            let rappels = [];
+            try {
+                rappels = (await (await fetch('/api/rappels')).json()).rappels || [];
+            } catch (e) {
+                container.innerHTML = "<div class='core-empty'>Liste illisible.</div>";
+                return;
+            }
+            if (!rappels.length) {
+                container.innerHTML = "<div class='core-empty'>Rien de prévu. Dis-lui « rappelle-moi… », ou pose-en un ci-dessus.</div>";
+                return;
+            }
+            container.innerHTML = '<div class="core-file">' + rappels.map(r => {
+                const when = (r.due_local || '').replace('T', ' à ');
+                const origin = r.origin ? escapeHtml(r.origin) : '—';
+                return `<div class="rappel-row">
+                    <span class="rappel-when">${escapeHtml(when)}</span>
+                    <span class="rappel-texte">${escapeHtml(r.texte || '')}</span>
+                    <span class="rappel-origin" title="D'où venait la demande">${origin}</span>
+                    <button class="rappel-cancel" data-rappel="${escapeHtml(r.id)}">Annuler</button>
+                </div>`;
+            }).join('') + '</div>';
+
+            container.querySelectorAll('[data-rappel]').forEach(button => {
+                button.addEventListener('click', async () => {
+                    button.disabled = true;
+                    try {
+                        await fetch('/api/rappels/' + encodeURIComponent(button.dataset.rappel),
+                                    { method: 'DELETE' });
+                    } catch (e) {
+                        button.disabled = false;
+                        return;
+                    }
+                    loadRappels();
+                });
+            });
+        }
+
+        document.getElementById('btn-rappel-add').addEventListener('click', async () => {
+            const texte = document.getElementById('rappel-texte');
+            const quand = document.getElementById('rappel-quand');
+            const error = document.getElementById('rappel-error');
+            error.textContent = '';
+            let response;
+            try {
+                response = await fetch('/api/rappels', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ texte: texte.value, due_local: quand.value }),
+                });
+            } catch (e) {
+                error.textContent = "Yuba ne répond pas.";
+                return;
+            }
+            if (!response.ok) {
+                const body = await response.json().catch(() => ({}));
+                error.textContent = body.error || "Impossible de poser ce rappel.";
+                return;
+            }
+            texte.value = '';
+            quand.value = '';
+            loadRappels();
+        });
+
+        // ── Routines tab ────────────────────────────────────────────
+        //
+        // Two questions, and neither is answered by one artefact alone:
+        // the row says when it fires, routines.md says what it may
+        // reach. A user should not have to open a text editor to find
+        // out whether the thing running at 07:00 can read their files.
+
+        async function loadRoutines() {
+            const container = document.getElementById('routines-list');
+            let routines = [];
+            try {
+                routines = (await (await fetch('/api/routines')).json()).routines || [];
+            } catch (e) {
+                container.innerHTML = "<div class='core-empty'>Liste illisible.</div>";
+                return;
+            }
+            if (!routines.length) {
+                container.innerHTML = "<div class='core-empty'>Aucune routine, et aucun bloc dans routines.md. Dis-lui « tous les matins à 7h, … ».</div>";
+                return;
+            }
+            container.innerHTML = '<div class="core-file">' + routines.map(r => {
+                // Trim to minutes first: ' à ' is three characters where
+                // the T was one, so slicing afterwards eats them.
+                const when = (r.due_local || '').slice(0, 16).replace('T', ' à ');
+                const flags = [];
+                if (r.arretee) {
+                    flags.push('<span class="routine-flag" title="Arrêtée. Son bloc est toujours là : redis la même demande et elle repart.">arrêtée</span>');
+                }
+                if (r.horaire_divergent) {
+                    flags.push('<span class="routine-flag warn" title="routines.md annonce un horaire différent de celui auquel elle part.">horaire à revoir</span>');
+                }
+                if (r.suspendue) {
+                    flags.push('<span class="routine-flag warn" title="Plus de bloc dans routines.md : elle ne fera rien tant qu&#39;il n&#39;est pas revenu">suspendue</span>');
+                } else if ((r.introuvables || []).length) {
+                    flags.push('<span class="routine-flag warn" title="Nommés dans son bloc, absents de la machine : ' +
+                               escapeHtml((r.introuvables || []).join(', ')) +
+                               '">' + escapeHtml(String(r.introuvables.length)) + ' outil(s) disparu(s)</span>');
+                }
+                if (!r.suspendue && !r.outils.length) {
+                    flags.push('<span class="routine-flag warn" title="Périmètre vide : elle ne peut atteindre aucun outil">périmètre vide</span>');
+                }
+                if (r.memoire) {
+                    flags.push('<span class="routine-flag" title="Ton profil et tes règles partent avec elle">mémoire</span>');
+                }
+                if (r.steriles) {
+                    flags.push('<span class="routine-flag warn" title="Passages de suite sans rien produire. Au bout de 5, elle s&#39;arrête.">' +
+                               escapeHtml(String(r.steriles)) + ' sans résultat</span>');
+                }
+                const outils = r.outils.length
+                    ? escapeHtml(r.outils.join(', '))
+                    : "aucun outil";
+                return `<div class="routine-row">
+                    <span class="routine-nom">${escapeHtml(r.nom || '?')}</span>
+                    <span class="routine-quand">${escapeHtml(when)}</span>
+                    <span class="routine-phrase">${escapeHtml(r.texte || '')}</span>
+                    ${flags.join(' ')}
+                    ${r.arretee ? '' : `<button class="rappel-cancel" data-routine="${escapeHtml(r.id)}">Arrêter</button>`}
+                    <span class="routine-outils">🔧 ${outils}</span>
+                </div>`;
+            }).join('') + '</div>';
+
+            container.querySelectorAll('[data-routine]').forEach(button => {
+                button.addEventListener('click', async () => {
+                    if (!confirm("Arrêter cette routine ? Son bloc restera dans routines.md.")) return;
+                    button.disabled = true;
+                    try {
+                        await fetch('/api/routines/' + encodeURIComponent(button.dataset.routine),
+                                    { method: 'DELETE' });
+                    } catch (e) {
+                        button.disabled = false;
+                        return;
+                    }
+                    loadRoutines();
+                });
+            });
+        }
+
+        async function loadAppris() {
+            const container = document.getElementById('appris-list');
+            let propositions = [];
+            try {
+                propositions = (await (await fetch('/api/appris')).json()).propositions || [];
+            } catch (e) {
+                container.innerHTML = "<div class='core-empty'>Fichier illisible.</div>";
+                return;
+            }
+
+            const attente = propositions.filter(p => p.etat === 'attente');
+            const reglees = propositions.filter(p => p.etat !== 'attente');
+
+            if (!propositions.length) {
+                container.innerHTML = "<div class='core-empty'>Rien pour l'instant. " +
+                    "Demande-lui ce qu'elle a appris sur toi.</div>";
+                return;
+            }
+
+            const carte = (p, agissable) => {
+                const ou = p.section === 'regles' ? 'tes règles'
+                         : p.section === 'profil' ? 'ton profil'
+                         : 'nulle part : titre inconnu';
+                const boutons = agissable
+                    ? `<button class="rappel-cancel" data-retenir="${escapeHtml(p.ligne)}">Je confirme</button>
+                       <button class="rappel-cancel" data-refuser="${escapeHtml(p.ligne)}">Non</button>`
+                    : `<span class="routine-flag">${
+                        p.etat === 'rayée'
+                          ? (p.tampon ? escapeHtml(p.tampon) : 'refusée')
+                          : escapeHtml(p.etat)}</span>`;
+                return `<div class="routine-row">
+                    <span class="routine-phrase">${escapeHtml(p.texte || '')}</span>
+                    <span class="routine-quand">${escapeHtml(p.date || '')}</span>
+                    <span class="routine-flag" title="Où elle irait si tu confirmes">${escapeHtml(ou)}</span>
+                    ${boutons}
+                    <span class="routine-outils" title="La phrase de ton journal d'où elle vient">📖 ${escapeHtml(p.citation || 'sans citation')}</span>
+                </div>`;
+            };
+
+            container.innerHTML =
+                (attente.length
+                    ? '<div class="core-files">' + attente.map(p => carte(p, true)).join('') + '</div>'
+                    : "<div class='core-empty'>Rien en attente.</div>") +
+                (reglees.length
+                    ? '<div class="core-intro"><p>Déjà réglées, gardées pour la trace :</p></div>' +
+                      '<div class="core-files">' + reglees.map(p => carte(p, false)).join('') + '</div>'
+                    : '');
+
+            container.querySelectorAll('[data-retenir]').forEach(button => {
+                button.addEventListener('click', async () => {
+                    button.disabled = true;
+                    try {
+                        await fetch('/api/appris/retenir', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ ligne: button.dataset.retenir }),
+                        });
+                    } catch (e) {
+                        button.disabled = false;
+                        return;
+                    }
+                    loadAppris();
+                });
+            });
+
+            container.querySelectorAll('[data-refuser]').forEach(button => {
+                button.addEventListener('click', async () => {
+                    if (!confirm("Elle ne te la reproposera jamais. C'est bien ça ?")) return;
+                    button.disabled = true;
+                    try {
+                        await fetch('/api/appris/refuser', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ ligne: button.dataset.refuser }),
+                        });
+                    } catch (e) {
+                        button.disabled = false;
+                        return;
+                    }
+                    loadAppris();
+                });
+            });
+        }
+
+        async function loadJournal() {
+            const container = document.getElementById('journal-list');
+            let pages = [];
+            try {
+                pages = (await (await fetch('/api/journal')).json()).pages || [];
+            } catch (e) {
+                container.innerHTML = "<div class='core-empty'>Journal illisible.</div>";
+                return;
+            }
+            if (!pages.length) {
+                container.innerHTML = "<div class='core-empty'>Aucune matinée écrite pour l'instant.</div>";
+                return;
+            }
+            container.innerHTML = pages.map(p => `<div class="journal-page">
+                <div class="journal-date">${escapeHtml(p.date)}</div>
+                <div class="journal-texte">${escapeHtml(p.texte)}</div>
+            </div>`).join('');
+        }
+
+        // ── Goals tab ───────────────────────────────────────────────
+        //
+        // The whole page, not a summary. The reason this artefact exists
+        // is that he can read in October what he said in August, and a
+        // tab that showed only the last line would be a worse version of
+        // the prompt block.
+
+        async function loadObjectifs() {
+            const container = document.getElementById('objectifs-list');
+            let objectifs = [];
+            try {
+                objectifs = (await (await fetch('/api/objectifs')).json()).objectifs || [];
+            } catch (e) {
+                container.innerHTML = "<div class='core-empty'>Liste illisible.</div>";
+                return;
+            }
+            if (!objectifs.length) {
+                container.innerHTML = "<div class='core-empty'>Aucun objectif. Dis-lui « garde une trace de… ».</div>";
+                return;
+            }
+            container.innerHTML = objectifs.map(o => {
+                const points = (o.points || []).map(p =>
+                    `<div class="objectif-point">
+                        <span class="objectif-date">${escapeHtml(p.date)}</span>
+                        <span class="objectif-source">${escapeHtml(p.source)}</span>
+                        <span class="objectif-texte">${escapeHtml(p.texte)}</span>
+                    </div>`).join('')
+                    || "<div class='objectif-point'><span class='objectif-texte'>Rien de noté pour l'instant.</span></div>";
+                const etat = o.ouvert
+                    ? `<button class="rappel-cancel" data-objectif="${escapeHtml(o.nom)}">Terminer</button>`
+                    : `<span class="routine-flag">terminé ${escapeHtml(o.clos)}</span>`;
+                return `<div class="objectif-carte${o.ouvert ? '' : ' close'}">
+                    <div class="objectif-tete">
+                        <span class="objectif-nom">${escapeHtml(o.nom)}</span>
+                        <span class="objectif-phrase">${escapeHtml(o.phrase)}</span>
+                        ${etat}
+                    </div>
+                    <div class="objectif-fin">Fini quand : ${escapeHtml(o.fini_quand || '(non dit)')}</div>
+                    ${points}
+                </div>`;
+            }).join('');
+
+            container.querySelectorAll('[data-objectif]').forEach(button => {
+                button.addEventListener('click', async () => {
+                    if (!confirm("Terminer cet objectif ? Tout ce qu'il a enregistré reste dans le fichier.")) return;
+                    button.disabled = true;
+                    try {
+                        await fetch('/api/objectifs/' + encodeURIComponent(button.dataset.objectif),
+                                    { method: 'DELETE' });
+                    } catch (e) {
+                        button.disabled = false;
+                        return;
+                    }
+                    loadObjectifs();
+                });
+            });
+        }
+
+        document.getElementById('btn-clear-activity').addEventListener('click', async () => {
+            if (!confirm("Effacer tout le registre d'activité ?")) return;
+            await fetch('/api/activity', { method: 'DELETE' });
+            loadActivity();
+        });
+
         function switchTab(tabName) {
             tabs.forEach(t => t.classList.remove('active'));
             document.querySelector(`.tab[data-tab="${tabName}"]`).classList.add('active');
@@ -2546,10 +3919,35 @@ def index() -> str:
             memoriesPane.style.display = 'none';
             graphContent.style.display = 'none';
             mealsPane.style.display = 'none';
+            corePane.style.display = 'none';
+            activityPane.style.display = 'none';
+            rappelsPane.style.display = 'none';
+            routinesPane.style.display = 'none';
+            objectifsPane.style.display = 'none';
+            apprisPane.style.display = 'none';
 
             if (currentTab === 'memories') {
                 memoriesPane.style.display = '';
                 loadMemories();
+            } else if (currentTab === 'core') {
+                corePane.style.display = '';
+                loadCore();
+            } else if (currentTab === 'activity') {
+                activityPane.style.display = '';
+                loadActivity();
+            } else if (currentTab === 'rappels') {
+                rappelsPane.style.display = '';
+                loadRappels();
+            } else if (currentTab === 'routines') {
+                routinesPane.style.display = '';
+                loadRoutines();
+                loadJournal();
+            } else if (currentTab === 'appris') {
+                apprisPane.style.display = '';
+                loadAppris();
+            } else if (currentTab === 'objectifs') {
+                objectifsPane.style.display = '';
+                loadObjectifs();
             } else if (currentTab === 'graph') {
                 graphContent.style.display = '';
                 initGraph();

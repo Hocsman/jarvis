@@ -1,9 +1,11 @@
+import ipaddress
 import os
 import sys
 import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 
 
@@ -67,6 +69,21 @@ def _default_db_path() -> str:
 
 
 @dataclass(frozen=True)
+class UISettings:
+    """Desktop-app UI choices.
+
+    Currently a single knob: whether the reactive orb renders its
+    ambient particle layer. Disabling particles cuts per-frame draw
+    work (relevant on lower-end hardware where the orb's animation
+    adds noticeable GPU load) and is also an aesthetic preference for
+    a calmer orb. Set ``"ui": {"orb_particles_enabled": false}`` in
+    config.json to turn them off.
+    """
+
+    orb_particles_enabled: bool
+
+
+@dataclass(frozen=True)
 class Settings:
     # Database & Storage
     db_path: str
@@ -78,16 +95,34 @@ class Settings:
     # reading them keeps working when the provider is Ollama.
     llm_provider: str  # "ollama" | "openai_compatible"
     llm_base_url: str
+    # Resolved API key for the OpenAI-compatible provider. When
+    # ``llm_api_key_env`` names an environment variable that is set, the
+    # parser populates this from that variable so the secret never has
+    # to live in config.json. Otherwise it falls back to the literal
+    # ``llm_api_key`` value from the config file.
     llm_api_key: str
+    # Name of the environment variable to read the API key from (e.g.
+    # "OPENROUTER_API_KEY"). Empty = use the literal ``llm_api_key``.
+    llm_api_key_env: str
     llm_chat_model: str
+    # Provider-specific extra request fields merged into every cloud chat
+    # payload (OpenAI-compatible path only). Example for OpenRouter, to pin
+    # the fastest upstream for a multi-provider model:
+    # {"provider": {"sort": "throughput"}}. Empty = standard OpenAI shape.
+    llm_extra_body: Dict[str, Any]
+    # Scrub secret-shaped tokens (emails, API keys, JWTs, password/
+    # token/secret pairs) from prompts before they leave the machine
+    # for a remote OpenAI-compatible provider. Default True (privacy-
+    # first). No effect when the provider is local Ollama.
+    auto_redact_before_cloud: bool
     embedding_provider: str  # "" (= same as llm_provider) | "ollama" | "openai_compatible"
     embedding_base_url: str
     embedding_api_key: str
     embedding_model: str
-    # Compatibility aliases — populated alongside the provider-aware
-    # fields. Code paths that have not yet been migrated to the factory
-    # read these. `ollama_base_url`/`ollama_chat_model`/`ollama_embed_model`
-    # retain the same meaning they had before PR 2.
+    # Disk-format aliases. Older config files name these fields, so they
+    # stay readable here; the loader promotes their values into the
+    # provider-aware fields above so everything inside the codebase reads
+    # ``llm_*`` / ``embedding_*`` only.
     ollama_base_url: str
     ollama_embed_model: str
     ollama_chat_model: str
@@ -111,7 +146,7 @@ class Settings:
 
     # Text-to-Speech
     tts_enabled: bool
-    tts_engine: str  # "piper" (default) or "chatterbox"
+    tts_engine: str  # "piper" (default), "kokoro", or "chatterbox"
     tts_voice: str | None
     tts_rate: int | None  # Words per minute (WPM), 200=normal
     tts_chatterbox_device: str  # "cuda", "auto", or "cpu" for Chatterbox
@@ -126,6 +161,11 @@ class Settings:
     tts_piper_noise_scale: float  # Audio variation
     tts_piper_noise_w: float  # Phoneme width variation
     tts_piper_sentence_silence: float  # Post-sentence silence in seconds
+
+    # Kokoro TTS (more natural neural voice; real-time on CPU)
+    tts_kokoro_voice: str  # Voice id, e.g. "ff_siwis" (French)
+    tts_kokoro_lang_code: str  # Kokoro language code, e.g. "f" (French)
+    tts_kokoro_speed: float  # Speech speed multiplier (1.0 = normal)
 
     # Voice Input & Audio
     voice_device: str | None
@@ -166,10 +206,39 @@ class Settings:
     tune_enabled: bool
     hot_window_enabled: bool
     hot_window_seconds: float
+    low_power_mode: bool
 
     # Echo Detection
     echo_energy_threshold: float
     echo_tolerance: float
+
+    # Reminders — the first thing she does while nobody is watching
+    reminders_enabled: bool
+    reminder_model: str
+    reminder_timeout_sec: float
+    reminder_default_hour: int
+    reminder_tick_sec: float
+    reminder_late_grace_sec: float
+    reminder_max_attempts: int
+
+    # Appris — what she thinks she noticed in his journal, for him to say
+    appris_model: str
+    appris_jours: int
+    appris_max_propositions: int
+    appris_seuil_doublon: int
+    appris_timeout_sec: float
+
+    # Routines — what she does at a fixed hour with nobody in the room
+    routines_enabled: bool
+    routine_tick_sec: float
+    routine_late_grace_sec: float
+    routine_max_steriles: int
+
+    # Confirmation — how long a question waits, and who reads the answer
+    confirmation_ttl_sec: float
+    confirmation_hot_window_sec: float
+    confirmation_model: str
+    confirmation_timeout_sec: float
 
     # Intent Judge (LLM-based intent classification)
     # Always used when available, falls back to simple wake word detection
@@ -207,10 +276,10 @@ class Settings:
     agentic_max_turns: int
     tool_selection_strategy: str  # "all", "keyword", "embedding", or "llm"
     # When `tool_selection_strategy == "llm"`, this model does the routing.
-    # Empty string means "reuse `ollama_chat_model`" (the default).
+    # Empty string means "reuse ``llm_chat_model``" (the default).
     tool_router_model: str
     # Optional override for the post-turn evaluator LLM. Empty string means
-    # "fall back to intent_judge_model, then ollama_chat_model" (the default).
+    # "fall back to intent_judge_model, then ``llm_chat_model``" (the default).
     evaluator_model: str
     # None = auto (on for SMALL models, off for LARGE). Explicit true/false forces.
     evaluator_enabled: Optional[bool]
@@ -225,7 +294,7 @@ class Settings:
     evaluator_nudge_max: int
     # Optional override for the pre-loop task-list planner model. Empty
     # string means "fall back to tool_router_model → intent_judge_model →
-    # ollama_chat_model" (the default). The planner is a small
+    # ``llm_chat_model``" (the default). The planner is a small
     # classification-shaped pass so it rides the same small-model chain
     # as the router and the evaluator.
     planner_model: str
@@ -269,6 +338,28 @@ class Settings:
 
     # MCP Integration
     mcps: Dict[str, Any]
+
+    # Force the assistant's reply language regardless of input language.
+    # Empty = mirror the user's language (model default). Example:
+    # "français". Layered into the system prompt by build_system_prompt.
+    response_language: str
+
+    # Offered in the defaults and written by the settings window, so they
+    # have to arrive: every consumer reads them with a `getattr` fallback,
+    # and a missing field means the fallback wins and his choice does
+    # nothing at all, quietly.
+    llm_thinking_enabled: bool
+    intent_judge_thinking_enabled: bool
+    dictation_thinking_enabled: bool
+    stop_commands: list
+    stop_command_fuzzy_ratio: float
+
+    # City shown on the dashboard weather card (Open-Meteo geocoded).
+    # Empty falls back to "Paris".
+    weather_city: str
+
+    # Desktop UI choices (orb particle layer, etc.)
+    ui: UISettings
 
 
 
@@ -334,11 +425,11 @@ def _migrate_config(cfg_path: Path, cfg_json: Dict[str, Any]) -> Dict[str, Any]:
         cfg_json["_config_version"] = 1
         modified = True
 
-    # Migration v2: introduce provider-aware llm_* / embedding_* keys.
-    # Existing installs keep their behaviour: llm_provider defaults to
-    # "ollama" and the llm_* / embedding_* fields are filled from the
-    # ollama_* fields they already have. The old keys remain in place so
-    # any code path that still reads them works unchanged.
+    # Migration v2: promote any ``ollama_*`` keys on disk into the
+    # provider-aware ``llm_*`` / ``embedding_*`` shape. Default
+    # ``llm_provider`` is ``"ollama"`` so existing installs keep their
+    # behaviour. The old keys are left in place on disk so a downgrade
+    # to an older Jarvis build still finds them.
     if migration_version < 2:
         if "llm_provider" not in cfg_json:
             cfg_json["llm_provider"] = "ollama"
@@ -383,6 +474,84 @@ def load_config() -> Dict[str, Any]:
     return {**defaults, **cfg_json}
 
 
+# Pins already discarded in this process. `debug_log` reloads the settings
+# every couple of seconds, and a warning repeated at that rate is a
+# warning the user learns to scroll past.
+_discarded_pins: set = set()
+
+
+def _is_local_endpoint(base_url: str) -> bool:
+    """Whether this URL points at a server on this machine or this network.
+
+    The OpenAI-compatible provider covers both ends of the range: a
+    remote cloud endpoint, whose model IDs are namespaced
+    ``vendor/model``, and a server on the user's own machine (LM Studio,
+    oMLX, ``llama-server``, vLLM, LocalAI), whose model IDs are bare
+    names. The host separates them; the provider name does not.
+
+    Literals and ``localhost`` only, resolved without DNS: the settings
+    are loaded on every debug check, and a resolver call here would block
+    startup. A remote endpoint reached by hostname is therefore treated
+    as remote, which is the safe direction — the pin is discarded, and
+    the announcement tells the user to write the address as an IP if it
+    was actually theirs.
+    """
+    raw = (base_url or "").strip()
+    if not raw:
+        return False
+    try:
+        host = urlparse(raw if "//" in raw else f"//{raw}").hostname
+    except Exception:
+        return False
+    if not host:
+        return False
+    host = host.lower()
+    if host == "localhost" or host.endswith(".localhost") or host.endswith(".local"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return bool(ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_unspecified)
+
+
+def _cloud_safe_model(value: str, field: str, provider: str,
+                      base_url: str, fallback: str) -> str:
+    """Keep auxiliary model names valid for the endpoint actually in use.
+
+    Jarvis runs several small LLM tasks (intent judge, tool router,
+    evaluator, planner) on their own configured model. A remote cloud
+    endpoint namespaces its model IDs as ``vendor/model`` and answers
+    HTTP 400 ("X is not a valid model ID") to a bare local tag like
+    ``gemma4:e2b``, so the auxiliary task dies for no gain: those get the
+    chat model instead.
+
+    A local OpenAI-compatible server is the opposite case. A bare name is
+    the only shape it accepts, and the pin is the whole reason the user
+    set a small model for a small task. So the endpoint decides rather
+    than the provider name, and a discarded pin is announced: nothing
+    downstream ever shows the effective value, and three of these four
+    fields have no field in the settings window at all.
+    """
+    if not value:
+        return value
+    if provider != "openai_compatible" or "/" in value:
+        return value
+    if _is_local_endpoint(base_url):
+        return value
+    if not fallback or fallback == value:
+        return value
+    mark = (field, value, fallback)
+    if mark not in _discarded_pins:
+        _discarded_pins.add(mark)
+        print(f"⚠️ Pinned model ignored: {field}", flush=True)
+        print(f"   📌 pinned: {value}", flush=True)
+        print(f"   ☁️ remote endpoint: {base_url}", flush=True)
+        print(f"   ↪️ used instead: {fallback}", flush=True)
+    return fallback
+
+
 def _ensure_list(value: Any) -> list[str]:
     if value is None:
         return []
@@ -420,14 +589,18 @@ def get_default_config() -> Dict[str, Any]:
         "sqlite_vss_path": None,
 
         # LLM & AI Models
-        # Provider-aware fields (PR 2). Default provider is "ollama" so
-        # existing installs keep working without re-configuration. The
-        # `ollama_*` fields below are kept for backwards compatibility
-        # with code paths that have not yet been migrated to the factory.
+        # Provider-aware fields. Default provider is ``ollama`` so a fresh
+        # install needs no extra configuration. The ``ollama_*`` fields are
+        # disk-format aliases for older config files; the loader promotes
+        # their values into ``llm_*`` / ``embedding_*`` so everything inside
+        # the codebase reads the provider-aware keys only.
         "llm_provider": "ollama",
         "llm_base_url": "",  # falls back to ollama_base_url when empty
         "llm_api_key": "",
+        "llm_api_key_env": "",  # name of env var holding the key (preferred over plaintext)
         "llm_chat_model": "",  # falls back to ollama_chat_model when empty
+        "llm_extra_body": {},  # provider-specific extra chat payload fields
+        "auto_redact_before_cloud": True,  # scrub secrets before remote egress
         "embedding_provider": "",  # "" = same as llm_provider
         "embedding_base_url": "",
         "embedding_api_key": "",
@@ -458,7 +631,7 @@ def get_default_config() -> Dict[str, Any]:
 
         # Text-to-Speech
         "tts_enabled": True,
-        "tts_engine": "piper",  # "piper" (default) or "chatterbox"
+        "tts_engine": "piper",  # "piper" (default), "kokoro", or "chatterbox"
         "tts_voice": None,
         "tts_rate": 200,  # Words per minute (WPM), 200=normal
         "tts_chatterbox_device": "cuda",  # "cuda" (recommended), "auto", or "cpu"
@@ -473,6 +646,11 @@ def get_default_config() -> Dict[str, Any]:
         "tts_piper_noise_scale": 0.8,  # Audio variation (higher = more expressive)
         "tts_piper_noise_w": 1.0,  # Phoneme width variation (higher = more lively)
         "tts_piper_sentence_silence": 0.2,  # Post-sentence silence in seconds
+
+        # Kokoro TTS
+        "tts_kokoro_voice": "ff_siwis",  # French voice
+        "tts_kokoro_lang_code": "f",  # French
+        "tts_kokoro_speed": 1.0,  # Speech speed multiplier
 
         # Voice Input & Audio
         "voice_device": None,
@@ -513,8 +691,64 @@ def get_default_config() -> Dict[str, Any]:
         "tune_enabled": True,
         "hot_window_enabled": True,
         "hot_window_seconds": 3.0,
+        "low_power_mode": False,
         "echo_energy_threshold": 2.0,
         "echo_tolerance": 0.3,  # Time tolerance for echo detection timing
+
+        # Reminders. The grace window is what separates "she is late"
+        # from "she was never going to say it": past it she still speaks,
+        # but says how late she is rather than pretending it is now.
+        "reminders_enabled": True,
+        # Empty = the warm small chain. Pin a local model to keep the
+        # user's own sentence about their own life off the network.
+        "reminder_model": "",
+        "reminder_timeout_sec": 8.0,
+        # Where a bare day lands when no hour was said: "jeudi" means
+        # jeudi morning to most people who say it.
+        "reminder_default_hour": 9,
+        "reminder_tick_sec": 5.0,
+        "reminder_late_grace_sec": 900.0,
+        "reminder_max_attempts": 60,
+
+        # Appris. Empty model = the reminder chain, whose last link is
+        # the chat model; pin one to keep a fortnight of his days local.
+        "appris_model": "",
+        # A fortnight is long enough that a habit shows up twice and
+        # short enough that he recognises what she is quoting.
+        "appris_jours": 14,
+        # Three is what a person will actually read and answer. A list
+        # of twelve is a list nobody resolves, and unresolved proposals
+        # are the failure mode that makes the file feel like a chore.
+        "appris_max_propositions": 3,
+        "appris_seuil_doublon": 90,
+        "appris_timeout_sec": 30.0,
+
+        # Routines. The grace window is what separates "the laptop was
+        # shut" from "this morning has passed": a digest two hours late
+        # is still the thing that was asked for, one at 18:00 is not.
+        # Bounded again by the period inside `staleness_window`, so a
+        # daily routine can never fire for yesterday while today's slot
+        # is approaching.
+        "routines_enabled": True,
+        "routine_tick_sec": 30.0,
+        "routine_late_grace_sec": 14400.0,
+        # Consecutive runs that produced nothing at all before she stops
+        # trying. Errors and empty write-ups count; "rien à signaler"
+        # does not, since that is the routine working.
+        "routine_max_steriles": 5,
+
+        # Confirmation. The click window is generous because walking to
+        # the machine takes longer than answering aloud. The spoken window
+        # is wider than `hot_window_seconds`, which is tuned for
+        # follow-ups rather than for consent — a person weighing whether
+        # to let something happen pauses before answering.
+        "confirmation_ttl_sec": 180.0,
+        "confirmation_hot_window_sec": 12.0,
+        # Empty = reuse the small warm chain (tool_router_model →
+        # intent_judge_model → chat model). Pin a local model here to keep
+        # the reading of a spoken approval off the network.
+        "confirmation_model": "",
+        "confirmation_timeout_sec": 8.0,
 
         # Audio Wake Word Detection
         # Intent Judge (LLM-based intent classification)
@@ -599,6 +833,20 @@ def get_default_config() -> Dict[str, Any]:
 
         # MCP Integration (external servers Jarvis can use). No defaults.
         "mcps": {},
+
+        # Force reply language (empty = mirror the user's language).
+        "response_language": "",
+
+        # Dashboard weather card city (empty = "Paris").
+        "weather_city": "",
+
+        # Desktop UI. ``orb_particles_enabled`` controls whether the
+        # reactive orb renders its ambient particle layer (default
+        # True). Set false to skip the particle draw entirely (perf
+        # or aesthetic preference).
+        "ui": {
+            "orb_particles_enabled": True,
+        },
     }
 
 
@@ -648,28 +896,50 @@ def load_settings() -> Settings:
     ollama_embed_model = str(merged.get("ollama_embed_model"))
     ollama_chat_model = str(merged.get("ollama_chat_model"))
 
-    # Provider-aware fields. Empty string in any of llm_base_url /
-    # llm_chat_model / embedding_model is treated as "use the
-    # corresponding ollama_* field" so existing configs keep working
-    # without a re-save (the v2 migration also fills them in on disk).
+    # Provider-aware fields. The two field sets are per-provider: the
+    # ``ollama_*`` fields are authoritative when the provider is Ollama,
+    # the ``llm_*`` / ``embedding_*`` fields when it is OpenAI-compatible.
+    # Resolving the active model this way (rather than a blanket
+    # ``llm_chat_model or ollama_chat_model``) keeps the Ollama model
+    # picker — which writes ``ollama_chat_model`` — authoritative on the
+    # Ollama path, so a stale ``llm_chat_model`` (e.g. promoted by the v2
+    # migration) can never shadow it.
     llm_provider = str(merged.get("llm_provider", "ollama") or "ollama").strip().lower()
     if llm_provider not in ("ollama", "openai_compatible"):
         llm_provider = "ollama"
     llm_base_url = str(merged.get("llm_base_url", "") or "").strip() or ollama_base_url
+    # API key resolution: prefer the named environment variable (keeps
+    # the secret out of config.json), fall back to the literal field.
+    llm_api_key_env = str(merged.get("llm_api_key_env", "") or "").strip()
     llm_api_key = str(merged.get("llm_api_key", "") or "").strip()
-    llm_chat_model = str(merged.get("llm_chat_model", "") or "").strip() or ollama_chat_model
+    if llm_api_key_env:
+        env_key = os.environ.get(llm_api_key_env, "").strip()
+        if env_key:
+            llm_api_key = env_key
+    auto_redact_before_cloud = bool(merged.get("auto_redact_before_cloud", True))
+    raw_extra_body = merged.get("llm_extra_body", {})
+    llm_extra_body = raw_extra_body if isinstance(raw_extra_body, dict) else {}
+    if llm_provider == "openai_compatible":
+        llm_chat_model = str(merged.get("llm_chat_model", "") or "").strip() or ollama_chat_model
+    else:
+        llm_chat_model = ollama_chat_model
     embedding_provider_raw = str(merged.get("embedding_provider", "") or "").strip().lower()
     if embedding_provider_raw not in ("", "ollama", "openai_compatible"):
         embedding_provider_raw = ""
     embedding_provider = embedding_provider_raw
     embedding_base_url = str(merged.get("embedding_base_url", "") or "").strip()
     embedding_api_key = str(merged.get("embedding_api_key", "") or "").strip()
-    embedding_model = str(merged.get("embedding_model", "") or "").strip() or ollama_embed_model
+    # Effective embedding provider inherits the chat provider when unset.
+    _effective_embed_provider = embedding_provider or llm_provider
+    if _effective_embed_provider == "openai_compatible":
+        embedding_model = str(merged.get("embedding_model", "") or "").strip() or ollama_embed_model
+    else:
+        embedding_model = ollama_embed_model
     use_stdin = bool(merged.get("use_stdin", False))
     active_profiles = _ensure_list(merged.get("active_profiles"))
     tts_enabled = bool(merged.get("tts_enabled", True))
     tts_engine = str(merged.get("tts_engine", "piper")).lower()
-    if tts_engine not in ("piper", "chatterbox"):
+    if tts_engine not in ("piper", "chatterbox", "kokoro"):
         tts_engine = "piper"  # Default to piper if invalid value
     tts_voice_val = merged.get("tts_voice")
     tts_voice = None if tts_voice_val in (None, "", "null") else str(tts_voice_val)
@@ -698,6 +968,12 @@ def load_settings() -> Settings:
     tts_piper_noise_scale = float(merged.get("tts_piper_noise_scale", 0.8))
     tts_piper_noise_w = float(merged.get("tts_piper_noise_w", 1.0))
     tts_piper_sentence_silence = float(merged.get("tts_piper_sentence_silence", 0.2))
+    tts_kokoro_voice = str(merged.get("tts_kokoro_voice", "ff_siwis") or "ff_siwis").strip()
+    tts_kokoro_lang_code = str(merged.get("tts_kokoro_lang_code", "f") or "f").strip()
+    try:
+        tts_kokoro_speed = float(merged.get("tts_kokoro_speed", 1.0))
+    except Exception:
+        tts_kokoro_speed = 1.0
 
     voice_device_val = merged.get("voice_device")
     voice_device = None if voice_device_val in (None, "", "default", "system") else str(voice_device_val)
@@ -728,11 +1004,50 @@ def load_settings() -> Settings:
     tune_enabled = bool(merged.get("tune_enabled", True))
     hot_window_enabled = bool(merged.get("hot_window_enabled", True))
     hot_window_seconds = float(merged.get("hot_window_seconds", 3.0))
+    low_power_mode = bool(merged.get("low_power_mode", False))
     echo_energy_threshold = float(merged.get("echo_energy_threshold", 2.0))
     echo_tolerance = float(merged.get("echo_tolerance", 0.3))
 
+    # Reminders. Clamped rather than trusted: a tick of zero spins a core
+    # and a timeout of zero makes every reminder unreadable, and both
+    # symptoms point nowhere near their cause.
+    reminders_enabled = bool(merged.get("reminders_enabled", True))
+    # Deliberately NOT passed through `_cloud_safe_model`, unlike the
+    # tool router and the intent judge. That filter rewrites a pinned
+    # local tag to the cloud chat model, and this prompt carries the
+    # user's own sentence about their own life — pinning a local model is
+    # the only way to keep it off the network, so rescuing it would
+    # silently undo the one thing the setting is for.
+    reminder_model = str(merged.get("reminder_model", ""))
+    reminder_timeout_sec = min(max(float(merged.get("reminder_timeout_sec", 8.0)), 2.0), 30.0)
+    reminder_default_hour = min(max(int(merged.get("reminder_default_hour", 9)), 0), 23)
+    appris_model = str(merged.get("appris_model", "") or "")
+    appris_jours = min(max(int(merged.get("appris_jours", 14)), 1), 365)
+    appris_max_propositions = min(max(int(merged.get("appris_max_propositions", 3)), 1), 10)
+    # Below ~70 `token_set_ratio` starts folding together two different
+    # things he said; above ~97 it stops catching a rephrasing.
+    appris_seuil_doublon = min(max(int(merged.get("appris_seuil_doublon", 90)), 70), 100)
+    appris_timeout_sec = min(max(float(merged.get("appris_timeout_sec", 30.0)), 5.0), 120.0)
+    reminder_tick_sec = min(max(float(merged.get("reminder_tick_sec", 5.0)), 1.0), 60.0)
+    reminder_late_grace_sec = min(max(float(merged.get("reminder_late_grace_sec", 900.0)), 0.0), 86400.0)
+    reminder_max_attempts = min(max(int(merged.get("reminder_max_attempts", 60)), 1), 600)
+    routines_enabled = bool(merged.get("routines_enabled", True))
+    routine_tick_sec = min(max(float(merged.get("routine_tick_sec", 30.0)), 5.0), 300.0)
+    routine_late_grace_sec = min(max(float(merged.get("routine_late_grace_sec", 14400.0)), 0.0), 86400.0)
+    routine_max_steriles = min(max(int(merged.get("routine_max_steriles", 5)), 1), 100)
+
+    # Confirmation. Clamped rather than trusted: a TTL of zero would
+    # expire every question before it could be read, and an unbounded one
+    # would leave a destructive action answerable days later.
+    confirmation_ttl_sec = min(max(float(merged.get("confirmation_ttl_sec", 180.0)), 15.0), 900.0)
+    confirmation_hot_window_sec = min(max(float(merged.get("confirmation_hot_window_sec", 12.0)), 3.0), 60.0)
+    confirmation_model = str(merged.get("confirmation_model", ""))
+    confirmation_timeout_sec = min(max(float(merged.get("confirmation_timeout_sec", 8.0)), 2.0), 30.0)
+
     # Intent Judge - always used when available
     intent_judge_model = str(merged.get("intent_judge_model", "gemma4:e2b"))
+    intent_judge_model = _cloud_safe_model(
+        intent_judge_model, "intent_judge_model", llm_provider, llm_base_url, llm_chat_model)
     intent_judge_timeout_sec = float(merged.get("intent_judge_timeout_sec", 10.0))
 
     # Transcript Buffer - ambient speech context for intent judge (separate from dialogue)
@@ -763,7 +1078,11 @@ def load_settings() -> Settings:
     if tool_selection_strategy not in ("all", "keyword", "embedding", "llm"):
         tool_selection_strategy = "llm"
     tool_router_model = str(merged.get("tool_router_model", "") or "").strip()
+    tool_router_model = _cloud_safe_model(
+        tool_router_model, "tool_router_model", llm_provider, llm_base_url, llm_chat_model)
     evaluator_model = str(merged.get("evaluator_model", "") or "").strip()
+    evaluator_model = _cloud_safe_model(
+        evaluator_model, "evaluator_model", llm_provider, llm_base_url, llm_chat_model)
     _eval_raw = merged.get("evaluator_enabled", None)
     evaluator_enabled: Optional[bool]
     if _eval_raw is None:
@@ -771,6 +1090,8 @@ def load_settings() -> Settings:
     else:
         evaluator_enabled = bool(_eval_raw)
     planner_model = str(merged.get("planner_model", "") or "").strip()
+    planner_model = _cloud_safe_model(
+        planner_model, "planner_model", llm_provider, llm_base_url, llm_chat_model)
     planner_enabled = bool(merged.get("planner_enabled", True))
     try:
         planner_timeout_sec = float(merged.get("planner_timeout_sec", 6.0))
@@ -803,6 +1124,38 @@ def load_settings() -> Settings:
     raw_dict = merged.get("dictation_custom_dictionary", [])
     dictation_custom_dictionary = list(raw_dict) if isinstance(raw_dict, list) else []
     mcps = _ensure_dict(merged.get("mcps"))
+    response_language = str(merged.get("response_language", "") or "").strip()
+    llm_thinking_enabled = bool(merged.get("llm_thinking_enabled", False))
+    intent_judge_thinking_enabled = bool(
+        merged.get("intent_judge_thinking_enabled", False))
+    dictation_thinking_enabled = bool(merged.get("dictation_thinking_enabled", False))
+    _mots = merged.get("stop_commands")
+    stop_commands = (
+        [str(m) for m in _mots if str(m).strip()]
+        if isinstance(_mots, list) and any(str(m).strip() for m in _mots)
+        else ["stop", "quiet", "shush", "silence", "enough", "shut up"]
+    )
+    # Below ~0.5 a stop word matches most short utterances; above 1.0 is
+    # not a ratio. An empty or unusable list falls back rather than
+    # leaving him unable to interrupt her at all.
+    stop_command_fuzzy_ratio = min(
+        max(float(merged.get("stop_command_fuzzy_ratio", 0.8)), 0.5), 1.0)
+    weather_city = str(merged.get("weather_city", "") or "").strip()
+
+    # Parse ui subsection. ``orb_particles_enabled`` defaults to True;
+    # coerced via bool()/string rules so a hand-edited config that
+    # writes "false"/0/"no" still resolves sensibly. A missing or
+    # non-dict ``ui`` block falls back to the default.
+    raw_ui = merged.get("ui", {})
+    if not isinstance(raw_ui, dict):
+        raw_ui = {}
+    raw_particles = raw_ui.get("orb_particles_enabled", True)
+    if isinstance(raw_particles, str):
+        orb_particles_enabled = raw_particles.strip().lower() not in {"false", "0", "no", "off"}
+    else:
+        orb_particles_enabled = bool(raw_particles)
+    ui = UISettings(orb_particles_enabled=orb_particles_enabled)
+
     whisper_min_confidence = float(merged.get("whisper_min_confidence", 0.4))
     whisper_no_speech_threshold = float(merged.get("whisper_no_speech_threshold", 0.5))
     whisper_min_audio_duration = float(merged.get("whisper_min_audio_duration", 0.3))
@@ -822,7 +1175,10 @@ def load_settings() -> Settings:
         llm_provider=llm_provider,
         llm_base_url=llm_base_url,
         llm_api_key=llm_api_key,
+        llm_api_key_env=llm_api_key_env,
         llm_chat_model=llm_chat_model,
+        llm_extra_body=llm_extra_body,
+        auto_redact_before_cloud=auto_redact_before_cloud,
         embedding_provider=embedding_provider,
         embedding_base_url=embedding_base_url,
         embedding_api_key=embedding_api_key,
@@ -861,6 +1217,9 @@ def load_settings() -> Settings:
         tts_piper_noise_scale=tts_piper_noise_scale,
         tts_piper_noise_w=tts_piper_noise_w,
         tts_piper_sentence_silence=tts_piper_sentence_silence,
+        tts_kokoro_voice=tts_kokoro_voice,
+        tts_kokoro_lang_code=tts_kokoro_lang_code,
+        tts_kokoro_speed=tts_kokoro_speed,
 
         # Voice Input & Audio
         voice_device=voice_device,
@@ -901,8 +1260,31 @@ def load_settings() -> Settings:
         tune_enabled=tune_enabled,
         hot_window_enabled=hot_window_enabled,
         hot_window_seconds=hot_window_seconds,
+        low_power_mode=low_power_mode,
         echo_energy_threshold=echo_energy_threshold,
         echo_tolerance=echo_tolerance,
+        # Reminders
+        reminders_enabled=reminders_enabled,
+        reminder_model=reminder_model,
+        reminder_timeout_sec=reminder_timeout_sec,
+        appris_model=appris_model,
+        appris_jours=appris_jours,
+        appris_max_propositions=appris_max_propositions,
+        appris_seuil_doublon=appris_seuil_doublon,
+        appris_timeout_sec=appris_timeout_sec,
+        reminder_default_hour=reminder_default_hour,
+        reminder_tick_sec=reminder_tick_sec,
+        reminder_late_grace_sec=reminder_late_grace_sec,
+        reminder_max_attempts=reminder_max_attempts,
+        routines_enabled=routines_enabled,
+        routine_tick_sec=routine_tick_sec,
+        routine_late_grace_sec=routine_late_grace_sec,
+        routine_max_steriles=routine_max_steriles,
+        # Confirmation
+        confirmation_ttl_sec=confirmation_ttl_sec,
+        confirmation_hot_window_sec=confirmation_hot_window_sec,
+        confirmation_model=confirmation_model,
+        confirmation_timeout_sec=confirmation_timeout_sec,
         # Intent Judge - always used when available
         intent_judge_model=intent_judge_model,
         intent_judge_timeout_sec=intent_judge_timeout_sec,
@@ -949,4 +1331,14 @@ def load_settings() -> Settings:
 
         # MCP Integration
         mcps=mcps,
+        response_language=response_language,
+        llm_thinking_enabled=llm_thinking_enabled,
+        intent_judge_thinking_enabled=intent_judge_thinking_enabled,
+        dictation_thinking_enabled=dictation_thinking_enabled,
+        stop_commands=stop_commands,
+        stop_command_fuzzy_ratio=stop_command_fuzzy_ratio,
+        weather_city=weather_city,
+
+        # Desktop UI
+        ui=ui,
     )

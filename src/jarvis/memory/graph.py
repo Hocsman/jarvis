@@ -84,6 +84,26 @@ def normalise_fact(text: str) -> str:
     return _WS_RE.sub(" ", folded.strip())
 
 
+def fold_for_search(text: str) -> str:
+    """Strip diacritics and case so a search matches across spellings.
+
+    Nodes are filled by an extraction step working in English, which
+    writes "Cafe Rouviere" and "Patricio Guzman". The user asks in his
+    own language, with the accents. LIKE compares code points, so
+    without this the node is present, the search is correct, and nothing
+    is found — the quietest kind of miss, since the only consequence is
+    that she looks it up on the web again.
+
+    NFKD splits a letter from its marks; dropping the combining marks
+    covers every script the decomposition reaches, so this stays a
+    property of Unicode rather than a table of French letters.
+    """
+    if not text:
+        return ""
+    decomposed = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in decomposed if not unicodedata.combining(c)).casefold()
+
+
 # ── Configuration defaults ──────────────────────────────────────────────────
 
 SPLIT_THRESHOLD = 1500       # tokens — when to split a node into children
@@ -227,8 +247,34 @@ CREATE TABLE IF NOT EXISTS memory_nodes (
     created_at       TEXT NOT NULL,
     updated_at       TEXT NOT NULL,
     data_token_count INTEGER NOT NULL DEFAULT 0,
+    -- The same three columns, accent- and case-folded. Search compares
+    -- against these so a question typed with accents finds a node the
+    -- extractor wrote without them. Stored rather than computed: folding
+    -- is a property of the row, and folding at query time cost one
+    -- Python call per column, per keyword, per row, over a full scan.
+    name_fold        TEXT NOT NULL DEFAULT '',
+    description_fold TEXT NOT NULL DEFAULT '',
+    data_fold        TEXT NOT NULL DEFAULT '',
     CHECK(parent_id IS NULL OR parent_id != id)
 );
+
+-- Filled by trigger rather than by each writer. There are five write
+-- sites today and nothing stops a sixth; a writer that forgot would
+-- leave a node searchable by nothing, which reads exactly like a node
+-- nobody wrote about.
+CREATE TRIGGER IF NOT EXISTS nodes_fold_ai AFTER INSERT ON memory_nodes BEGIN
+  UPDATE memory_nodes SET name_fold = fold(new.name),
+                          description_fold = fold(new.description),
+                          data_fold = fold(new.data)
+   WHERE id = new.id;
+END;
+CREATE TRIGGER IF NOT EXISTS nodes_fold_au AFTER UPDATE OF name, description, data
+ON memory_nodes BEGIN
+  UPDATE memory_nodes SET name_fold = fold(new.name),
+                          description_fold = fold(new.description),
+                          data_fold = fold(new.data)
+   WHERE id = new.id;
+END;
 
 CREATE INDEX IF NOT EXISTS idx_nodes_parent ON memory_nodes(parent_id);
 CREATE INDEX IF NOT EXISTS idx_nodes_last_accessed ON memory_nodes(last_accessed DESC);
@@ -253,6 +299,10 @@ class GraphMemoryStore:
         self.db_path = db_path
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        # SQLite compares code points and only lowercases ASCII, so search
+        # folds both sides through Python instead. Deterministic, so the
+        # planner is free to cache it.
+        self.conn.create_function("fold", 1, fold_for_search, deterministic=True)
         self._lock = threading.RLock()
         self._init_schema()
         self._ensure_root()
@@ -262,7 +312,35 @@ class GraphMemoryStore:
     def _init_schema(self) -> None:
         with self._lock:
             self.conn.execute("PRAGMA foreign_keys = ON")
+            # A graph written before the folded columns existed reaches
+            # them here: `CREATE TABLE IF NOT EXISTS` leaves an existing
+            # table alone, so a column added to the DDL arrives only by
+            # `ALTER`. Each is attempted separately and independently —
+            # a half-migrated file is what a single combined attempt
+            # would leave behind.
+            for colonne in ("name_fold", "description_fold", "data_fold"):
+                try:
+                    self.conn.execute(
+                        f"ALTER TABLE memory_nodes ADD COLUMN {colonne} "
+                        "TEXT NOT NULL DEFAULT ''"
+                    )
+                except sqlite3.OperationalError:
+                    pass  # already there, or the table is not yet created
             self.conn.executescript(_GRAPH_SCHEMA_SQL)
+
+            # Fill what the writers never wrote: the rows that predate
+            # the columns, and any row whose folded text was lost. An
+            # empty fold on a non-empty field is unsearchable, which
+            # looks exactly like a node nobody wrote about.
+            self.conn.execute(
+                "UPDATE memory_nodes"
+                "   SET name_fold = fold(name),"
+                "       description_fold = fold(description),"
+                "       data_fold = fold(data)"
+                " WHERE (name_fold = '' AND name != '')"
+                "    OR (description_fold = '' AND description != '')"
+                "    OR (data_fold = '' AND data != '')"
+            )
             self.conn.commit()
 
     def _ensure_root(self) -> None:
@@ -310,7 +388,7 @@ class GraphMemoryStore:
 
         The purpose-driven taxonomy (root → User / Directives / World)
         is a hard reorganisation: pre-existing nodes under root that
-        don't match this shape would sit invisible to the warm profile
+        don't match this shape would sit unreachable by traversal
         forever.
         Rather than carrying them as dead weight, we wipe on daemon
         start-up and let the diary re-import repopulate with correctly
@@ -346,17 +424,49 @@ class GraphMemoryStore:
             if not root_has_data and rogue_child is None:
                 return False
 
-            reason = (
-                "root holds pre-taxonomy data"
-                if root_has_data
-                else f"found non-conforming root child: {rogue_child['id']!r}"
-            )
-            debug_log(
-                f"wiping knowledge graph ({reason}); will re-seed fixed branches",
-                "memory",
-            )
-            self.conn.execute("DELETE FROM memory_nodes")
+            # Remove what is unreachable, and only that.
+            #
+            # The reason this exists is that a node sitting directly under
+            # root, from before the taxonomy, can never be reached by
+            # branch-pinned traversal — carrying it is dead weight. That
+            # justifies deleting those nodes. It does not justify deleting
+            # the table, which is what used to happen: one stray child, and
+            # every correctly-filed fact he had looked up went with it.
+            enleves: list = []
+            for ligne in self.conn.execute(
+                "SELECT id, name FROM memory_nodes "
+                "WHERE parent_id = 'root' AND id NOT IN ({})".format(
+                    ",".join("?" * len(expected_ids))
+                ),
+                tuple(expected_ids),
+            ).fetchall():
+                # The subtree beneath a stray is unreachable for the same
+                # reason the stray is.
+                a_faire = [ligne["id"]]
+                while a_faire:
+                    nid = a_faire.pop()
+                    a_faire.extend(
+                        r["id"] for r in self.conn.execute(
+                            "SELECT id FROM memory_nodes WHERE parent_id = ?", (nid,)
+                        ).fetchall()
+                    )
+                    self.conn.execute("DELETE FROM memory_nodes WHERE id = ?", (nid,))
+                enleves.append(ligne["name"] or ligne["id"])
+
+            if root_has_data:
+                self.conn.execute("UPDATE memory_nodes SET data = '' WHERE id = 'root'")
+
             self.conn.commit()
+
+            quoi = []
+            if root_has_data:
+                quoi.append("pre-taxonomy data on the root")
+            if enleves:
+                quoi.append(f"{len(enleves)} unreachable node(s): "
+                            + ", ".join(str(n)[:24] for n in enleves[:4]))
+            debug_log("graph migration removed " + "; ".join(quoi), "memory")
+            print(f"  🧠 Knowledge graph tidied — removed {'; '.join(quoi)}. "
+                  f"Everything filed under the branches was kept.", flush=True)
 
         # Re-seed root + fixed branches from scratch.
         self._ensure_root()
@@ -515,8 +625,8 @@ class GraphMemoryStore:
         """Delete a node. Children are orphaned (parent_id set to NULL by FK).
 
         Root and the seeded fixed branches (see ``FIXED_BRANCHES``) are
-        non-deletable — the warm profile and extractor routing rely on
-        their stable presence (graph.spec.md §"Fixed Top-Level Branches").
+        non-deletable — extractor routing relies on their stable
+        presence (graph.spec.md §"Fixed Top-Level Branches").
         """
         if node_id == "root" or node_id in FIXED_BRANCH_IDS:
             return False
@@ -567,13 +677,25 @@ class GraphMemoryStore:
 
     def touch_node(self, node_id: str) -> None:
         """Increment access_count and update last_accessed."""
+        self.touch_nodes([node_id])
+
+    def touch_nodes(self, node_ids: "list[str]") -> None:
+        """The same, for a whole result set, in one transaction.
+
+        A search touches every node it returns. One statement and one
+        commit each meant five write transactions — and five WAL fsyncs —
+        on the reply path, for bookkeeping nobody reads synchronously.
+        """
+        ids = [i for i in node_ids if i]
+        if not ids:
+            return
         now = datetime.now(timezone.utc).isoformat()
         with self._lock:
             self.conn.execute(
-                """UPDATE memory_nodes
-                   SET access_count = access_count + 1, last_accessed = ?
-                   WHERE id = ?""",
-                (now, node_id),
+                "UPDATE memory_nodes"
+                "   SET access_count = access_count + 1, last_accessed = ?"
+                f" WHERE id IN ({','.join('?' * len(ids))})",
+                (now, *ids),
             )
             self.conn.commit()
 
@@ -684,7 +806,9 @@ class GraphMemoryStore:
     def search_nodes(self, query: str, limit: int = 10) -> list[MemoryNode]:
         """Search nodes by keyword match across name, description, and data.
 
-        Uses case-insensitive LIKE matching on each keyword (split by whitespace).
+        Matching is diacritic- and case-insensitive in both directions
+        (see ``fold_for_search``): a keyword typed with its accents finds a
+        node written without them, and the reverse.
         Scoring weights: name/description matches are worth 3× data matches, so
         specific nodes about a topic rank above broad category nodes that merely
         contain the keyword somewhere in their data blob.
@@ -699,12 +823,13 @@ class GraphMemoryStore:
         params: list[str] = []
         for kw in keywords:
             # Escape LIKE wildcards so literal %, _, \ are matched exactly
-            escaped = kw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            folded = fold_for_search(kw)
+            escaped = folded.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             pattern = f"%{escaped}%"
             score_parts.append(
-                "(CASE WHEN name LIKE ? ESCAPE '\\' THEN 3 ELSE 0 END"
-                " + CASE WHEN description LIKE ? ESCAPE '\\' THEN 3 ELSE 0 END"
-                " + CASE WHEN data LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END)"
+                "(CASE WHEN name_fold LIKE ? ESCAPE '\\' THEN 3 ELSE 0 END"
+                " + CASE WHEN description_fold LIKE ? ESCAPE '\\' THEN 3 ELSE 0 END"
+                " + CASE WHEN data_fold LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END)"
             )
             params.extend([pattern, pattern, pattern])
 
@@ -725,9 +850,8 @@ class GraphMemoryStore:
             rows = self.conn.execute(sql, params).fetchall()
             nodes = [self._row_to_node(r) for r in rows]
 
-        # Touch matched nodes (updates access tracking)
-        for node in nodes:
-            self.touch_node(node.id)
+        # Touch matched nodes (updates access tracking), in one go
+        self.touch_nodes([n.id for n in nodes])
 
         debug_log(f"Graph search for '{query}' found {len(nodes)} nodes", "memory")
         return nodes

@@ -21,7 +21,9 @@ from jarvis.reply.planner import (
     _parse_plan,
     format_plan_block,
     is_search_memory_step,
+    lookup_terms_of,
     memory_topic_of,
+    plan_step_args,
     plan_query,
     plan_requires_memory,
     progress_nudge,
@@ -38,6 +40,7 @@ def _cfg(**overrides):
     base = {
         "ollama_base_url": "http://localhost:11434",
         "ollama_chat_model": "gemma4:e2b",
+        "llm_chat_model": "gemma4:e2b",
         "planner_model": "",
         "tool_router_model": "",
         "intent_judge_model": "",
@@ -99,21 +102,38 @@ class TestResolvePlannerModel:
         assert resolve_planner_model(cfg) == "gemma-plan"
 
     def test_tracks_chat_model_by_default(self):
-        cfg = _cfg(ollama_chat_model="gemma4:e2b")
+        cfg = _cfg(llm_chat_model="gemma4:e2b")
         assert resolve_planner_model(cfg) == "gemma4:e2b"
+
+    def test_it_tracks_the_model_the_provider_actually_accepts(self):
+        """`llm_chat_model` is the live chat model; `ollama_chat_model`
+        is what the local backend was last configured with, and it
+        survives a move to a cloud provider as a stale tag.
+
+        Falling back to the stale one posts "gemma4:e2b" to an endpoint
+        that answers 400, `plan_query` swallows it, and the planner is
+        off with nothing to show for it — the whole turn silently loses
+        its plan. `_cloud_safe_model` rescues an explicitly configured
+        override but deliberately leaves empty values to this chain, so
+        the chain has to be the one that is right.
+        """
+        cfg = _cfg(llm_chat_model="deepseek/deepseek-v4-flash",
+                   ollama_chat_model="gemma4:e2b")
+
+        assert resolve_planner_model(cfg) == "deepseek/deepseek-v4-flash"
 
     def test_ignores_tool_router_model(self):
         # Planner must track the chat model — not the router. Upgrading
         # the chat model through setup must upgrade the planner too.
-        cfg = _cfg(tool_router_model="router-x", ollama_chat_model="chat-y")
+        cfg = _cfg(tool_router_model="router-x", llm_chat_model="chat-y")
         assert resolve_planner_model(cfg) == "chat-y"
 
     def test_upgrading_chat_model_upgrades_planner(self):
-        cfg = _cfg(ollama_chat_model="gpt-oss:20b")
+        cfg = _cfg(llm_chat_model="gpt-oss:20b")
         assert resolve_planner_model(cfg) == "gpt-oss:20b"
 
     def test_returns_empty_when_no_candidates(self):
-        cfg = _cfg(ollama_chat_model="")
+        cfg = _cfg(llm_chat_model="", ollama_chat_model="")
         assert resolve_planner_model(cfg) == ""
 
 
@@ -788,3 +808,45 @@ class TestPlanHasUnresolvedToolSteps:
         assert plan_has_unresolved_tool_steps(
             plan, ["chrome-devtools__navigate_page"]
         ) is False
+
+
+class TestWhatAStepIsLookingUp:
+    """A plan step's own arguments name its subject better than the
+    utterance does.
+
+    The planner composes them against the user's intent with pronouns
+    already resolved to literal entity names (rules 5 and 7), precisely
+    so a tool that never sees the dialogue can still act. That makes
+    them the right search string for asking the graph whether this
+    lookup has already been made.
+    """
+
+    def test_the_argument_value_is_the_search_string(self):
+        assert lookup_terms_of("webSearch query='Kestrel M3 memory'") == "Kestrel M3 memory"
+
+    def test_double_quotes_too(self):
+        assert lookup_terms_of('webSearch query="Kestrel M3 memory"') == "Kestrel M3 memory"
+
+    def test_several_arguments_join(self):
+        terms = lookup_terms_of("getWeather location='Lyon' unit='celsius'")
+
+        assert "Lyon" in terms and "celsius" in terms
+
+    def test_a_step_naming_something_not_yet_known_offers_nothing(self):
+        """An angle-bracket placeholder stands for an entity a later step
+        will reveal. Searching for the literal text would match nothing
+        and, worse, could match something wrong."""
+        assert lookup_terms_of("webSearch query='films by <director from step 1>'") == ""
+
+    def test_a_step_with_no_arguments_offers_nothing(self):
+        assert lookup_terms_of("getWeather") == ""
+
+    def test_prose_offers_nothing(self):
+        assert lookup_terms_of("Reply to the user with the combined findings.") == ""
+
+    def test_the_pairs_are_read_the_same_way_everywhere(self):
+        """One parser, so the reuse check and the direct-exec fast path
+        can never disagree about what a step is asking for."""
+        step = "webSearch query='Kestrel M3' limit=5"
+
+        assert plan_step_args(step) == {"query": "Kestrel M3", "limit": "5"}

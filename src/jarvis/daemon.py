@@ -10,6 +10,7 @@ import os
 import time
 import signal
 import threading
+import contextlib
 
 # Fix OpenBLAS threading crash in bundled apps (must be before numpy imports)
 os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
@@ -44,9 +45,39 @@ from .utils.location import get_location_context, is_location_available
 # Global instances for coordination between modules
 _global_dialogue_memory: Optional[DialogueMemory] = None
 _global_stop_requested: bool = False
-_warm_profile_graph_listener = None  # registered callback, kept for shutdown unregister
+_global_skip_shutdown_diary_update: bool = False
+_warm_profile_core_listener = None  # registered callback, kept for shutdown unregister
 _global_tts_engine = None  # TTS engine reference for face animation polling
 _global_dictation_engine = None  # Dictation engine reference for history UI
+# Config + DB booted by main(). Shared by the voice listener and the text-chat
+# submission path so voice and text are one conversation against one store.
+_global_cfg = None
+_global_db = None
+# The voice listener, so a reply produced on another thread can be handed
+# to it rather than spoken from that thread — it speaks outside the query
+# lock, and two speakers would interleave their echo bookkeeping.
+_global_listener = None
+# The thread that keeps reminders. Stopped before the listener, because
+# a promise settled with nothing able to speak it is a broken one.
+_global_reminders = None
+# The pair that runs what nobody asked for this minute: the dispatcher
+# decides a morning has arrived, the runner turns it into a turn of the
+# reply engine. Their own thread, not the reminder scheduler's — that one
+# is the only thing keeping spoken promises and must not share a failure
+# surface with this.
+_global_routines = None
+_global_routine_runner = None
+
+# Surfaces the desktop app wires in bundled mode, where stdout IPC is not
+# how the two halves talk.
+_confirmation_callbacks: dict = {
+    "on_confirm": None,        # Callable[[PendingAction], None]
+    "on_confirm_settled": None,  # Callable[[str, str], None] — id, outcome
+    # Callable[[str, str, bool], None] — nom, raison, stopped
+    "on_routine_trouble": None,
+    # Callable[[str, str, str], None] — texte, due_local, raison
+    "on_reminder_failed": None,
+}
 
 # Shutdown timeout for diary update (shorter than normal to allow reasonable quit time)
 # Desktop app's stop_daemon() should wait at least this long + buffer
@@ -61,11 +92,51 @@ _diary_update_callbacks: dict = {
     "on_complete": None,  # Callable[[bool], None] - called when done (success/fail)
 }
 
+# One query at a time: voice and text share this lock so they cannot race the
+# dialogue memory. Held for the duration of a single reply-engine run.
+_chat_query_lock = threading.Lock()
 
-def request_stop() -> None:
-    """Request the daemon to stop gracefully. Used by desktop app for QThread shutdown."""
-    global _global_stop_requested
+# Per-query cancellation flag for the text-chat path. Set by
+# ``cancel_active_chat_query`` (the chat window's Stop button), checked by the
+# chat worker after ``run_reply_engine`` returns so the reply is dropped
+# instead of displayed. This is distinct from ``request_stop`` (daemon
+# lifecycle shutdown) — cancelling a chat query must not tear down the voice
+# assistant.
+_chat_cancel_event: Optional[threading.Event] = None
+
+# Chat IPC protocol prefixes - desktop app intercepts lines starting with these.
+# __CHAT__:        daemon -> desktop (event stream, mirrors DIARY_IPC_PREFIX)
+# __CHAT_QUERY__:  desktop -> daemon (query submission, read from stdin)
+CHAT_IPC_PREFIX = "__CHAT__:"
+CHAT_QUERY_IPC_PREFIX = "__CHAT_QUERY__:"
+# __CHAT_DECISION__: desktop -> daemon. The one line on this bus that
+# authorises an irreversible action, and validated accordingly.
+CHAT_DECISION_IPC_PREFIX = "__CHAT_DECISION__:"
+SHUTDOWN_SKIP_DIARY_COMMAND = "SHUTDOWN_SKIP_DIARY"
+
+
+def request_stop(skip_diary_update: bool = False) -> None:
+    """Request the daemon to stop gracefully.
+
+    ``skip_diary_update`` is reserved for explicit fast-stop UI paths where
+    freeing local model resources is more important than the final shutdown
+    diary pass. The normal stop path keeps diary saving enabled.
+    """
+    global _global_stop_requested, _global_skip_shutdown_diary_update
     _global_stop_requested = True
+    if skip_diary_update:
+        _global_skip_shutdown_diary_update = True
+    # Before the diary pass, so a question nobody answered is closed with
+    # the machine rather than coming back with it.
+    try:
+        revoke_pending_confirmation()
+    except Exception as e:
+        debug_log(f"pending confirmation not revoked: {e}", "tools")
+
+
+def is_shutdown_diary_update_skipped() -> bool:
+    """Check whether shutdown should skip the final diary update."""
+    return _global_skip_shutdown_diary_update
 
 
 def set_diary_update_callbacks(
@@ -110,27 +181,608 @@ def get_pending_diary_chunks() -> list:
 DIARY_IPC_PREFIX = "__DIARY__:"
 
 
-def _emit_diary_event(event_type: str, data) -> None:
-    """
-    Emit a diary update event to stdout for IPC with desktop app.
+def _emit_ipc_event(prefix: str, event_type: str, data, debug_tag: str) -> None:
+    """Emit a JSON IPC event line to stdout for the desktop app (subprocess mode).
 
-    Used in subprocess mode where callbacks aren't available.
-    Desktop app intercepts these lines and forwards to diary dialog.
+    Shared by the diary and chat event emitters. Builds ``{"type", "data"}``,
+    prints ``{prefix}{json}`` with flush, skips debug logging for ``token``
+    events to avoid spam, and swallows+logs emit errors so a bad payload never
+    crashes the worker.
+    """
+    import json
+    try:
+        event = {"type": event_type, "data": data}
+        line = f"{prefix}{json.dumps(event)}"
+        print(line, flush=True)
+        if event_type != "token":  # Don't spam for tokens
+            debug_log(f"IPC event emitted: {event_type}", debug_tag)
+    except Exception as e:
+        debug_log(f"IPC emit error: {e}", debug_tag)
+
+
+def _emit_diary_event(event_type: str, data) -> None:
+    """Emit a diary update event to stdout for IPC with the desktop app.
+
+    Used in subprocess mode where callbacks aren't available. The desktop app
+    intercepts these lines and forwards them to the diary dialog.
 
     Args:
         event_type: One of "chunks", "token", "status", "complete"
         data: Event payload (list for chunks, str for token/status, bool for complete)
     """
+    _emit_ipc_event(DIARY_IPC_PREFIX, event_type, data, "diary_ipc")
+
+
+def _emit_chat_event(event_type: str, data) -> None:
+    """Emit a chat event to stdout for IPC with the desktop app (subprocess mode).
+
+    The payload never carries unredacted user text: the caller passes the
+    already-redacted query to the ``start`` event.
+    """
+    _emit_ipc_event(CHAT_IPC_PREFIX, event_type, data, "chat_ipc")
+
+
+def _notify_chat(event_type: str, data, *, callbacks: dict, use_ipc: bool) -> None:
+    """Dispatch a chat event to per-call callbacks and/or the IPC stream.
+
+    ``callbacks`` is the dict of caller-supplied callables (``on_start`` etc.),
+    not a module global. ``busy`` takes no argument; all others take ``data``.
+    """
+    callback_map = {
+        "start": "on_start",
+        "token": "on_token",
+        "stage": "on_stage",
+        "tool": "on_tool_call",
+        "complete": "on_complete",
+        "busy": "on_busy",
+    }
+    callback_name = callback_map.get(event_type)
+    if callbacks and callback_name:
+        cb = callbacks.get(callback_name)
+        if cb is not None:
+            try:
+                if event_type == "busy":
+                    cb()
+                else:
+                    cb(data)
+            except Exception:
+                pass
+    if use_ipc:
+        _emit_chat_event(event_type, data)
+
+
+@contextlib.contextmanager
+def query_lock():
+    """Context manager that acquires the shared voice+text query lock (blocking).
+
+    Used by the voice path so a voice query waits for any in-flight text query
+    to finish before running ``run_reply_engine`` against the shared dialogue
+    memory. The text path uses a non-blocking acquire (reject-with-busy) in
+    ``submit_text_query``; the voice path blocks because voice queries should
+    not be silently dropped when text is running.
+    """
+    _chat_query_lock.acquire()
+    try:
+        yield
+    finally:
+        _chat_query_lock.release()
+
+
+def cancel_active_chat_query() -> None:
+    """Cancel the in-flight text-chat query, if any.
+
+    Sets the per-query cancellation flag so the chat worker drops the reply
+    when ``run_reply_engine`` returns. Distinct from ``request_stop`` (full
+    daemon shutdown): this does not stop the voice listener, save the diary,
+    or close the database. Used by the chat window's Stop button.
+    """
+    global _chat_cancel_event
+    if _chat_cancel_event is not None:
+        _chat_cancel_event.set()
+        debug_log("chat query cancellation requested", "chat")
+
+
+def submit_text_query(
+    text: str,
+    *,
+    on_start=None,
+    on_token=None,
+    on_stage=None,
+    on_tool_call=None,
+    on_complete=None,
+    on_busy=None,
+    use_ipc: bool = False,
+) -> None:
+    """Submit a text query to the reply engine (fire-and-forget).
+
+    Runs ``run_reply_engine`` on a worker thread with ``tts=None`` and the
+    shared global dialogue memory, so text and voice are one conversation.
+    Results are delivered via the per-call callbacks (bundled mode) and/or
+    ``__CHAT__:`` IPC events (subprocess mode). See ``chat_window.spec.md``.
+
+    A second submission while one is running is rejected with a ``busy``
+    event rather than queued. A running query can be cancelled with
+    ``cancel_active_chat_query``; the reply is then dropped (``complete(None)``)
+    rather than displayed.
+    """
+    if not text or not text.strip():
+        return
+
+    callbacks = {
+        "on_start": on_start,
+        "on_token": on_token,
+        "on_stage": on_stage,
+        "on_tool_call": on_tool_call,
+        "on_complete": on_complete,
+        "on_busy": on_busy,
+    }
+
+    dm = _global_dialogue_memory
+    cfg = _global_cfg
+    db = _global_db
+    if dm is None or cfg is None or db is None:
+        # Daemon not initialised (e.g. tests that don't boot main()). Fail
+        # open with a None complete so the UI doesn't hang.
+        _notify_chat("complete", None, callbacks=callbacks, use_ipc=use_ipc)
+        return
+
+    if is_stop_requested():
+        # Daemon is shutting down. Don't spawn a worker that may use db after
+        # close (bundled) or write to a dead pipe (subprocess).
+        _notify_chat("complete", None, callbacks=callbacks, use_ipc=use_ipc)
+        return
+
+    # One query at a time: voice and text share the lock.
+    if not _chat_query_lock.acquire(blocking=False):
+        _notify_chat("busy", None, callbacks=callbacks, use_ipc=use_ipc)
+        debug_log("chat query rejected: another query is running", "chat")
+        return
+
+    # Per-query cancellation flag. The Stop button sets this so the worker
+    # drops the reply instead of displaying it.
+    global _chat_cancel_event
+    cancel_event = threading.Event()
+    _chat_cancel_event = cancel_event
+
+    # Snapshot the redacted query for the start event. ``run_reply_engine``
+    # redacts internally too; we mirror that here so the IPC stream and the
+    # UI never carry raw user text even if the engine hasn't run yet.
+    from .utils.redact import redact
+    display_query = redact(text)
+
+    def _worker() -> None:
+        try:
+            _notify_chat("start", display_query, callbacks=callbacks, use_ipc=use_ipc)
+            from .reply.engine import run_reply_engine
+
+            def _on_token(chunk: str) -> None:
+                # Progressive display only — ``complete`` below still carries
+                # the authoritative reply. Never let a UI/IPC hiccup kill the
+                # generation the user is waiting on.
+                try:
+                    _notify_chat("token", chunk, callbacks=callbacks, use_ipc=use_ipc)
+                except Exception as exc:
+                    debug_log(f"chat token emit failed: {exc}", "chat")
+
+            def _on_stage(stage_id: str, detail=None) -> None:
+                # Which preparation phase is running, so the UI can show
+                # progress during the seconds before the first token. The
+                # payload keeps the neutral stage id; wording is the
+                # presenting layer's job (the assistant is multilingual).
+                try:
+                    _notify_chat(
+                        "stage", {"stage": stage_id, "detail": detail},
+                        callbacks=callbacks, use_ipc=use_ipc,
+                    )
+                except Exception as exc:
+                    debug_log(f"chat stage emit failed: {exc}", "chat")
+
+            engine_kwargs = dict(
+                db=db,
+                cfg=cfg,
+                tts=None,
+                text=text,
+                dialogue_memory=dm,
+                language=None,
+                origin="chat",
+            )
+            try:
+                reply = run_reply_engine(
+                    on_token=_on_token, on_stage=_on_stage, **engine_kwargs
+                )
+            except TypeError:
+                # Engine build without progress support: fall back to the
+                # buffered call rather than failing the query.
+                debug_log("reply engine has no on_token/on_stage; buffered reply", "chat")
+                reply = run_reply_engine(**engine_kwargs)
+            if cancel_event.is_set():
+                debug_log("chat query cancelled, dropping reply", "chat")
+                reply = None
+            _notify_chat("complete", reply, callbacks=callbacks, use_ipc=use_ipc)
+        except Exception as exc:
+            debug_log(f"chat query worker error: {exc}", "chat")
+            try:
+                _notify_chat("complete", None, callbacks=callbacks, use_ipc=use_ipc)
+            except Exception:
+                pass
+        finally:
+            global _chat_cancel_event
+            if _chat_cancel_event is cancel_event:
+                _chat_cancel_event = None
+            _chat_query_lock.release()
+
+    try:
+        threading.Thread(target=_worker, name="jarvis-chat-query", daemon=True).start()
+    except Exception:
+        # If thread spawning fails, release the lock so future queries work.
+        _chat_cancel_event = None
+        _chat_query_lock.release()
+        _notify_chat("complete", None, callbacks=callbacks, use_ipc=use_ipc)
+
+
+def handle_chat_query_stdin_line(line: str) -> bool:
+    """Parse a stdin line as a chat-query submission (subprocess mode).
+
+    Returns True if the line was a ``__CHAT_QUERY__:`` line and was handled
+    (whether or not the query was accepted). Returns False for any other
+    line, so the caller can still apply SHUTDOWN / EOF semantics.
+    """
+    line = line.strip()
+    if not line.startswith(CHAT_QUERY_IPC_PREFIX):
+        return False
     import json
     try:
-        event = {"type": event_type, "data": data}
-        line = f"{DIARY_IPC_PREFIX}{json.dumps(event)}"
-        print(line, flush=True)
-        # Debug: also print to stderr so we can verify it's being called
-        if event_type != "token":  # Don't spam for tokens
-            debug_log(f"IPC event emitted: {event_type}", "diary_ipc")
+        payload = json.loads(line[len(CHAT_QUERY_IPC_PREFIX):])
+        text = payload.get("text", "")
+    except Exception:
+        debug_log("malformed __CHAT_QUERY__ line ignored", "chat_ipc")
+        return True
+    # Reject non-string payloads (e.g. {"text":[1]}) so a hostile or buggy
+    # writer can't crash the stdin monitor via submit_text_query's str API.
+    if not isinstance(text, str):
+        debug_log("__CHAT_QUERY__ text payload is not a string, ignored", "chat_ipc")
+        return True
+    # In subprocess mode the reply comes back via __CHAT__: events on stdout.
+    submit_text_query(text, use_ipc=True)
+    return True
+
+
+def handle_chat_decision_stdin_line(line: str) -> bool:
+    """Parse a stdin line as a confirmation decision (subprocess mode).
+
+    Returns True if the line was a ``__CHAT_DECISION__:`` line and was
+    handled, whether or not the decision was acted on.
+
+    Validated harder than the query line beside it, because this is the
+    one message on the bus that authorises an irreversible action.
+    ``approved`` must be an actual boolean: a truthy ``1`` or ``"true"``
+    from a buggy writer must not run a deletion. ``isinstance(True, int)``
+    is True in Python, so the check is on ``bool`` explicitly.
+    """
+    line = line.strip()
+    if not line.startswith(CHAT_DECISION_IPC_PREFIX):
+        return False
+
+    import json
+    try:
+        payload = json.loads(line[len(CHAT_DECISION_IPC_PREFIX):])
+    except Exception:
+        debug_log("malformed __CHAT_DECISION__ line ignored", "chat_ipc")
+        return True
+
+    if not isinstance(payload, dict):
+        debug_log("__CHAT_DECISION__ payload is not an object, ignored", "chat_ipc")
+        return True
+
+    request_id = payload.get("request_id")
+    approved = payload.get("approved")
+    if not isinstance(request_id, str) or not request_id:
+        debug_log("__CHAT_DECISION__ request_id is not a string, ignored", "chat_ipc")
+        return True
+    if not isinstance(approved, bool):
+        debug_log("__CHAT_DECISION__ approved is not a boolean, ignored", "chat_ipc")
+        return True
+
+    outcome = resolve_confirmation(request_id, approved)
+    if outcome not in ("ok", "décliné"):
+        # The click did not take: busy, unknown, or shutting down. The
+        # question is NOT settled — the card must stay up with its
+        # buttons live and its deadline running. Silently dropping a
+        # decision the user correctly made is the failure this whole
+        # channel exists to avoid, and it looks to them exactly like the
+        # button not working.
+        _emit_chat_event("confirm_nack", {
+            "request_id": request_id, "outcome": outcome,
+        })
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Confirmation
+# ─────────────────────────────────────────────────────────────────────────────
+
+def announce_confirmation(action, *, origin: Optional[str] = None) -> None:
+    """Show a question on every surface that can display one.
+
+    Emitted on the chat bus whatever the question's origin: the chat
+    window is the surface with buttons, and a spoken question that never
+    reached it would be a destructive action nobody can approve.
+
+    The payload is what the card must show, rendered by
+    ``describe_action`` rather than by the model, and the query rides
+    along already redacted — these lines get logged.
+    """
+    from .tools.confirmation import describe_action
+
+    try:
+        described = describe_action(action.tool, action.args, action.risk)
+        _emit_chat_event("confirm", {
+            "request_id": action.request_id,
+            "tool": action.tool,
+            "risk": action.risk,
+            "channel": action.channel,
+            "origin": origin or action.origin,
+            "shown": described.shown,
+            "hazards": described.hazards,
+            "ttl_sec": action.ttl_sec,
+        })
+        for cb in (_confirmation_callbacks.get("on_confirm"),):
+            if cb is not None:
+                cb(action)
     except Exception as e:
-        debug_log(f"IPC emit error: {e}", "diary_ipc")
+        debug_log(f"confirmation announce failed: {e}", "chat_ipc")
+
+
+def _settle(action, outcome: str) -> None:
+    """Close a question's ledger episode."""
+    db = _global_db
+    if db is None or not hasattr(db, "record_action"):
+        return
+    try:
+        db.record_action(
+            tool=action.tool, args=action.args, risk=action.risk,
+            verdict="demande", outcome=outcome, duration_ms=None,
+            origin=action.origin, query=action.query_redacted,
+            request_id=action.request_id,
+        )
+    except Exception as e:
+        debug_log(f"confirmation outcome not recorded: {e}", "tools")
+
+
+def _announce_settled(action, outcome: str) -> None:
+    try:
+        _emit_chat_event("confirm_settled", {
+            "request_id": action.request_id, "outcome": outcome,
+        })
+        cb = _confirmation_callbacks.get("on_confirm_settled")
+        if cb is not None:
+            cb(action.request_id, outcome)
+    except Exception as e:
+        debug_log(f"confirmation settle not announced: {e}", "chat_ipc")
+
+
+def resolve_confirmation(request_id: str, approved: bool) -> str:
+    """Settle a waiting question by a deliberate gesture.
+
+    Returns what happened, for the caller to show: ``ok`` (running now),
+    ``décliné``, ``occupée`` (a turn is in flight — the card stays up and
+    its deadline keeps running, because a decision the user correctly
+    made must not vanish without a word), ``arrêt``, or ``inconnue``.
+
+    The lock is taken without blocking. A blocking or timed acquire would
+    be a third semantic on a lock that already has two — voice blocks,
+    text rejects with ``busy`` — and it would hold a UI thread on a lock
+    a reply engine can own for a minute.
+    """
+    dm = _global_dialogue_memory
+    if dm is None or not hasattr(dm, "take_pending_by_id"):
+        return "inconnue"
+
+    if is_stop_requested():
+        debug_log("confirmation decision arrived during shutdown, ignored", "tools")
+        return "arrêt"
+
+    if not approved:
+        action = dm.take_pending_by_id(request_id)
+        if action is None:
+            return "inconnue"
+        _settle(action, "décliné")
+        _announce_settled(action, "décliné")
+        debug_log(f"    🙋 declined {action.tool} ({request_id})", "tools")
+        return "décliné"
+
+    # Approved. Claim the lock before the question, so a failure to run
+    # leaves the card exactly as it was rather than consuming a decision
+    # that then goes nowhere.
+    if not _chat_query_lock.acquire(blocking=False):
+        debug_log("confirmation decision rejected: another query is running", "tools")
+        return "occupée"
+
+    action = dm.take_pending_by_id(request_id)
+    if action is None:
+        _chat_query_lock.release()
+        return "inconnue"
+
+    _announce_settled(action, "accordé")
+    try:
+        threading.Thread(
+            target=_resume_after_confirmation, args=(action,),
+            name="jarvis-confirmation-resume", daemon=True,
+        ).start()
+    except Exception as e:
+        # The worker owns the lock's release. If it never starts, nothing
+        # ever releases it and every later query is rejected as busy for
+        # the life of the process.
+        debug_log(f"confirmation resume thread failed to start: {e}", "tools")
+        _chat_query_lock.release()
+        _settle(action, "expiré")
+        _announce_settled(action, "expiré")
+        return "arrêt"
+    return "ok"
+
+
+def _resume_after_confirmation(action) -> None:
+    """Run the approved call and narrate it, holding the query lock.
+
+    The lock is already held by ``resolve_confirmation``; this thread
+    owns it now and releases it when the turn is done.
+    """
+    from .reply.engine import run_reply_engine
+    from .tools.confirmation import Approval
+
+    try:
+        reply = run_reply_engine(
+            db=_global_db, cfg=_global_cfg, tts=None,
+            text=action.query_redacted, dialogue_memory=_global_dialogue_memory,
+            origin=action.origin,
+            granted=Approval(
+                request_id=action.request_id, fingerprint=action.fingerprint,
+            ),
+            granted_action=action,
+        )
+        _notify_chat("complete", reply, callbacks={}, use_ipc=True)
+        if reply:
+            _speak_from_worker(reply)
+    except Exception as e:
+        debug_log(f"confirmation resume failed: {e}", "tools")
+    finally:
+        _chat_query_lock.release()
+
+
+def _speak_from_worker(text: str, on_spoken=None) -> bool:
+    """Hand a reply to the listener so it, and only it, speaks.
+
+    Returns whether anything took it. False means no engine will ever say
+    this, which a caller holding a promise has to act on rather than
+    assume away.
+
+    Speaking from this thread would race the listener: it speaks outside
+    the lock block, so two ``track_tts_start`` writes and two hot-window
+    activations could interleave.
+    """
+    listener = _global_listener
+    if listener is None or not hasattr(listener, "enqueue_reply"):
+        debug_log("nothing can speak: no listener", "voice")
+        return False
+    try:
+        return bool(listener.enqueue_reply(text, on_spoken=on_spoken))
+    except Exception as e:
+        debug_log(f"reply not queued for speaking: {e}", "voice")
+        return False
+
+
+def announce_reminder_failure(row: dict, why: str) -> None:
+    """Tell the user a reminder could not be said.
+
+    The ledger alone is a tab nobody has a reason to open, and a promise
+    that quietly failed is the thing this subsystem exists to prevent.
+
+    Both routes, like every other surface here: subprocess mode reads the
+    stdout bus, bundled mode has no stdout bus and reads the callback.
+    One of the two alone is a notification that exists in exactly half
+    the builds, and silently not in the other.
+    """
+    try:
+        _emit_chat_event("reminder_failed", {
+            "id": row.get("id"),
+            "texte": row.get("texte"),
+            "due_local": row.get("due_local"),
+            "raison": why,
+        })
+    except Exception as e:
+        debug_log(f"reminder failure not announced: {e}", "tools")
+
+    callback = _confirmation_callbacks.get("on_reminder_failed")
+    if callback is not None:
+        try:
+            callback(
+                str(row.get("texte") or ""), str(row.get("due_local") or ""), why,
+            )
+        except Exception as e:
+            debug_log(f"reminder failure callback failed: {e}", "tools")
+
+
+def nudge_reminders() -> None:
+    """Wake the scheduler — something closer than a tick was just set."""
+    scheduler = _global_reminders
+    if scheduler is not None:
+        try:
+            scheduler.nudge()
+        except Exception as e:
+            debug_log(f"reminder nudge failed: {e}", "tools")
+
+
+def announce_routine_trouble(nom: str, pourquoi: str, *, stopped: bool) -> None:
+    """Tell the user about a morning that did not work.
+
+    Only the ones that did not. A routine that ran and wrote its page is
+    already delivered — the page is the delivery — and a balloon every
+    day at 07:00 is a balloon people learn to dismiss without reading.
+    These two they would otherwise never learn: it failed, or it has
+    stopped trying.
+
+    The name and the reason, and never the write-up. A notification lands
+    on a lock screen and in a system log, which is the same reason the
+    confirmation one carries the tool name and nothing else.
+    """
+    try:
+        _emit_chat_event("routine_trouble", {
+            "nom": nom,
+            "raison": pourquoi,
+            "arretee": bool(stopped),
+        })
+    except Exception as e:
+        debug_log(f"routine trouble not announced: {e}", "tools")
+
+    # Bundled mode pipes no stdout, so the event above reaches nobody
+    # there. Both routes, or the notification silently stops existing in
+    # a packaged build — which is the build the user is least able to
+    # debug.
+    callback = _confirmation_callbacks.get("on_routine_trouble")
+    if callback is not None:
+        try:
+            callback(nom, pourquoi, bool(stopped))
+        except Exception as e:
+            debug_log(f"routine trouble callback failed: {e}", "tools")
+
+
+def nudge_routines() -> None:
+    """Wake the dispatcher — a routine closer than a tick was just made."""
+    dispatcher = _global_routines
+    if dispatcher is not None:
+        try:
+            dispatcher.nudge()
+        except Exception as e:
+            debug_log(f"routine nudge failed: {e}", "tools")
+
+
+def revoke_pending_confirmation() -> None:
+    """Drop a waiting question on shutdown.
+
+    A question nobody answered before the machine went down does not come
+    back when it comes up: the approval would be given without the
+    context that produced it.
+    """
+    dm = _global_dialogue_memory
+    if dm is None or not hasattr(dm, "peek_pending"):
+        return
+    action = dm.peek_pending()
+    if action is None:
+        return
+    dm.clear_pending()
+    _settle(action, "expiré")
+    _announce_settled(action, "expiré")
+    debug_log(f"    🙋 revoked {action.tool} on shutdown", "tools")
+
+
+def set_confirmation_callbacks(*, on_confirm=None, on_confirm_settled=None,
+                               on_routine_trouble=None,
+                               on_reminder_failed=None) -> None:
+    """Wire the desktop app's surfaces in bundled mode."""
+    _confirmation_callbacks["on_confirm"] = on_confirm
+    _confirmation_callbacks["on_confirm_settled"] = on_confirm_settled
+    _confirmation_callbacks["on_routine_trouble"] = on_routine_trouble
+    _confirmation_callbacks["on_reminder_failed"] = on_reminder_failed
 
 
 def is_stop_requested() -> bool:
@@ -261,9 +913,7 @@ def _check_and_update_diary(
             summary_id = update_diary_from_dialogue_memory(
                 db=db,
                 dialogue_memory=_global_dialogue_memory,
-                ollama_base_url=cfg.ollama_base_url,
-                ollama_chat_model=cfg.ollama_chat_model,
-                ollama_embed_model=cfg.ollama_embed_model,
+                cfg=cfg,
                 source_app=source_app,
                 voice_debug=cfg.voice_debug,
                 timeout_sec=effective_timeout,
@@ -303,28 +953,37 @@ def _check_and_update_diary(
 
 def main() -> None:
     """Main daemon entry point."""
-    global _global_dialogue_memory, _global_stop_requested, _global_tts_engine, _global_dictation_engine
-    global _warm_profile_graph_listener
+    global _global_dialogue_memory, _global_stop_requested, _global_tts_engine, _global_dictation_engine, _global_listener
+    global _warm_profile_core_listener
+    global _global_skip_shutdown_diary_update
 
     # Reset stop flag at start (in case of restart)
     _global_stop_requested = False
+    _global_skip_shutdown_diary_update = False
 
     _install_signal_handlers()
 
     cfg = load_settings()
     db = Database(cfg.db_path, cfg.sqlite_vss_path)
+    # Expose cfg + db so the text-chat submission path shares the same store
+    # and config as the voice listener (one conversation, one config).
+    global _global_cfg, _global_db
+    _global_cfg = cfg
+    _global_db = db
 
     debug_log("daemon started", "jarvis")
     print("✓ Daemon started", flush=True)
-    print(f"🧠 Using chat model: {cfg.ollama_chat_model}", flush=True)
+    print(f"🧠 Using chat model: {cfg.llm_chat_model}", flush=True)
     print(f"🎤 Using whisper model: {cfg.whisper_model}", flush=True)
 
     # MCP preflight: discover and cache external MCP tools
     mcps = getattr(cfg, "mcps", {}) or {}
+    _mcp_discovery_incomplete = False
     if mcps:
         print(f"📡 Discovering MCP tools from {len(mcps)} server(s)...", flush=True)
         try:
             mcp_tools, mcp_errors = initialize_mcp_tools(mcps, verbose=False)
+            _mcp_discovery_incomplete = bool(mcp_errors)
 
             # Group tools by server for display
             tools_by_server: dict = {}
@@ -348,8 +1007,26 @@ def main() -> None:
         except Exception as e:
             debug_log(f"MCP discovery failed: {e}", "mcp")
             print(f"  ⚠️ MCP discovery failed: {e}", flush=True)
+            _mcp_discovery_incomplete = True
     else:
         print("📡 No MCP servers configured", flush=True)
+
+    # The user's control surface over what Yuba may do on her own. Written
+    # here rather than earlier so the servers' tools are already in the
+    # cache and land in the file next to the builtins.
+    from .tools.registry import ensure_policy_file
+    # `_mcp_discovery_incomplete` is set above when a configured server
+    # raised or returned nothing. The file is written once and never
+    # rewritten, so writing it now would freeze it without that server's
+    # tools for good.
+    ensure_policy_file(cfg, discovery_failed=_mcp_discovery_incomplete)
+
+    # A question whose card died with the process that raised it. Swept
+    # here rather than in `Database.__init__`, because the memory viewer
+    # opens the same file from another process and would close the
+    # running daemon's live question on his behalf.
+    from .memory.db import close_orphan_questions
+    close_orphan_questions(db)
 
     # Initialize dialogue memory with timeout
     print("💾 Initializing dialogue memory...", flush=True)
@@ -359,35 +1036,25 @@ def main() -> None:
     )
     print("✓ Dialogue memory initialized", flush=True)
 
-    # Wire the conversation-scoped warm-profile cache to graph mutations.
-    # When the User or Directives branch is mutated mid-conversation, the
-    # cached warm profile is dropped so the next reply rebuilds it from
-    # the current graph state. World-branch writes (typical webSearch
-    # extractions) do not touch warm profile, so they are ignored.
+    # Wire the conversation-scoped profile cache to core writes. When the
+    # user says "remember that..." mid-conversation, the cached block is
+    # dropped so the very next reply is built with the new fact in the
+    # system prompt rather than waiting for a fresh conversation.
     try:
-        from .memory.graph import (
-            BRANCH_DIRECTIVES,
-            BRANCH_USER,
-            register_graph_mutation_listener,
-        )
-
-        _wp_relevant_branches = {BRANCH_USER, BRANCH_DIRECTIVES}
+        from .memory.core import register_core_mutation_listener
 
         # Read the DialogueMemory ref through the module global at fire
         # time, not via closure capture, so a future singleton swap (tests
         # or hot-reload) routes invalidation to the live instance instead
         # of the freed one.
-        def _invalidate_wp_on_graph_mutation(*, action, node_id, branch):
-            del action, node_id  # Only the branch matters for warm-profile filtering.
-            if branch not in _wp_relevant_branches:
-                return
+        def _invalidate_wp_on_core_write(*, action, section):
             dm = _global_dialogue_memory
             if dm is None:
                 return
             try:
                 dm.invalidate_warm_profile()
                 debug_log(
-                    f"warm profile invalidated by {branch} graph mutation",
+                    f"warm profile invalidated by core {action} on {section}",
                     "memory",
                 )
             except Exception as exc:
@@ -399,14 +1066,14 @@ def main() -> None:
         # If a previous run left a listener registered (re-entry without
         # full process restart), drop it before installing the new one so
         # the registry never accumulates stale closures.
-        if _warm_profile_graph_listener is not None:
+        if _warm_profile_core_listener is not None:
             try:
-                from .memory.graph import unregister_graph_mutation_listener
-                unregister_graph_mutation_listener(_warm_profile_graph_listener)
+                from .memory.core import unregister_core_mutation_listener
+                unregister_core_mutation_listener(_warm_profile_core_listener)
             except Exception:
                 pass
-        register_graph_mutation_listener(_invalidate_wp_on_graph_mutation)
-        _warm_profile_graph_listener = _invalidate_wp_on_graph_mutation
+        register_core_mutation_listener(_invalidate_wp_on_core_write)
+        _warm_profile_core_listener = _invalidate_wp_on_core_write
     except Exception as exc:
         debug_log(
             f"warm profile mutation listener wiring failed (non-fatal): {exc}",
@@ -419,6 +1086,26 @@ def main() -> None:
     try:
         from .memory.graph import GraphMemoryStore
         _graph_store_boot = GraphMemoryStore(cfg.db_path)
+
+        # Hand the user and directives branches over to the core before
+        # anything can wipe them: the core is the authority for what the
+        # assistant believes about its user, and those two branches no
+        # longer reach the prompt. Additive and idempotent, so this is a
+        # no-op on every run after the first.
+        try:
+            from .memory.core import MemoryCore
+            from .memory.graph_ops import migrate_graph_branches_into_core
+            _migrated = migrate_graph_branches_into_core(
+                _graph_store_boot, MemoryCore.for_config(cfg),
+            )
+            if _migrated:
+                print(
+                    f"🪨 Moved {_migrated} remembered items into your core files",
+                    flush=True,
+                )
+        except Exception as e:
+            debug_log(f"core migration failed (non-fatal): {e}", "memory")
+
         if _graph_store_boot.migrate_legacy_shape():
             print("🧹 Wiped legacy knowledge graph; re-seeded User / Directives / World branches", flush=True)
             print("   📥 Open the memory viewer and use 'Import from Diary' to repopulate.", flush=True)
@@ -467,6 +1154,10 @@ def main() -> None:
         piper_noise_scale=cfg.tts_piper_noise_scale,
         piper_noise_w=cfg.tts_piper_noise_w,
         piper_sentence_silence=cfg.tts_piper_sentence_silence,
+        # Kokoro parameters
+        kokoro_voice=cfg.tts_kokoro_voice,
+        kokoro_lang_code=cfg.tts_kokoro_lang_code,
+        kokoro_speed=cfg.tts_kokoro_speed,
     )
     _global_tts_engine = tts  # Expose for face widget speaking animation
     if tts.enabled:
@@ -479,8 +1170,59 @@ def main() -> None:
     print("🎤 Initializing voice listener (this may take a moment to load Whisper model)...", flush=True)
     voice_thread: Optional[threading.Thread] = None
     voice_thread = VoiceListener(db, cfg, tts, _global_dialogue_memory)
+    # So a reply produced on another thread — a click-approved action —
+    # can be handed to the listener to speak, rather than spoken from
+    # that thread and racing the listener's echo bookkeeping.
+    _global_listener = voice_thread
     voice_thread.start()
     print("✓ Voice listener thread started (loading Whisper model in background)", flush=True)
+
+    # Reminders. Its own thread rather than the main loop, which calls
+    # the diary pass synchronously and can block for up to 45 seconds —
+    # a 09:00 reminder would land anywhere inside that.
+    global _global_reminders
+    if bool(getattr(cfg, "reminders_enabled", True)):
+        from .reminders.scheduler import ReminderScheduler
+
+        _global_reminders = ReminderScheduler(
+            db=db, cfg=cfg,
+            speak=_speak_from_worker,
+            # A reminder never cuts across a reply the user is waiting
+            # for. The lock is only inspected, never taken: taking it
+            # would give it a third meaning on top of the two it has.
+            busy=lambda: _chat_query_lock.locked(),
+            announce=announce_reminder_failure,
+        )
+        _global_reminders.start()
+        print("⏰ Reminders on", flush=True)
+    else:
+        print("⏰ Reminders off", flush=True)
+
+    # Routines. Also its own thread, and deliberately not the reminder
+    # scheduler's: that one is the only thing keeping spoken promises,
+    # and a bug in this newer and more complicated feature must not be
+    # able to stop it.
+    global _global_routines, _global_routine_runner
+    if bool(getattr(cfg, "routines_enabled", True)):
+        from .routines.dispatcher import RoutineDispatcher
+        from .routines.runner import RoutineRunner
+        from .routines.scope import ensure_routines_file
+
+        ensure_routines_file(cfg)
+        _global_routine_runner = RoutineRunner(
+            db=db, cfg=cfg, announce=announce_routine_trouble,
+        )
+        _global_routines = RoutineDispatcher(
+            db=db, cfg=cfg, runner=_global_routine_runner,
+            announce=announce_routine_trouble,
+            # Inspected, never taken. A routine must never make the user
+            # wait, which is also why the runner holds nothing.
+            busy=lambda: _chat_query_lock.locked(),
+        )
+        _global_routines.start()
+        print("🌅 Routines on", flush=True)
+    else:
+        print("🌅 Routines off", flush=True)
 
     # Initialize dictation engine (hold-to-dictate)
     dictation = None
@@ -527,8 +1269,8 @@ def main() -> None:
                 voice_device=getattr(cfg, "voice_device", None),
                 filler_removal=getattr(cfg, "dictation_filler_removal", False),
                 custom_dictionary=getattr(cfg, "dictation_custom_dictionary", []),
-                ollama_base_url=getattr(cfg, "ollama_base_url", "http://127.0.0.1:11434"),
-                ollama_model=cfg.ollama_chat_model,
+                cfg=cfg,
+                chat_model=cfg.llm_chat_model,
                 thinking=getattr(cfg, "dictation_thinking_enabled", False),
             )
             dictation.start()
@@ -547,28 +1289,57 @@ def main() -> None:
     last_diary_check = time.time()
     diary_check_interval = 60.0
 
-    # Start stdin monitor thread for Windows shutdown signal
-    # On Windows, CTRL_BREAK_EVENT doesn't work reliably with CREATE_NO_WINDOW
-    # So we also check for stdin being closed as a shutdown signal
+    # Start stdin monitor thread.
+    # Two jobs:
+    #   1. Windows shutdown signal: CTRL_BREAK_EVENT doesn't work reliably with
+    #      CREATE_NO_WINDOW, so we treat stdin EOF / a bare "SHUTDOWN" line as a
+    #      stop request (unchanged behaviour).
+    #   2. Subprocess chat query-in: the desktop app writes
+    #      ``__CHAT_QUERY__:{"text":"..."}`` lines so the chat window can submit
+    #      text when the daemon runs as a separate process. Non-chat lines are
+    #      ignored so the monitor is a no-op for users who never open the chat.
     def stdin_monitor():
-        global _global_stop_requested
         try:
             # When parent closes our stdin, readline returns empty
             while True:
                 line = sys.stdin.readline()
                 if not line:  # EOF - stdin closed
                     debug_log("stdin closed, requesting stop", "jarvis")
-                    _global_stop_requested = True
+                    request_stop()
                     break
-                line = line.strip()
-                if line == "SHUTDOWN":
+                stripped = line.strip()
+                if stripped == SHUTDOWN_SKIP_DIARY_COMMAND:
+                    debug_log("fast shutdown command received, skipping diary update", "jarvis")
+                    request_stop(skip_diary_update=True)
+                    break
+                if stripped == "SHUTDOWN":
                     debug_log("SHUTDOWN command received, requesting stop", "jarvis")
-                    _global_stop_requested = True
+                    request_stop()
                     break
+                # Chat query-in (subprocess mode). Returns False for any other
+                # line, which we silently ignore.
+                if stripped.startswith(CHAT_QUERY_IPC_PREFIX):
+                    handle_chat_query_stdin_line(stripped)
+                # A decision on a waiting confirmation.
+                if stripped.startswith(CHAT_DECISION_IPC_PREFIX):
+                    handle_chat_decision_stdin_line(stripped)
         except Exception:
             pass  # stdin might not be available
 
-    if sys.platform == "win32" and not getattr(sys, 'frozen', False):
+    # Run the monitor on Windows (shutdown signal) and whenever the desktop
+    # app explicitly signals it owns our stdin (subprocess chat query-in on
+    # any platform). The desktop app sets JARVIS_STDIN_IPC=1 when spawning us
+    # so that a bare ``python -m jarvis.main < /dev/null`` (or a systemd unit
+    # with StandardInput=null) does NOT start the monitor and immediately exit
+    # on EOF. Bundled mode uses a QThread, not a subprocess, so it's skipped.
+    _start_stdin_monitor = (
+        (sys.platform == "win32" and not getattr(sys, 'frozen', False))
+        or (
+            not getattr(sys, 'frozen', False)
+            and os.environ.get("JARVIS_STDIN_IPC") == "1"
+        )
+    )
+    if _start_stdin_monitor:
         stdin_thread = threading.Thread(target=stdin_monitor, daemon=True)
         stdin_thread.start()
 
@@ -601,6 +1372,23 @@ def main() -> None:
             dictation.stop()
             debug_log("dictation engine stopped", "jarvis")
 
+        # Before the speaker dies. The shutdown diary pass can take 45
+        # seconds after this and the database outlives both, so a
+        # reminder firing in that window would be settled as said with
+        # nothing able to say it.
+        if _global_reminders is not None:
+            debug_log("stopping reminder scheduler...", "jarvis")
+            _global_reminders.stop()
+
+        # The dispatcher first, so nothing new is handed over while the
+        # runner is being waited on.
+        if _global_routines is not None:
+            debug_log("stopping routine dispatcher...", "jarvis")
+            _global_routines.stop()
+        if _global_routine_runner is not None:
+            debug_log("waiting for the routine in flight...", "jarvis")
+            _global_routine_runner.stop()
+
         if voice_thread is not None:
             debug_log("stopping voice thread...", "jarvis")
             voice_thread.stop()
@@ -610,25 +1398,29 @@ def main() -> None:
                 pass
             debug_log("voice thread stopped", "jarvis")
 
-        # Final diary update before shutdown
-        debug_log("performing final diary update (force=True)...", "jarvis")
-        print("📝 Updating diary before shutdown...", flush=True)
-
-        # Check dialogue memory status
-        if _global_dialogue_memory is None:
-            print("⚠️ Dialogue memory is None - nothing to save", flush=True)
+        if _global_skip_shutdown_diary_update:
+            debug_log("shutdown diary update skipped by fast stop request", "jarvis")
+            print("⏭️ Skipping diary update before shutdown", flush=True)
         else:
-            # Display-only count; actual save uses the atomic snapshot path.
-            pending = _global_dialogue_memory.get_pending_chunks()
-            print(f"💬 Found {len(pending)} pending conversation chunks", flush=True)
+            # Final diary update before shutdown
+            debug_log("performing final diary update (force=True)...", "jarvis")
+            print("📝 Updating diary before shutdown...", flush=True)
 
-        # Use callbacks if they were set by desktop app (for live UI updates in bundled mode)
-        # Use IPC (stdout events) if callbacks not set (subprocess mode)
-        use_callbacks = any(_diary_update_callbacks.values())
-        use_ipc = not use_callbacks  # Subprocess mode - emit events to stdout
-        _check_and_update_diary(db, cfg, verbose=True, force=True, timeout_sec=SHUTDOWN_DIARY_TIMEOUT_SEC, use_callbacks=use_callbacks, use_ipc=use_ipc)
-        print("✅ Diary update complete", flush=True)
-        debug_log("diary update complete", "jarvis")
+            # Check dialogue memory status
+            if _global_dialogue_memory is None:
+                print("⚠️ Dialogue memory is None - nothing to save", flush=True)
+            else:
+                # Display-only count; actual save uses the atomic snapshot path.
+                pending = _global_dialogue_memory.get_pending_chunks()
+                print(f"💬 Found {len(pending)} pending conversation chunks", flush=True)
+
+            # Use callbacks if they were set by desktop app (for live UI updates in bundled mode)
+            # Use IPC (stdout events) if callbacks not set (subprocess mode)
+            use_callbacks = any(_diary_update_callbacks.values())
+            use_ipc = not use_callbacks  # Subprocess mode - emit events to stdout
+            _check_and_update_diary(db, cfg, verbose=True, force=True, timeout_sec=SHUTDOWN_DIARY_TIMEOUT_SEC, use_callbacks=use_callbacks, use_ipc=use_ipc)
+            print("✅ Diary update complete", flush=True)
+            debug_log("diary update complete", "jarvis")
 
         if tts is not None:
             tts.stop()
@@ -643,17 +1435,17 @@ def main() -> None:
 
         db.close()
 
-        # Drop the warm-profile graph listener so the module registry does
-        # not retain a closure pointing at this run's DialogueMemory after
+        # Drop the core write listener so the module registry does not
+        # retain a closure pointing at this run's DialogueMemory after
         # shutdown — relevant for tests and any embedder that re-runs the
         # daemon in-process.
-        if _warm_profile_graph_listener is not None:
+        if _warm_profile_core_listener is not None:
             try:
-                from .memory.graph import unregister_graph_mutation_listener
-                unregister_graph_mutation_listener(_warm_profile_graph_listener)
+                from .memory.core import unregister_core_mutation_listener
+                unregister_core_mutation_listener(_warm_profile_core_listener)
             except Exception:
                 pass
-            _warm_profile_graph_listener = None
+            _warm_profile_core_listener = None
 
         debug_log("daemon stopped", "jarvis")
         print("👋 Daemon stopped", flush=True)

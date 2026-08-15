@@ -10,6 +10,13 @@ from ...types import ToolExecutionResult
 class DeleteMealTool(Tool):
     """Tool for deleting meals from the nutrition database."""
     
+    def risk_for(self, args):
+        """Removes records the user logged. Recoverable only from a
+        database backup, which is not a thing they have."""
+        from ...policy import RISK_DESTRUCTIVE
+
+        return RISK_DESTRUCTIVE
+
     @property
     def name(self) -> str:
         return "deleteMeal"

@@ -849,8 +849,16 @@ class TestIntentJudgeFallback:
     def test_returns_none_when_ollama_unavailable(self):
         from jarvis.listening.intent_judge import IntentJudge, IntentJudgeConfig
 
+        from types import SimpleNamespace
+
+        # The endpoint lives on the settings object the judge dispatches
+        # through, not on its own config: every LLM call goes via
+        # `get_llm_backend(cfg)`.
         judge = IntentJudge(IntentJudgeConfig(
-            ollama_base_url="http://127.0.0.1:99999",
+            cfg=SimpleNamespace(
+                llm_provider="ollama",
+                ollama_base_url="http://127.0.0.1:99999",
+            ),
             timeout_sec=1.0,
         ))
 

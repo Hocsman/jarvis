@@ -158,7 +158,7 @@ def test_generate_tools_description_includes_mcp_tools():
 
 
 @pytest.mark.unit
-def test_mcp_tool_execution_new_format(monkeypatch):
+def test_mcp_tool_execution_new_format(monkeypatch, tools_unrestricted):
     """Test execution of MCP tools using the new server__toolname format."""
     db = DummyDB()
     cfg = DummyCfg()
@@ -194,7 +194,7 @@ def test_mcp_tool_execution_new_format(monkeypatch):
 
 
 @pytest.mark.unit
-def test_mcp_tool_execution_error_handling(monkeypatch):
+def test_mcp_tool_execution_error_handling(monkeypatch, tools_unrestricted):
     """Test that MCP tool errors are properly handled."""
     db = DummyDB()
     cfg = DummyCfg()
@@ -226,7 +226,7 @@ def test_mcp_tool_execution_error_handling(monkeypatch):
 
 
 @pytest.mark.unit
-def test_mcp_tool_invalid_server_name():
+def test_mcp_tool_invalid_server_name(tools_unrestricted):
     """Test that invalid server names in tool names are handled."""
     db = DummyDB()
     cfg = DummyCfg()
@@ -250,7 +250,7 @@ def test_mcp_tool_invalid_server_name():
 
 
 @pytest.mark.unit
-def test_mcp_tool_exception_handling(monkeypatch):
+def test_mcp_tool_exception_handling(monkeypatch, tools_unrestricted):
     """Test that exceptions during MCP tool execution are caught."""
     db = DummyDB()
     cfg = DummyCfg()

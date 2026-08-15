@@ -13,6 +13,13 @@ from ...debug import debug_log
 class RefreshMCPToolsTool(Tool):
     """Tool to refresh the MCP tools cache."""
 
+    def risk_for(self, args):
+        """Touches nothing outside Yuba, but changes which tools exist
+        for the rest of the turn, so it is not a plain read."""
+        from ..policy import RISK_ACTION
+
+        return RISK_ACTION
+
     @property
     def name(self) -> str:
         return "refreshMCPTools"

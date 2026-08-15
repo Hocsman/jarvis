@@ -5,6 +5,7 @@ import sys
 import re
 import requests
 import threading
+import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 import os
@@ -18,9 +19,22 @@ from .builtin.nutrition.fetch_meals import FetchMealsTool
 from .builtin.nutrition.delete_meal import DeleteMealTool
 from .builtin.refresh_mcp_tools import RefreshMCPToolsTool
 from .builtin.weather import WeatherTool
+from .builtin.remember import RememberTool
+from .builtin.forget import ForgetTool
+from .builtin.set_reminder import SetReminderTool
+from .builtin.set_routine import SetRoutineTool
+from .builtin.cancel_routine import CancelRoutineTool
+from .builtin.review_learnings import ReviewLearningsTool
+from .builtin.goals import (
+    CloseGoalTool,
+    ListGoalsTool,
+    NoteGoalTool,
+    SetGoalTool,
+)
 from .builtin.stop import StopTool
 from .builtin.tool_search import ToolSearchTool
 from .types import ToolExecutionResult
+from .naming import is_plain_name
 from ..config import Settings
 from .external.mcp_client import MCPClient
 from ..debug import debug_log
@@ -37,6 +51,16 @@ BUILTIN_TOOLS = {
     "deleteMeal": DeleteMealTool(),
     "refreshMCPTools": RefreshMCPToolsTool(),
     "getWeather": WeatherTool(),
+    "remember": RememberTool(),
+    "forget": ForgetTool(),
+    "setReminder": SetReminderTool(),
+    "setRoutine": SetRoutineTool(),
+    "cancelRoutine": CancelRoutineTool(),
+    "setGoal": SetGoalTool(),
+    "noteGoal": NoteGoalTool(),
+    "closeGoal": CloseGoalTool(),
+    "listGoals": ListGoalsTool(),
+    "reviewLearnings": ReviewLearningsTool(),
     "stop": StopTool(),
     "toolSearchTool": ToolSearchTool(),
 }
@@ -115,6 +139,28 @@ class ToolSpec:
     name: str  # canonical tool identifier (camelCase)
     description: str  # Human-readable description (matches MCP format)
     inputSchema: Optional[Dict[str, Any]] = None  # JSON Schema for arguments (matches MCP format)
+    # What the server says the tool does to the world: ``readOnlyHint``,
+    # ``destructiveHint``. Optional because every existing construction
+    # site passes three arguments, and because a server may send none —
+    # which the policy gate reads as "unclassified", not as "harmless".
+    annotations: Optional[Dict[str, Any]] = None
+
+
+def _spec_from_tool_info(server_name: str, tool_info: Dict[str, Any]) -> ToolSpec:
+    """Build the catalogue entry for one discovered MCP tool.
+
+    Namespaced ``server__tool`` so two servers can expose the same name,
+    and carrying the server's own annotations through: they are what lets
+    the policy gate tell a snapshot from a click without the user
+    classifying dozens of tools by hand.
+    """
+    name = tool_info.get("name")
+    return ToolSpec(
+        name=f"{server_name}__{name}",
+        description=tool_info.get("description") or f"Tool from {server_name} MCP server",
+        inputSchema=tool_info.get("inputSchema") or {"type": "object", "properties": {}, "required": []},
+        annotations=tool_info.get("annotations"),
+    )
 
 
 def discover_mcp_tools(mcps_config: Dict[str, Any]) -> Tuple[Dict[str, ToolSpec], Dict[str, str]]:
@@ -142,13 +188,25 @@ def discover_mcp_tools(mcps_config: Dict[str, Any]) -> Tuple[Dict[str, ToolSpec]
                     # Create a unique tool name: server__toolname
                     full_tool_name = f"{server_name}__{tool_name}"
 
-                    # Create a ToolSpec for this MCP tool
-                    description = tool_info.get("description", f"Tool from {server_name} MCP server")
-                    input_schema = tool_info.get("inputSchema", {"type": "object", "properties": {}, "required": []})
-                    discovered_tools[full_tool_name] = ToolSpec(
-                        name=full_tool_name,
-                        description=description,
-                        inputSchema=input_schema
+                    if not is_plain_name(full_tool_name):
+                        # Dropped here rather than filtered at each of the
+                        # places that write it onto a line, so a name that
+                        # cannot be written is also a name that cannot be
+                        # called. Said out loud once, at discovery: a
+                        # capability quietly missing looks exactly like a
+                        # server that never offered it.
+                        montre = full_tool_name.encode(
+                            "unicode_escape").decode("ascii")[:120]
+                        debug_log(
+                            f"MCP tool dropped, name outside the plain class: {montre}",
+                            "mcp",
+                        )
+                        print(f"  ⚠️ 🔌 Tool ignored — its name cannot be written "
+                              f"on a line: {montre}", flush=True)
+                        continue
+
+                    discovered_tools[full_tool_name] = _spec_from_tool_info(
+                        server_name, tool_info,
                     )
 
             except BaseException as e:
@@ -191,7 +249,11 @@ def generate_tools_json_schema(allowed_tools: Optional[List[str]] = None, mcp_to
         }
     ]
     """
-    names = list(allowed_tools or list(BUILTIN_TOOLS.keys()))
+    # ``None`` asks for the whole catalogue; ``[]`` asks for nothing.
+    # Collapsing the two would hand every builtin to the two callers that
+    # deliberately narrow to nothing — a routine with an empty envelope,
+    # and the resume turn that runs one approved call and narrates it.
+    names = list(BUILTIN_TOOLS.keys()) if allowed_tools is None else list(allowed_tools)
     tools: List[Dict[str, Any]] = []
 
     # Add built-in tools
@@ -229,7 +291,8 @@ def generate_tools_json_schema(allowed_tools: Optional[List[str]] = None, mcp_to
 
 def generate_tools_description(allowed_tools: Optional[List[str]] = None, mcp_tools: Optional[Dict[str, ToolSpec]] = None) -> str:
     """Produce a compact tool help string for the system prompt using OpenAI standard format."""
-    names = list(allowed_tools or list(BUILTIN_TOOLS.keys()))
+    # Same rule as the schema: ``None`` is everything, ``[]`` is nothing.
+    names = list(BUILTIN_TOOLS.keys()) if allowed_tools is None else list(allowed_tools)
     lines: List[str] = []
     lines.append("Tool-use protocol: Use the tool_calls field in your response:")
     lines.append('tool_calls: [{"id": "call_<id>", "type": "function", "function": {"name": "<toolName>", "arguments": "<json_string>"}}]')
@@ -304,6 +367,338 @@ def _normalize_time_range(args: Optional[Dict[str, Any]]) -> Tuple[str, str]:
     return since or (now - timedelta(days=1)).isoformat(), until or now.isoformat()
 
 
+# ── Policy gate ──────────────────────────────────────────────────────
+#
+# Every tool call in the process passes through ``run_tool_with_retries``:
+# the planner's direct execution and the agentic loop both land here. The
+# gate lives at that single point rather than at either call site, so a
+# future third caller cannot bypass it by construction.
+
+_POLICY_CACHE: Dict[str, Any] = {"stamp": None, "policy": None}
+
+
+def load_tool_policy(cfg: Settings):
+    """Read the user's tool policy, cached on the file's mtime.
+
+    Re-read when the file changes so an edit takes effect on the next
+    call rather than the next restart: the file is the control surface,
+    and a control surface with a restart delay is one people stop
+    trusting.
+    """
+    from .policy import ToolPolicy
+
+    try:
+        from ..memory.core import MemoryCore
+
+        path = MemoryCore.for_config(cfg).directory / "outils.md"
+        stamp = path.stat().st_mtime_ns if path.exists() else None
+    except Exception:
+        return ToolPolicy.empty()
+
+    if stamp is None:
+        return ToolPolicy.empty()
+    if _POLICY_CACHE["stamp"] == stamp and _POLICY_CACHE["policy"] is not None:
+        return _POLICY_CACHE["policy"]
+
+    try:
+        policy = ToolPolicy.parse(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        # Not just OSError. `read_text` raises UnicodeDecodeError — a
+        # ValueError — for a file that is not UTF-8, which a user reaches
+        # by reopening their own generated policy in a Windows editor and
+        # saving it as ANSI. Escaping here would break every tool call on
+        # every turn until the file was repaired, which is the opposite of
+        # what the spec promises: a malformed file yields the defaults.
+        debug_log(f"tool policy unreadable, falling back to defaults: {e}", "tools")
+        return ToolPolicy.empty()
+
+    _POLICY_CACHE["stamp"], _POLICY_CACHE["policy"] = stamp, policy
+    return policy
+
+
+def ensure_policy_file(cfg: Settings, *, discovery_failed: bool = False) -> None:
+    """Write ``outils.md`` from the installed catalogue, once.
+
+    Deferred a boot when ``discovery_failed``: the file is written once
+    and never rewritten, so a first start with a server down would freeze
+    it without that server's tools — permanently, and with nothing in the
+    file to say anything is missing. Waiting costs one start-up; writing
+    early costs every card those tools will ever raise.
+
+    Generated rather than shipped so the user opens it and finds their
+    own tools by name. Written only when absent: once it exists it is
+    theirs, and a file regenerated on startup would quietly undo every
+    decision they made in it.
+
+    Call after MCP discovery, so the servers' tools are in the cache and
+    land in the file alongside the builtins.
+
+    Never raises. This runs during daemon boot, and one unwritable file
+    must not stop Yuba starting.
+    """
+    from .policy import render_policy_file, resolve_risk
+
+    try:
+        from ..memory.core import MemoryCore
+
+        path = MemoryCore.for_config(cfg).directory / "outils.md"
+        if path.exists():
+            return
+
+        if discovery_failed:
+            debug_log("policy file deferred: MCP discovery incomplete", "tools")
+            print("  ⚠️ 🚪 outils.md pas encore écrit : un serveur MCP n'a pas "
+                  "répondu, et le fichier ne s'écrit qu'une fois. Il sera "
+                  "généré au prochain démarrage réussi.", flush=True)
+            return
+
+        builtin_risks = {
+            name: resolve_risk(name, tool, {})
+            for name, tool in BUILTIN_TOOLS.items()
+        }
+        mcp_risks = {
+            name: resolve_risk(name, spec, {})
+            for name, spec in get_cached_mcp_tools().items()
+        }
+
+        texte, refuses = render_policy_file(builtin_risks, mcp_risks)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Written whole or not at all, like every other page the
+        # assistant owns. `path.exists()` above is what stops
+        # regeneration, so a body truncated halfway would be permanent —
+        # and it would read back clean, because the parser skips
+        # everything it does not recognise.
+        temporaire = path.with_name(f".{path.name}.{os.getpid()}")
+        temporaire.write_text(texte, encoding="utf-8")
+        os.replace(temporaire, path)
+        debug_log(
+            f"policy file written: {len(builtin_risks)} builtins, "
+            f"{len(mcp_risks)} MCP tools, {len(refuses)} names refused",
+            "tools",
+        )
+        if refuses:
+            print(
+                f"  ⚠️ {len(refuses)} outil(s) écarté(s) d'outils.md : leur nom "
+                "ne peut pas s'écrire sur une ligne.",
+                flush=True,
+            )
+            for name in refuses:
+                # Escaped, and on one line: an unwritable name is
+                # unwritable here too, and a newline in one would forge a
+                # second line of this very report.
+                montre = name.encode("unicode_escape").decode("ascii")
+                print(f"     • {montre[:120]}", flush=True)
+            print(
+                "     ↳ traités comme destructifs : elle demandera avant "
+                f"chaque appel. Fichier : {path}",
+                flush=True,
+            )
+    except Exception as e:
+        debug_log(f"policy file not written: {e}", "tools")
+
+
+def _known_tool(name: str):
+    """The builtin or discovered spec for ``name``, or None.
+
+    None is the honest answer for a tool the catalogue has never heard
+    of, and the risk resolver treats it as destructive rather than
+    guessing it is harmless.
+    """
+    if name in BUILTIN_TOOLS:
+        return BUILTIN_TOOLS[name]
+    return get_cached_mcp_tools().get(name)
+
+
+def _refusal(name: str, verdict: str, risk: str) -> ToolExecutionResult:
+    from .policy import NEVER
+
+    if verdict == NEVER:
+        text = (
+            f'The tool "{name}" is in the user\'s never list and cannot be '
+            f"run under any circumstance. Tell them plainly that you are not "
+            f"allowed to do this, and do not offer to try again or suggest a "
+            f"way around it."
+        )
+    else:
+        text = (
+            f'The tool "{name}" needs the user\'s confirmation before it can '
+            f"run ({risk}), and there is no way to ask them yet. Nothing was "
+            f"done. Tell them what you wanted to do and that they can allow it "
+            f'by moving "{name}" into the ## Libre section of their outils.md '
+            f"file."
+        )
+    debug_log(f"    🚪 refused {name} ({risk} → {verdict})", "tools")
+    return ToolExecutionResult(
+        success=False, reply_text=text, error_message=None, refused=True,
+    )
+
+
+def _out_of_scope(name, scope, risk, verdict):
+    """Whether an unattended call steps outside its routine's envelope.
+
+    Five checks, and the last four are re-run on every call because the
+    envelope was written weeks ago and the world moved.
+
+    Returns a refusal, or None to carry on. The refusal deliberately does
+    NOT point at `## Libre` the way the ordinary one does: unattended,
+    that becomes a paragraph recommending the policy be loosened for
+    every origin, written by a thread running while the user sleeps.
+    """
+    from ..routines.scope import JAMAIS_EN_ROUTINE
+    from .policy import FREE, RISK_READ
+
+    tool = _known_tool(name)
+    if name in JAMAIS_EN_ROUTINE:
+        # Distinct from the line below because the user may well have
+        # written this name in the block themselves, and "not in the
+        # perimeter" would read as a bug rather than a rule.
+        why = "aucune routine ne peut l'atteindre, quel que soit son périmètre"
+    elif not scope.allows(name):
+        why = "il n'est pas dans le périmètre de cette routine"
+    elif verdict != FREE:
+        why = "tu as demandé à être consulté pour cet outil"
+    elif risk != RISK_READ:
+        why = "il ne se contente pas de lire"
+    elif getattr(tool, "writes_own_state", False):
+        why = "il écrit la mémoire de Yuba, et personne n'est là pour relire"
+    elif getattr(tool, "reads_his_life", False):
+        # Deliberately not the `writes_own_state` wording: this one may
+        # write nothing at all and still be wrong unattended, because
+        # what it does is read his days and form an opinion about him.
+        why = "il lit ta vie et se fait une idée de toi, sans toi"
+    elif getattr(tool, "needs_a_human", False):
+        # It would not fail, it would *wait* — holding the runner's one
+        # slot, which every other routine queues on, until a restart.
+        why = "il attend que quelqu'un fasse un geste, et personne n'est là"
+    else:
+        return None
+
+    debug_log(f"    🔁 {name} out of scope for {scope.nom}: {why}", "tools")
+    return ToolExecutionResult(
+        success=False, refused=True, error_message=None,
+        reply_text=(
+            f'The tool "{name}" is outside what the routine "{scope.nom}" '
+            f"may reach ({why}). Nothing was done. Carry on with the rest "
+            f"of the routine and say in your write-up what was missing. Do "
+            f"not suggest changing any settings."
+        ),
+    )
+
+
+def _fingerprint(name, args):
+    from .confirmation import fingerprint
+
+    return fingerprint(name, args)
+
+
+def _ask(db, cfg, confirmation, *, name, args, risk, verdict, origin,
+         redacted_text) -> ToolExecutionResult:
+    """Raise a question and end the turn. Nothing runs.
+
+    The gate never waits here. For voice, ``run_reply_engine`` runs on
+    the listener's own audio thread, so blocking would silence the
+    microphone that has to hear the answer — and blocking destroys the
+    answer rather than delaying it, because the audio queue overflows
+    into a swallowed exception.
+    """
+    from .confirmation import PendingAction, channel_for_call
+    from .policy import OUTCOME_ASKED, OUTCOME_EXPIRED, OUTCOME_REFUSED
+
+    store = confirmation.store
+    channel = channel_for_call(risk, _known_tool(name), name, args)
+
+    # Close whatever this question is about to displace. `raise_pending`
+    # overwrites a card past its deadline, and the episode would leave
+    # with the object: one `demandé` row and nothing after it, which the
+    # Activity tab reads as a question still waiting on him.
+    perimee = getattr(store, "take_expired_pending", None)
+    if callable(perimee):
+        try:
+            morte = perimee()
+        except Exception as e:
+            debug_log(f"expired question not claimed: {e}", "tools")
+            morte = None
+        if morte is not None:
+            debug_log(f"    🚪 {morte.tool} expired unanswered", "tools")
+            _log_action(
+                db, tool=morte.tool, args=morte.args, risk=morte.risk,
+                verdict="demande", outcome=OUTCOME_EXPIRED,
+                query=morte.query_redacted, origin=morte.origin,
+                request_id=morte.request_id,
+            )
+
+    action = PendingAction.create(
+        tool=name, args=args, risk=risk, channel=channel, origin=origin,
+        query_redacted=redacted_text,
+        raised_at_turn=store.current_turn(origin),
+        ttl_sec=confirmation.ttl_sec,
+    )
+    held = store.raise_pending(action)
+    if held is None:
+        # A different question is already waiting. One card at a time, so
+        # a three-step plan asks about its first step rather than
+        # stacking questions the user has to disentangle.
+        #
+        # Not `_refusal`: its text tells the model there is no way to ask
+        # and to send the user to `## Libre`, which here would advise
+        # weakening the policy to work around a question they are in the
+        # middle of answering. The truth is a queue, not a wall.
+        waiting = store.peek_pending()
+        other = getattr(waiting, "tool", None) or "another action"
+        debug_log(f"    🚪 {name} not asked: {other} is still waiting", "tools")
+        _log_action(
+            db, tool=name, args=args, risk=risk, verdict=verdict,
+            outcome=OUTCOME_REFUSED, query=redacted_text, origin=origin,
+        )
+        return ToolExecutionResult(
+            success=False, refused=True, error_message=None,
+            reply_text=(
+                f'The tool "{name}" was not run because the user is still '
+                f'being asked about "{other}". Tell them that, and that you '
+                f"can come back to this once they have answered. Do not "
+                f"suggest changing any settings."
+            ),
+        )
+
+    if held.request_id == action.request_id:
+        # A re-ask keeps the original id and writes no second row: one
+        # episode in the ledger, not a queue of duplicates.
+        _log_action(
+            db, tool=name, args=args, risk=risk, verdict=verdict,
+            outcome=OUTCOME_ASKED, query=redacted_text, origin=origin,
+            request_id=held.request_id,
+        )
+
+    try:
+        confirmation.publish(held)
+    except Exception as e:
+        debug_log(f"confirmation not published: {e}", "tools")
+
+    debug_log(f"    🚪 asked about {name} ({risk} → {channel})", "tools")
+    return ToolExecutionResult(
+        success=False, reply_text=None, error_message=None,
+        pending_id=held.request_id,
+    )
+
+
+def _log_action(
+    db, *, tool, args, risk, verdict, outcome, query, origin,
+    duration_ms=None, request_id=None,
+):
+    """Write one ledger row. Never lets bookkeeping break a tool call."""
+    recorder = getattr(db, "record_action", None)
+    if not callable(recorder):
+        return
+    try:
+        recorder(
+            tool=tool, args=args, risk=risk, verdict=verdict, outcome=outcome,
+            duration_ms=duration_ms, origin=origin, query=query,
+            request_id=request_id,
+        )
+    except Exception as e:
+        debug_log(f"action log write skipped: {e}", "tools")
+
+
 def run_tool_with_retries(
     db,
     cfg: Settings,
@@ -314,10 +709,130 @@ def run_tool_with_retries(
     redacted_text: str,
     max_retries: int = 1,
     language: Optional[str] = None,
+    origin: Optional[str] = None,
+    confirmation: Optional["Confirmation"] = None,
+    scope: Optional["RoutineScope"] = None,
 ) -> ToolExecutionResult:
+    """Run one tool, subject to the user's policy, and record what happened.
+
+    ``origin`` labels the ledger row with what set this call going —
+    ``"voix"``, ``"chat"``, and later the routines that run unattended.
+    Passed rather than read from ambient state because those routines run
+    on their own threads while the user is mid-conversation, and a shared
+    slot would label their rows with whoever spoke last. None is the
+    honest value when nothing said.
+
+    ``confirmation`` is a channel the gate can raise a question on, and
+    the user's answer to a question raised on an earlier turn. Threaded
+    in rather than reached for: without one the gate refuses exactly as
+    it does today, because a gate that found a channel lying around
+    would ask on behalf of code with no way to show the question.
+
+    ``scope`` says this call is running unattended, inside one routine's
+    envelope. It narrows what is allowed and never widens it, and its
+    absence changes nothing at all — an attended turn sees exactly the
+    behaviour it saw before routines existed.
+    """
     # Normalize tool name to canonical camelCase
     raw_name = (tool_name or "").strip()
     name = raw_name
+
+    # The gate, before anything runs. Placed here and not at the call
+    # sites because this is the only funnel: both the planner's direct
+    # execution and the agentic loop arrive through it.
+    from .policy import (
+        FREE, NEVER, OUTCOME_ASKED, OUTCOME_FAILED, OUTCOME_OK,
+        OUTCOME_OUT_OF_SCOPE, OUTCOME_REFUSED, RISK_READ, resolve_risk,
+    )
+
+    risk = resolve_risk(name, _known_tool(name), tool_args)
+    verdict = load_tool_policy(cfg).verdict(name, risk)
+    request_id: Optional[str] = None
+
+    # Running unattended. `jamais` is checked first, below, because a tool
+    # the user retired is refused rather than reported out-of-scope —
+    # different facts, and their own retirement is the stronger one.
+    #
+    # Everything here is re-checked on the call rather than trusted from
+    # when the routine was written, because the things that change in
+    # between are exactly the ones that matter: the user edited
+    # `outils.md`, a server update added `destructiveHint`, or the model
+    # picked the same tool with different arguments — `localFiles`
+    # reading yesterday and deleting today, under one name.
+    if scope is not None and verdict != NEVER:
+        refusal = _out_of_scope(name, scope, risk, verdict)
+        if refusal is not None:
+            _log_action(
+                db, tool=name, args=tool_args, risk=risk, verdict=verdict,
+                outcome=OUTCOME_OUT_OF_SCOPE, query=redacted_text, origin=origin,
+            )
+            return refusal
+
+    if verdict != FREE:
+        # Order is the design.
+        #
+        # `jamais` first, and before any approval, so a tool the user
+        # retired between the question and the answer is refused while a
+        # perfectly valid grant sits in hand. `load_tool_policy` re-reads
+        # on mtime, so the gate sees the newer decision, and the newer
+        # decision wins.
+        approval = getattr(confirmation, "approval", None) if confirmation else None
+
+        if verdict == NEVER:
+            _log_action(
+                db, tool=name, args=tool_args, risk=risk, verdict=verdict,
+                outcome=OUTCOME_REFUSED, query=redacted_text, origin=origin,
+            )
+            return _refusal(name, verdict, risk)
+
+        if approval is not None:
+            # The digest is recomputed here, now, against the call that is
+            # actually about to run. Between the question and the answer
+            # the model got to run again — the planner re-resolves steps,
+            # the loop re-emits tool calls — so a grant given for one path
+            # must not carry to whatever came back under the same name.
+            if approval.fingerprint != _fingerprint(name, tool_args):
+                debug_log(f"    🚪 approval does not match {name}", "tools")
+                _log_action(
+                    db, tool=name, args=tool_args, risk=risk, verdict=verdict,
+                    outcome=OUTCOME_REFUSED, query=redacted_text, origin=origin,
+                    request_id=approval.request_id,
+                )
+                return _refusal(name, verdict, risk)
+            request_id = approval.request_id
+            debug_log(f"    🚪 approved {name} ({request_id})", "tools")
+
+        elif confirmation is None:
+            # Nothing can ask. Today's refusal, which is what keeps every
+            # caller that predates this parameter safe by default.
+            _log_action(
+                db, tool=name, args=tool_args, risk=risk, verdict=verdict,
+                outcome=OUTCOME_REFUSED, query=redacted_text, origin=origin,
+            )
+            return _refusal(name, verdict, risk)
+
+        else:
+            return _ask(
+                db, cfg, confirmation, name=name, args=tool_args, risk=risk,
+                verdict=verdict, origin=origin, redacted_text=redacted_text,
+            )
+
+    # Allowed. The ledger records the outcome once the call returns, so
+    # both halves of the gate's decision leave a trace: what was let
+    # through and what it did, not only what was stopped.
+    _started = time.monotonic()
+
+    def _finish(result: ToolExecutionResult) -> ToolExecutionResult:
+        _log_action(
+            db, tool=name, args=tool_args, risk=risk, verdict=verdict,
+            outcome=(
+                getattr(result, "outcome", None)
+                or (OUTCOME_OK if getattr(result, "success", False) else OUTCOME_FAILED)
+            ),
+            query=redacted_text, origin=origin, request_id=request_id,
+            duration_ms=int((time.monotonic() - _started) * 1000),
+        )
+        return result
 
     # Check if tool name is a discovered MCP tool (server__toolname format)
     if "__" in raw_name:
@@ -326,15 +841,21 @@ def run_tool_with_retries(
         if mcps_config and server_name in mcps_config:
             try:
                 if MCPClient is None:
-                    return ToolExecutionResult(success=False, reply_text=None, error_message="MCP client not available. Install 'mcp' package.")
+                    return _finish(ToolExecutionResult(success=False, reply_text=None, error_message="MCP client not available. Install 'mcp' package."))
 
                 client = MCPClient(mcps_config)
                 result = client.invoke_tool(server_name=server_name, tool_name=mcp_tool_name, arguments=tool_args or {})
                 is_error = bool(result.get("isError", False))
                 text = result.get("text") or None
-                return ToolExecutionResult(success=(not is_error), reply_text=text, error_message=(text if is_error else None))
+                return _finish(ToolExecutionResult(
+                    success=(not is_error), reply_text=text,
+                    error_message=(text if is_error else None),
+                ))
             except Exception as e:
-                return ToolExecutionResult(success=False, reply_text=None, error_message=f"MCP tool '{raw_name}' error: {e}")
+                return _finish(ToolExecutionResult(
+                    success=False, reply_text=None,
+                    error_message=f"MCP tool '{raw_name}' error: {e}",
+                ))
 
     # Friendly user print helper (non-debug only)
     def _user_print(message: str) -> None:
@@ -350,20 +871,37 @@ def run_tool_with_retries(
     # Check builtin tools first
     if name in BUILTIN_TOOLS:
         tool = BUILTIN_TOOLS[name]
-        return tool.execute(
-            db=db,
-            cfg=cfg,
-            tool_args=tool_args,
-            system_prompt=system_prompt,
-            original_prompt=original_prompt,
-            redacted_text=redacted_text,
-            max_retries=max_retries,
-            user_print=_user_print,
-            language=language,
-        )
+        # Wrapped like the MCP branch above, and for the reason written
+        # below: a call the gate allowed and that then went nowhere still
+        # happened. Unwrapped, an exception walks out through the whole
+        # funnel, kills the turn, and leaves the ledger claiming she never
+        # tried — and when the call came from an approval, its `demandé`
+        # row never closes either.
+        try:
+            return _finish(tool.execute(
+                db=db,
+                cfg=cfg,
+                tool_args=tool_args,
+                system_prompt=system_prompt,
+                original_prompt=original_prompt,
+                redacted_text=redacted_text,
+                max_retries=max_retries,
+                user_print=_user_print,
+                language=language,
+                origin=origin,
+            ))
+        except Exception as e:
+            debug_log(f"builtin tool '{name}' raised: {e}", "tools")
+            return _finish(ToolExecutionResult(
+                success=False, reply_text=None,
+                error_message=f"Tool '{name}' raised: {e}",
+            ))
 
     # Unknown tool
     debug_log(f"unknown tool requested: {tool_name}", "tools")
-    return ToolExecutionResult(success=False, reply_text=None, error_message=f"Unknown tool: {tool_name}")
+    # Through `_finish` like every other exit past the gate: a call the
+    # gate allowed and that then went nowhere still happened, and a
+    # ledger silent about it claims she never tried.
+    return _finish(ToolExecutionResult(success=False, reply_text=None, error_message=f"Unknown tool: {tool_name}"))
 
 

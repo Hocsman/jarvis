@@ -10,3 +10,20 @@ class ToolExecutionResult:
     success: bool
     reply_text: Optional[str]
     error_message: Optional[str] = None
+    # The policy gate declined to run this tool. Distinct from a failure
+    # on purpose: a failure invites a retry, and retrying a tool that was
+    # just denied is a loop the user watches and cannot stop. Callers
+    # that decide whether to try again must check this first.
+    refused: bool = False
+    # The gate asked the user instead, and this identifies the question
+    # now waiting on them. Nothing ran and nothing failed — the turn ends
+    # here and the answer arrives on a later one. Kept apart from
+    # ``refused`` because the two mean opposite things to a caller: a
+    # refusal closes the matter, a question is waiting on someone.
+    pending_id: Optional[str] = None
+    # What the ledger should record instead of the usual ok/échec pair.
+    # A tool that stopped to ask the user something did not fail, and a
+    # durable trace saying it did is a lie in a tab they read. Distinct
+    # from ``pending_id``: nothing is pinned and nothing is waiting on an
+    # id — the turn simply ends with a question in the reply.
+    outcome: Optional[str] = None

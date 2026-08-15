@@ -3,6 +3,7 @@
 import requests
 from typing import Dict, Any, Optional
 from ...debug import debug_log
+from ...llm import get_llm_backend
 from ...utils.location import get_location_info
 from ..base import Tool, ToolContext
 from ..types import ToolExecutionResult
@@ -37,15 +38,9 @@ def _extract_place_from_user_text(text: str, cfg) -> Optional[str]:
     model = (
         getattr(cfg, "tool_router_model", "")
         or getattr(cfg, "intent_judge_model", "")
-        or getattr(cfg, "ollama_chat_model", "")
+        or getattr(cfg, "llm_chat_model", "")
     )
-    base_url = getattr(cfg, "ollama_base_url", "")
-    if not model or not base_url:
-        return None
-
-    try:
-        from ...llm import call_llm_direct
-    except Exception:
+    if not model:
         return None
 
     sys_prompt = (
@@ -57,8 +52,8 @@ def _extract_place_from_user_text(text: str, cfg) -> Optional[str]:
     user_prompt = f"User utterance: {text}\n\nPlace:"
 
     try:
-        resp = call_llm_direct(
-            base_url, model, sys_prompt, user_prompt,
+        resp = get_llm_backend(cfg).direct(
+            model, sys_prompt, user_prompt,
             timeout_sec=float(getattr(cfg, "llm_tools_timeout_sec", 8.0)),
         )
     except Exception as e:
@@ -119,6 +114,12 @@ WMO_CODES = {
 
 class WeatherTool(Tool):
     """Tool for getting current weather using Open-Meteo API."""
+
+    def risk_for(self, args):
+        """Looks at the world without changing it."""
+        from ..policy import RISK_READ
+
+        return RISK_READ
 
     @property
     def name(self) -> str:
@@ -242,15 +243,34 @@ class WeatherTool(Tool):
                         location_str = extracted
                         place_from_fallback = True
                     else:
-                        # Auto-detect genuinely failed and the user didn't name
-                        # a place in this utterance. Asking is the right move.
-                        return ToolExecutionResult(
-                            success=False,
-                            reply_text=(
-                                "I couldn't auto-detect your location. "
-                                "Please tell me which city to check the weather for."
-                            ),
-                        )
+                        # Still nothing: fall back to the home city the user
+                        # declared in config. Geo-IP needs a local GeoLite2
+                        # database that many installs don't have, and a failed
+                        # tool result is precisely what tempts the model into
+                        # inventing a plausible forecast — so a city the user
+                        # has already told us about beats asking again.
+                        home_city = str(
+                            getattr(getattr(context, "cfg", None), "weather_city", "") or ""
+                        ).strip()
+                        if home_city:
+                            debug_log(
+                                f"    📍 auto-detect unavailable; using configured "
+                                f"weather_city: '{home_city}'",
+                                "tools",
+                            )
+                            location_str = home_city
+                            place_from_fallback = True
+                        else:
+                            # Auto-detect genuinely failed, the user didn't name
+                            # a place, and no home city is configured. Asking is
+                            # the right move.
+                            return ToolExecutionResult(
+                                success=False,
+                                reply_text=(
+                                    "I couldn't auto-detect your location. "
+                                    "Please tell me which city to check the weather for."
+                                ),
+                            )
 
             if location_str:
                 # User specified a location (or we pulled one from their text) — geocode it.

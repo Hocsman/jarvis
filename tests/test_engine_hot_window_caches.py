@@ -26,6 +26,7 @@ def _mock_cfg():
     cfg = Mock()
     cfg.ollama_base_url = "http://localhost:11434"
     cfg.ollama_chat_model = "test-large"
+    cfg.llm_chat_model = "test-large"
     cfg.voice_debug = False
     cfg.llm_tools_timeout_sec = 8.0
     cfg.llm_embedding_timeout_sec = 10.0
@@ -52,8 +53,57 @@ def _mock_cfg():
 
 
 @pytest.mark.unit
-@patch("src.jarvis.memory.graph_ops.format_warm_profile_block", return_value="")
-@patch("src.jarvis.memory.graph_ops.build_warm_profile", return_value={"user": "", "directives": ""})
+@patch("src.jarvis.memory.graph.GraphMemoryStore")
+@patch("src.jarvis.reply.engine.select_tools", return_value=[])
+@patch("src.jarvis.reply.engine.plan_query", return_value=[])
+@patch("src.jarvis.reply.engine.extract_search_params_for_memory", return_value={})
+@patch("src.jarvis.reply.engine.extract_text_from_response")
+@patch("src.jarvis.reply.engine.chat_with_messages")
+def test_a_core_edited_mid_conversation_reaches_the_next_turn(
+    mock_chat, mock_extract, _mock_extractor, _mock_plan, _mock_select,
+    _mock_graph, tmp_path,
+):
+    """Editing the files is the headline feature of the core, and it is
+    the one write the running daemon cannot be told about: the memory
+    viewer and the user's text editor are other processes. A block cached
+    for the whole conversation would keep answering from the old file,
+    which reads exactly like the correction was ignored.
+    """
+    from src.jarvis.memory.core import SECTION_PROFILE, MemoryCore
+
+    mock_chat.side_effect = [
+        {"message": {"content": "a"}},
+        {"message": {"content": "b"}},
+    ]
+    mock_extract.side_effect = ["a", "b"]
+
+    db = Mock()
+    cfg = _mock_cfg()
+    cfg.db_path = str(tmp_path / "jarvis.db")
+    dm = DialogueMemory()
+
+    core = MemoryCore.for_config(cfg)
+    core.remember(SECTION_PROFILE, "Il vit à Paris.", on_date="2026-07-18")
+
+    run_reply_engine(db=db, cfg=cfg, tts=None, text="hi", dialogue_memory=dm)
+    first = dm.hot_cache_get(DialogueMemory.WARM_PROFILE_CACHE_KEY)
+
+    # Someone edits the file outside this process.
+    core.write_raw(
+        SECTION_PROFILE, "# Profil\n\n- 2026-07-26 · dit : Il vit à Lyon.\n",
+    )
+
+    run_reply_engine(db=db, cfg=cfg, tts=None, text="and now?", dialogue_memory=dm)
+    second = dm.hot_cache_get(DialogueMemory.WARM_PROFILE_CACHE_KEY)
+
+    assert second != first, "the cached block survived a file change"
+    assert "Lyon" in str(second)
+    assert "Paris" not in str(second)
+
+
+@pytest.mark.unit
+@patch("src.jarvis.memory.core.format_warm_profile_block", return_value="")
+@patch("src.jarvis.memory.core.build_core_profile", return_value={"user": "", "directives": ""})
 @patch("src.jarvis.memory.graph.GraphMemoryStore")
 @patch("src.jarvis.reply.engine.select_tools", return_value=[])
 @patch("src.jarvis.reply.engine.plan_query", return_value=[])
@@ -86,8 +136,8 @@ def test_tool_router_cached_across_turns(
 
 
 @pytest.mark.unit
-@patch("src.jarvis.memory.graph_ops.format_warm_profile_block", return_value="")
-@patch("src.jarvis.memory.graph_ops.build_warm_profile", return_value={"user": "", "directives": ""})
+@patch("src.jarvis.memory.core.format_warm_profile_block", return_value="")
+@patch("src.jarvis.memory.core.build_core_profile", return_value={"user": "", "directives": ""})
 @patch("src.jarvis.memory.graph.GraphMemoryStore")
 @patch("src.jarvis.reply.engine.plan_query", return_value=[])
 @patch("src.jarvis.reply.engine.extract_search_params_for_memory", return_value={})
@@ -136,8 +186,8 @@ def test_router_fallback_to_all_tools_is_not_cached(
 
 
 @pytest.mark.unit
-@patch("src.jarvis.memory.graph_ops.format_warm_profile_block", return_value="")
-@patch("src.jarvis.memory.graph_ops.build_warm_profile", return_value={"user": "", "directives": ""})
+@patch("src.jarvis.memory.core.format_warm_profile_block", return_value="")
+@patch("src.jarvis.memory.core.build_core_profile", return_value={"user": "", "directives": ""})
 @patch("src.jarvis.memory.graph.GraphMemoryStore")
 @patch("src.jarvis.reply.engine.select_tools", return_value=[])
 @patch("src.jarvis.reply.engine.plan_query", return_value=[])
@@ -177,8 +227,8 @@ def test_memory_extractor_cached_across_turns(
 
 
 @pytest.mark.unit
-@patch("src.jarvis.memory.graph_ops.format_warm_profile_block", return_value="warm-block")
-@patch("src.jarvis.memory.graph_ops.build_warm_profile", return_value={"user": "u", "directives": "d"})
+@patch("src.jarvis.memory.core.format_warm_profile_block", return_value="warm-block")
+@patch("src.jarvis.memory.core.build_core_profile", return_value={"user": "u", "directives": "d"})
 @patch("src.jarvis.memory.graph.GraphMemoryStore")
 @patch("src.jarvis.reply.engine.select_tools", return_value=[])
 @patch("src.jarvis.reply.engine.plan_query", return_value=[])
@@ -211,8 +261,8 @@ def test_warm_profile_cached_across_turns(
 
 
 @pytest.mark.unit
-@patch("src.jarvis.memory.graph_ops.format_warm_profile_block", return_value="")
-@patch("src.jarvis.memory.graph_ops.build_warm_profile", return_value={"user": "", "directives": ""})
+@patch("src.jarvis.memory.core.format_warm_profile_block", return_value="")
+@patch("src.jarvis.memory.core.build_core_profile", return_value={"user": "", "directives": ""})
 @patch("src.jarvis.memory.graph.GraphMemoryStore")
 @patch("src.jarvis.reply.engine.select_tools", return_value=[])
 @patch(
@@ -259,8 +309,8 @@ def test_planner_search_memory_overrides_recall_gate(
 
 
 @pytest.mark.unit
-@patch("src.jarvis.memory.graph_ops.format_warm_profile_block", return_value="")
-@patch("src.jarvis.memory.graph_ops.build_warm_profile", return_value={"user": "", "directives": ""})
+@patch("src.jarvis.memory.core.format_warm_profile_block", return_value="")
+@patch("src.jarvis.memory.core.build_core_profile", return_value={"user": "", "directives": ""})
 @patch("src.jarvis.memory.graph.GraphMemoryStore")
 @patch("src.jarvis.reply.engine.select_tools", return_value=[])
 @patch("src.jarvis.reply.engine.plan_query", return_value=[])

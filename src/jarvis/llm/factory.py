@@ -13,16 +13,37 @@ Two factories share one provider catalogue:
 """
 
 from __future__ import annotations
-from typing import Any, Optional
+import json
+from typing import Any, Dict, Optional
 
 from .backend import LLMBackend
 from .ollama import OllamaBackend
 from .openai_compatible import OpenAICompatibleBackend
+from .redacting import RedactingBackend
 
 
 _OLLAMA = "ollama"
 _OPENAI_COMPATIBLE = "openai_compatible"
 _DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
+
+# Backends are cached by their resolved connection parameters so that a
+# single instance — and its persistent HTTP session — is reused across
+# the many ``get_llm_backend`` calls a single reply makes. Without this
+# every call built a fresh backend with a cold connection and paid the
+# TLS handshake (and the provider's cold-start) every time; on a remote
+# cloud endpoint that dominated the latency of a multi-call reply.
+_BACKEND_CACHE: dict = {}
+
+
+def clear_backend_cache() -> None:
+    """Drop all cached backends.
+
+    Call after a configuration reload so the next ``get_llm_backend``
+    rebuilds against the new settings instead of returning a backend
+    wired to the old endpoint/key. Also used by tests to keep instances
+    isolated.
+    """
+    _BACKEND_CACHE.clear()
 
 
 def _resolve_provider(value: Any) -> str:
@@ -38,26 +59,72 @@ def _str_attr(settings: Any, name: str, default: str = "") -> str:
     return val if isinstance(val, str) and val else default
 
 
-def _build(provider: str, base_url: str, api_key: Optional[str]) -> LLMBackend:
+def _build(
+    provider: str,
+    base_url: str,
+    api_key: Optional[str],
+    redact: bool = False,
+    extra_body: Optional[Dict[str, Any]] = None,
+) -> LLMBackend:
+    key = (
+        provider, base_url, api_key, redact,
+        json.dumps(extra_body or {}, sort_keys=True),
+    )
+    cached = _BACKEND_CACHE.get(key)
+    if cached is not None:
+        return cached
+    backend = _build_uncached(provider, base_url, api_key, redact, extra_body)
+    _BACKEND_CACHE[key] = backend
+    return backend
+
+
+def _build_uncached(
+    provider: str,
+    base_url: str,
+    api_key: Optional[str],
+    redact: bool = False,
+    extra_body: Optional[Dict[str, Any]] = None,
+) -> LLMBackend:
     if provider == _OPENAI_COMPATIBLE:
-        return OpenAICompatibleBackend(base_url, api_key=api_key)
+        backend: LLMBackend = OpenAICompatibleBackend(
+            base_url, api_key=api_key, extra_body=extra_body
+        )
+        # Scrub secrets before remote egress. Only the OpenAI-compatible
+        # path is wrapped — the Ollama path is local, so its prompts
+        # never leave the machine and redaction would be wasted work.
+        if redact:
+            backend = RedactingBackend(backend)
+        return backend
     return OllamaBackend(base_url)
 
 
 def get_llm_backend(settings: Any) -> LLMBackend:
     """Return the configured chat backend.
 
-    Reads ``llm_provider`` and the new ``llm_base_url`` / ``llm_api_key``
-    fields. Falls back to the legacy ``ollama_base_url`` when the new
-    base-URL field is unset, so existing configs keep working without a
-    re-save.
+    ``llm_base_url`` is the OpenAI-compatible server's URL; the Ollama path
+    uses ``ollama_base_url``. Keeping each provider on its own URL field
+    means toggling ``llm_provider`` back to Ollama can never leave the
+    backend pointed at a stale OpenAI-compatible URL.
     """
     provider = _resolve_provider(getattr(settings, "llm_provider", None))
-    base_url = _str_attr(settings, "llm_base_url") or _str_attr(
-        settings, "ollama_base_url", _DEFAULT_OLLAMA_URL
-    )
+    if provider == _OPENAI_COMPATIBLE:
+        base_url = _str_attr(settings, "llm_base_url") or _str_attr(
+            settings, "ollama_base_url", _DEFAULT_OLLAMA_URL
+        )
+    else:
+        base_url = _str_attr(settings, "ollama_base_url", _DEFAULT_OLLAMA_URL)
     api_key = _str_attr(settings, "llm_api_key") or None
-    return _build(provider, base_url, api_key)
+    # Fallback False (not True) only matters for partial cfg objects
+    # that lack the field — i.e. test mocks. The real ``Settings`` always
+    # carries ``auto_redact_before_cloud`` (required field, default True
+    # in the parser), so production egress is always redaction-wrapped;
+    # this fallback just keeps the factory's type contract intact for the
+    # backend-resolution unit tests that pass bare mocks.
+    redact = bool(getattr(settings, "auto_redact_before_cloud", False))
+    extra_body = getattr(settings, "llm_extra_body", None)
+    if not isinstance(extra_body, dict):
+        extra_body = None
+    return _build(provider, base_url, api_key, redact=redact, extra_body=extra_body)
 
 
 def get_embedding_backend(settings: Any) -> LLMBackend:
@@ -86,4 +153,54 @@ def get_embedding_backend(settings: Any) -> LLMBackend:
     api_key = _str_attr(settings, "embedding_api_key") or _str_attr(
         settings, "llm_api_key"
     ) or None
-    return _build(provider, base_url, api_key)
+    # Fallback False (not True) only matters for partial cfg objects
+    # that lack the field — i.e. test mocks. The real ``Settings`` always
+    # carries ``auto_redact_before_cloud`` (required field, default True
+    # in the parser), so production egress is always redaction-wrapped;
+    # this fallback just keeps the factory's type contract intact for the
+    # backend-resolution unit tests that pass bare mocks.
+    redact = bool(getattr(settings, "auto_redact_before_cloud", False))
+    return _build(provider, base_url, api_key, redact=redact)
+
+
+class _SurLaMachine:
+    """`settings`, read as if the provider were the local one.
+
+    A thin view rather than a copy: `Settings` is frozen, callers pass
+    mocks, and the factory reads a dozen attributes it should keep
+    reading from the original.
+    """
+
+    __slots__ = ("_vrai",)
+
+    def __init__(self, vrai: Any):
+        object.__setattr__(self, "_vrai", vrai)
+
+    def __getattr__(self, nom: str) -> Any:
+        if nom == "llm_provider":
+            return "ollama"
+        return getattr(object.__getattribute__(self, "_vrai"), nom)
+
+
+def get_private_backend(settings: Any, pinned: str) -> LLMBackend:
+    """The backend for a prompt carrying the user's own life.
+
+    Four contexts read his own sentences: the time he said out loud, the
+    routine he described, the goal he is working towards, and the
+    fortnight of diary the learning step mines. Each specifies that
+    pinning a model is how he keeps that sentence off the network.
+
+    A name never did that. :func:`get_llm_backend` picks the endpoint
+    from ``llm_provider`` and never looks at the model, so a pinned local
+    tag was sent to the cloud — verified, the request reached
+    ``https://openrouter.ai/api/v1`` carrying his sentence, and the tag
+    would have been rejected there anyway. The setting changed a name and
+    nothing else while its documentation promised privacy.
+
+    So a pin decides the destination too. With nothing pinned there is
+    nothing to honour and the ordinary provider applies: a user who never
+    asked for this is not quietly moved off the one he chose.
+    """
+    if not (pinned or "").strip():
+        return get_llm_backend(settings)
+    return get_llm_backend(_SurLaMachine(settings))

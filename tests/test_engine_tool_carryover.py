@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from src.jarvis.memory.conversation import DialogueMemory
+from src.jarvis.tools.types import ToolExecutionResult
 from src.jarvis.reply.engine import run_reply_engine
 
 
@@ -15,6 +16,7 @@ def _mock_cfg():
     cfg = Mock()
     cfg.ollama_base_url = "http://localhost:11434"
     cfg.ollama_chat_model = "test-large"  # avoid SMALL-model text-tool path
+    cfg.llm_chat_model = "test-large"  # avoid SMALL-model text-tool path
     cfg.voice_debug = False
     cfg.llm_tools_timeout_sec = 8.0
     cfg.llm_embedding_timeout_sec = 10.0
@@ -49,7 +51,8 @@ def test_tool_carryover_makes_prior_result_visible_to_next_turn(
     mock_chat, mock_extract, mock_tool, _mock_extract, _mock_plan
 ):
     # Turn 1: model emits webSearch call, then final text.
-    mock_tool.return_value = Mock(
+    mock_tool.return_value = ToolExecutionResult(
+        success=True,
         reply_text="Justin Bieber is a Canadian singer.",
         error_message=None,
     )
@@ -122,8 +125,8 @@ def test_stop_signal_clears_tool_carryover(
     from src.jarvis.tools.builtin.stop import STOP_SIGNAL
 
     mock_tool.side_effect = [
-        Mock(reply_text="Justin Bieber is a Canadian singer.", error_message=None),
-        Mock(reply_text=STOP_SIGNAL, error_message=None),
+        ToolExecutionResult(success=True, reply_text="Justin Bieber is a Canadian singer.", error_message=None),
+        ToolExecutionResult(success=True, reply_text=STOP_SIGNAL, error_message=None),
     ]
     mock_chat.side_effect = [
         # Turn 1a: tool call
@@ -171,8 +174,10 @@ def test_tool_carryover_text_tool_mode(
     """
     cfg = _mock_cfg()
     cfg.ollama_chat_model = "gemma4:e2b"  # triggers SMALL/text-tool path
+    cfg.llm_chat_model = "gemma4:e2b"  # triggers SMALL/text-tool path
 
-    mock_tool.return_value = Mock(
+    mock_tool.return_value = ToolExecutionResult(
+        success=True,
         reply_text="Paris is the capital of France.", error_message=None,
     )
     fence_call = (

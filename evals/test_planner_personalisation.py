@@ -32,6 +32,9 @@ def _cfg():
     from types import SimpleNamespace
     return SimpleNamespace(
         ollama_base_url=JUDGE_BASE_URL,
+        # The planner tracks `llm_chat_model`, which is the field that
+        # carries the model the active provider will actually accept.
+        llm_chat_model=JUDGE_MODEL,
         ollama_chat_model=JUDGE_MODEL,
         planner_model="",
         tool_router_model="",

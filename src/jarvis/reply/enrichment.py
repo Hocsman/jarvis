@@ -2,14 +2,28 @@ from __future__ import annotations
 from typing import Optional
 from datetime import datetime, timezone
 
-from ..llm import call_llm_direct
+from ..llm import get_llm_backend
 from ..debug import debug_log
 
 
-def extract_search_params_for_memory(query: str, ollama_base_url: str, ollama_chat_model: str,
+def call_llm_direct(*, cfg, chat_model, system_prompt, user_content,
+                    timeout_sec=10.0, thinking=False, num_ctx=4096,
+                    temperature=None, max_tokens=None):
+    """Local indirection: route enrichment LLM calls through the backend
+    configured by ``cfg.llm_provider``. Tests patch this single symbol
+    to intercept every enrichment call."""
+    return get_llm_backend(cfg).direct(
+        chat_model, system_prompt, user_content,
+        timeout_sec=timeout_sec, thinking=thinking,
+        num_ctx=num_ctx, temperature=temperature, max_tokens=max_tokens,
+    )
+
+
+
+def extract_search_params_for_memory(query: str, cfg, chat_model: str,
                                    timeout_sec: float = 8.0,
                                    thinking: bool = False,
-                                   context_hint: Optional[str] = None) -> dict:
+                                   context_hint: Optional[str] = None) -> Optional[dict]:
     """
     Extract search keywords and time parameters for memory recall.
 
@@ -19,7 +33,24 @@ def extract_search_params_for_memory(query: str, ollama_base_url: str, ollama_ch
     whose answers are already available there — no point pulling those from
     long-term memory. When absent, the extractor gets a UTC timestamp fallback
     so it can still resolve relative time expressions.
+
+    Returns the extracted parameters, or ``None`` when the extraction could
+    not run at all: no model configured, nothing usable after both attempts,
+    or an unexpected error. ``None`` is not the same answer as
+    ``{"keywords": []}`` — the latter is the extractor reading the query and
+    deciding it needs no memory search, which the prompt trains it to do for
+    "what time is it?". The caller has to be able to tell a query that needs
+    no memory from a memory pass that has stopped answering, and only the
+    caller can put that on screen.
     """
+    if not (chat_model or "").strip():
+        # Mirror the planner/evaluator gate: no model configured ⇒ skip the
+        # round-trip. Without this guard the OpenAI/Ollama backends would burn
+        # one HTTP call per reply that lands here, cost a "model is required"
+        # error, and silently fall through to ``return None`` after the broad
+        # except below.
+        debug_log("search parameter extraction skipped: no chat model configured", "memory")
+        return None
     try:
         if context_hint and context_hint.strip():
             hint_block = (
@@ -70,8 +101,8 @@ Examples:
         while attempts < 2:
             attempts += 1
             response = call_llm_direct(
-                base_url=ollama_base_url,
-                chat_model=ollama_chat_model,
+                cfg=cfg,
+                chat_model=chat_model,
                 system_prompt=formatted_prompt,
                 user_content=f"Extract search parameters from: {query}",
                 timeout_sec=timeout_sec,
@@ -92,14 +123,26 @@ Examples:
 
             if attempts == 1:
                 debug_log("search parameter extraction: first attempt returned no usable result, retrying", "memory")
+            else:
+                debug_log("search parameter extraction: no usable result after 2 attempts", "memory")
 
     except Exception as e:
         debug_log(f"search parameter extraction failed: {e}", "memory")
 
-    return {}
+    return None
 
 
 # ── Memory digest ───────────────────────────────────────────────────────────
+
+
+class MemoryDigestError(Exception):
+    """The distil pass could not run.
+
+    Distinct from an empty digest: empty means the distil read the snippets
+    and judged none of them relevant, so the caller may drop its raw blocks.
+    This means nothing was read at all, and the caller must keep them.
+    """
+
 
 # Below this size, skip the distil round-trip entirely — the raw text is
 # already cheap to feed to the main model.
@@ -248,12 +291,18 @@ def _batch_snippets(snippets: list[str], max_chars: int) -> list[list[str]]:
 def _distil_batch(
     query: str,
     raw_block: str,
-    ollama_base_url: str,
-    ollama_chat_model: str,
+    cfg,
+    chat_model: str,
     timeout_sec: float,
     thinking: bool,
 ) -> str:
-    """Run one distil LLM call over ``raw_block``; returns the relevance note or ""."""
+    """Run one distil LLM call over ``raw_block``.
+
+    Returns the relevance note, or "" when the distil read the snippets and
+    judged none of them relevant. Raises ``MemoryDigestError`` when the call
+    could not be made at all — the caller drops its raw memory blocks on an
+    empty note, so the two must not collapse into the same value.
+    """
     user_content = (
         f"CURRENT QUERY: {query}\n\n"
         f"PAST MEMORY SNIPPETS:\n{raw_block}\n\n"
@@ -261,8 +310,8 @@ def _distil_batch(
     )
     try:
         response = call_llm_direct(
-            base_url=ollama_base_url,
-            chat_model=ollama_chat_model,
+            cfg=cfg,
+            chat_model=chat_model,
             system_prompt=_DIGEST_SYSTEM_PROMPT,
             user_content=user_content,
             timeout_sec=timeout_sec,
@@ -270,10 +319,14 @@ def _distil_batch(
         )
     except Exception as e:
         debug_log(f"memory digest batch failed: {e}", "memory")
-        return ""
+        raise MemoryDigestError(str(e)) from e
 
     if not response:
-        return ""
+        # The backends hand back None on timeout and on transport error
+        # rather than raising, so this is what a dead distil looks like
+        # most of the time. "NONE" is a verdict; no answer is a fault.
+        debug_log("memory digest batch failed: no response from backend", "memory")
+        raise MemoryDigestError("no response from backend")
 
     cleaned = response.strip().strip('"').strip("'")
     if not cleaned or cleaned.upper().rstrip(".") in _NONE_SENTINELS:
@@ -288,8 +341,8 @@ def digest_memory_for_query(
     query: str,
     diary_entries: list[str],
     graph_parts: list[str],
-    ollama_base_url: str,
-    ollama_chat_model: str,
+    cfg,
+    chat_model: str,
     timeout_sec: float = 8.0,
     thinking: bool = False,
 ) -> str:
@@ -313,11 +366,16 @@ def digest_memory_for_query(
     Returns:
       - A short string (usually ≤ _DIGEST_MAX_CHARS, up to one per batch)
         when memory is relevant.
-      - Empty string when the distil decides nothing is relevant, when
-        inputs are empty, or when every LLM call fails.
+      - Empty string when the distil decides nothing is relevant, or when
+        inputs are empty.
       - The raw block unchanged when it's already below
         ``_DIGEST_MIN_CHARS`` — digestion wouldn't save enough context to
         justify the round-trip.
+
+    Raises:
+      MemoryDigestError: when a distil call could not be made. The caller
+        keeps its raw memory blocks rather than reading the failure as a
+        verdict that none of them mattered.
     """
     diary_entries = [e for e in (diary_entries or []) if e and e.strip()]
     graph_parts = [p for p in (graph_parts or []) if p and p.strip()]
@@ -349,7 +407,7 @@ def digest_memory_for_query(
     # Single-batch fast path — most real turns fit here.
     if len(raw_block) <= _DIGEST_BATCH_MAX_CHARS:
         cleaned = _distil_batch(
-            query, raw_block, ollama_base_url, ollama_chat_model,
+            query, raw_block, cfg, chat_model,
             timeout_sec, thinking,
         )
         if not cleaned:
@@ -370,7 +428,7 @@ def digest_memory_for_query(
     for batch in diary_batches:
         block = _compose(batch, [])
         note = _distil_batch(
-            query, block, ollama_base_url, ollama_chat_model,
+            query, block, cfg, chat_model,
             timeout_sec, thinking,
         )
         if note:
@@ -378,7 +436,7 @@ def digest_memory_for_query(
     for batch in graph_batches:
         block = _compose([], batch)
         note = _distil_batch(
-            query, block, ollama_base_url, ollama_chat_model,
+            query, block, cfg, chat_model,
             timeout_sec, thinking,
         )
         if note:
@@ -481,8 +539,8 @@ _TOOL_DIGEST_SYSTEM_PROMPT = (
 def _distil_tool_batch(
     query: str,
     raw_block: str,
-    ollama_base_url: str,
-    ollama_chat_model: str,
+    cfg,
+    chat_model: str,
     timeout_sec: float,
     thinking: bool,
 ) -> str:
@@ -494,8 +552,8 @@ def _distil_tool_batch(
     )
     try:
         response = call_llm_direct(
-            base_url=ollama_base_url,
-            chat_model=ollama_chat_model,
+            cfg=cfg,
+            chat_model=chat_model,
             system_prompt=_TOOL_DIGEST_SYSTEM_PROMPT,
             user_content=user_content,
             timeout_sec=timeout_sec,
@@ -551,8 +609,8 @@ def digest_tool_result_for_query(
     query: str,
     tool_name: str,
     tool_result: str,
-    ollama_base_url: str,
-    ollama_chat_model: str,
+    cfg,
+    chat_model: str,
     timeout_sec: float = 8.0,
     thinking: bool = False,
 ) -> str:
@@ -596,7 +654,7 @@ def digest_tool_result_for_query(
     # Single-batch fast path — the typical webSearch result fits here.
     if len(raw) <= _TOOL_DIGEST_BATCH_MAX_CHARS:
         cleaned = _distil_tool_batch(
-            framed_query, raw, ollama_base_url, ollama_chat_model,
+            framed_query, raw, cfg, chat_model,
             timeout_sec, thinking,
         )
         if not cleaned:
@@ -618,7 +676,7 @@ def digest_tool_result_for_query(
     notes: list[str] = []
     for chunk in chunks:
         note = _distil_tool_batch(
-            framed_query, chunk, ollama_base_url, ollama_chat_model,
+            framed_query, chunk, cfg, chat_model,
             timeout_sec, thinking,
         )
         if note:
@@ -826,9 +884,8 @@ def digest_loop_for_max_turns(
     if not activity:
         return None
 
-    base_url = getattr(cfg, "ollama_base_url", "")
     chat_model = _resolve_loop_digest_model(cfg)
-    if not base_url or not chat_model:
+    if not chat_model:
         return None
 
     try:
@@ -846,7 +903,7 @@ def digest_loop_for_max_turns(
 
     try:
         raw = call_llm_direct(
-            base_url=base_url,
+            cfg=cfg,
             chat_model=chat_model,
             system_prompt=_LOOP_DIGEST_SYSTEM_PROMPT,
             user_content=user_content,

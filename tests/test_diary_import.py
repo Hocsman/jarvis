@@ -14,16 +14,34 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-# Mock modules that may not be available in the test environment
-_MOCK_MODULES = [
+# Mock modules that may not be available in the test environment.
+# We attempt a real import first and only fall back to a MagicMock when the
+# module is genuinely unavailable. Mocking unconditionally (or based on
+# ``not in sys.modules``) corrupts PyQt6 for every later test that needs the
+# real Qt classes, because pytest imports this module during collection
+# before any test has loaded PyQt6.
+import importlib
+import logging
+
+_mock_logger = logging.getLogger(__name__)
+
+
+def _ensure_module(name: str) -> None:
+    try:
+        importlib.import_module(name)
+    except Exception:
+        if name not in sys.modules:
+            sys.modules[name] = MagicMock()
+        _mock_logger.debug("module %s unavailable, mocked for tests", name)
+
+
+for _mod in [
     "PyQt6", "PyQt6.QtWidgets", "PyQt6.QtCore", "PyQt6.QtGui",
     "PyQt6.QtWebEngineWidgets", "PyQt6.sip",
     "requests", "requests.exceptions",
     "psutil",
-]
-for _mod in _MOCK_MODULES:
-    if _mod not in sys.modules:
-        sys.modules[_mod] = MagicMock()
+]:
+    _ensure_module(_mod)
 
 # Ensure requests.exceptions.Timeout is a proper exception class
 sys.modules["requests"].exceptions.Timeout = type("Timeout", (Exception,), {})
@@ -155,6 +173,7 @@ class TestImportDiaryEndpoint:
         cfg = MagicMock()
         cfg.ollama_base_url = "http://localhost:11434"
         cfg.ollama_chat_model = "test-model"
+        cfg.llm_chat_model = "test-model"
         cfg.llm_chat_timeout_sec = 10.0
         cfg.llm_thinking_enabled = False
         mock_settings.return_value = cfg
@@ -213,6 +232,7 @@ class TestImportDiaryEndpoint:
         cfg = MagicMock()
         cfg.ollama_base_url = "http://localhost:11434"
         cfg.ollama_chat_model = "test-model"
+        cfg.llm_chat_model = "test-model"
         cfg.llm_chat_timeout_sec = 10.0
         cfg.llm_thinking_enabled = False
         mock_settings.return_value = cfg

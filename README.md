@@ -32,10 +32,9 @@
 
 **🔌 Extensible** - MCP integration connects Jarvis to thousands of tools: smart home, GitHub, Slack, databases, and more. Smart tool selection means adding more tools won't slow things down.
 
-**📊 Transparent progress** - We track what works (and what doesn't) with automated evals. [See current accuracy →](EVALS.md)
+**📊 Transparent progress** - We track what works (and what doesn't) with automated evals. [See the suite →](evals/)
 
 **🚧 Known limitations:** Jarvis is under active development. Primary development happens on macOS. Windows/Linux support may lag behind. We're building in the open, [issues](https://github.com/isair/jarvis/issues) and [contributions](https://github.com/isair/jarvis/pulls) welcome!
-- Voice-only for now—no text chat interface yet ([#35](https://github.com/isair/jarvis/issues/35))
 - No mobile apps ([#17](https://github.com/isair/jarvis/issues/17))
 - "Stop" commands during speech sometimes get filtered as echo ([#24](https://github.com/isair/jarvis/issues/24))
 - Dictation is not available on macOS 26+ (Tahoe) due to a pynput incompatibility ([#172](https://github.com/isair/jarvis/issues/172))
@@ -162,12 +161,22 @@ Jarvis starts listening automatically — just say "Jarvis" and talk!
 ## Features
 
 - **Conversational Awareness** - Understands ongoing discussions. Ask "Jarvis, what do you think?" and it knows what you're talking about. Works naturally in multi-person conversations.
+- **Text Chat** - Type to Jarvis alongside voice. Voice and text share one conversation, so a follow-up typed in the chat window continues a voice discussion. Text never speaks. Open it from the tray menu (`💬 Chat…`) while Jarvis is listening. The window shows a local status banner while Jarvis starts, stops, or needs to be restarted.
 - **Unlimited Memory** - Never forgets. Searches across all your conversation history. Memory Viewer GUI included.
 - **Adaptive Tone** - Automatically surgical for code, pragmatic for business, encouraging for wellbeing — no manual mode switching
 - **Smart Tool Selection** - Embedding-based relevance filtering picks only the tools needed per query — add unlimited MCP tools without performance degradation
-- **Built-in Tools** - Screenshot OCR, web search (DuckDuckGo → Brave → Wikipedia fallback chain with auto-fetch), weather, file access, nutrition tracking, location awareness, plus a tool-discovery escape hatch the agent uses to widen its own toolset mid-reply
-- **Knowledge Graph Memory** - Self-organising memory that learns from conversations, auto-splits by topic, and surfaces relevant knowledge automatically
+- **Built-in Tools** - Screenshot OCR, web search (DuckDuckGo → Brave → Wikipedia fallback chain with auto-fetch), weather, file access, nutrition tracking, location awareness, remembering things you ask it to, plus a tool-discovery escape hatch the agent uses to widen its own toolset mid-reply
+- **Memory You Can Read** - Say "remember that…" or correct a mistake, and it goes into two plain Markdown files you can open, edit, and back up. Nothing is written by inference: only what you actually said, dated and attributed, and a correction strikes the old line through instead of erasing it
+- **Reminders That Survive a Restart** - "Remind me in twenty minutes to take the dish out", "on Thursday, remind me to call the accountant". Says the time back so you can catch a misheard day in the same turn, in any language. A laptop shut through the due time still gets told — late, and saying how late. See and cancel them in the Memory Viewer, and switch the whole thing off under **⚙️ Settings → ⏰ Rappels**. Set `reminder_model` to a local model there if you want the sentence you dictated kept off the network
+- **It Proposes, You Decide** - Ask what it has noticed about you and it reads your own diary for things you never said outright, then writes each one as a question in `yuba/appris.md`. Nothing there is a belief: no reply ever reads that file, and a proposal sitting in it for six months changes nothing. Tick a box and it moves into your profile marked `confirmé`; cross a line out and it is never offered again. You can rewrite the sentence before agreeing to it, which is the point: what gets saved is your wording, not its guess. Only ever runs when you ask, never on a schedule and never while you sleep. There is an Appris tab in the Memory Viewer too, where a click lands straight away instead of waiting for your next question
+- **Goals It Keeps Track Of** - "I'm preparing for an interview at Datadog, done when I have their answer." It goes into `yuba/objectifs.md`, another plain file you own, and one line per open goal sits in its context so it recognises the subject when it comes up weeks later. Progress is whatever you tell it, dated and attributed to you; it never writes down what it inferred on its own. It can say a goal *might* be finished and ask, and it cannot say it *is*. Closing one is your word, never its conclusion. A goal is something it remembers and brings up, not something it runs: no schedule, no tools, nothing happens unattended. See them in the Objectifs tab
+- **Routines That Run While You Sleep** - "Every morning at 7, summarise my mail." Creating one asks your permission first, because it is a standing grant rather than a single action, and she reads the tool names back so you can narrow them on the spot. Each routine gets its own envelope of tools, written in a Markdown file you own: it can only ever read, only inside that envelope, and only tools you already let it run freely. Delete the block and the routine is suspended; an empty tool list means nothing, never everything. Every morning writes a dated page in `yuba/journal/`, including what it was stopped from reaching and why, and a routine that produces nothing several runs running stops itself and says so. Stop one by asking, or from the Routines tab
+- **Asks Before It Acts** - Every tool declares what it does to the world, and a plain-text file you own decides which ones run freely and which need your say-so. It is generated once from the tools you actually have installed, then belongs to you. A tool nobody classified is treated as destructive, so it asks
+- **Destructive Actions Need a Click** - Reads and recoverable changes can be approved by answering out loud, in any language. Anything that may not come back is approved on a card showing the exact call, or not at all — a mis-heard word must never be able to delete a file
+- **A Record of What It Did** - One line per tool call: what ran, what it cost, what you allowed and what you refused. Deliberately no record of what it *saw* — no page contents, no file contents, no tool output
+- **Knowledge Graph Memory** - Self-organising memory of what it has looked up for you, which auto-splits by topic and surfaces relevant knowledge automatically
 - **Natural Voice** - Say "Jarvis" anywhere in your sentence, interrupt with "stop", follow up without repeating the wake word
+- **Fast Stop** - Use the tray action `⚡ Stop Now (Skip Diary)` to release local model resources quickly when you need your machine back immediately.
 - **Dictation Mode** - Free, offline alternative to WisprFlow — hold a hotkey, speak, release to paste text into any app
 - **MCP Integration** - Connect to thousands of external tools (Home Assistant, GitHub, Slack, etc.)
 
@@ -191,6 +200,93 @@ Most users won't need to change anything. Open **⚙️ Settings** from the tray
   <img src="docs/img/settings-window.png" alt="Settings Window" width="500">
   <img src="docs/img/settings-mcp.png" alt="Settings - MCP Servers" width="500">
 </p>
+
+<details>
+<summary><strong>Permissions — what it may do on its own</strong></summary>
+
+Jarvis reads and writes files, drives your browser through MCP servers, and can run scripts. Which of those it does without asking is your decision, taken in a file you can read:
+
+`~/.local/share/jarvis/yuba/outils.md`
+
+It is generated at first start from the tools you actually have installed — your own catalogue, by name — and then never rewritten. Three sections, and you move lines between them:
+
+```markdown
+## Libre
+- webSearch
+- chrome-devtools__take_snapshot
+
+## Demande
+- localFiles
+- chrome-devtools__*
+
+## Jamais
+- macos__execute_script
+```
+
+- `## Libre` runs without asking. `## Demande` asks first. `## Jamais` is refused whatever happens, with no way to override.
+- `- server__*` covers a whole MCP server; an exact name beats a wildcard, so you can free a server and pull one tool back out of it.
+- A tool that appears after the file was written is absent from it, therefore unclassified, therefore treated as destructive — so it asks.
+
+**How it asks.** Reads and recoverable changes can be answered out loud, in whatever language you speak; a small model reads the answer, and anything it cannot read plainly is treated as "not an answer" rather than as a yes. Anything destructive is different: it shows a card with the exact call — full path, nothing truncated — and needs a click. No setting relaxes that. A false no costs you a turn; a false yes costs you a file, and speech recognition plus a language model are two lossy layers to put in front of that.
+
+**What it records.** Every tool call leaves one line in the **📋 Activity** tab of the Memory Viewer: what ran, its risk, what you allowed, what you refused, and how long it took. There is deliberately no record of what it *saw*.
+
+Timings and the model that reads a spoken answer live under **⚙️ Settings → 🙋 Permissions**. Set `confirmation_model` to a local model if you want that reading kept off the network.
+
+</details>
+
+<details>
+<summary><strong>LLM Provider (Ollama or OpenAI-compatible)</strong></summary>
+
+By default Jarvis runs everything locally through [Ollama](https://ollama.com): no API keys, nothing leaves your machine. If you already run an OpenAI-compatible server (**LM Studio**, **oMLX**, **llama.cpp**'s `llama-server`, **vLLM**, **LocalAI**, …) you can point Jarvis at it instead. Your data still only travels to the servers you control.
+
+Pick the provider in the Setup Wizard's first step, or under **⚙️ Settings → 🔌 LLM Provider**. No JSON editing required. For reference, the underlying keys are:
+
+```json
+{
+  "llm_provider": "openai_compatible",
+  "llm_base_url": "http://localhost:1234/v1",
+  "llm_api_key": "",
+  "llm_chat_model": "your-served-model-name"
+}
+```
+
+- `llm_base_url`: your server's OpenAI API base URL (LM Studio defaults to `http://localhost:1234/v1`).
+- `llm_api_key`: only if your server requires one; leave empty otherwise.
+- `llm_chat_model`: whatever model name your server exposes.
+
+**Embeddings** (used for memory search) can run on a different backend. If your chat server has no embeddings endpoint, leave the embedding model empty to fall back to Ollama, or route embeddings explicitly:
+
+```json
+{
+  "embedding_provider": "ollama",
+  "embedding_model": "nomic-embed-text"
+}
+```
+
+Leave `embedding_provider` empty to use the same provider as chat. When no embedding model is available, memory search degrades gracefully to keyword search.
+
+</details>
+
+<details>
+<summary><strong>Power and Startup</strong></summary>
+
+Jarvis favours fast first responses by default: it warms Whisper, the chat
+model, and the intent judge before announcing that it is listening. On Macs or
+laptops where heat and battery matter more than instant first-token latency,
+enable **⚙️ Settings → ✨ Features → Low Power Mode**.
+
+```json
+{
+  "low_power_mode": true
+}
+```
+
+Low Power Mode skips LLM startup warmup and shortens Ollama model residency for
+the intent judge from 30 minutes to 1 minute. Whisper still warms so voice input
+is ready. The first LLM-backed request after startup or idle may be slower.
+
+</details>
 
 <details>
 <summary><strong>Speech Recognition (Whisper)</strong></summary>
@@ -322,6 +418,14 @@ To use different Piper voices, download from [HuggingFace](https://huggingface.c
   "tts_piper_model_path": "~/.local/share/jarvis/models/piper/en_GB-alan-medium.onnx"
 }
 ```
+
+**Kokoro** - more natural neural voice (Kokoro-82M), still real-time on CPU:
+```json
+{ "tts_engine": "kokoro", "tts_kokoro_voice": "ff_siwis", "tts_kokoro_lang_code": "f" }
+```
+- Noticeably more natural than Piper while staying fast enough for modest hardware
+- Multilingual; non-English voices need `espeak-ng` installed (`brew install espeak-ng` on macOS)
+- Model weights download once from Hugging Face (~330MB)
 
 **Chatterbox** - AI voice with emotion control (requires running from source):
 ```json
@@ -502,11 +606,19 @@ Get API key at [composio.dev](https://composio.dev)
 <details>
 <summary><strong>Common issues</strong></summary>
 
-**First startup takes a bit** - Jarvis pre-warms the Whisper, chat, and intent-judge models before announcing "Listening!" so the first engagement feels instant. This adds a few seconds on cold start and is bounded at 60 s — if Ollama is slow, Jarvis will start listening anyway and load the models on demand.
+**First startup takes a bit** - Jarvis pre-warms the Whisper, chat, and intent-judge models before announcing "Listening!" so the first engagement feels instant. This adds a few seconds on cold start and is bounded at 60 s. If Ollama is slow, Jarvis will start listening anyway and load the models on demand. Enable **Low Power Mode** in Settings to skip LLM startup warmup.
 
 **Jarvis doesn't hear me** - Check microphone permissions, speak clearly after "Jarvis"
 
+**Not sure what is running** - Open the tray menu and click **🩺 Runtime Status**. It shows whether Jarvis is listening, whether Low Power Mode is active, whether Ollama is needed/running, which models are configured, and how many MCP servers are enabled.
+
 **Responses are slow** - Ensure you have enough VRAM (8GB+ for default model; see System Requirements for other models)
+
+**Mac gets warm while Jarvis is active** - Enable **⚙️ Settings → ✨ Features → Low Power Mode**. This keeps voice recognition ready while avoiding background LLM warmup and shortening Ollama's idle residency window.
+
+**Need to cool down immediately** - Use the tray action **⚡ Stop Now (Skip Diary)**. It stops the voice daemon without running the final diary LLM pass. Regular **Stop Listening** still saves the diary before shutdown.
+
+**Mac is still warm after quitting** - If Jarvis starts Ollama for you, quitting Jarvis also stops that owned Ollama runtime. If Ollama was already running before Jarvis opened, Jarvis leaves it running so it does not interrupt your other local AI tools.
 
 **Windows: App won't start** - Extract full zip first, check Windows Defender
 
@@ -586,6 +698,8 @@ provider can't run out the voice-assistant latency budget.
 - **100% offline** - No cloud services required
 - **Auto-redaction** - Emails, tokens, passwords automatically removed
 - **Local storage** - Everything in `~/.local/share/jarvis`
+- **No record of what it read** - The action log has no column for tool output, structurally. A log that kept results would accumulate the contents of every page fetched and every file opened, somewhere you read casually
+- **Permissions are yours to set** - `~/.local/share/jarvis/yuba/outils.md` lists your own tools by name, in three sections you move lines between. Written once, never rewritten. A tool that appears later is unclassified, and therefore asked about
 
 ## License
 

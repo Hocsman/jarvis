@@ -38,6 +38,7 @@ FieldMeta (dataclass)
 | `int` (nullable) | QCheckBox + QSpinBox | Checkbox enables/disables the spinbox |
 | `float` | QDoubleSpinBox | With bounds, step, suffix |
 | `str` | QLineEdit | Placeholder if nullable |
+| `password` | QLineEdit (EchoMode.Password) | Masked input for API keys; same value extraction as `str` |
 | `choice` | QComboBox | Pre-defined options |
 | `device` | QComboBox | Dynamically populated from sounddevice |
 | `list` | QListWidget + Add/Edit/Remove buttons | Stores as JSON array in config |
@@ -49,19 +50,87 @@ The settings window uses a sidebar navigation pattern: a fixed-width `QListWidge
 ## Categories (Sidebar Order)
 
 1. LLM & AI Models
-2. Text-to-Speech
-3. Piper TTS
-4. Chatterbox TTS
-5. Voice Input (includes microphone device selection)
-6. Wake Word
-7. Speech Recognition (Whisper)
-8. Voice Activity Detection
-9. Timing & Windows
-10. Memory & Dialogue
-11. Location
-12. Features (includes Dictation Mode toggle and hotkey)
-13. MCP Servers
-14. Advanced
+2. LLM Provider
+3. Text-to-Speech
+4. Piper TTS
+5. Chatterbox TTS
+6. Voice Input (includes microphone device selection)
+7. Wake Word
+8. Speech Recognition (Whisper)
+9. Voice Activity Detection
+10. Timing & Windows
+11. Memory & Dialogue
+12. Location
+13. Features (includes web search, Wikipedia fallback, low-power mode, startup tune, and dictation toggles)
+14. 🙋 Permissions
+15. ⏰ Rappels
+16. 🌅 Routines
+17. MCP Servers
+18. Advanced
+
+### 🙋 Permissions
+
+What the gate asks about before doing it, and how long a card waits.
+
+### ⏰ Rappels
+
+The master switch for a subsystem that speaks unprompted, plus the model
+that reads the hour out of his sentence. Both belong here rather than in
+`config.json`: one is the only way to stop it, and the other is the only
+way to keep the sentence he dictated off the network, since the reminder
+chain deliberately skips the cloud-safe rewrite.
+
+What a reminder says and when is not settable here — that is one
+sentence about one promise, not a number that applies to all of them.
+
+### 🌅 Routines
+
+The master switch and the two limits that decide when she gives up on an
+occurrence and when she gives up on a routine. What each routine may
+reach lives in `yuba/routines.md`, one block per routine.
+
+### LLM Provider
+
+Selects the local runtime that serves the LLM and holds the provider-aware
+connection fields: `llm_provider` (Ollama / OpenAI-compatible), `llm_base_url`,
+`llm_api_key` (password), `llm_chat_model`, and the four `embedding_*` fields
+(`embedding_provider`, `embedding_base_url`, `embedding_api_key`,
+`embedding_model`). The model fields are free-text `str` — an OpenAI-compatible
+server's model name is not in the Ollama `SUPPORTED_CHAT_MODELS` catalogue.
+
+Every connection/credential/model field is nullable: leaving it empty falls
+back to the Ollama settings on the "LLM & AI Models" page. A default Ollama
+install therefore never needs to open this page, and the minimal-config save
+behaviour keeps these keys out of `config.json` until the user sets them.
+
+Unlike the setup wizard's provider page, the settings window does **not**
+clear the OpenAI-compatible fields when the user switches `llm_provider` back
+to Ollama: it is metadata-driven with no cross-field logic, and a blanket
+clear would wipe the supported "Ollama chat + remote embeddings" split
+(`llm_provider: ollama` with `embedding_provider: openai_compatible`). Stale
+values are harmless because the backend resolves per-provider: the Ollama path
+uses `ollama_base_url` / `ollama_chat_model` and `OllamaBackend` ignores any
+API key. To drop a leftover value, clear that field and save.
+
+### Features
+
+The Features category exposes user-facing runtime toggles that do not need a
+dedicated page:
+
+- `web_search_enabled`
+- `brave_search_api_key`
+- `wikipedia_fallback_enabled`
+- `low_power_mode`
+- `tune_enabled`
+- `dictation_enabled`
+- `dictation_hotkey`
+- `dictation_filler_removal`
+- `dictation_custom_dictionary`
+
+`low_power_mode` is a boolean toggle. When enabled, the voice listener skips
+LLM startup warmup and the Ollama keep-alive windows used by warmup and the
+intent judge are short. The setting is saved only when it differs from the
+default, like every other metadata-managed field.
 
 ## Hardware Device Selection
 

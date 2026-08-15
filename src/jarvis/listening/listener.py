@@ -21,7 +21,12 @@ from .echo_detection import EchoDetector
 from .state_manager import StateManager, ListeningState
 from .wake_detection import is_wake_word_detected, extract_query_after_wake, is_stop_command
 from .transcript_buffer import TranscriptBuffer
-from .intent_judge import IntentJudge, create_intent_judge, warm_up_ollama_model
+from .intent_judge import (
+    IntentJudge,
+    _is_low_power_mode_enabled,
+    create_intent_judge,
+    warm_up_chat_model,
+)
 from ..debug import debug_log
 from ..utils.location import is_location_available
 
@@ -497,11 +502,16 @@ class VoiceListener(threading.Thread):
         # Track TTS finish time for echo detection
         self.echo_detector.track_tts_finish()
 
+        # A waiting spoken question buys more listening time than a
+        # follow-up does. Set per window rather than at construction,
+        # because it depends on what is pending right now.
+        self.state_manager.hot_window_seconds = self.hot_window_duration()
+
         # Schedule delayed hot window activation
         debug_log(f"scheduling hot window activation (echo_tolerance={self.state_manager.echo_tolerance}s, hot_window={self.state_manager.hot_window_seconds}s)", "voice")
         self.state_manager.schedule_hot_window_activation(self.cfg.voice_debug)
 
-    def _process_transcript(self, text: str, utterance_energy: float = 0.0, utterance_start_time: float = 0.0, utterance_end_time: float = 0.0) -> None:
+    def _process_transcript(self, text: str, utterance_energy: float = 0.0, utterance_start_time: float = 0.0, utterance_end_time: float = 0.0) -> None:  # noqa: E501
         """
         Process a transcript from speech recognition.
 
@@ -509,6 +519,13 @@ class VoiceListener(threading.Thread):
             text: Transcribed text from audio
             utterance_energy: Pre-calculated energy from the utterance frames
         """
+        # Kept whole. When a spoken question is waiting, the answer is
+        # read from this rather than from the query the intent judge
+        # extracts, because at that moment there is no request to find in
+        # the speech — there is a reply to read.
+        if text and text.strip():
+            self._last_transcript = text
+
         if not text or not text.strip():
             # Check for timeouts
             if self.state_manager.check_collection_timeout():
@@ -557,7 +574,7 @@ class VoiceListener(threading.Thread):
                     tts_words = len(last_tts_text.split())
                     text_words = len(text_lower.split())
                     is_pure_echo = (
-                        echo_score >= 70
+                        echo_score >= self.echo_detector.PURE_ECHO_THRESHOLD
                         and text_words <= max(tts_words * 1.3, tts_words + 3)
                     )
                     if is_pure_echo:
@@ -622,7 +639,14 @@ class VoiceListener(threading.Thread):
         if self.tts and self.tts.enabled and self.tts.is_speaking():
             # Stop command detection (fast, text-based)
             stop_commands = getattr(self.cfg, "stop_commands", ["stop", "quiet", "shush", "silence", "enough", "shut up"])
-            if is_stop_command(text_lower, stop_commands):
+            # The threshold travels with the words. It was configurable,
+            # exported and settable, and never reached this call, so
+            # `is_stop_command`'s own signature default decided how hard
+            # it was to interrupt her — whatever he had chosen.
+            if is_stop_command(
+                text_lower, stop_commands,
+                fuzzy_ratio=float(getattr(self.cfg, "stop_command_fuzzy_ratio", 0.8)),
+            ):
                 debug_log(f"stop command detected during TTS: {text_lower} (energy: {utterance_energy:.4f})", "voice")
                 self.tts.interrupt()
                 try:
@@ -739,11 +763,17 @@ class VoiceListener(threading.Thread):
                 "voice",
             )
 
+        # The error back-off lives inside ``judge()``: during the cooldown it
+        # returns None without touching the backend. The listener still
+        # enters this block so the no-verdict branch below runs — it prints
+        # the unavailability and keeps hot-window speech. A judge that cannot
+        # answer is not the same thing as speech that was never addressed to
+        # us, and gating entry on ``available`` made the two identical for
+        # thirty seconds at a time.
         if (
             not skip_intent_judge_during_tts
             and has_engagement_signal
             and self._intent_judge is not None
-            and self._intent_judge.available
         ):
             # Get recent transcript segments for context (full buffer)
             context_segments = self._transcript_buffer.get_last_seconds(self._buffer_duration)
@@ -1182,13 +1212,21 @@ class VoiceListener(threading.Thread):
 
         # Import reply engine
         from ..reply.engine import run_reply_engine
+        from ..daemon import query_lock
 
-        # Process the query (keep thinking tune playing during processing)
+        # Process the query (keep thinking tune playing during processing).
+        # Hold the shared voice+text query lock so a voice query and a text
+        # chat query cannot run the reply engine concurrently against the
+        # same dialogue memory. Voice blocks while a text query finishes
+        # rather than being dropped (see daemon.query_lock).
         try:
-            reply = run_reply_engine(
-                self.db, self.cfg, None, query, self.dialogue_memory,
-                language=self._last_detected_language,
-            )
+            with query_lock():
+                reply = run_reply_engine(
+                    self.db, self.cfg, None, query, self.dialogue_memory,
+                    language=self._last_detected_language,
+                    origin="voix",
+                    heard=getattr(self, "_last_transcript", None),
+                )
         except Exception as e:
             # Log the error visibly - this should never happen silently
             print(f"\n  ❌ Reply engine error: {e}", flush=True)
@@ -1199,7 +1237,19 @@ class VoiceListener(threading.Thread):
                 self.tts.speak("Sorry, I encountered an error processing your request.")
             return
 
-        # Handle TTS with proper callbacks
+        self._speak_reply(reply)
+
+    def _speak_reply(self, reply: Optional[str], on_spoken=None) -> None:
+        """Say one reply, and do the echo bookkeeping that goes with it.
+
+        The only place anything is spoken. A sentence said without being
+        recorded here is one the echo detector will not recognise coming
+        back, so she answers herself.
+
+        ``on_spoken`` fires when the speech finished — not when it
+        started, and not at all when it was interrupted, because
+        interrupted means unheard.
+        """
         if reply and self.tts and self.tts.enabled:
             # Stop thinking tune when TTS starts
             self._stop_thinking_tune()
@@ -1209,6 +1259,15 @@ class VoiceListener(threading.Thread):
                 import time as _time
                 debug_log(f"TTS completion callback triggered at {_time.time():.3f}", "voice")
                 self.activate_hot_window()
+                # After the window, so a slow or raising caller cannot
+                # cost the user their chance to reply. This runs on the
+                # audio thread: whatever it is doing, it is not worth the
+                # microphone.
+                if on_spoken is not None:
+                    try:
+                        on_spoken()
+                    except Exception as e:
+                        debug_log(f"delivery callback raised, ignoring: {e}", "voice")
 
             # Duration callback to update echo detector with exact timing (Piper only)
             def _on_duration_known(duration: float):
@@ -1226,6 +1285,137 @@ class VoiceListener(threading.Thread):
             debug_log(f"no TTS output: reply={bool(reply)}, tts={bool(self.tts)}, enabled={getattr(self.tts, 'enabled', False) if self.tts else False}", "voice")
             # Stop thinking tune if no TTS response
             self._stop_thinking_tune()
+
+    # ── Replies produced elsewhere ────────────────────────────────────
+    #
+    # A click-approved action runs on a resume worker. If that worker
+    # spoke directly it would race this thread, which speaks outside the
+    # block holding the query lock: two writes to the echo detector's
+    # record of what was last said, and two hot-window activations. The
+    # detector would then compare the next transcript against the wrong
+    # sentence, which is how a user's answer gets deleted as an echo.
+
+    def enqueue_reply(self, text: Optional[str], on_spoken=None) -> bool:
+        """Hand a reply to this thread to speak. Safe from any thread.
+
+        Returns whether it was taken. False is a *definitive* refusal —
+        there is no engine that will ever say this — so the caller deals
+        with it now rather than waiting for a delivery that cannot come.
+        Queueing into a dead engine would hold the text forever and say
+        it at some unrelated later moment.
+
+        ``on_spoken`` fires once the speech actually finished, which is
+        not the same thing as it being queued. Anything holding a promise
+        needs that distinction: interrupted speech never reports, so it
+        can be tried again.
+        """
+        if not text or not text.strip():
+            return False
+        if not self.tts or not getattr(self.tts, "enabled", False):
+            debug_log("reply not queued: TTS unavailable", "voice")
+            return False
+        if getattr(self, "_reply_queue", None) is None:
+            import queue as _queue
+
+            self._reply_queue = _queue.Queue()
+        self._reply_queue.put((text, on_spoken))
+        debug_log(f"reply queued for speaking ({len(text)} chars)", "voice")
+        return True
+
+    def drain_reply_queue(self) -> None:
+        """Say at most one queued reply. This thread only.
+
+        One at a time, and only while nothing is already being said.
+        ``TTS.speak`` keeps its completion callback in a single
+        engine-level slot (output/tts.py:369, set at :469, cleared at
+        :579), so a second call before the first finishes overwrites the
+        first's callback — and that callback is what reopens the
+        listening window. Whatever is left waits for the next pass, which
+        is at most one audio frame away.
+        """
+        q = getattr(self, "_reply_queue", None)
+        if q is None:
+            return
+        if self.tts is not None and self.tts.is_speaking():
+            return
+
+        import queue as _queue
+
+        try:
+            text, on_spoken = q.get_nowait()
+        except _queue.Empty:
+            return
+        self._speak_reply(text, on_spoken=on_spoken)
+
+    def _sounds_like_her_name(self, text: str) -> bool:
+        """Whether a segment about to be dropped is the user calling her.
+
+        `avg_logprob` is a poor judge of a proper noun the model has
+        never seen. That is exactly why "Yuba" comes back as "Youba",
+        "Nuba", "Juba" — and why the segment carrying it scores low and
+        is thrown away, leaving the sentence that follows to arrive with
+        no wake word in it and be ignored. She then looks broken, which
+        is the one failure mode a wake word cannot afford.
+
+        The wake word is configured, not a language pattern, and this is
+        the same matcher the detector uses a moment later. Keeping the
+        segment decides nothing: everything downstream still applies.
+        """
+        try:
+            from .wake_detection import is_wake_word_detected
+
+            wake = getattr(self.cfg, "wake_word", "jarvis")
+            aliases = list(set(getattr(self.cfg, "wake_aliases", [])) | {wake})
+            return is_wake_word_detected((text or "").lower(), wake, aliases)
+        except Exception:
+            return False
+
+    def awaiting_spoken_answer(self) -> bool:
+        """Whether a question is on the table that a sentence can settle.
+
+        The confidence filter exists to stop her *acting* on a mumble.
+        While this is true nothing acts on it: the approval judge reads
+        the sentence and fails closed, so anything it cannot read as a
+        clear yes is not an approval. The filter is therefore redundant
+        here, and actively harmful — the answer to a yes/no question is
+        one word, one word carries almost no context, and `avg_logprob`
+        over one word is poor by construction. The shorter the answer the
+        likelier it is dropped, and "oui" is as short as they come.
+        """
+        dm = getattr(self, "dialogue_memory", None)
+        if dm is None or not hasattr(dm, "peek_pending"):
+            return False
+        try:
+            from ..tools.confirmation import CHANNEL_PAROLE
+
+            waiting = dm.peek_pending()
+            return waiting is not None and waiting.channel == CHANNEL_PAROLE
+        except Exception as e:
+            debug_log(f"pending question not checked: {e}", "voice")
+            return False
+
+    def hot_window_duration(self) -> float:
+        """How long to keep listening after she finishes speaking.
+
+        The configured default is tuned for a follow-up ("tell me more").
+        A person weighing whether to let something happen pauses first, so
+        a waiting spoken question widens it. A gesture-only question does
+        not: nothing said can settle one, and the extra listening would
+        only collect an answer that has to be thrown away.
+        """
+        default = float(getattr(self.cfg, "hot_window_seconds", 3.0))
+        dm = getattr(self, "dialogue_memory", None)
+        if dm is None or not hasattr(dm, "peek_pending"):
+            return default
+        try:
+            from ..tools.confirmation import CHANNEL_PAROLE
+
+            waiting = dm.peek_pending()
+            if waiting is not None and waiting.channel == CHANNEL_PAROLE:
+                return float(getattr(self.cfg, "confirmation_hot_window_sec", 12.0))
+        except Exception as e:
+            debug_log(f"hot window duration fell back to default: {e}", "voice")
+        return default
 
     def _calculate_audio_energy(self, frames: list) -> float:
         """Calculate RMS energy from audio frames."""
@@ -1283,6 +1473,12 @@ class VoiceListener(threading.Thread):
     def _filter_noisy_segments(self, segments):
         """Filter out low-confidence Whisper segments."""
         min_confidence = getattr(self.cfg, "whisper_min_confidence", 0.3)
+        if self.awaiting_spoken_answer():
+            # A question is waiting and only the judge decides. Keeping
+            # this bar would make the spoken channel unanswerable: the
+            # observed "Oui" scored 0.22 against a 0.3 floor, which is
+            # what a one-word utterance scores.
+            min_confidence = 0.0
         marginal_threshold = min_confidence / 3  # Show user-visible log for marginal confidence
         # Threshold above which a segment is considered non-speech (hallucination during silence).
         # Checked independently of avg_logprob because Whisper can be confident about a
@@ -1304,6 +1500,15 @@ class VoiceListener(threading.Thread):
                 confidence = min(1.0, max(0.0, (seg.avg_logprob + 1.0)))
             elif hasattr(seg, 'no_speech_prob'):
                 confidence = 1.0 - seg.no_speech_prob
+
+            if (confidence is not None and confidence < min_confidence
+                    and self._sounds_like_her_name(seg.text)):
+                debug_log(
+                    f"segment kept despite confidence={confidence:.2f}: "
+                    f"it carries her name", "voice",
+                )
+                filtered.append(seg)
+                continue
 
             if confidence is not None and confidence < min_confidence:
                 if confidence >= marginal_threshold:
@@ -1484,12 +1689,14 @@ class VoiceListener(threading.Thread):
         return resolved_device
 
     def _start_llm_warmup(self) -> list[threading.Thread]:
-        """Pre-load chat and intent judge models into Ollama memory.
+        """Pre-load chat and intent judge models via the active backend.
 
-        Starts up to two daemon threads concurrently so warmup overlaps
-        with Whisper initialisation. When both models point at the same
-        Ollama model, a single warmup covers both (Ollama loads the
-        weights once; ``keep_alive`` keeps them resident for every caller).
+        Warmup goes through ``warm_up_chat_model`` → ``LLMBackend.warm_up``,
+        so it pages models into Ollama's resident memory on the Ollama path
+        and is a no-op for an OpenAI-compatible server (which keeps models
+        warm at load time). Starts up to two daemon threads concurrently so
+        warmup overlaps with Whisper initialisation. When both models point
+        at the same model, a single warmup covers both.
 
         Results land in ``self._llm_warmup_results`` keyed by role. The
         caller joins the returned threads with a shared deadline before
@@ -1497,8 +1704,12 @@ class VoiceListener(threading.Thread):
         """
         self._llm_warmup_results: dict[str, tuple[str, bool]] = {}
 
-        chat_model = str(getattr(self.cfg, "ollama_chat_model", "") or "").strip()
-        base_url = str(getattr(self.cfg, "ollama_base_url", "") or "").strip()
+        if _is_low_power_mode_enabled(self.cfg):
+            print("     🌱 Low power mode: LLM warmup skipped", flush=True)
+            debug_log("low power mode enabled: skipping LLM warmup", "voice")
+            return []
+
+        chat_model = str(getattr(self.cfg, "llm_chat_model", "") or "").strip()
         chat_timeout = max(float(getattr(self.cfg, "llm_tools_timeout_sec", 8.0)), 60.0)
         judge = self._intent_judge
         judge_model = judge.config.model if judge is not None else ""
@@ -1522,9 +1733,9 @@ class VoiceListener(threading.Thread):
 
         threads: list[threading.Thread] = []
 
-        if chat_model and base_url:
+        if chat_model:
             def _warm_chat() -> None:
-                ok = warm_up_ollama_model(base_url, chat_model, timeout=chat_timeout)
+                ok = warm_up_chat_model(self.cfg, chat_model, timeout=chat_timeout)
                 self._llm_warmup_results["chat"] = (chat_model, ok)
                 # When chat and judge share a model, one warmup covers both.
                 if shared_judge:
@@ -1544,9 +1755,9 @@ class VoiceListener(threading.Thread):
 
             threads.append(threading.Thread(target=_warm_judge, daemon=True, name="warmup-judge"))
 
-        if router_model and base_url and not shared_router:
+        if router_model and not shared_router:
             def _warm_router() -> None:
-                ok = warm_up_ollama_model(base_url, router_model, timeout=chat_timeout)
+                ok = warm_up_chat_model(self.cfg, router_model, timeout=chat_timeout)
                 self._llm_warmup_results["router"] = (router_model, ok)
 
             threads.append(threading.Thread(target=_warm_router, daemon=True, name="warmup-router"))
@@ -2127,7 +2338,7 @@ class VoiceListener(threading.Thread):
             # things out for it. Classification lives in model_variants so
             # it stays in sync when supported models change.
             from ..reply.prompts.model_variants import detect_model_size, ModelSize
-            chat_model_name = str(getattr(self.cfg, "ollama_chat_model", "") or "").strip()
+            chat_model_name = str(getattr(self.cfg, "llm_chat_model", "") or "").strip()
             if chat_model_name and detect_model_size(chat_model_name) == ModelSize.SMALL:
                 print(
                     f"  ⚠️  Small model in use ({chat_model_name}). Assume it can't infer — spell out the steps for anything more involved:",
@@ -2178,6 +2389,14 @@ class VoiceListener(threading.Thread):
                         print("  ⚠️  No audio received after 5 seconds!", flush=True)
                         print(f"     Check: {_get_mic_permission_hint()}", flush=True)
                         print("     Also check that your microphone is not muted", flush=True)
+
+                # Say anything another thread handed over — a
+                # click-approved action's narration. Here rather than on
+                # that thread, so only one thread ever speaks, and here
+                # rather than in the idle branch below: the audio callback
+                # delivers a frame every 20 ms, so on a live microphone
+                # the queue is never empty and that branch never runs.
+                self.drain_reply_queue()
 
                 try:
                     item = self._audio_q.get(timeout=0.2)
@@ -2335,6 +2554,9 @@ class VoiceListener(threading.Thread):
 
                 # Filter segments by confidence (MLX Whisper returns segments with avg_logprob)
                 min_confidence = getattr(self.cfg, "whisper_min_confidence", 0.3)
+                if self.awaiting_spoken_answer():
+                    # Same reasoning as the faster-whisper path above.
+                    min_confidence = 0.0
                 marginal_threshold = min_confidence / 3  # Show user-visible log for marginal confidence
                 no_speech_threshold = getattr(self.cfg, "whisper_no_speech_threshold", 0.5)
                 segments = result.get("segments", [])
@@ -2352,6 +2574,16 @@ class VoiceListener(threading.Thread):
                         # Hard filter: high no_speech_prob means no real speech regardless of logprob.
                         if is_whisper_hallucination(no_speech_prob, no_speech_threshold):
                             debug_log(f"MLX segment filtered (no_speech_prob={no_speech_prob:.2f}): '{seg_text[:50]}'", "voice")
+                            continue
+
+                        if (confidence < min_confidence
+                                and self._sounds_like_her_name(seg_text)):
+                            debug_log(
+                                f"MLX segment kept despite "
+                                f"confidence={confidence:.2f}: it carries her "
+                                f"name", "voice",
+                            )
+                            filtered_texts.append(seg.get("text", ""))
                             continue
 
                         if confidence < min_confidence:

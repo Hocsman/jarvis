@@ -22,6 +22,7 @@ class ToolContext:
         max_retries: int,
         user_print: Callable[[str], None],
         language: Optional[str] = None,
+        origin: Optional[str] = None,
     ):
         self.db = db
         self.cfg = cfg
@@ -36,6 +37,11 @@ class ToolContext:
         # treat absence as "no signal" and fall back to their own default
         # rather than assuming English.
         self.language = language
+        # What set this turn going — "voix", "chat", "routine". A tool
+        # that writes a row of its own stamps it with this, so the user
+        # can later tell something they asked for from something that
+        # happened while they were away.
+        self.origin = origin
 
 
 class Tool(ABC):
@@ -51,6 +57,51 @@ class Tool(ABC):
         - `run` receives validated args (per schema) and a `ToolContext` giving access to db, cfg,
             prompts, redacted_text, retry allowance, and a user_print callable.
     """
+
+    # Whether running this writes Yuba's own state — the core files, the
+    # meals log, the reminders table.
+    #
+    # A second axis, not a louder risk. Four tools return ``lecture``
+    # from ``risk_for`` and all justify it the same way: they write only
+    # into files the user can reopen and correct by hand. That reasoning
+    # is sound and depends entirely on someone being there. At 14:00 a
+    # wrong entry is visible in the reply and correctable in the next
+    # breath; at 07:00 nobody reopens anything, and an unattended write
+    # to the core would put a sentence into every later prompt with no
+    # turn in which it was ever seen.
+    #
+    # So the risk stays where it is — raising it would make her ask
+    # permission to write down what she was just asked to write down —
+    # and this carries what that justification assumes, for callers that
+    # run without a user present.
+    #
+    # Defaults to False, the opposite of ``risk_for``'s default and right
+    # for the opposite reason: over-claiming here would stop a routine
+    # reading something harmless.
+    writes_own_state: bool = False
+
+    # Whether the tool blocks until a person does something.
+    #
+    # `screenshot` shells out to `screencapture -i`, which waits for a
+    # rectangle to be dragged, with no timeout. At 07:00 nobody drags
+    # anything, and `subprocess.run` waits forever — holding the routine
+    # runner's single slot, which is what every other routine queues on.
+    # One such tool in one envelope would stop the whole feature until a
+    # restart, silently.
+    #
+    # A separate axis from the risk, like `writes_own_state`, and for the
+    # same reason: it is not that the call is dangerous, it is that its
+    # justification assumes somebody is there.
+    needs_a_human: bool = False
+
+    # Whether running this reads his own life rather than the world.
+    #
+    # A third axis for the same reason as the other two: the hazard is
+    # not that the call is dangerous, it is that its justification
+    # assumes somebody is there. Forming an opinion about him out of a
+    # fortnight of his journal is only defensible because he is in the
+    # room to hear it and say no.
+    reads_his_life: bool = False
 
     @property
     @abstractmethod
@@ -69,6 +120,23 @@ class Tool(ABC):
     def inputSchema(self) -> Dict[str, Any]:
         """JSON Schema for tool arguments (matches MCP format)."""
         pass
+
+    def risk_for(self, args: Optional[Dict[str, Any]]) -> str:
+        """What running this tool with these arguments does to the world.
+
+        One of ``RISK_READ`` / ``RISK_ACTION`` / ``RISK_DESTRUCTIVE``
+        (see ``tools/policy.py``). Takes the arguments because one tool
+        can span the range: ``localFiles`` reads, writes and deletes
+        under a single name, and a risk fixed at the class level would
+        make reading a file need permission.
+
+        The default is destructive, deliberately. A tool added later by
+        someone who never read this docstring will ask before it acts
+        instead of sliding through the gate unclassified.
+        """
+        from .policy import RISK_DESTRUCTIVE
+
+        return RISK_DESTRUCTIVE
 
     @abstractmethod
     def run(self, args: Optional[Dict[str, Any]], context: ToolContext) -> ToolExecutionResult:
@@ -97,6 +165,7 @@ class Tool(ABC):
         max_retries: int,
         user_print: Callable[[str], None],
         language: Optional[str] = None,
+        origin: Optional[str] = None,
     ) -> ToolExecutionResult:
         """Execute the tool (internal method used by registry).
 
@@ -112,5 +181,6 @@ class Tool(ABC):
             max_retries=max_retries,
             user_print=user_print,
             language=language,
+            origin=origin,
         )
         return self.run(tool_args, context)

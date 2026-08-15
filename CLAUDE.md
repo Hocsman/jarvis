@@ -13,17 +13,24 @@ Any code change must either adhere to our spec files perfectly or you should ask
 | `src/desktop_app/desktop_app.spec.md` | System tray app, startup flow, daemon integration, windows, theme, updates | Desktop is separate from core; jarvis has no knowledge of desktop_app |
 | `src/desktop_app/settings_window.spec.md` | Auto-generated settings UI from config metadata | Metadata-driven; only non-default values written; preserves unknown keys |
 | `src/desktop_app/setup_wizard.spec.md` | First-run wizard (Ollama, models, Whisper, location) | Minimal friction; only shown when user action required; doesn't configure everything |
+| `src/desktop_app/chat_window.spec.md` | Text chat interface alongside voice; shared conversation, no TTS, bundled callbacks + subprocess IPC | One conversation for voice + text; text never speaks; redaction shared with voice path |
 | `src/jarvis/dictation/dictation.spec.md` | Hold-to-dictate engine, hotkey, clipboard paste | Independent from assistant pipeline; shared Whisper model; pause flag on listener |
 | `src/jarvis/listening/listening.spec.md` | Voice listener, wake word detection, audio pipeline | — |
 | `src/jarvis/reply/reply.spec.md` | LLM reply generation, tool use, profiles | Tools return raw data; profiles handle formatting |
 | `src/jarvis/reply/evaluator.spec.md` | **Deprecated** — evaluator no longer runs in the reply engine; preserved for reference | Replaced by the planner; see planner.spec.md |
 | `src/jarvis/reply/planner.spec.md` | Task-list planner: pre-loop query decomposition + direct-exec step resolver for small models | Fail-open; rides warm small model chain; advisory for large models, direct-exec for small |
+| `src/jarvis/tools/policy.spec.md` | Risk vocabulary, verdicts, `yuba/outils.md`, the gate at the tool funnel, the action ledger | Unclassified is destructive; the file is generated once then belongs to the user; refusing is not failing; the ledger records what was done, never what was seen |
+| `src/jarvis/objectifs/objectifs.spec.md` | Multi-step goals: the `objectifs.md` page, the four tools, the completion judge (LLM #18), the prompt line, the tab | Nothing is written by deduction: every line carries its source, the judge's vocabulary cannot say "finished", and its verdict has no writer. No schedule and no envelope in this slice — a goal is remembered, never run |
+| `src/jarvis/appris/appris.spec.md` | Propositions issues du journal : la page `appris.md`, `reviewLearnings`, la récolte à la coche, le contexte LLM #19, le mot `confirmé`, l'axe `reads_his_life` | Une proposition n'est pas une croyance et n'atteint aucun prompt ; la coche n'a pas de valeur par défaut et le temps n'est pas un acteur ; aucun modèle sur le chemin d'écriture ; ce qui part est la ligne telle qu'il l'a réécrite ; un refus est aussi durable qu'un accord |
+| `src/jarvis/routines/routines.spec.md` | What runs unattended at a fixed hour: recurrence rules, the envelope in `yuba/routines.md`, the spoken-schedule extractor, `setRoutine`/`cancelRoutine`, the routine's catalogue in the engine, the four re-checks at the gate | Every default leans shut; an empty list is empty, not "all"; a routine can only ever read, and only inside its envelope; the user's profile stays home unless the block asks for it; creating one is `action`, so it costs a human yes |
+| `src/jarvis/reminders/reminders.spec.md` | The `rappels` table, the time extractor (LLM #16), `setReminder`, the scheduler thread, the Rappels tab | A reminder is a promise: late, clumsy or repeated beats silent. Wall clock, not monotonic — the opposite of the confirmation TTL. Delivery settles it, never queueing. She never claims one she has not read back from disk |
 | `src/jarvis/tools/builtin/tool_search.spec.md` | toolSearchTool escape hatch for mid-loop tool routing | Re-runs the same router; never removes stop/self; capped per reply |
 | `src/jarvis/tools/external/mcp_runtime.spec.md` | Persistent MCP runtime: per-server long-lived stdio session, queue-based dispatch, retry on transient session loss | One worker per server keyed by config; calls to the same server serialise; `MCPServerSessionError` for session-level failures; opt-in `idle_timeout_sec` for stateless servers |
 | `src/jarvis/reply/prompts/prompts.spec.md` | System/user prompt templates | — |
 | `src/jarvis/tools/builtin/web_search.spec.md` | webSearch tool: cascade fetch, SSRF guard, prompt-injection fence, links-only envelope | Untrusted web content is fenced as data, not instructions; rank preference over speed; honest failure over confabulation |
 | `src/jarvis/tools/builtin/nutrition/log_meal.spec.md` | logMeal tool: single-property schema for planner fast-path, internal nutrition extraction, untrusted-data fence, follow-ups | Public schema is a single optional `meal` string; nutrition fields are internal; user text is fenced as data |
 | `src/jarvis/utils/location.spec.md` | GeoIP location detection | Privacy-first; local GeoLite2 DB only |
+| `src/jarvis/memory/core.spec.md` | The two files the user owns: `profil.md`, `regles.md`, their grammar, the source on every line, retiring by strikethrough | Written only when he asks or corrects, never by deduction; the file is his and hand edits win |
 | `src/jarvis/memory/graph.spec.md` | Node graph memory (v2), self-organising tree, UI explorer | Dynamic structure; access-aware; auto-split/merge (future) |
 | `src/jarvis/memory/summariser.spec.md` | Diary summariser prompt contract, hygiene rules (deflection, attribution, topic separation), post-process scrub, and bulk-sweep clean button | Two-layer defence: prompt + deterministic scrub; corrupted summaries poison every downstream consumer |
 | `src/jarvis/memory/recall_gate.spec.md` | Deterministic skip-enrichment heuristic when the hot window covers a follow-up | Fail-open; language-agnostic via `\w{3,}` + `re.UNICODE`; planner intent always wins |
@@ -99,6 +106,14 @@ Run evals after finalising a change that can affect agent accuracy.
 
 Any change to LLM prompts (system prompts, tool incentives, constraints, etc.) must be verified against a relevant eval case. If no eval exists for the behaviour being changed, write one first. The eval should demonstrate the improvement — i.e. it should fail or show worse results before the prompt change and pass or improve after.
 
+### Comparing prompt variants: interleave the arms, never run them in sequence
+
+A remote provider's behaviour drifts within a single session, so two arms measured one after the other are not comparable. Measured on this repo: a merge-prompt rule scored 6/8, then 7/8, then 15/15 across three sequential rounds, and on the strength of the last one it would have been declared healthy and nothing shipped. Interleaved call-by-call against its replacement, sharing the same window, the same prompt scored 7/25 against 25/25.
+
+So a variant comparison alternates arms inside one loop, one call each per iteration. Anything else measures the hour rather than the prompt. The same trap sits under a plain before/after: change the prompt, re-run, and you have compared two different hours.
+
+Sample sizes: three runs settle nothing. A one-line clause that measured 1/3 both before and after turned out to be a real 54% against 15% (p = 0.0078) once it had 26 runs an arm. Below about twenty an arm, expect to learn nothing and say so rather than reporting a number.
+
 Commit your changes when you finish a fix or feature before moving on to the next task.
 
 Before running `git commit --amend`, always check `git log --oneline -3` first to verify you're amending the correct commit.
@@ -106,6 +121,23 @@ Before running `git commit --amend`, always check `git log --oneline -3` first t
 Always use British English everywhere (e.g. "colour" not "color", "behaviour" not "behavior", "initialise" not "initialize").
 
 Do not use em dashes (—) in GitHub issue/PR/discussion replies or any user-facing writing. Prefer a comma, a full stop, a colon, or parentheses depending on the clause. This applies to replies you post on the user's behalf and to text generated for them.
+
+## Code, comments, specs, docs: describe the current state, not the history
+
+The codebase is ours and releases are versioned. Git carries the history; the code carries the present. Anything you write that lives in a file (code comments, docstrings, `*.spec.md`, `docs/*`, READMEs) should describe what the system *is*, not what it *was* or how it *changed*. Avoid:
+
+- "previously did X", "used to be Y", "this fixes the regression where…"
+- "refactored to", "migrated from", "now uses", "no longer reads"
+- "PR 2.5b will…", "deferred to follow-up", "TODO(PR X): drop this once…"
+- Phases tables, migration rollouts, "Done / Pending" status columns inside specs
+
+Commit messages and PR descriptions are the right place for "what changed and why" — they exist to be read in sequence. Files under `src/`, `docs/`, and `*.spec.md` are read as the present-day reference; historical narrative there ages badly and confuses future readers.
+
+## Refactor completely or not at all
+
+If you're touching every legacy call site, finish the job. Don't leave compat shims, fallback parameters, `SimpleNamespace` defaults, or `TODO(PR X)` markers for paths you are also rewriting in the same change. The whole point of doing the refactor is that the legacy shape goes away — keeping a half-converted state means future readers have to figure out which version of the contract is canonical, and the reasoning behind the old shape sits in the codebase as dead weight.
+
+The exception is genuinely external boundaries the codebase does not own: on-disk config files written by a previous release, third-party API shapes, persisted database rows. Those need migration paths because users depend on them. Internal function signatures, helper modules, and call patterns inside `src/` are ours to change cleanly.
 
 ## Prompt-engineering: denial-template mirroring
 

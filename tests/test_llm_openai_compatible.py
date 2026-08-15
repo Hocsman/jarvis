@@ -36,7 +36,7 @@ def _make_response(*, json_data=None, iter_lines=None, status_code=200, raise_ht
 
 
 class TestOpenAICompatibleDirect:
-    @patch("jarvis.llm.requests.post")
+    @patch("requests.Session.post")
     def test_returns_assistant_text_from_choices(self, mock_post):
         from jarvis.llm import OpenAICompatibleBackend
 
@@ -47,7 +47,7 @@ class TestOpenAICompatibleDirect:
 
         assert backend.direct("any-model", "sys", "user") == "hello"
 
-    @patch("jarvis.llm.requests.post")
+    @patch("requests.Session.post")
     def test_posts_to_chat_completions_endpoint(self, mock_post):
         from jarvis.llm import OpenAICompatibleBackend
 
@@ -60,7 +60,7 @@ class TestOpenAICompatibleDirect:
         url = mock_post.call_args[0][0]
         assert url == "http://localhost:1234/v1/chat/completions"
 
-    @patch("jarvis.llm.requests.post")
+    @patch("requests.Session.post")
     def test_sends_authorization_header_when_api_key_set(self, mock_post):
         from jarvis.llm import OpenAICompatibleBackend
 
@@ -73,7 +73,7 @@ class TestOpenAICompatibleDirect:
         headers = mock_post.call_args.kwargs.get("headers") or {}
         assert headers.get("Authorization") == "Bearer sk-test"
 
-    @patch("jarvis.llm.requests.post")
+    @patch("requests.Session.post")
     def test_omits_authorization_header_when_no_key(self, mock_post):
         from jarvis.llm import OpenAICompatibleBackend
 
@@ -86,7 +86,7 @@ class TestOpenAICompatibleDirect:
         headers = mock_post.call_args.kwargs.get("headers") or {}
         assert "Authorization" not in headers
 
-    @patch("jarvis.llm.requests.post")
+    @patch("requests.Session.post")
     def test_temperature_and_model_in_payload(self, mock_post):
         from jarvis.llm import OpenAICompatibleBackend
 
@@ -104,7 +104,7 @@ class TestOpenAICompatibleDirect:
             {"role": "user", "content": "user"},
         ]
 
-    @patch("jarvis.llm.requests.post")
+    @patch("requests.Session.post")
     def test_returns_none_on_failure(self, mock_post):
         from jarvis.llm import OpenAICompatibleBackend
 
@@ -113,7 +113,7 @@ class TestOpenAICompatibleDirect:
 
         assert backend.direct("any", "sys", "user") is None
 
-    @patch("jarvis.llm.requests.post")
+    @patch("requests.Session.post")
     def test_temperature_omitted_when_none(self, mock_post):
         from jarvis.llm import OpenAICompatibleBackend
 
@@ -134,7 +134,7 @@ class TestOpenAICompatibleDirect:
 
 
 class TestOpenAICompatibleStreaming:
-    @patch("jarvis.llm.requests.post")
+    @patch("requests.Session.post")
     def test_invokes_on_token_per_sse_chunk_and_returns_full_text(self, mock_post):
         from jarvis.llm import OpenAICompatibleBackend
 
@@ -154,7 +154,7 @@ class TestOpenAICompatibleStreaming:
         assert seen == ["hel", "lo"]
         assert result == "hello"
 
-    @patch("jarvis.llm.requests.post")
+    @patch("requests.Session.post")
     def test_works_without_on_token_callback(self, mock_post):
         from jarvis.llm import OpenAICompatibleBackend
 
@@ -167,7 +167,7 @@ class TestOpenAICompatibleStreaming:
 
         assert backend.streaming("any", "sys", "user") == "x"
 
-    @patch("jarvis.llm.requests.post")
+    @patch("requests.Session.post")
     def test_skips_keepalive_and_invalid_lines(self, mock_post):
         from jarvis.llm import OpenAICompatibleBackend
 
@@ -182,7 +182,7 @@ class TestOpenAICompatibleStreaming:
 
         assert backend.streaming("any", "sys", "user") == "ok"
 
-    @patch("jarvis.llm.requests.post")
+    @patch("requests.Session.post")
     def test_returns_none_on_timeout(self, mock_post):
         import requests
         from jarvis.llm import OpenAICompatibleBackend
@@ -192,7 +192,7 @@ class TestOpenAICompatibleStreaming:
 
         assert backend.streaming("any", "sys", "user") is None
 
-    @patch("jarvis.llm.requests.post")
+    @patch("requests.Session.post")
     def test_returns_none_on_connection_error(self, mock_post):
         import requests
         from jarvis.llm import OpenAICompatibleBackend
@@ -202,7 +202,7 @@ class TestOpenAICompatibleStreaming:
 
         assert backend.streaming("any", "sys", "user") is None
 
-    @patch("jarvis.llm.requests.post")
+    @patch("requests.Session.post")
     def test_returns_none_on_http_error(self, mock_post):
         import requests
         from jarvis.llm import OpenAICompatibleBackend
@@ -221,7 +221,7 @@ class TestOpenAICompatibleStreaming:
 
 
 class TestOpenAICompatibleChat:
-    @patch("jarvis.llm.requests.post")
+    @patch("requests.Session.post")
     def test_lifts_choices_message_to_top_level(self, mock_post):
         """The reply engine reads ``resp['message']['content']``;
         OpenAI returns ``choices[0].message.content``. The backend must
@@ -237,7 +237,7 @@ class TestOpenAICompatibleChat:
         assert result is not None
         assert result["message"]["content"] == "hello"
 
-    @patch("jarvis.llm.requests.post")
+    @patch("requests.Session.post")
     def test_decodes_tool_call_arguments_string_to_dict(self, mock_post):
         """OpenAI returns ``tool_calls[*].function.arguments`` as a JSON
         string; Ollama returns it as a dict, and the reply engine
@@ -272,7 +272,7 @@ class TestOpenAICompatibleChat:
         assert tc["function"]["name"] == "getWeather"
         assert tc["function"]["arguments"] == {"location": "Tbilisi"}
 
-    @patch("jarvis.llm.requests.post")
+    @patch("requests.Session.post")
     def test_passes_tools_in_payload(self, mock_post):
         from jarvis.llm import OpenAICompatibleBackend
 
@@ -289,7 +289,7 @@ class TestOpenAICompatibleChat:
         sent = mock_post.call_args.kwargs["json"]
         assert sent["tools"][0]["function"]["name"] == "x"
 
-    @patch("jarvis.llm.requests.post")
+    @patch("requests.Session.post")
     def test_raises_tools_not_supported_on_400_with_tools(self, mock_post):
         import requests
         from jarvis.llm import OpenAICompatibleBackend, ToolsNotSupportedError
@@ -306,7 +306,7 @@ class TestOpenAICompatibleChat:
                 tools=[{"type": "function", "function": {"name": "x"}}],
             )
 
-    @patch("jarvis.llm.requests.post")
+    @patch("requests.Session.post")
     def test_returns_none_on_400_without_tools(self, mock_post):
         import requests
         from jarvis.llm import OpenAICompatibleBackend
@@ -318,17 +318,20 @@ class TestOpenAICompatibleChat:
 
         assert backend.chat("any", [{"role": "user", "content": "hi"}]) is None
 
-    @patch("jarvis.llm.requests.post")
-    def test_returns_none_on_connection_error(self, mock_post):
+    @patch("requests.Session.post")
+    def test_propagates_connection_error(self, mock_post):
+        """``chat`` re-raises ``ConnectionError`` so callers can distinguish
+        an unreachable server from a transient HTTP failure."""
         import requests
         from jarvis.llm import OpenAICompatibleBackend
 
         mock_post.side_effect = requests.exceptions.ConnectionError("server down")
         backend = OpenAICompatibleBackend("http://localhost:1234/v1")
 
-        assert backend.chat("any", [{"role": "user", "content": "hi"}]) is None
+        with pytest.raises(requests.exceptions.ConnectionError):
+            backend.chat("any", [{"role": "user", "content": "hi"}])
 
-    @patch("jarvis.llm.requests.post")
+    @patch("requests.Session.post")
     def test_returns_none_on_http_500_even_with_tools(self, mock_post):
         """Only HTTP 400 with tools means "model rejects native tools" —
         500 is a server-side failure that should degrade gracefully."""
@@ -349,7 +352,7 @@ class TestOpenAICompatibleChat:
             is None
         )
 
-    @patch("jarvis.llm.requests.post")
+    @patch("requests.Session.post")
     def test_returns_none_on_timeout(self, mock_post):
         import requests
         from jarvis.llm import OpenAICompatibleBackend
@@ -359,7 +362,7 @@ class TestOpenAICompatibleChat:
 
         assert backend.chat("any", [{"role": "user", "content": "hi"}]) is None
 
-    @patch("jarvis.llm.requests.post")
+    @patch("requests.Session.post")
     def test_returns_none_on_generic_exception(self, mock_post):
         from jarvis.llm import OpenAICompatibleBackend
 
@@ -368,7 +371,84 @@ class TestOpenAICompatibleChat:
 
         assert backend.chat("any", [{"role": "user", "content": "hi"}]) is None
 
-    @patch("jarvis.llm.requests.post")
+
+class TestOpenAICompatibleErrorMessagesDoNotLeakUrls:
+    """``requests.exceptions.HTTPError`` and ``ConnectionError`` ``str()``s
+    typically embed the request URL — and the request URL can carry sensitive
+    query strings (e.g. some hosted providers accept ``?api_key=…`` literally,
+    and configured endpoints may include team/account identifiers). The chat
+    backend prints these errors to stdout, which surfaces in the desktop log
+    pane and any captured terminal session. The error message must include
+    enough information for diagnosis (status code, exception class) without
+    echoing the URL the user configured."""
+
+    _SECRET_URL = "http://internal-server.example.com:1234/v1"
+
+    @patch("requests.Session.post")
+    def test_http_error_message_does_not_leak_endpoint_url(self, mock_post, capsys):
+        import requests
+        from jarvis.llm import OpenAICompatibleBackend
+
+        # Construct an HTTPError whose str() embeds the URL — exactly what
+        # ``requests`` does in real failures.
+        http_resp = MagicMock(status_code=401)
+        http_resp.url = f"{self._SECRET_URL}/chat/completions"
+        err = requests.exceptions.HTTPError(
+            f"401 Client Error: Unauthorized for url: {self._SECRET_URL}/chat/completions",
+            response=http_resp,
+        )
+        mock_post.return_value = _make_response(raise_http=err)
+        backend = OpenAICompatibleBackend(self._SECRET_URL, api_key="sk-secret")
+
+        backend.chat("any", [{"role": "user", "content": "hi"}])
+
+        captured = capsys.readouterr()
+        assert self._SECRET_URL not in captured.out, (
+            "HTTPError message must not echo the configured endpoint URL"
+        )
+        # Status code must still be visible so users can diagnose 401 vs 5xx.
+        assert "401" in captured.out
+
+    @patch("requests.Session.post")
+    def test_connection_error_message_does_not_leak_endpoint_url(self, mock_post, capsys):
+        import requests
+        from jarvis.llm import OpenAICompatibleBackend
+
+        # Real-world ConnectionError messages include the URL via the
+        # underlying urllib3 exception.
+        mock_post.side_effect = requests.exceptions.ConnectionError(
+            f"HTTPConnectionPool(host='internal-server.example.com', port=1234): "
+            f"Max retries exceeded with url: /v1/chat/completions"
+        )
+        backend = OpenAICompatibleBackend(self._SECRET_URL, api_key="sk-secret")
+
+        # ``chat`` re-raises so the caller can detect "server unreachable";
+        # the printed log line must not carry the URL or the API key.
+        with pytest.raises(requests.exceptions.ConnectionError):
+            backend.chat("any", [{"role": "user", "content": "hi"}])
+
+        captured = capsys.readouterr()
+        assert "internal-server.example.com" not in captured.out, (
+            "ConnectionError message must not echo the configured host"
+        )
+        assert "sk-secret" not in captured.out
+
+    @patch("requests.Session.post")
+    def test_generic_exception_message_does_not_leak_url_or_key(self, mock_post, capsys):
+        from jarvis.llm import OpenAICompatibleBackend
+
+        mock_post.side_effect = RuntimeError(
+            f"unexpected: {self._SECRET_URL}?api_key=sk-secret"
+        )
+        backend = OpenAICompatibleBackend(self._SECRET_URL, api_key="sk-secret")
+
+        backend.chat("any", [{"role": "user", "content": "hi"}])
+
+        captured = capsys.readouterr()
+        assert self._SECRET_URL not in captured.out
+        assert "sk-secret" not in captured.out
+
+    @patch("requests.Session.post")
     def test_extra_options_merge_at_payload_root(self, mock_post):
         """OpenAI takes ``temperature`` / ``max_tokens`` at the payload
         root, not under an ``options`` nest like Ollama. The merge must
@@ -400,7 +480,7 @@ class TestOpenAICompatibleChat:
 
 
 class TestOpenAICompatibleEmbed:
-    @patch("jarvis.llm.requests.post")
+    @patch("requests.Session.post")
     def test_returns_vector_from_data_array(self, mock_post):
         from jarvis.llm import OpenAICompatibleBackend
 
@@ -412,7 +492,7 @@ class TestOpenAICompatibleEmbed:
 
         assert backend.embed("hello", "text-embedding-3-small") == [0.1, 0.2, 0.3]
 
-    @patch("jarvis.llm.requests.post")
+    @patch("requests.Session.post")
     def test_returns_none_on_error(self, mock_post):
         from jarvis.llm import OpenAICompatibleBackend
 
@@ -421,7 +501,7 @@ class TestOpenAICompatibleEmbed:
 
         assert backend.embed("hello", "text-embedding-3-small") is None
 
-    @patch("jarvis.llm.requests.post")
+    @patch("requests.Session.post")
     def test_sends_authorization_when_api_key_set(self, mock_post):
         from jarvis.llm import OpenAICompatibleBackend
 
@@ -442,7 +522,7 @@ class TestOpenAICompatibleEmbed:
 
 
 class TestOpenAICompatibleListModels:
-    @patch("jarvis.llm.requests.get")
+    @patch("requests.Session.get")
     def test_returns_model_ids(self, mock_get):
         from jarvis.llm import OpenAICompatibleBackend
 
@@ -461,7 +541,7 @@ class TestOpenAICompatibleListModels:
 
         assert names == ["gpt-4o-mini", "lmstudio-community/gemma-3-4b-it-GGUF"]
 
-    @patch("jarvis.llm.requests.get")
+    @patch("requests.Session.get")
     def test_returns_empty_list_on_failure(self, mock_get):
         from jarvis.llm import OpenAICompatibleBackend
 
@@ -470,7 +550,7 @@ class TestOpenAICompatibleListModels:
 
         assert backend.list_models() == []
 
-    @patch("jarvis.llm.requests.get")
+    @patch("requests.Session.get")
     def test_returns_empty_list_when_data_field_missing(self, mock_get):
         from jarvis.llm import OpenAICompatibleBackend
 

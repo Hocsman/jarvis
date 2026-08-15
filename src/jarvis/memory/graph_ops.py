@@ -6,7 +6,9 @@ Keeps graph.py as a pure data store (SQLite only). This module handles:
 - Best-node traversal (greedy descent via recent → top → root entry points)
 - Auto-split when a node exceeds the token threshold
 
-All LLM calls use call_llm_direct from the local Ollama instance.
+All LLM calls go through the configured backend (factory dispatch on
+``cfg.llm_provider``); the local ``call_llm_direct`` wrapper is the
+single intercept point tests patch.
 """
 
 from __future__ import annotations
@@ -17,7 +19,13 @@ from dataclasses import dataclass, field
 from typing import Iterator, NamedTuple, Optional
 
 from ..debug import debug_log
-from ..llm import call_llm_direct
+from ..llm import get_llm_backend
+from .core import (
+    SECTION_PROFILE,
+    SECTION_RULES,
+    SOURCE_MIGRATED,
+    MemoryCore,
+)
 from .graph import (
     BRANCH_DIRECTIVES,
     BRANCH_USER,
@@ -31,16 +39,17 @@ from .graph import (
 )
 
 
-# Mapping from the branch id the extractor emits to its human-readable
-# label (what the prompt shows the model). Keeping this local so the
-# prompt can describe each branch in its own voice without leaking
-# storage identifiers into the model's output format.
-_BRANCH_LABELS = {
-    BRANCH_USER: "USER",
-    BRANCH_DIRECTIVES: "DIRECTIVES",
-    BRANCH_WORLD: "WORLD",
-}
-_LABEL_TO_BRANCH = {v: k for k, v in _BRANCH_LABELS.items()}
+def call_llm_direct(*, cfg, chat_model, system_prompt, user_content,
+                    timeout_sec=10.0, thinking=False, num_ctx=4096,
+                    temperature=None):
+    """Local indirection: route graph-ops LLM calls through the backend
+    configured by ``cfg.llm_provider``. Tests patch this single symbol
+    to intercept every LLM round-trip in this module."""
+    return get_llm_backend(cfg).direct(
+        chat_model, system_prompt, user_content,
+        timeout_sec=timeout_sec, thinking=thinking,
+        num_ctx=num_ctx, temperature=temperature,
+    )
 
 
 # ── Memory extraction from dialogue ───────────────────────────────────
@@ -48,18 +57,20 @@ _LABEL_TO_BRANCH = {v: k for k, v in _BRANCH_LABELS.items()}
 
 def extract_graph_memories(
     summary: str,
-    ollama_base_url: str,
-    ollama_chat_model: str,
+    cfg,
+    chat_model: str,
     timeout_sec: float = 30.0,
     thinking: bool = False,
     date_utc: Optional[str] = None,
-) -> list[tuple[str, str]]:
-    """Extract novel knowledge from a conversation summary, tagged by branch.
+) -> list[str]:
+    """Extract external facts the assistant looked up during a conversation.
 
-    Each returned fact is a ``(branch_id, fact_text)`` tuple. ``branch_id``
-    is one of ``BRANCH_USER``, ``BRANCH_DIRECTIVES``, ``BRANCH_WORLD`` — the
-    three fixed top-level graph branches. Callers route each fact into the
-    correct subtree during storage, preserving the purpose-shaped taxonomy.
+    Everything returned lands in the World branch. Facts about the user
+    and standing instructions are not extracted here at all: they belong
+    to the core, which is written only when the user asks for it or
+    corrects something (see ``core.spec.md``). Inferring them from a
+    summary is how a wrong belief gets into every future prompt without
+    the user ever being able to see where it came from.
 
     Returns an empty list if nothing novel was found.
 
@@ -68,38 +79,23 @@ def extract_graph_memories(
             Included as a date prefix on each fact for temporal context.
     """
     system_prompt = (
-        "You extract NOVEL KNOWLEDGE from a conversation and CLASSIFY each "
-        "piece into one of three branches of the assistant's memory. Each "
-        "fact must be a self-contained statement useful to recall in future "
-        "conversations, AND tagged with exactly one branch.\n\n"
-        "BRANCHES:\n"
-        "- USER: facts ABOUT the user — who they are, where they live, "
-        "their relationships, tastes, preferences, habits, plans, "
-        "opinions, history. Anything that answers 'what is true about "
-        "the user?'. Examples: 'The user is vegetarian', 'The user lives "
-        "in Hackney, London', 'The user enjoys dark sci-fi films like "
-        "Possessor'.\n"
-        "- DIRECTIVES: imperatives the user has issued AT the assistant "
-        "about its OWN behaviour — tone, verbosity, language, style "
-        "rules, do/don't instructions. These are RULES the assistant "
-        "must obey, not descriptions of the user. Examples: 'Always "
-        "answer in British English', 'Keep replies under three "
-        "sentences', 'Do not apologise or say sorry', 'Address the user "
-        "as Boss'. Heuristic: if the user is TELLING the assistant what "
-        "to do → DIRECTIVES; if TELLING the assistant about themselves "
-        "→ USER.\n"
-        "- WORLD: external facts the assistant looked up — films, "
-        "books, businesses, recipes, techniques, named entities, post-"
-        "cutoff events, corrections to assumptions. Write each as a "
-        "direct factual statement, NOT as 'the assistant said X' or "
-        "'the assistant told the user X' (meta-narrative is banned, "
-        "see below). Examples: 'Trenches Boxing Club in Hackney offers "
+        "You extract EXTERNAL FACTS the assistant looked up during a "
+        "conversation. Each fact must be a self-contained statement worth "
+        "recalling in a future conversation: films, books, businesses, "
+        "recipes, techniques, named entities, post-cutoff events, "
+        "corrections to wrong assumptions. Write each as a direct factual "
+        "statement. Examples: 'Trenches Boxing Club in Hackney offers "
         "evening classes', 'Possessor (2020) is a sci-fi horror film "
         "directed by Brandon Cronenberg', 'A soy-oyster-teriyaki glaze "
         "works well for air-fried chicken breast'.\n\n"
-        "EXTRACT:\n"
-        "- User facts, directives, world discoveries, practical "
-        "knowledge, post-cutoff events, corrections to defaults.\n\n"
+        "NEVER EXTRACT ANYTHING ABOUT THE USER. Not who they are, where "
+        "they live, their relationships, tastes, preferences, habits, "
+        "plans, or opinions. Not instructions they gave the assistant "
+        "about how to behave, answer, or write. The user states those "
+        "themselves and they are stored elsewhere; guessing at them from "
+        "a conversation is how a wrong belief about someone becomes "
+        "permanent. If a summary says the user is vegetarian, wants "
+        "shorter replies, or lives in Lyon, extract NONE of it.\n\n"
         "DO NOT EXTRACT — these are NEVER knowledge, no exceptions:\n"
         "- ASSISTANT-GENERATED RECOMMENDATIONS, ADVICE, OR SUGGESTIONS. "
         "If the assistant 'recommended X', 'suggested Y', 'advised Z' "
@@ -122,15 +118,16 @@ def extract_graph_memories(
         "- Vague, content-free statements ('user explored options').\n"
         "- Pure meta-interaction (greetings, thank-yous, requests for "
         "a recap).\n\n"
-        "MIXED SUMMARIES: a summary may interleave novel user-stated "
-        "facts with assistant recommendations and current weather / "
-        "time. Drop the bans below, but keep ALL user-stated facts in "
-        "the same summary — never emit `[]` just because part of the "
-        "summary was banned content. Example: 'It's 22°C in Hackney "
-        "right now. The user adopted a cat named Miso.' → extract "
-        "'The user adopted a cat named Miso', drop the weather.\n\n"
+        "MIXED SUMMARIES: a summary may interleave lookups with user "
+        "facts, assistant recommendations and current weather. Drop the "
+        "banned content and keep ALL the lookups in the same summary — "
+        "never emit `[]` just because part of the summary was banned. "
+        "Example: 'It is 22°C in Hackney right now. The user adopted a "
+        "cat named Miso. Miso is a Japanese word for fermented soybean "
+        "paste.' → extract only the meaning of the word, drop the "
+        "weather and drop the user's cat.\n\n"
         "BANNED FACT FORMS — never emit a fact whose text matches any "
-        "of these, regardless of branch:\n"
+        "of these:\n"
         "- ANY sentence that starts with 'The assistant ...' or 'I ...' "
         "(the assistant). This includes every verb: said, told, "
         "suggested, recommended, advised, proposed, provided, offered, "
@@ -138,8 +135,9 @@ def extract_graph_memories(
         "Meta-narrative about what the assistant did is never a fact — "
         "the underlying lookup, if any, is the fact, not the act of "
         "saying it.\n"
-        "- 'The user asked / enquired / wondered / requested ...' "
-        "(describes the user's question, not their knowledge)\n"
+        "- ANY sentence about the user: 'The user is / lives / likes / "
+        "wants / asked / prefers ...'. If the subject is the user, it "
+        "does not belong here.\n"
         "- ANY fact about current weather, temperature, sky condition, "
         "wind, cloud cover, humidity, time of day, or day of the week. "
         "This applies whether the place is named or not, and whether "
@@ -156,28 +154,21 @@ def extract_graph_memories(
         "Write facts as KNOWLEDGE, not as interaction descriptions:\n"
         "Wrong: 'User asked about boxing gyms'\n"
         "Right: 'Trenches Boxing Club in Hackney has evening classes'\n\n"
-        "One fact can produce BOTH a USER entry and a WORLD entry from "
-        "the same conversation turn — emit both. For example, if the "
-        "user says they love Possessor: emit 'The user enjoys the film "
-        "Possessor' (USER) AND 'Possessor (2020) is directed by Brandon "
-        "Cronenberg' (WORLD) if that was established.\n\n"
-        "Respond with ONLY a JSON array of objects of the exact shape "
-        '`{\"branch\": \"USER|DIRECTIVES|WORLD\", \"fact\": \"...\"}`. '
-        "If nothing novel was learned, respond with `[]`.\n"
+        "Respond with ONLY a JSON array of strings. If nothing novel was "
+        "learned, respond with `[]`.\n"
         "Example:\n"
-        '[{"branch": "USER", "fact": "The user follows an 1800 kcal daily meal plan"},\n'
-        ' {"branch": "DIRECTIVES", "fact": "Always answer in British English"},\n'
-        ' {"branch": "WORLD", "fact": "Trenches Boxing Club in Hackney offers evening classes"}]'
+        '["Trenches Boxing Club in Hackney offers evening classes",\n'
+        ' "Possessor (2020) is directed by Brandon Cronenberg"]'
     )
 
     # Include date so each fact carries temporal context
     date_prefix = f"(Date: {date_utc}) " if date_utc else ""
     user_content = (
-        f"Extract and classify novel knowledge from this conversation "
+        f"Extract novel external knowledge from this conversation "
         f"summary:\n{date_prefix}{summary}"
     )
 
-    debug_log(f"graph memory extraction: sending {len(summary)} chars to {ollama_chat_model}", "memory")
+    debug_log(f"graph memory extraction: sending {len(summary)} chars to {chat_model}", "memory")
 
     # Knowledge extraction is a rule-following classification task —
     # determinism beats creativity here. Ollama's default ~0.8 makes
@@ -185,8 +176,8 @@ def extract_graph_memories(
     # sometimes drifting back into meta-narrative or stale-snapshot
     # extraction); temperature=0 lets the prompt do its job consistently.
     response = call_llm_direct(
-        base_url=ollama_base_url,
-        chat_model=ollama_chat_model,
+        cfg=cfg,
+        chat_model=chat_model,
         system_prompt=system_prompt,
         user_content=user_content,
         timeout_sec=timeout_sec,
@@ -215,27 +206,18 @@ def extract_graph_memories(
         debug_log(f"graph memory extraction: JSON parse failed — {e}", "memory")
         return []
 
-    facts: list[tuple[str, str]] = []
+    facts: list[str] = []
     for item in parsed:
-        if not isinstance(item, dict):
+        # Small models drift towards the object shape they have seen in
+        # other extraction prompts, so a `{"fact": "..."}` wrapper is read
+        # rather than discarded. Model output is a boundary we don't own.
+        if isinstance(item, dict):
+            item = item.get("fact") or item.get("text") or ""
+        if not isinstance(item, str):
             continue
-        branch_label = str(item.get("branch") or "").strip().upper()
-        fact_text = str(item.get("fact") or "").strip()
-        if not fact_text:
-            continue
-        branch_id = _LABEL_TO_BRANCH.get(branch_label)
-        if branch_id is None:
-            # Unknown branch label → default to USER. Assistant is a
-            # personal agent; the common failure mode is the model
-            # emitting a bare fact string, and user-scoped context is
-            # the safer default for unclassified content.
-            debug_log(
-                f"graph memory extraction: unknown branch {branch_label!r}, "
-                f"defaulting to USER for: {fact_text[:60]!r}",
-                "memory",
-            )
-            branch_id = BRANCH_USER
-        facts.append((branch_id, fact_text))
+        fact_text = item.strip()
+        if fact_text:
+            facts.append(fact_text)
 
     debug_log(f"graph memory extraction: got {len(facts)} facts", "memory")
     return facts
@@ -247,8 +229,8 @@ def extract_graph_memories(
 def _llm_pick_best_child(
     fragment: str,
     children: list[MemoryNode],
-    ollama_base_url: str,
-    ollama_chat_model: str,
+    cfg,
+    chat_model: str,
     timeout_sec: float = 15.0,
     thinking: bool = False,
     picker_model: Optional[str] = None,
@@ -279,9 +261,9 @@ def _llm_pick_best_child(
     # Picker is a one-digit classification — reuse the small picker_model
     # when the caller provides one (resolved from intent_judge_model → chat_model).
     # Falls back to the chat model when no small model is configured.
-    effective_model = picker_model or ollama_chat_model
+    effective_model = picker_model or chat_model
     response = call_llm_direct(
-        base_url=ollama_base_url,
+        cfg=cfg,
         chat_model=effective_model,
         system_prompt=system_prompt,
         user_content=user_content,
@@ -309,8 +291,8 @@ def _llm_pick_best_child(
 def find_best_node(
     store: GraphMemoryStore,
     fragment: str,
-    ollama_base_url: str,
-    ollama_chat_model: str,
+    cfg,
+    chat_model: str,
     timeout_sec: float = 15.0,
     thinking: bool = False,
     picker_model: Optional[str] = None,
@@ -347,7 +329,7 @@ def find_best_node(
         if recent:
             debug_log(f"graph traversal: trying {len(recent)} recent nodes: {[n.name for n in recent]}", "memory")
             best = _llm_pick_best_child(
-                fragment, recent, ollama_base_url, ollama_chat_model,
+                fragment, recent, cfg, chat_model,
                 timeout_sec=timeout_sec, thinking=thinking, picker_model=picker_model,
             )
             if best is not None:
@@ -362,7 +344,7 @@ def find_best_node(
         if top:
             debug_log(f"graph traversal: trying {len(top)} top nodes: {[n.name for n in top]}", "memory")
             best = _llm_pick_best_child(
-                fragment, top, ollama_base_url, ollama_chat_model,
+                fragment, top, cfg, chat_model,
                 timeout_sec=timeout_sec, thinking=thinking, picker_model=picker_model,
             )
             if best is not None:
@@ -385,7 +367,7 @@ def find_best_node(
 
         debug_log(f"graph traversal: depth {depth}, choosing from {[c.name for c in children]}", "memory")
         best = _llm_pick_best_child(
-            fragment, children, ollama_base_url, ollama_chat_model,
+            fragment, children, cfg, chat_model,
             timeout_sec=timeout_sec, thinking=thinking, picker_model=picker_model,
         )
         if best is None:
@@ -406,48 +388,21 @@ def find_best_node(
 
 
 _MERGE_SYSTEM_PROMPT = (
-    "You curate a knowledge store. You are given the CURRENT facts on "
-    "a node and a NEW fact to incorporate. Produce the REVISED set of "
-    "facts that should replace the node's contents.\n\n"
-    "Apply these rules in order:\n"
-    "1. CONTRADICTION / REVERSAL: if the new fact contradicts, negates, "
-    "or updates the current value of the same attribute as an existing "
-    "fact, drop the old version. Examples: 'User dislikes coffee' "
-    "replaces 'User likes coffee'. 'User lives in Berlin' replaces "
-    "'User lives in Hackney'. 'User does not need a daily check-in' "
-    "replaces 'User has a need for a daily check-in' AND any line that "
-    "lists that same need as an interest.\n"
-    "2. DUPLICATION: drop existing lines that say the same thing as the "
-    "new fact, even with different wording, casing, or punctuation. "
-    "Keep one canonical phrasing.\n"
-    "3. CONSOLIDATION: when several existing facts describe the same "
-    "repeated activity across different days (e.g. 'ate sushi on "
-    "Monday', 'ate sushi on Thursday'), merge them into a pattern "
-    "('regularly eats sushi'). Preserve dates only for significant "
-    "one-off events (a job change, a move).\n"
-    "4. INDEPENDENCE: keep existing facts that describe a different "
-    "attribute, even if related. 'User ate a Big Mac' does NOT replace "
-    "'User is vegetarian' — leave both visible so the inconsistency "
-    "stays inspectable. Past-tense historical events ('Visited Paris "
-    "in 2023') coexist with current-state facts.\n"
-    "5. PRUNING: drop facts that are common knowledge already in your "
-    "training data (general nutrition trivia, well-known places, "
-    "public-figure basics). Only keep what is novel to you: user-"
-    "specific details, local / niche information, recent events after "
-    "your cutoff, corrections to default assumptions.\n"
-    "6. META-NARRATIVE: drop any line whose SUBJECT is the assistant "
-    "itself ('The assistant ...', 'I (the assistant) ...'). Verb "
-    "doesn't matter — said / suggested / recommended / advised / "
-    "is unable to / cannot — the subject is the tell. Drop e.g. "
-    "'The assistant is unable to navigate to a web page' and "
-    "'The assistant suggested grilled salmon'. Keep imperatives "
-    "addressed AT the assistant ('Always reply in British English') "
-    "— those are directives, not narration.\n"
-    "7. ORDER: keep the most enduring, identity-defining facts near "
-    "the top; transient / specific facts below.\n\n"
-    "Respond with ONLY a JSON object of shape `{\"facts\": [\"fact 1\", "
-    "\"fact 2\", ...]}`. Each fact is a self-contained sentence. No "
-    "prose outside the JSON, no explanations, no markdown fences."
+    "You curate a knowledge store. You are given the CURRENT facts on a node, and usually a NEW fact to incorporate. Write out the REVISED set of facts that replaces the node's contents, deciding line by line what you write. When no new fact is given, the job is the same rewrite with nothing to incorporate.\n"
+    '\n'
+    'Apply these rules in order:\n'
+    "1. CONTRADICTION / REVERSAL: if the new fact contradicts, negates, or updates the current value of the same attribute as an existing fact, drop the old version. Examples: 'User dislikes coffee' replaces 'User likes coffee'. 'User lives in Berlin' replaces 'User lives in Hackney'. '[2026-03-15] User's phone is a Pixel 9' replaces '[2025-12-01] User's phone is a Pixel 7' — the two dates do not make two facts, they make one fact and its earlier value. 'User does not need a daily check-in' replaces 'User has a need for a daily check-in' AND any line that lists that same need as an interest.\n"
+    '2. DUPLICATION: drop existing lines that say the same thing as the new fact, even with different wording, casing, or punctuation. Keep one canonical phrasing.\n'
+    "3. CONSOLIDATION: when several existing facts describe the same repeated activity across different days (e.g. 'ate sushi on Monday', 'ate sushi on Thursday'), merge them into a pattern ('regularly eats sushi'). Preserve dates only for significant one-off events (a job change, a move).\n"
+    "4. INDEPENDENCE: keep existing facts that describe a different attribute, even if related. 'User ate a Big Mac' does NOT replace 'User is vegetarian' — leave both visible so the inconsistency stays inspectable. Past-tense historical events ('Visited Paris in 2023') coexist with current-state facts.\n"
+    "5. PRUNING: drop generic filler nobody asked for — stock advice, encyclopaedic padding, how-to steps for everyday tasks. Being already in your training data is not by itself a reason to drop a line: these facts are on this node because the user asked about them, so an answer to a real question stays even when you already knew it ('Dune (2021) is directed by Denis Villeneuve' stays). This rule and the subject check below never point at the same line: narration about the assistant goes however novel it looks, an answer the user asked for stays however obvious it looks. If the two lines left in front of you are one of each, drop the narration and keep the answer.\n"
+    '6. ORDER: keep the most enduring, identity-defining facts near the top; transient / specific facts below.\n'
+    '\n'
+    "Then, as you write each line of the revised set, check it as you write it — whose sentence is this? If the line you are about to write has the assistant as its SUBJECT ('The assistant suggested grilled salmon', 'The assistant is unable to navigate to a web page', 'The assistant said / recommended / advised ...', 'I (the assistant) ...', or that same shape in any other language), do not write it. Just omit it. The revised set is shorter — that is correct. The verb does not matter; the subject is the tell.\n"
+    '\n'
+    "The check fires on the subject and nothing else: a line whose subject is the user, a person, a place, a film, a product or anything else in the world gets written, even if the assistant once looked it up; a line addressed AT the assistant in the imperative ('Always reply in British English') is a directive, not narration, and gets written.\n"
+    '\n'
+    'Respond with ONLY a JSON object of shape `{"facts": ["fact 1", "fact 2", ...]}`. Each fact is a self-contained sentence. No prose outside the JSON, no explanations, no markdown fences.'
 )
 
 
@@ -539,8 +494,8 @@ def merge_node_data(
     store: GraphMemoryStore,
     node_id: str,
     new_facts: list[str],
-    ollama_base_url: str,
-    ollama_chat_model: str,
+    cfg,
+    chat_model: str,
     timeout_sec: float = 20.0,
     thinking: bool = False,
     picker_model: Optional[str] = None,
@@ -610,9 +565,9 @@ def merge_node_data(
             f"consolidate / dedupe / prune only):\n{existing}"
         )
 
-    effective_model = picker_model or ollama_chat_model
+    effective_model = picker_model or chat_model
     response = call_llm_direct(
-        base_url=ollama_base_url,
+        cfg=cfg,
         chat_model=effective_model,
         system_prompt=_MERGE_SYSTEM_PROMPT,
         user_content=user_content,
@@ -687,8 +642,8 @@ def merge_node_data(
 def auto_split_node(
     store: GraphMemoryStore,
     node_id: str,
-    ollama_base_url: str,
-    ollama_chat_model: str,
+    cfg,
+    chat_model: str,
     timeout_sec: float = 45.0,
     thinking: bool = False,
 ) -> bool:
@@ -739,8 +694,8 @@ def auto_split_node(
     )
 
     response = call_llm_direct(
-        base_url=ollama_base_url,
-        chat_model=ollama_chat_model,
+        cfg=cfg,
+        chat_model=chat_model,
         system_prompt=system_prompt,
         user_content=user_content,
         timeout_sec=timeout_sec,
@@ -816,8 +771,8 @@ class GraphUpdateResult(NamedTuple):
 def update_graph_from_dialogue(
     store: GraphMemoryStore,
     summary: str,
-    ollama_base_url: str,
-    ollama_chat_model: str,
+    cfg,
+    chat_model: str,
     timeout_sec: float = 30.0,
     thinking: bool = False,
     date_utc: Optional[str] = None,
@@ -839,8 +794,8 @@ def update_graph_from_dialogue(
     # Step 1: Extract discrete branch-tagged facts from the summary
     facts = extract_graph_memories(
         summary=summary,
-        ollama_base_url=ollama_base_url,
-        ollama_chat_model=ollama_chat_model,
+        cfg=cfg,
+        chat_model=chat_model,
         timeout_sec=timeout_sec,
         thinking=thinking,
         date_utc=date_utc,
@@ -859,20 +814,20 @@ def update_graph_from_dialogue(
     # fact. Without batching, a 5-fact flush against a populated User
     # node fires 5 small-model rewrites of the same `data`; with
     # batching, it's one rewrite that incorporates all five.
-    pending: list[tuple[str, str, str]] = []  # (branch_id, fact, node_id)
+    pending: list[tuple[str, str]] = []  # (fact, node_id)
     seen_keys_per_node: dict[str, set[str]] = {}
     skipped = 0
-    for branch_id, fact in facts:
+    for fact in facts:
         try:
             node_id = find_best_node(
                 store=store,
                 fragment=fact,
-                ollama_base_url=ollama_base_url,
-                ollama_chat_model=ollama_chat_model,
+                cfg=cfg,
+                chat_model=chat_model,
                 timeout_sec=15.0,
                 thinking=thinking,
                 picker_model=picker_model,
-                branch_root_id=branch_id,
+                branch_root_id=BRANCH_WORLD,
             )
         except Exception as e:
             debug_log(f"graph update: traversal failed for '{fact[:50]}...' — {e}", "memory")
@@ -892,7 +847,7 @@ def update_graph_from_dialogue(
             skipped += 1
             debug_log(
                 f"graph update: skipped duplicate '{fact[:50]}...' → "
-                f"'{target_name}' [{branch_id}]",
+                f"'{target_name}'",
                 "memory",
             )
             continue
@@ -911,20 +866,19 @@ def update_graph_from_dialogue(
         if key:
             node_keys.add(key)
 
-        pending.append((branch_id, fact, node_id))
+        pending.append((fact, node_id))
 
     if not pending:
         debug_log("graph update: nothing to merge after dedupe", "memory")
         return GraphUpdateResult(stored=[], skipped=skipped)
 
     # Group by destination node so each node gets a single merge call.
-    by_node: dict[str, list[tuple[str, str]]] = {}
-    for branch_id, fact, node_id in pending:
-        by_node.setdefault(node_id, []).append((branch_id, fact))
+    by_node: dict[str, list[str]] = {}
+    for fact, node_id in pending:
+        by_node.setdefault(node_id, []).append(fact)
 
     stored: "list[tuple[str, str]]" = []
-    for node_id, items in by_node.items():
-        node_facts = [fact for _, fact in items]
+    for node_id, node_facts in by_node.items():
         node = store.get_node(node_id)
         node_name = node.name if node else node_id[:8]
 
@@ -948,8 +902,8 @@ def update_graph_from_dialogue(
                 store=store,
                 node_id=node_id,
                 new_facts=node_facts,
-                ollama_base_url=ollama_base_url,
-                ollama_chat_model=ollama_chat_model,
+                cfg=cfg,
+                chat_model=chat_model,
                 timeout_sec=20.0,
                 thinking=thinking,
                 picker_model=picker_model,
@@ -965,12 +919,12 @@ def update_graph_from_dialogue(
             # pattern, or treated as a near-duplicate) was not
             # newly learned and shouldn't be claimed as such.
             incorporated = set(merge_result.incorporated_indices)
-            for idx, (branch_id, fact) in enumerate(items):
+            for idx, fact in enumerate(node_facts):
                 if idx in incorporated:
                     stored.append((fact, node_name))
                     debug_log(
                         f"graph update: merged '{fact[:50]}...' → "
-                        f"'{node_name}' [{branch_id}]",
+                        f"'{node_name}'",
                         "memory",
                     )
                 else:
@@ -983,12 +937,12 @@ def update_graph_from_dialogue(
             # Cold start, merge failure, or guard rejection — fall
             # back to plain append for every queued fact so nothing
             # is lost.
-            for branch_id, fact in items:
+            for fact in node_facts:
                 store.append_to_node(node_id, fact)
                 stored.append((fact, node_name))
                 debug_log(
                     f"graph update: appended '{fact[:50]}...' → "
-                    f"'{node_name}' [{branch_id}] (merge skipped)",
+                    f"'{node_name}' (merge skipped)",
                     "memory",
                 )
 
@@ -1005,8 +959,8 @@ def update_graph_from_dialogue(
                 auto_split_node(
                     store=store,
                     node_id=node_id,
-                    ollama_base_url=ollama_base_url,
-                    ollama_chat_model=ollama_chat_model,
+                    cfg=cfg,
+                    chat_model=chat_model,
                     timeout_sec=45.0,
                     thinking=thinking,
                 )
@@ -1023,8 +977,8 @@ def update_graph_from_dialogue(
 
 def consolidate_all_populated_nodes(
     store: GraphMemoryStore,
-    ollama_base_url: str,
-    ollama_chat_model: str,
+    cfg,
+    chat_model: str,
     timeout_sec: float = 20.0,
     thinking: bool = False,
     picker_model: Optional[str] = None,
@@ -1059,8 +1013,8 @@ def consolidate_all_populated_nodes(
                 store=store,
                 node_id=node.id,
                 new_facts=[],
-                ollama_base_url=ollama_base_url,
-                ollama_chat_model=ollama_chat_model,
+                cfg=cfg,
+                chat_model=chat_model,
                 timeout_sec=timeout_sec,
                 thinking=thinking,
                 picker_model=picker_model,
@@ -1080,30 +1034,70 @@ def consolidate_all_populated_nodes(
         yield (node.name, before, after)
 
 
-# ── Warm profile (User + Directives) ─────────────────────────────────
+# ── Handing user knowledge over to the core ──────────────────────────
 
 
-def _collect_branch_text(
-    store: GraphMemoryStore, branch_root_id: str, max_chars: int,
-) -> str:
-    """Return the concatenated ``data`` of all nodes in a branch's subtree,
-    newest-touched first, truncated at ``max_chars``.
+# The graph branches whose contents belong in the core, and the core
+# section each one lands in.
+_BRANCH_TO_CORE_SECTION = {
+    BRANCH_USER: SECTION_PROFILE,
+    BRANCH_DIRECTIVES: SECTION_RULES,
+}
 
-    Used to build the warm blob. We walk the subtree breadth-first from
-    the branch root so fresher / more-touched nodes (ordered by the
-    store's decayed access score) appear first; content gets truncated
-    at the char cap so the system prompt stays bounded.
+
+def migrate_graph_branches_into_core(store: GraphMemoryStore, core: MemoryCore) -> int:
+    """Hand the user and directives branches over to the core files.
+
+    The core is the authority for what the assistant believes about its
+    user, so knowledge the graph accumulated under those two branches has
+    to reach the files the user can read and correct. Returns the number
+    of entries actually written.
+
+    A hand-over, not a copy: once a node's facts are safely in the core,
+    the node keeps its place in the tree but gives up its data. Leaving
+    the text behind would break the core's two central promises. Recall
+    still searches the graph, so a retired belief would be pulled back
+    into the prompt from the node it was copied from; and a line the user
+    pruned from their own file would be rewritten on the next start-up,
+    for ever. Emptying the source makes both impossible and makes the
+    migration a no-op on every subsequent run, since there is nothing
+    left to hand over.
+
+    A node is cleared only when every one of its facts reached the core.
+    Text the core already holds counts as arrived, so a partial run
+    finishes cleanly on the next boot; a write that fails leaves the
+    facts in the graph rather than losing them.
     """
-    root = store.get_node(branch_root_id)
-    if root is None:
-        return ""
+    written = 0
+    for branch_id, section in _BRANCH_TO_CORE_SECTION.items():
+        for node_id, facts in _walk_branch_nodes(store, branch_id):
+            handed_over = True
+            for text in facts:
+                if core.knows(section, text):
+                    continue
+                try:
+                    core.remember(section, text, source=SOURCE_MIGRATED)
+                    written += 1
+                except (OSError, ValueError) as e:
+                    handed_over = False
+                    debug_log(f"core migration skipped '{text[:40]}': {e}", "memory")
+            if handed_over:
+                store.update_node(node_id, data="")
+    if written:
+        debug_log(f"core migration: {written} entries moved from the graph", "memory")
+    return written
 
-    parts: list[str] = []
-    remaining = max_chars
-    # BFS ordered by sibling decayed-access score (get_children sorts).
+
+def _walk_branch_nodes(
+    store: GraphMemoryStore, branch_root_id: str,
+) -> Iterator[tuple[str, list[str]]]:
+    """Yield ``(node_id, facts)`` for every populated node in a subtree."""
+    if store.get_node(branch_root_id) is None:
+        return
+
     queue: list[str] = [branch_root_id]
     visited: set[str] = set()
-    while queue and remaining > 0:
+    while queue:
         node_id = queue.pop(0)
         if node_id in visited:
             continue
@@ -1111,78 +1105,8 @@ def _collect_branch_text(
         node = store.get_node(node_id)
         if node is None:
             continue
-        if node.data:
-            snippet = node.data.strip()
-            if len(snippet) > remaining:
-                snippet = snippet[: max(0, remaining - 1)].rstrip() + "…"
-            if snippet:
-                parts.append(snippet)
-                remaining -= len(snippet) + 1  # +1 for separator
+        facts = [line.strip() for line in _split_data_lines(node.data)]
+        if facts:
+            yield node_id, facts
         for child in store.get_children(node_id):
             queue.append(child.id)
-    return "\n".join(parts)
-
-
-def build_warm_profile(
-    store: GraphMemoryStore,
-    *,
-    user_max_chars: int = 1200,
-    directives_max_chars: int = 600,
-) -> dict[str, str]:
-    """Build the warm profile blob from the User and Directives branches.
-
-    Returned as a dict of ``{"user": "...", "directives": "..."}`` so
-    callers can render the two sections separately in the system prompt
-    (directives want a near-verbatim, imperative framing; user facts
-    want a descriptive framing). An empty string on either key means
-    the branch is empty — the caller should omit that section entirely,
-    not render an empty heading.
-
-    Call sites should cache this per-session and invalidate on writes
-    to the User or Directives branches, since it's injected on every
-    reply turn. Recomputing from the store on every turn is cheap
-    (SQLite reads only, no LLM calls) but still wasteful at scale.
-    """
-    return {
-        "user": _collect_branch_text(store, BRANCH_USER, user_max_chars),
-        "directives": _collect_branch_text(
-            store, BRANCH_DIRECTIVES, directives_max_chars,
-        ),
-    }
-
-
-def format_warm_profile_block(profile: dict[str, str]) -> str:
-    """Render a warm profile dict as a labelled block for the system prompt.
-
-    Returns an empty string when both sections are empty so the caller
-    can append unconditionally without introducing whitespace noise on
-    fresh installs with no accumulated memory.
-
-    The labels deliberately mirror the denial templates small models
-    produce under uncertainty ("I don't have information the user has
-    shared in prior conversations"). Naming the section exactly what
-    the denial refers to short-circuits the denial pattern — see the
-    CLAUDE.md note on denial-template mirroring.
-    """
-    user = (profile.get("user") or "").strip()
-    directives = (profile.get("directives") or "").strip()
-    if not user and not directives:
-        return ""
-
-    sections: list[str] = []
-    if user:
-        sections.append(
-            "INFORMATION THE USER HAS SHARED IN PRIOR CONVERSATIONS\n"
-            "(their identity, location, tastes, preferences, habits, "
-            "history — treat this as known context about the user, not "
-            "as new information you need to ask about):\n"
-            f"{user}"
-        )
-    if directives:
-        sections.append(
-            "STANDING INSTRUCTIONS FROM THE USER\n"
-            "(rules the user has told you to follow — obey these "
-            "verbatim, in every reply, without being reminded):\n"
-            f"{directives}"
-        )
-    return "\n\n".join(sections)

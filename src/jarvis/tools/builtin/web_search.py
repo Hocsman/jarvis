@@ -557,6 +557,12 @@ def _wikipedia_summary(
 class WebSearchTool(Tool):
     """Tool for performing web searches using DuckDuckGo."""
 
+    def risk_for(self, args):
+        """Looks at the world without changing it."""
+        from ..policy import RISK_READ
+
+        return RISK_READ
+
     @property
     def name(self) -> str:
         return "webSearch"

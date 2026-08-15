@@ -119,7 +119,7 @@ class TestMigrateLegacyShape:
         assert store.migrate_legacy_shape() is False
         assert store.get_node_count() == BOOTSTRAP_NODE_COUNT
 
-    def test_no_wipe_when_only_descendants_of_fixed_branches(self, store):
+    def test_nothing_removed_when_only_descendants_of_fixed_branches(self, store):
         """Children grown under User/Directives/World are fine — the shape
         check only looks at direct root children."""
         store.create_node(
@@ -132,14 +132,15 @@ class TestMigrateLegacyShape:
             n.name == "Identity" for n in store.get_all_nodes()
         )
 
-    def test_wipes_when_root_has_rogue_child(self, store):
-        """Pre-taxonomy nodes sitting directly under root trigger a wipe."""
+    def test_removes_a_rogue_child_of_root(self, store):
+        """Pre-taxonomy nodes sitting directly under root are unreachable,
+        so the migration takes them out."""
         store.create_node(
             name="People", description="pre-taxonomy category",
             data="Alice is a friend.", parent_id="root",
         )
         assert store.migrate_legacy_shape() is True
-        # After wipe: only root + seeded branches, no rogue child
+        # Only root + seeded branches are left, and no rogue child
         names = {n.name for n in store.get_all_nodes()}
         assert "People" not in names
         assert store.get_node_count() == BOOTSTRAP_NODE_COUNT
@@ -156,8 +157,8 @@ class TestMigrateLegacyShape:
         root = store.get_root()
         assert root.data == ""
 
-    def test_reseeds_fixed_branches_after_wipe(self, store):
-        """After a wipe the three fixed branches are present again."""
+    def test_reseeds_missing_fixed_branches(self, store):
+        """The three fixed branches are present after the migration."""
         store.create_node(
             name="Rogue", description="x", data="y", parent_id="root",
         )
@@ -606,3 +607,74 @@ class TestAccessDecay:
         top = store.get_top_nodes(limit=5)
         # Should not raise — zero access_count means score is 0
         assert all(n.access_count >= 0 for n in top)
+
+
+class TestSearchIgnoresAccents:
+    """A name typed with its accents finds a node written without them.
+
+    Nodes are filled by an extraction step that works in English and
+    routinely writes "Cafe Rouviere" or "Patricio Guzman". The user asks
+    in his own language and types the accents. SQLite's LIKE compares
+    code points, so the two never meet: the node is there, the search is
+    correct, and nothing is found.
+
+    It fails the way every defect in this area fails — quietly, in the
+    safe direction. She simply searches the web again, and the only
+    visible symptom is a bill.
+
+    Folding is Unicode-general rather than a list of French letters: the
+    same decomposition handles Turkish, Vietnamese, Greek and Cyrillic
+    diacritics, and this assistant has no fixed language.
+    """
+
+    def test_an_accented_query_finds_an_unaccented_node(self, store):
+        store.create_node(
+            name="Cafe Rouviere", description="A roaster",
+            data="Cafe Rouviere is known for its Yirgacheffe filter.",
+            parent_id=store.get_root().id,
+        )
+
+        assert store.search_nodes("rouvière")
+
+    def test_an_unaccented_query_finds_an_accented_node(self, store):
+        """The other direction matters just as much: she writes what he
+        said, and he later asks without bothering with the accents."""
+        store.create_node(
+            name="Café Rouvière", description="Un torréfacteur",
+            data="Le Café Rouvière est réputé pour son filtre Yirgacheffe.",
+            parent_id=store.get_root().id,
+        )
+
+        assert store.search_nodes("rouviere")
+
+    def test_it_is_not_a_list_of_french_letters(self, store):
+        """Turkish, here, because its dotted capital is the classic case
+        a hand-rolled table gets wrong."""
+        store.create_node(
+            name="Bogazici", description="A strait",
+            data="Bogazici is the Turkish name for the Bosphorus.",
+            parent_id=store.get_root().id,
+        )
+
+        assert store.search_nodes("Boğaziçi")
+
+    def test_case_folds_beyond_ascii(self, store):
+        """SQLite's LIKE lowercases ASCII only, so an accented capital
+        never matched its lowercase form either."""
+        store.create_node(
+            name="Ecole", description="A school",
+            data="École normale is in Paris.",
+            parent_id=store.get_root().id,
+        )
+
+        assert store.search_nodes("école")
+
+    def test_a_word_that_is_simply_absent_still_finds_nothing(self, store):
+        """Folding must widen matching, not blur it."""
+        store.create_node(
+            name="Cafe Rouviere", description="A roaster",
+            data="Cafe Rouviere is known for its Yirgacheffe filter.",
+            parent_id=store.get_root().id,
+        )
+
+        assert store.search_nodes("bogazici") == []

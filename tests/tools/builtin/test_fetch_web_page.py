@@ -17,6 +17,16 @@ def _make_response_mock(**attrs) -> Mock:
     resp = Mock(**attrs)
     resp.__enter__ = Mock(return_value=resp)
     resp.__exit__ = Mock(return_value=False)
+    # The body is streamed under a byte ceiling rather than read whole,
+    # so the double has to stream too: a mock that only answers
+    # `.content` measures a shape production no longer has.
+    corps = attrs.get("content")
+    if corps is None:
+        texte = attrs.get("text")
+        corps = texte.encode("utf-8") if isinstance(texte, str) else b""
+    resp.iter_content = Mock(return_value=iter([corps]))
+    if "encoding" not in attrs:
+        resp.encoding = "utf-8"
     return resp
 
 
@@ -125,7 +135,13 @@ class TestFetchWebPageTool:
         result = self.tool.run(args, self.context)
         assert isinstance(result, ToolExecutionResult)
         assert result.success is False
-        assert "failed" in result.reply_text.lower() or "error" in result.reply_text.lower()
+        # "not-a-url" becomes "https://not-a-url", whose DNS does not
+        # resolve, so the public-web guard turns it away before any
+        # request is made. What matters is that it is refused and says
+        # so, not which of the two wordings it used.
+        texte = result.reply_text.lower()
+        assert ("failed" in texte or "error" in texte
+                or "not on the public web" in texte)
 
     @patch('requests.get')
     def test_run_with_links_extraction(self, mock_get):

@@ -77,6 +77,7 @@ class OllamaBackend(LLMBackend):
         thinking: bool = False,
         num_ctx: int = 4096,
         temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ) -> Optional[str]:
         """Direct LLM call without temporal context, location, or other
         ``ask_coach`` features.
@@ -101,6 +102,9 @@ class OllamaBackend(LLMBackend):
         options: Dict[str, Any] = {"num_ctx": num_ctx}
         if temperature is not None:
             options["temperature"] = temperature
+        if max_tokens is not None:
+            # Ollama spells the generation cap ``num_predict``.
+            options["num_predict"] = max_tokens
 
         payload: Dict[str, Any] = {
             "model": chat_model,
@@ -206,26 +210,58 @@ class OllamaBackend(LLMBackend):
         extra_options: Optional[Dict[str, Any]] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         thinking: bool = False,
+        on_token: Optional[Callable[[str], None]] = None,
     ) -> Optional[Dict[str, Any]]:
+        # ``on_token`` is accepted for interface parity but not yet honoured
+        # here: Ollama streams JSON-lines rather than SSE, so it needs its own
+        # reassembly path. Buffering is a correct (if less lively) fallback —
+        # the returned value is the same either way, which is what the
+        # contract guarantees. Progressive display matters most on the cloud
+        # path, where round-trip latency is highest.
+        if on_token is not None:
+            debug_log("OllamaBackend.chat: streaming not implemented, buffering", "llm")
         """Send an arbitrary messages array to Ollama and return the
         raw response JSON. Caller is responsible for interpreting
         assistant content (including JSON / tool calls).
 
         Main agentic chat uses ``num_ctx=8192`` so the system prompt
         (tool list + protocol guidance + memory context) does not
-        overflow and force Ollama to truncate — which previously
-        dropped the tool schema on smaller models like ``gemma4:e2b``,
-        tipping them into their pre-trained ``tool_code`` scaffolding.
+        overflow and force Ollama to truncate the tool schema — small
+        models like ``gemma4:e2b`` then fall back to pre-trained
+        ``tool_code`` scaffolding instead of producing valid tool calls.
         """
         payload: Dict[str, Any] = {
             "model": chat_model,
             "messages": messages,
             "stream": False,
             "options": {"num_ctx": 8192},
-            "think": thinking,
         }
+        # A request carrying tools never says ``think: false``. Ollama reads
+        # an explicit false as an instruction about the model's reasoning
+        # mode, and on a model that has no such mode it suppresses native
+        # tool calls outright: measured on gemma4:e2b, the same request
+        # scores 3/3 tool calls with the key absent and 0/3 with the flag,
+        # for ``remember`` and ``getWeather`` alike.
+        #
+        # Only tool-carrying requests drop it. On tool-free calls the flag
+        # earns its place: the same model extracts nothing at all from a
+        # summary once it is free to ramble, so the knowledge extractor
+        # fell from 5/5 to 3/5 eval cases when this was applied blanket.
+        # Callers can still force the flag either way via ``extra_options``.
+        if thinking or not tools:
+            payload["think"] = thinking
+        # ``extra_options`` keys land at the Ollama wire root for known
+        # request-level fields (``keep_alive``, ``format``, ``think``); the
+        # rest fold into the sampling-options dict. The split lets callers
+        # pin per-request keep-alive without learning Ollama's wire shape.
         if extra_options and isinstance(extra_options, dict):
-            payload["options"].update(extra_options)
+            for key, value in extra_options.items():
+                if key in {"keep_alive", "format", "think"}:
+                    payload[key] = value
+                elif key == "options" and isinstance(value, dict):
+                    payload["options"].update(value)
+                else:
+                    payload["options"][key] = value
 
         if tools and isinstance(tools, list) and len(tools) > 0:
             payload["tools"] = tools
@@ -241,18 +277,22 @@ class OllamaBackend(LLMBackend):
         except requests.exceptions.Timeout:
             print("  ⏱️ LLM request timed out", flush=True)
             return None
-        except requests.exceptions.ConnectionError as e:
-            print(f"  ❌ LLM connection error: {e}", flush=True)
-            return None
+        except requests.exceptions.ConnectionError:
+            # Bubble out so callers (e.g. the intent judge) can distinguish
+            # "server unreachable" from a transient error and apply their own
+            # back-off policy.
+            print("  ❌ LLM connection error", flush=True)
+            raise
         except requests.exceptions.HTTPError as e:
             if e.response is not None and e.response.status_code == 400 and tools:
                 raise ToolsNotSupportedError(
                     f"Model {chat_model!r} returned HTTP 400 — native tools API not supported"
                 )
-            print(f"  ❌ LLM HTTP error: {e}", flush=True)
+            status = e.response.status_code if e.response is not None else "?"
+            print(f"  ❌ LLM HTTP error (status {status})", flush=True)
             return None
         except Exception as e:
-            print(f"  ❌ LLM error: {e}", flush=True)
+            print(f"  ❌ LLM error ({type(e).__name__})", flush=True)
             return None
 
         return None
@@ -297,3 +337,31 @@ class OllamaBackend(LLMBackend):
             return names
         except Exception:
             return []
+
+    def warm_up(
+        self,
+        model: str,
+        timeout_sec: float = 60.0,
+        keep_alive: str = "30m",
+    ) -> bool:
+        """Issue a minimal ``/api/generate`` request so Ollama loads ``model``
+        into resident memory for the requested ``keep_alive`` duration.
+        Best-effort: errors are swallowed so callers never crash on warmup
+        failure."""
+        if not self._base_url or not model:
+            return False
+        try:
+            resp = requests.post(
+                f"{self._base_url}/api/generate",
+                json={
+                    "model": model,
+                    "prompt": "",
+                    "stream": False,
+                    "keep_alive": keep_alive,
+                    "options": {"num_predict": 1},
+                },
+                timeout=timeout_sec,
+            )
+            return resp.status_code == 200
+        except Exception:
+            return False

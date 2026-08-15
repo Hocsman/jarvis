@@ -15,6 +15,8 @@ from enum import Enum
 from typing import Dict, List, Optional, TYPE_CHECKING
 
 from ..debug import debug_log
+from ..llm import LLMBackend
+from .naming import is_plain_name, one_line
 
 if TYPE_CHECKING:
     from .base import Tool
@@ -29,7 +31,7 @@ class ToolSelectionStrategy(Enum):
 
 
 # Tools that must always be available regardless of selection strategy.
-_ALWAYS_INCLUDED = {"stop"}
+_ALWAYS_INCLUDED = {"stop", "remember", "forget"}
 
 # Minimum number of tools to return from similarity-based strategies.
 # Prevents overly aggressive filtering that would leave the model with nothing useful.
@@ -142,11 +144,16 @@ def _select_keyword(
         scored.append((name, score))
 
     matched = [name for name, score in scored if score > 0]
-    matched = _ensure_always_included(matched, builtin_tools, mcp_tools)
 
-    if len(matched) <= len(_ALWAYS_INCLUDED):
+    # The fallback is for a query nothing matched at all. It runs before
+    # the mandatory tools are added, so plain emptiness is the test:
+    # discounting a mandatory tool here would read a correct single-tool
+    # answer as a failure and hand the model the whole catalogue instead.
+    if not matched:
         debug_log("Keyword tool selection found no matches, falling back to all tools", "planning")
         return _all_tool_names(builtin_tools, mcp_tools)
+
+    matched = _ensure_always_included(matched, builtin_tools, mcp_tools)
 
     debug_log(f"Keyword tool selection: {len(matched)}/{len(builtin_tools) + len(mcp_tools)} tools selected", "planning")
     return matched
@@ -160,16 +167,15 @@ def _select_embedding(
     query: str,
     builtin_tools: Dict[str, "Tool"],
     mcp_tools: Dict[str, "ToolSpec"],
-    embed_base_url: str,
+    embedding_backend: LLMBackend,
     embed_model: str,
     embed_timeout_sec: float,
 ) -> List[str]:
     """Rank tools by cosine similarity between query and tool description embeddings."""
     import numpy as np
-    from ..memory.embeddings import get_embedding
 
     # Embed the query.
-    query_vec = get_embedding(query, embed_base_url, embed_model, timeout_sec=embed_timeout_sec)
+    query_vec = embedding_backend.embed(query, embed_model, timeout_sec=embed_timeout_sec)
     if query_vec is None:
         debug_log("Embedding tool selection: failed to embed query, falling back to all tools", "planning")
         return _all_tool_names(builtin_tools, mcp_tools)
@@ -191,7 +197,7 @@ def _select_embedding(
         all_tools[name] = _tool_summary(name, spec.description)
 
     for name, summary in all_tools.items():
-        tool_vec = get_embedding(summary, embed_base_url, embed_model, timeout_sec=embed_timeout_sec)
+        tool_vec = embedding_backend.embed(summary, embed_model, timeout_sec=embed_timeout_sec)
         if tool_vec is None:
             continue
         tool_arr = np.array(tool_vec, dtype=np.float32)
@@ -234,11 +240,43 @@ def _select_embedding(
 # Strategy: llm
 # ---------------------------------------------------------------------------
 
+# How much of a description the router is shown. Whole sentences only:
+# a description cut mid-word tells the router something its author did
+# not write, and the half that survives is usually the invitation rather
+# than the restriction — "Call this ONLY when the user explicitly asks
+# you to" truncates to an unfinished clause whose meaning is the
+# opposite of the sentence it came from.
+_ROUTER_SUMMARY_CHARS = 200
+
+
+def _router_summary(description: str) -> str:
+    """The tool as the router reads it: complete sentences, within budget.
+
+    Falls back to the first sentence when even that is over budget — a
+    long first sentence read whole is still truthful, where the same
+    sentence cut is not.
+    """
+    # Flattened first. A description is third-party text read from a
+    # list where one entry is one line, so its own line breaks would
+    # open an entry of its own — a tool that does not exist, described
+    # however the server likes.
+    text = one_line(description)
+    if len(text) <= _ROUTER_SUMMARY_CHARS:
+        return text
+
+    kept = ""
+    for sentence in re.findall(r"[^.!?]*[.!?]", text):
+        if kept and len(kept) + len(sentence) > _ROUTER_SUMMARY_CHARS:
+            break
+        kept += sentence
+    return (kept or text).strip()
+
+
 def _select_llm(
     query: str,
     builtin_tools: Dict[str, "Tool"],
     mcp_tools: Dict[str, "ToolSpec"],
-    llm_base_url: str,
+    llm_backend: LLMBackend,
     llm_model: str,
     llm_timeout_sec: float,
     context_hint: Optional[str] = None,
@@ -255,15 +293,20 @@ def _select_llm(
     missing or partial (e.g. location failed to resolve) — the router simply
     has less context and falls back to tool-selection on content.
     """
-    from ..llm import call_llm_direct
-
     catalogue_lines: List[str] = []
     for name, tool in builtin_tools.items():
         if name in _ALWAYS_INCLUDED:
             continue
-        catalogue_lines.append(f"- {name}: {tool.description[:120]}")
+        catalogue_lines.append(f"- {name}: {_router_summary(tool.description)}")
     for name, spec in mcp_tools.items():
-        catalogue_lines.append(f"- {name}: {spec.description[:120]}")
+        # Filtered here as well as at discovery, so no future source of
+        # tools can route round it. A name that cannot be written on a
+        # line writes a second one instead, offering the model a tool
+        # nobody installed.
+        if not is_plain_name(name):
+            debug_log(f"tool omitted from router catalogue, unwritable name", "planning")
+            continue
+        catalogue_lines.append(f"- {name}: {_router_summary(spec.description)}")
     catalogue = "\n".join(catalogue_lines)
 
     sys_prompt = (
@@ -328,8 +371,8 @@ def _select_llm(
     )
 
     try:
-        resp = call_llm_direct(
-            llm_base_url, llm_model, sys_prompt, user_prompt,
+        resp = llm_backend.direct(
+            llm_model, sys_prompt, user_prompt,
             timeout_sec=llm_timeout_sec,
         )
     except Exception as e:
@@ -361,11 +404,17 @@ def _select_llm(
     if len(selected) > _LLM_MAX_SELECTED:
         selected = selected[:_LLM_MAX_SELECTED]
 
-    selected = _ensure_always_included(selected, builtin_tools, mcp_tools)
-
-    if len(selected) <= len(_ALWAYS_INCLUDED):
+    # As in the keyword strategy, the check runs before the mandatory
+    # tools are added, so it asks whether the router named anything at
+    # all. A router that answers "remember" to "remember that I am
+    # vegetarian" has understood the query perfectly, and treating that
+    # as empty would bury the right tool in a 12-tool catalogue that a
+    # small model then fails to pick from.
+    if not selected:
         debug_log("LLM tool selection matched nothing, falling back to keyword strategy", "planning")
         return _select_keyword(query, builtin_tools, mcp_tools)
+
+    selected = _ensure_always_included(selected, builtin_tools, mcp_tools)
 
     debug_log(f"LLM tool selection: {len(selected)}/{len(known)} tools selected", "planning")
     return selected
@@ -380,9 +429,11 @@ def select_tools(
     builtin_tools: Dict[str, "Tool"],
     mcp_tools: Dict[str, "ToolSpec"],
     strategy: ToolSelectionStrategy = ToolSelectionStrategy.ALL,
-    llm_base_url: str = "",
+    *,
+    llm_backend: Optional[LLMBackend] = None,
     llm_model: str = "",
     llm_timeout_sec: float = 8.0,
+    embedding_backend: Optional[LLMBackend] = None,
     embed_model: str = "",
     embed_timeout_sec: float = 10.0,
     context_hint: Optional[str] = None,
@@ -391,15 +442,19 @@ def select_tools(
     Return a list of tool names relevant to *query*.
 
     Args:
-        query:            User's text query.
-        builtin_tools:    Registry of builtin Tool instances.
-        mcp_tools:        Registry of discovered MCP ToolSpec entries.
-        strategy:         ToolSelectionStrategy enum value.
-        llm_base_url:     Ollama base URL (needed for llm/embedding strategies).
-        llm_model:        Chat model name (needed for "llm" strategy).
-        llm_timeout_sec:  Timeout for the LLM call.
-        embed_model:      Embedding model name (needed for "embedding" strategy).
-        embed_timeout_sec: Timeout for embedding calls.
+        query:              User's text query.
+        builtin_tools:      Registry of builtin Tool instances.
+        mcp_tools:          Registry of discovered MCP ToolSpec entries.
+        strategy:           ToolSelectionStrategy enum value.
+        llm_backend:        Chat backend (needed for "llm" strategy). Construct
+                            from settings via ``get_llm_backend(cfg)``.
+        llm_model:          Chat model name (needed for "llm" strategy).
+        llm_timeout_sec:    Timeout for the LLM call.
+        embedding_backend:  Embedding backend (needed for "embedding" strategy).
+                            Construct via ``get_embedding_backend(cfg)``.
+        embed_model:        Embedding model name (needed for "embedding" strategy).
+        embed_timeout_sec:  Timeout for embedding calls.
+        context_hint:       Optional facts/dialogue surface for the LLM router.
 
     Returns:
         List of tool name strings.
@@ -407,14 +462,20 @@ def select_tools(
     if strategy == ToolSelectionStrategy.KEYWORD:
         return _select_keyword(query, builtin_tools, mcp_tools)
     elif strategy == ToolSelectionStrategy.EMBEDDING:
+        if embedding_backend is None:
+            debug_log("Embedding tool selection: no backend supplied, falling back to all tools", "planning")
+            return _all_tool_names(builtin_tools, mcp_tools)
         return _select_embedding(
             query, builtin_tools, mcp_tools,
-            llm_base_url, embed_model, embed_timeout_sec,
+            embedding_backend, embed_model, embed_timeout_sec,
         )
     elif strategy == ToolSelectionStrategy.LLM:
+        if llm_backend is None:
+            debug_log("LLM tool selection: no backend supplied, falling back to keyword strategy", "planning")
+            return _select_keyword(query, builtin_tools, mcp_tools)
         return _select_llm(
             query, builtin_tools, mcp_tools,
-            llm_base_url, llm_model, llm_timeout_sec,
+            llm_backend, llm_model, llm_timeout_sec,
             context_hint=context_hint,
         )
     else:

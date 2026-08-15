@@ -89,7 +89,7 @@ The intent judge receives full context and makes intelligent decisions:
 
 **Wake-word removal in the extracted query:** The wake word is addressed TO the assistant, never part of the query content. The judge prompt explicitly instructs removing every occurrence of the wake word from the extracted `query` — at the start, end, or middle of the sentence, including when it sits next to a named entity (e.g. "movie called Possessor Jarvis" → film is "Possessor", not "Possessor Jarvis"). The only exception is when the user is literally talking *about* the assistant as a subject ("tell me about Jarvis"). This is enforced by prompt rule + example rather than post-hoc string stripping, because the LLM already understands the semantic distinction and can handle cases a regex would mishandle (e.g. proper names that contain the wake word, like "Jarvis Cocker").
 
-**Model residency (`keep_alive: 30m`):** Each intent-judge request asks Ollama to keep the model resident for 30 minutes after the call. This avoids cold reloads between utterances — without it, Ollama evicts the model after its default 5-minute idle window and the next judge call pays the full reload cost (seconds of extra latency), which is long enough to hit `intent_judge_timeout_sec` and abort. The trade-off is memory: the judge model (default `gemma4:e2b`, ~2 GB) stays resident in RAM/VRAM during active voice sessions. On memory-constrained devices the user can switch to a smaller judge model or override `keep_alive` via a custom Ollama setup.
+**Model residency (`keep_alive`):** Each intent-judge request asks Ollama to keep the model resident after the call. The default duration is 30 minutes, which avoids cold reloads between utterances. When `cfg.low_power_mode` is true, the duration is 1 minute so the model can unload soon after an active exchange. The trade-off is latency: low-power sessions can pay a cold-load cost after idle periods, while default sessions keep the judge model (default `gemma4:e2b`, ~2 GB) in RAM/VRAM during active voice use.
 
 ## Startup & Model Warmup
 
@@ -113,9 +113,12 @@ The weather example adapts to location availability: if `location_enabled` is tr
 On small models, a caveat line is appended above a more involved example to set expectations (`⚠️ Small model in use (…). Assume it can't infer — spell out the steps for anything more involved:`). The Chrome MCP tip continues to appear as its own block when the browser tool is detected.
 
 **What gets warmed:**
-- **Whisper** — loading the model; additionally a silent-audio transcribe so the first real utterance doesn't pay the cold-decode cost. Both the MLX and faster-whisper backends do this.
-- **Chat model** (`cfg.ollama_chat_model`) — a minimal Ollama `/api/generate` request with `keep_alive=30m` so the weights stay resident.
-- **Intent judge model** (`cfg.intent_judge_model`) — same pattern. If it points at the same Ollama model as the chat model, a single warmup covers both roles (Ollama loads the weights once).
+- **Whisper**: loading the model; additionally a silent-audio transcribe so the first real utterance doesn't pay the cold-decode cost. Both the MLX and faster-whisper backends do this.
+- **Chat model** (`cfg.llm_chat_model`): a minimal Ollama `/api/generate` request with the configured power-mode `keep_alive` so the weights stay resident.
+- **Intent judge model** (`cfg.intent_judge_model`): same pattern. If it points at the same Ollama model as the chat model, a single warmup covers both roles (Ollama loads the weights once).
+- **Tool router model**: warmed only when `tool_selection_strategy == "llm"` and the resolved router model is distinct from the chat and intent-judge models.
+
+**Low-power mode:** When `cfg.low_power_mode` is true, the listener skips chat, intent-judge, and router warmup threads and prints `🌱 Low power mode: LLM warmup skipped`. Whisper still warms because speech recognition needs to be ready before the listener can accept input. The first LLM-backed engagement after startup or idle loads models on demand.
 
 **Concurrency:** LLM warmups run in daemon threads started before Whisper loads, so they overlap with Whisper initialisation. After Whisper finishes, the listener joins the warmup threads with a **single 60 s budget** shared across them all. If the budget is exhausted, the listener continues (with a `⏳ Some models still warming — continuing anyway` notice) and the first engagement pays the cold-load cost on demand.
 
@@ -304,7 +307,7 @@ If the intent judge later rejects the query (and no hot window override applies)
 | `whisper_min_confidence` | 0.3 | Minimum `avg_logprob`-derived confidence score for a transcribed segment. Segments below this are discarded before the intent judge sees them. |
 | `whisper_no_speech_threshold` | 0.5 | Hard cutoff on Whisper's `no_speech_prob` field. Any segment at or above this value is discarded **regardless of `avg_logprob`** — Whisper can be confident about a hallucinated phrase even when no real speech is present (e.g. the "MBC 뉴스" hallucination on background noise). This filter runs before the `avg_logprob` check so it catches high-confidence hallucinations that would otherwise survive. Applies to both the faster-whisper and MLX backends. |
 
-Note: Intent judge is always used when available (no enable flag). Falls back to simple wake word detection when Ollama is unavailable.
+Note: the intent judge has no enable flag. A connection error puts it in a 30-second back-off during which `judge()` returns without calling the backend; the listener still takes its no-verdict path, so the hot-window override keeps the follow-up and the unavailability is printed to standard output. Outside a hot window, text-based wake detection answers as usual.
 
 ## State Transitions
 
@@ -355,6 +358,30 @@ If judge rejects but in hot window and non-echo:
     → Override rejection, dispatch as query
 ```
 
+## Speaking Something Produced Elsewhere
+
+Some replies are not answers to an utterance: a tool approved by a click
+on a card runs on its own worker, and the sentence describing what
+happened has to be said out loud.
+
+That worker never speaks. It calls `enqueue_reply(text)`, and the
+listener says it on its own thread, through the same `_speak_reply` path
+it uses for its own replies. Two speakers would both write the echo
+detector's record of what was last said, and the next transcript would
+then be compared against the wrong sentence — which is how a user's
+answer gets deleted as an echo.
+
+**The drain runs at the top of the consumer loop**, before the audio
+`get`, not in its `queue.Empty` branch. The audio callback delivers a
+frame every `vad_frame_ms`, so on a live microphone the queue is never
+empty and an idle-only drain never runs at all.
+
+**One reply per pass, and none while she is already speaking.** `TTS.speak`
+holds its completion callback in a single engine-level slot, so a second
+call before the first finishes overwrites the first's callback — and that
+callback is what reopens the listening window. Anything still queued
+waits for the next pass, at most one frame away.
+
 ## Fallback Behaviour
 
 When components are unavailable, the system degrades gracefully:
@@ -385,3 +412,33 @@ Currently, echo is handled at the transcript level via fuzzy text matching and t
 - Add 10-50ms latency
 
 **Current recommendation:** The transcript-level echo detection (fuzzy matching + intent judge) is sufficient and simpler. Consider AEC only if transcript-level detection proves inadequate in practice.
+
+## The word that wakes her
+
+`whisper_min_confidence` (0.3) is computed from `avg_logprob`, and that
+is a poor judge of a proper noun the model has never seen — which is
+exactly why "Yuba" comes back as "Youba", "Nuba", "Juba". The segment
+carrying the wake word scores low, is dropped, and the sentence that
+follows arrives with no wake word in it and is ignored. She then looks
+broken, which is the one failure a wake word cannot afford.
+
+A segment about to be dropped for confidence is kept when it matches the
+wake word, using the same matcher the detector runs a moment later. The
+wake word is configured, not a language pattern, and keeping the segment
+decides nothing: the detector and the intent judge both still apply.
+
+Everything else stays dropped. In one afternoon's logs, 38 segments went
+to this filter and 36 were a television and a conversation in the room —
+lifting the bar for all of them would send every one to the intent judge.
+
+## Salvaging his speech out of a merged echo chunk
+
+Whisper sometimes hands back one segment holding the tail of her reply and the start of his. `salvage_after_echo_tail` finds the rightmost five-word window resembling her last twenty words and keeps what follows.
+
+**What is discarded has to look like her, not just the seam.** Checking only the seam was a destructive defect: when he corrects her he necessarily reuses her wording, so the winning window is found inside his own sentence and the correction is thrown away. Measured, "no my next meeting is at three o'clock can you check again" came back as "can you check again".
+
+The prefix test uses `ratio`, not `partial_ratio`: the discarded half must be substantially the same string as her tail rather than merely contain a fragment of it. Over two replies, real echo prefixes score 57-60 and his own words 34-52, where `partial_ratio` puts them at 94-95 against 81-88 and separates nothing. The threshold sits at 55 and ties lean towards keeping — her words left at the front of his sentence are noise the intent judge reads past, while a wrong cut destroys the correction and the caller overwrites the transcript buffer, so nothing downstream can recover it.
+
+The trigger upstream is purely temporal: he began speaking within the echo tolerance of her finishing. "There was no echo" is therefore exactly the case this fires on, which is why the text-level test has to carry the decision.
+
+A known, measured limit: the scan takes the rightmost matching window, so it eats the first word of his real speech — "who else is coming" comes back as "else is coming". Left alone deliberately, and pinned by a test so a future change has something to compare against.

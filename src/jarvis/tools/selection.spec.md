@@ -27,6 +27,8 @@ Controlled by `tool_selection_strategy` in config:
 
 Regardless of strategy, these tools are **always** included:
 - `stop` — needed so the user can dismiss the assistant at any time.
+- `remember` — an explicit "remember that…" must never be silently dropped because the router failed to offer the tool. Being always available is safe here because the tool is inert unless the user asked for it, and because every write lands in a plain-text file the user can read and edit.
+- `forget` — same argument, with more at stake: a user asking for something to be removed and being told "done" while it stays in every later prompt is the worst outcome the core can produce.
 
 ### Keyword Strategy
 
@@ -97,5 +99,5 @@ Called from the reply engine (Step 6) before `generate_tools_json_schema()` and 
 
 - Key: `tool_router_model`
 - Type: `str`
-- Default: `""` (empty string — resolves to `intent_judge_model`, then `ollama_chat_model`)
-- Effect: when `tool_selection_strategy == "llm"`, this model is used for the routing call. Resolution order for the empty default: `intent_judge_model` first (small, fast, already warm for wake-word paths and structurally the same classification job), then `ollama_chat_model` as a last resort. Override `tool_router_model` explicitly to decouple routing from both — useful when you want routing on a dedicated third model.
+- Default: `""` (empty string — resolves to `intent_judge_model`, then `llm_chat_model`)
+- Effect: when `tool_selection_strategy == "llm"`, this model is used for the routing call. Resolution order for the empty default: `intent_judge_model` first (small, fast, already warm for wake-word paths and structurally the same classification job), then `llm_chat_model` as a last resort. Override `tool_router_model` explicitly to decouple routing from both — useful when you want routing on a dedicated third model.

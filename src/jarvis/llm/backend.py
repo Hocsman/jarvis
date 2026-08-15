@@ -48,9 +48,18 @@ class LLMBackend(ABC):
         thinking: bool = False,
         num_ctx: int = 4096,
         temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ) -> Optional[str]:
         """Single-shot system+user prompt; returns the assistant text or
-        ``None`` on timeout / error / empty response."""
+        ``None`` on timeout / error / empty response.
+
+        ``max_tokens`` caps the generation. The classification-shaped callers
+        (tool router, memory extractor, digests) have bounded output — a list
+        of tool names, a small JSON object — but an uncapped model rambles
+        well past it: measured 200-358 tokens for a ~35-token answer, and the
+        wasted tokens are pure latency on a remote endpoint. Set it generously
+        (2-3x the expected answer) so a slightly long reply is never truncated
+        mid-JSON."""
 
     @abstractmethod
     def streaming(
@@ -75,12 +84,20 @@ class LLMBackend(ABC):
         extra_options: Optional[Dict[str, Any]] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         thinking: bool = False,
+        on_token: Optional[Callable[[str], None]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Arbitrary-messages chat. Returns the raw response dict so the
         caller (today: the reply engine) can inspect both content and
         ``tool_calls``. Raises :class:`ToolsNotSupportedError` when the
         model rejects the ``tools`` parameter so the caller can fall
-        back to text-based tool calling without losing the turn."""
+        back to text-based tool calling without losing the turn.
+
+        ``on_token``, when given, receives content deltas as the model
+        generates them, so a UI can render the reply progressively. The
+        return value must be identical whether or not it is supplied —
+        streaming is an additional output channel, never a different
+        result. Implementations that cannot stream must still accept the
+        argument and may ignore it."""
 
     @abstractmethod
     def embed(
@@ -99,3 +116,17 @@ class LLMBackend(ABC):
         """List the model names the runtime currently has loaded /
         available locally. Returns an empty list on error or when the
         runtime exposes no listing endpoint."""
+
+    def warm_up(
+        self,
+        model: str,
+        timeout_sec: float = 60.0,
+        keep_alive: str = "30m",
+    ) -> bool:
+        """Page ``model`` into the runtime's resident memory ahead of the
+        first real request. Default implementation is a no-op suitable for
+        runtimes without per-call model unloading (OpenAI-compatible servers
+        keep models warm at server load time). Backends that benefit from
+        explicit warmup (e.g. Ollama, which unloads after ``keep_alive``)
+        override to perform the runtime-specific ping."""
+        return True

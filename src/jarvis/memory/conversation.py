@@ -5,12 +5,43 @@ import time
 import threading
 from collections import OrderedDict
 from datetime import datetime, timezone
-from typing import Iterator, Optional, List, Tuple, Union, Callable
+from typing import Any, Iterator, Optional, List, Tuple, Union, Callable
 from .db import Database
-from ..llm import call_llm_direct
-from .embeddings import get_embedding
+from ..llm import get_embedding_backend, get_llm_backend
 from ..debug import debug_log
 from ..utils.redact import redact, scrub_secrets
+
+
+def _direct_llm(cfg, system_prompt: str, user_content: str, *,
+                timeout_sec: float = 30.0, thinking: bool = False) -> Optional[str]:
+    """Single intercept for chat-direct calls in this module. Tests patch
+    ``conversation._direct_llm`` to capture every diary/summary LLM round-trip
+    without reaching through the backend ABC."""
+    return get_llm_backend(cfg).direct(
+        cfg.llm_chat_model, system_prompt, user_content,
+        timeout_sec=timeout_sec, thinking=thinking,
+    )
+
+
+def _stream_llm(cfg, system_prompt: str, user_content: str, *,
+                on_token: Callable[[str], None],
+                timeout_sec: float = 30.0, thinking: bool = False) -> Optional[str]:
+    """Streaming counterpart to ``_direct_llm`` — same patch-point property."""
+    return get_llm_backend(cfg).streaming(
+        cfg.llm_chat_model, system_prompt, user_content,
+        on_token=on_token, timeout_sec=timeout_sec, thinking=thinking,
+    )
+
+
+def _embed_text(text: str, cfg, *, timeout_sec: float = 15.0) -> Optional[list[float]]:
+    """Embed ``text`` via the configured embedding backend. Returns ``None``
+    on any failure so callers can fall back to FTS-only paths."""
+    try:
+        return get_embedding_backend(cfg).embed(
+            text, cfg.embedding_model, timeout_sec=timeout_sec,
+        )
+    except Exception:
+        return None
 
 
 _UNTRUSTED_FENCE_BEGIN = "<<<BEGIN UNTRUSTED WEB EXTRACT>>>"
@@ -58,8 +89,8 @@ This task applies in every language. Do NOT translate the output — keep the or
 
 def _rewrite_diary_summary(
     summary: str,
-    ollama_base_url: str,
-    ollama_chat_model: str,
+    cfg,
+    *,
     timeout_sec: float = 30.0,
 ) -> Optional[str]:
     """Ask the chat model to remove deflection narration from one summary.
@@ -83,9 +114,8 @@ def _rewrite_diary_summary(
             f"{_UNTRUSTED_FENCE_END}\n\n"
             "Return the cleaned text only."
         )
-        raw = call_llm_direct(
-            ollama_base_url,
-            ollama_chat_model,
+        raw = _direct_llm(
+            cfg,
             _REWRITE_DEFLECTION_SYSTEM_PROMPT,
             user_prompt,
             timeout_sec=timeout_sec,
@@ -104,10 +134,9 @@ def _rewrite_diary_summary(
     # around the response despite the instructions. Two shapes are common:
     #   "```optional-tag\n<content>\n```"  — the canonical multi-line shape
     #   "```<content>```"                  — single-line, malformed but seen
-    # Both must be unwrapped: the previous regex-only path treated the
-    # single-line shape as one giant opening fence and consumed the whole
-    # response, tripping the empty-rewrite guard and dropping a clean
-    # rewrite for no good reason.
+    # Walking the prefix character by character handles both without the
+    # giant-greedy-regex failure mode where a single-line wrap consumes
+    # the whole response and trips the empty-rewrite guard.
     cleaned = raw.strip()
     if cleaned.startswith("```"):
         cleaned = cleaned[3:]
@@ -132,9 +161,8 @@ def _rewrite_diary_summary(
 
 def rewrite_all_diary_summaries(
     db: Database,
-    ollama_base_url: str,
-    ollama_chat_model: str,
-    ollama_embed_model: Optional[str] = None,
+    cfg,
+    *,
     embed_timeout_sec: float = 15.0,
     rewrite_timeout_sec: float = 30.0,
 ) -> Iterator[dict]:
@@ -145,11 +173,10 @@ def rewrite_all_diary_summaries(
     of when each summary was *originally* written must survive a
     maintenance pass.
 
-    Regenerates the row's vector embedding inline when both
-    ``ollama_base_url`` and ``ollama_embed_model`` are provided and the
-    DB has VSS enabled. Embedding regeneration is *best-effort*: if the
-    embedding service fails we still keep the cleaned summary, since the
-    FTS index stays consistent via SQLite triggers regardless.
+    Regenerates the row's vector embedding inline when the DB has VSS
+    enabled. Embedding regeneration is *best-effort*: if the embedding
+    service fails we still keep the cleaned summary, since the FTS index
+    stays consistent via SQLite triggers regardless.
 
     Yields one event dict per row as the walk progresses. Event payload
     contains *only* counts and the date — never raw summary text — so
@@ -168,7 +195,7 @@ def rewrite_all_diary_summaries(
 
     Mirrors ``optimise_diary_topics`` for shape and privacy guarantees.
     """
-    can_reembed = bool(ollama_base_url and ollama_embed_model and db.is_vss_enabled)
+    can_reembed = bool(cfg.embedding_model and db.stores_embeddings)
 
     rows = db.get_all_conversation_summaries()
     for row in rows:
@@ -189,8 +216,7 @@ def rewrite_all_diary_summaries(
 
         cleaned = _rewrite_diary_summary(
             original,
-            ollama_base_url,
-            ollama_chat_model,
+            cfg,
             timeout_sec=rewrite_timeout_sec,
         )
         if cleaned is None:
@@ -261,11 +287,8 @@ def rewrite_all_diary_summaries(
         if can_reembed:
             try:
                 text_for_embedding = f"{cleaned_stripped} {row['topics'] or ''}"
-                vec = get_embedding(
-                    text_for_embedding,
-                    ollama_base_url,
-                    ollama_embed_model,
-                    timeout_sec=embed_timeout_sec,
+                vec = _embed_text(
+                    text_for_embedding, cfg, timeout_sec=embed_timeout_sec,
                 )
                 if vec is not None:
                     db.upsert_summary_embedding(summary_id, vec)
@@ -374,9 +397,8 @@ def _apply_topic_mapping(
 
 def optimise_diary_topics(
     db: Database,
-    ollama_base_url: str,
-    ollama_chat_model: str,
-    ollama_embed_model: Optional[str] = None,
+    cfg,
+    *,
     embed_timeout_sec: float = 15.0,
 ) -> Iterator[dict]:
     """Normalise topic tags across every ``conversation_summaries`` row.
@@ -429,9 +451,8 @@ def optimise_diary_topics(
     mapping: dict[str, str | list[str]] = {}
     try:
         user_content = "\n".join(unique_topics)
-        raw = call_llm_direct(
-            ollama_base_url,
-            ollama_chat_model,
+        raw = _direct_llm(
+            cfg,
             _TOPIC_OPTIMISE_SYSTEM_PROMPT,
             user_content,
             timeout_sec=60.0,
@@ -463,7 +484,7 @@ def optimise_diary_topics(
         return
 
     # Apply the mapping to each row.
-    can_reembed = bool(ollama_base_url and ollama_embed_model and db.is_vss_enabled)
+    can_reembed = bool(cfg.embedding_model and db.stores_embeddings)
     for row in rows:
         date_utc = row["date_utc"]
         original_topics = row["topics"] or ""
@@ -525,11 +546,8 @@ def optimise_diary_topics(
             if can_reembed:
                 try:
                     text_for_embedding = f"{row['summary'] or ''} {new_topics}"
-                    vec = get_embedding(
-                        text_for_embedding,
-                        ollama_base_url,
-                        ollama_embed_model,
-                        timeout_sec=embed_timeout_sec,
+                    vec = _embed_text(
+                        text_for_embedding, cfg, timeout_sec=embed_timeout_sec,
                     )
                     if vec is not None:
                         db.upsert_summary_embedding(summary_id, vec)
@@ -736,6 +754,159 @@ class DialogueMemory:
         self._lock = threading.RLock()  # Reentrant lock for thread safety
         # Track the last profile used for follow-up detection
         self._last_profile: Optional[str] = None
+        # The one action waiting on the user's say-so, and the turn
+        # counter that bounds how long a spoken answer stays valid. Held
+        # here because this is the object voice and text already share.
+        # In memory only: see raise_pending.
+        self._pending: Optional[object] = None
+        self._turn_seq: int = 0
+        self._turn_seq_by_origin: dict = {}
+
+    # ── The action waiting on the user ────────────────────────────────
+    #
+    # One slot, in memory, cleared by a restart. Not the hot cache, which
+    # evicts under load and would let a busy router discard a destructive
+    # action mid-question; not a module global, which unattended routines
+    # on their own threads would trample; and not the database, because a
+    # deletion proposed before a crash and approved after it is an
+    # approval given without the context that produced it.
+
+    def begin_turn(self, origin: Optional[str] = None) -> int:
+        """Open a turn on ``origin`` and return its number.
+
+        Counted per origin, because "the turn immediately after" has to
+        mean the next turn *on the channel the question was asked on*. A
+        single global counter would let a chat turn — or the resume
+        worker's own turn — advance the number past a voice question that
+        nobody had a chance to answer yet, disqualifying a perfectly
+        timely spoken yes.
+        """
+        with self._lock:
+            self._turn_seq += 1
+            nxt = self._turn_seq_by_origin.get(origin, 0) + 1
+            self._turn_seq_by_origin[origin] = nxt
+            return nxt
+
+    def current_turn(self, origin: Optional[str] = None) -> int:
+        with self._lock:
+            return self._turn_seq_by_origin.get(origin, 0)
+
+    def raise_pending(self, action):
+        """Hold ``action`` as the question awaiting an answer.
+
+        Returns the held request, which is ``action`` itself unless the
+        same call is already waiting — the model re-proposing a tool it
+        was just asked about is a re-ask, not a second question, and it
+        keeps the original id so the ledger records one episode rather
+        than a queue of duplicates. Returns None when a *different*
+        question is already waiting: one card at a time, so a three-step
+        plan asks about its first step instead of stacking questions the
+        user has to disentangle.
+        """
+        with self._lock:
+            held = self._pending
+            if held is not None and not held.has_expired():
+                if held.fingerprint != action.fingerprint:
+                    return None
+                # A re-ask moves into the current turn, or the answer to
+                # it would arrive one turn too late to be accepted. It
+                # does NOT restart the deadline: `created_monotonic`
+                # carries over, so a model that re-proposes the same tool
+                # every turn cannot hold a card open indefinitely. The
+                # deadline belongs to the moment the user was first
+                # asked.
+                # The origin moves with it. A question first raised by
+                # voice and re-raised from the chat window belongs to the
+                # chat window now, or the surface that just asked cannot
+                # accept the answer it is about to get.
+                from dataclasses import replace
+
+                self._pending = replace(
+                    held,
+                    raised_at_turn=action.raised_at_turn,
+                    origin=action.origin,
+                )
+                return self._pending
+
+            self._pending = action
+            return action
+
+    def peek_pending(self):
+        """The waiting question, without consuming it."""
+        with self._lock:
+            return self._pending
+
+    def take_pending_for_utterance(self, origin: Optional[str], turn_seq: int):
+        """Claim the question if this utterance is entitled to answer it.
+
+        Entitled means: the question invited a spoken answer, it came
+        from the same place this utterance did, and this is the turn
+        immediately after it was asked. Anything else leaves the record
+        alone — the card is still on screen and the click door is still
+        the right way to settle it.
+
+        Consuming here rather than after the answer is read is the whole
+        safety story: the record is gone before the judge runs, before
+        the digest is compared and before anything executes.
+        """
+        from ..tools.confirmation import CHANNEL_PAROLE
+
+        with self._lock:
+            held = self._pending
+            if held is None:
+                return None
+            if held.channel != CHANNEL_PAROLE:
+                return None
+            if held.origin != origin:
+                return None
+            if held.raised_at_turn != turn_seq - 1:
+                return None
+            if held.has_expired():
+                return None
+
+            self._pending = None
+            return held
+
+    def take_pending_by_id(self, request_id: str):
+        """Claim the question named by a deliberate gesture.
+
+        Atomic, and good exactly once: a double-click, or a click racing
+        the expiry sweep, must produce one execution or the gate is not a
+        gate.
+        """
+        with self._lock:
+            held = self._pending
+            if held is None or held.request_id != request_id:
+                return None
+            if held.has_expired():
+                return None
+
+            self._pending = None
+            return held
+
+    def take_expired_pending(self):
+        """Claim the held question if its deadline has passed.
+
+        Returns it and lets it go, or None when nothing is held and when
+        what is held can still be answered. The caller settles it: this
+        object has no database, and a question that ends with no ledger
+        row is a question the Activity tab still shows as waiting.
+
+        `raise_pending` overwrites a stale card, so without this the
+        displaced episode leaves with the object and its `demandé` row
+        stays open for ever.
+        """
+        with self._lock:
+            held = self._pending
+            if held is None or not held.has_expired():
+                return None
+            self._pending = None
+            return held
+
+    def clear_pending(self) -> None:
+        """Drop the waiting question, unanswered."""
+        with self._lock:
+            self._pending = None
 
     def _next_ts(self) -> float:
         """Return a strictly-monotonic timestamp.
@@ -1096,8 +1267,8 @@ class DialogueMemory:
 def generate_conversation_summary(
     recent_chunks: List[str],
     previous_summary: Optional[str],
-    ollama_base_url: str,
-    ollama_chat_model: str,
+    cfg,
+    *,
     timeout_sec: float = 30.0,
     on_token: Optional[Callable[[str], None]] = None,
     thinking: bool = False,
@@ -1108,16 +1279,13 @@ def generate_conversation_summary(
     Args:
         recent_chunks: List of conversation chunks to summarise
         previous_summary: Previous summary for today (if any)
-        ollama_base_url: Ollama API base URL
-        ollama_chat_model: Model to use
+        cfg: Settings object — used for backend dispatch and chat model
         timeout_sec: Request timeout
         on_token: Optional callback for streaming tokens (for live UI updates)
 
     Returns:
         Tuple of (summary, topics) where topics is comma-separated
     """
-    from ..llm import call_llm_direct, call_llm_streaming
-
     chunks_text = "\n".join(recent_chunks[-10:])  # Last 10 chunks to keep context manageable
 
     system_prompt = """You are a conversation summariser for a personal AI assistant. Your job is to create concise daily summaries of conversations that will be stored in a diary for future reference.
@@ -1192,6 +1360,12 @@ Create a summary that:
      GOOD: "The user asked about the movie Possessor; the assistant said it is a 2020 science-fiction horror film directed by Brandon Cronenberg. Separately, the user asked about the name Jarvis; the assistant said the MCU character Jarvis is an AI created by Tony Stark and later embodied by Vision."
 
    This rule applies in any language.
+9. CRITICAL language rule — write the summary in the language the conversation was held in, not the language of these instructions. These instructions are in English; that says nothing about what you should write. A conversation held in French is summarised in French, one held in Turkish in Turkish, and so on for every language, including ones not named anywhere in this prompt.
+   - Never translate. The words the user chose are part of what happened, and a translated summary quietly replaces them with yours.
+   - When the conversation mixed languages, use the one the user spoke most; keep quoted phrases in their original language whatever you choose.
+   - This applies to the summary. The topic keywords follow the same language.
+
+   The reason is not stylistic. This diary is read by the user directly, and it is read by other parts of the assistant that write into files the user keeps in their own language. A summary in the wrong language hands them sentences about themselves that they did not say.
 
 Also extract 3-5 main topics as comma-separated keywords."""
 
@@ -1223,13 +1397,13 @@ TOPICS: [topic1, topic2, topic3]"""
     try:
         # Use streaming if callback provided, otherwise use direct call
         if on_token:
-            response = call_llm_streaming(
-                ollama_base_url, ollama_chat_model, system_prompt, user_prompt,
+            response = _stream_llm(
+                cfg, system_prompt, user_prompt,
                 on_token=on_token, timeout_sec=timeout_sec, thinking=thinking,
             )
         else:
-            response = call_llm_direct(
-                ollama_base_url, ollama_chat_model, system_prompt, user_prompt,
+            response = _direct_llm(
+                cfg, system_prompt, user_prompt,
                 timeout_sec=timeout_sec, thinking=thinking,
             )
 
@@ -1262,9 +1436,8 @@ TOPICS: [topic1, topic2, topic3]"""
 def update_daily_conversation_summary(
     db: Database,
     new_chunks: List[str],
-    ollama_base_url: str,
-    ollama_chat_model: str,
-    ollama_embed_model: str,
+    cfg,
+    *,
     source_app: str = "jarvis",
     voice_debug: bool = False,
     timeout_sec: float = 30.0,
@@ -1301,7 +1474,7 @@ def update_daily_conversation_summary(
 
         # Generate updated summary using redacted chunks
         summary, topics = generate_conversation_summary(
-            redacted_chunks, previous_summary, ollama_base_url, ollama_chat_model,
+            redacted_chunks, previous_summary, cfg,
             timeout_sec=timeout_sec, on_token=on_token, thinking=thinking,
         )
 
@@ -1329,11 +1502,15 @@ def update_daily_conversation_summary(
             source_app=source_app,
         )
 
-        # Generate and store embedding for semantic search
-        if db.is_vss_enabled:
+        # Generate and store embedding for semantic search. Gated on
+        # somewhere to put it as well as a model to make it with: the
+        # search reads whichever store exists, so writing has to follow
+        # the same rule, and an embedding nothing can hold is a
+        # round-trip paid for nothing.
+        if db.stores_embeddings and cfg.embedding_model:
             # Combine summary and topics for embedding
             text_for_embedding = f"{summary} {topics}"
-            vec = get_embedding(text_for_embedding, ollama_base_url, ollama_embed_model, timeout_sec=15.0)  # Use shorter timeout for embeddings
+            vec = _embed_text(text_for_embedding, cfg, timeout_sec=15.0)
             if vec is not None:
                 db.upsert_summary_embedding(summary_id, vec)
 
@@ -1346,10 +1523,10 @@ def update_daily_conversation_summary(
 def search_conversation_memory_by_keywords(
     db: Database,
     keywords: List[str],
+    cfg,
+    *,
     from_time: Optional[str] = None,
     to_time: Optional[str] = None,
-    ollama_base_url: Optional[str] = None,
-    ollama_embed_model: Optional[str] = None,
     timeout_sec: float = 60.0,
     voice_debug: bool = False,
     max_results: int = 10,
@@ -1361,10 +1538,9 @@ def search_conversation_memory_by_keywords(
     Args:
         db: Database instance
         keywords: List of keywords to search for (will be OR'd together)
+        cfg: Settings — used for embedding backend dispatch
         from_time: Start timestamp (ISO format)
         to_time: End timestamp (ISO format)
-        ollama_base_url: Base URL for embeddings
-        ollama_embed_model: Model for embeddings
         timeout_sec: Timeout for embedding generation
         voice_debug: Enable debug output
         max_results: Maximum number of results to return (default: 10)
@@ -1386,7 +1562,13 @@ def search_conversation_memory_by_keywords(
         debug_log(f"      🔍 Keyword-based search for: {clean_keywords}", "memory")
 
         # Build FTS OR query for better recall
-        fts_query = " OR ".join(clean_keywords[:5])  # Limit to 5 keywords
+        # Words, not syntax. `_normalize_fts_query` builds the FTS5
+        # expression, and joining with " OR " here handed it an operator
+        # it lowercases into a search term: "boxing OR club" became the
+        # phrase "boxing or club" and matched nothing. It went unseen
+        # while the builder was unreachable, because the fallback passed
+        # the operator through untouched and the accident worked.
+        fts_query = " ".join(clean_keywords[:5])  # Limit to 5 keywords
 
         # For embedding, combine keywords to get semantic meaning of the topic cluster
         embed_query = " ".join(clean_keywords)
@@ -1394,9 +1576,12 @@ def search_conversation_memory_by_keywords(
         debug_log(f"      📝 FTS query: '{fts_query}'", "memory")
         debug_log(f"      📝 Embed query: '{embed_query}'", "memory")
 
-        if ollama_base_url and ollama_embed_model:
+        # Same rule as the write side: no store, no round-trip. A query
+        # vector with nothing to compare it against costs a hop per turn
+        # and changes no result.
+        if cfg.embedding_model and db.stores_embeddings:
             try:
-                vec = get_embedding(embed_query, ollama_base_url, ollama_embed_model, timeout_sec=timeout_sec)
+                vec = _embed_text(embed_query, cfg, timeout_sec=timeout_sec)
                 vec_json = json.dumps(vec) if vec is not None else None
 
                 if vec_json:
@@ -1452,11 +1637,11 @@ def search_conversation_memory_by_keywords(
 
 def search_conversation_memory(
     db: Database,
+    cfg,
+    *,
     search_query: Optional[str] = None,
     from_time: Optional[str] = None,
     to_time: Optional[str] = None,
-    ollama_base_url: Optional[str] = None,
-    ollama_embed_model: Optional[str] = None,
     timeout_sec: float = 60.0,
     voice_debug: bool = False,
     max_results: int = 15,
@@ -1467,11 +1652,10 @@ def search_conversation_memory(
 
     Args:
         db: Database instance
+        cfg: Settings — used for embedding backend dispatch
         search_query: Natural language query or phrase to search for
         from_time: Start timestamp (ISO format)
         to_time: End timestamp (ISO format)
-        ollama_base_url: Base URL for embeddings (required if search_query provided)
-        ollama_embed_model: Model for embeddings (required if search_query provided)
         timeout_sec: Timeout for embedding generation
         voice_debug: Enable debug output
         max_results: Maximum number of results to return (default: 15)
@@ -1482,10 +1666,10 @@ def search_conversation_memory(
     contexts = []
 
     try:
-        if search_query and search_query.strip() and ollama_base_url and ollama_embed_model:
+        if search_query and search_query.strip() and cfg.embedding_model:
             # Primary: Use vector search for semantic similarity
             try:
-                vec = get_embedding(search_query, ollama_base_url, ollama_embed_model, timeout_sec=timeout_sec)
+                vec = _embed_text(search_query, cfg, timeout_sec=timeout_sec)
                 vec_json = json.dumps(vec) if vec is not None else None
 
                 if vec_json:
@@ -1593,35 +1777,31 @@ def search_conversation_memory(
 def get_relevant_conversation_context(
     db: Database,
     query: str,
-    ollama_base_url: str,
-    ollama_embed_model: str,
+    cfg,
+    *,
     timeout_sec: float = 60.0,
     max_results: int = 15,
 ) -> List[str]:
-    """
-    Get relevant conversation summaries that might provide context for the current query.
+    """Return conversation summaries semantically relevant to ``query``.
 
-    Returns list of formatted context strings.
-
-    This is a wrapper around search_conversation_memory for backward compatibility.
+    Thin wrapper around :func:`search_conversation_memory` for callers
+    that only need the simple "give me the top N matches" path.
     """
     return search_conversation_memory(
         db=db,
+        cfg=cfg,
         search_query=query,
-        ollama_base_url=ollama_base_url,
-        ollama_embed_model=ollama_embed_model,
         timeout_sec=timeout_sec,
         voice_debug=False,
-        max_results=max_results
+        max_results=max_results,
     )
 
 
 def update_diary_from_dialogue_memory(
     db: Database,
     dialogue_memory: DialogueMemory,
-    ollama_base_url: str,
-    ollama_chat_model: str,
-    ollama_embed_model: str,
+    cfg,
+    *,
     source_app: str = "jarvis",
     voice_debug: bool = False,
     timeout_sec: float = 30.0,
@@ -1674,9 +1854,7 @@ def update_diary_from_dialogue_memory(
         summary_id = update_daily_conversation_summary(
             db=db,
             new_chunks=pending_chunks,
-            ollama_base_url=ollama_base_url,
-            ollama_chat_model=ollama_chat_model,
-            ollama_embed_model=ollama_embed_model,
+            cfg=cfg,
             source_app=source_app,
             voice_debug=voice_debug,
             timeout_sec=timeout_sec,
@@ -1714,8 +1892,8 @@ def update_diary_from_dialogue_memory(
                     result = update_graph_from_dialogue(
                         store=graph_store,
                         summary=summary_text,
-                        ollama_base_url=ollama_base_url,
-                        ollama_chat_model=ollama_chat_model,
+                        cfg=cfg,
+                        chat_model=cfg.llm_chat_model,
                         timeout_sec=graph_timeout,
                         thinking=thinking,
                         date_utc=today,

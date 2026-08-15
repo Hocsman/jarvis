@@ -33,6 +33,21 @@ _REDACTION_RULES: list[tuple[re.Pattern[str], str]] = [
 ]
 
 
+# The shape every rule above leaves behind, labelled or bare. Anything
+# that keeps user text long-term needs to tell a real value from the
+# marker left where one used to be: the model only ever sees redacted
+# text, so "remember my email" arrives here as a placeholder, and storing
+# that keeps nothing while telling the user their email was saved.
+_PLACEHOLDER_RE = re.compile(r"\[REDACTED(?:_[A-Z0-9_]+)?\]")
+
+
+def contains_redaction_placeholder(text: str | None) -> bool:
+    """Whether ``text`` carries a marker left by :func:`redact`."""
+    if not text:
+        return False
+    return bool(_PLACEHOLDER_RE.search(text))
+
+
 def redact(text: str, max_len: int = 8000) -> str:
     scrubbed = text
     for pattern, repl in _REDACTION_RULES:
