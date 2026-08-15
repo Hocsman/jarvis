@@ -13,7 +13,10 @@ What survives from the GL design
 --------------------------------
 - Geometry (``geometry.build_icosphere`` / ``build_particles``) stays
   unchanged: the icosphere is now projected to 2D per frame.
-- ``AudioBus`` still feeds (rms, bass, mid, high) per frame.
+- ``AudioBus`` supplies (rms, bass, mid, high) per frame. In the
+  same process it is tapped from the audio callback; in subprocess
+  mode nothing publishes across the boundary, so it reads zero and
+  the orb animates on breath and drift alone.
 - ``StateController`` still drives colour / intensity / displacement
   through cubic-eased transitions.
 - The shader files (``shaders/orb.vert``, ``shaders/orb.frag``) are
@@ -115,10 +118,10 @@ class OrbWidget(QWidget):
         # octaves of distinct pseudo-noise. Three octaves is enough to
         # give the surface organic micro-motion without leaving the
         # Python-loop FPS budget.
-        # Phase 1 used two phases (slow breath + audio fast); Phase 2D
-        # adds a medium-frequency middle layer so the surface texture
-        # reads as live even with zero audio input — important now
-        # that the SHM bus may legitimately publish silence.
+        # Three phases rather than two — slow breath, a medium middle
+        # layer, and the audio-driven fast one — so the surface reads as
+        # live on zero audio input, which is what it gets whenever the
+        # orb runs outside the process that hears the microphone.
         rng = np.random.default_rng(seed=42)
         self._vertex_phase_a = rng.uniform(0.0, 2.0 * math.pi, self._mesh.vertex_count).astype(np.float32)
         self._vertex_phase_b = rng.uniform(0.0, 2.0 * math.pi, self._mesh.vertex_count).astype(np.float32)

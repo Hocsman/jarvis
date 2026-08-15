@@ -147,14 +147,12 @@ class OrbWindow(QMainWindow):
         )
         layout.addWidget(self._orb)
 
-        # DEV badge surfaces when the orb is running on synthetic /
-        # absent audio. Phase 1's heuristic was "subprocess mode" alone
-        # (env var); Phase 2C refines it: even in subprocess mode, if
-        # the supplied bus is actively reading frames from the daemon's
-        # SHM publisher, we have real audio and the badge is wrong.
+        # DEV badge surfaces when the orb is running on synthetic or
+        # absent audio, which in subprocess mode it always is: nothing
+        # publishes band readings across the process boundary, so the
+        # bus the orb reads answers zero.
         self._dev_badge: Optional[QLabel] = None
-        _bus_is_active = bool(getattr(audio_bus, "is_active", False))
-        if _is_dev_mode() and not _bus_is_active:
+        if _is_dev_mode():
             self._dev_badge = self._build_dev_badge(central)
 
         self.setCentralWidget(central)
