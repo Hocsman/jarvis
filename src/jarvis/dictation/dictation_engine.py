@@ -441,6 +441,7 @@ def _llm_clean_dictation(text: str, cfg, *, model: str = "gemma4:e2b", thinking:
         return text
 
     from ..llm import get_llm_backend
+    from ..llm.factory import _SurLaMachine
 
     system_prompt = (
         "Clean dictated text by removing filler words, hesitations, and false "
@@ -448,7 +449,16 @@ def _llm_clean_dictation(text: str, cfg, *, model: str = "gemma4:e2b", thinking:
         "cleaned text, nothing else."
     )
     try:
-        cleaned = get_llm_backend(cfg).direct(
+        # On the machine, always. The four contexts that read his own
+        # sentences honour a pin and otherwise follow the provider; this
+        # one does not get that choice, because it is not one sentence
+        # he addressed to her. It is everything he dictates, all day,
+        # into applications that have nothing to do with the assistant.
+        #
+        # Nothing local answering costs the cleanup and nothing else:
+        # the fallback below returns the words he actually said, which
+        # is what every other failure here already does.
+        cleaned = get_llm_backend(_SurLaMachine(cfg)).direct(
             model, system_prompt, text,
             timeout_sec=5.0,
             thinking=thinking,

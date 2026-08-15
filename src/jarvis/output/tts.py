@@ -497,6 +497,15 @@ class ChatterboxTTS:
         self._last_spoken_text = text
         self._should_interrupt.clear()
         interrupted = False
+        # Positive rather than negative: `interrupted` only ever became
+        # True inside the playback loop, so every other way out of this
+        # method — the engine that could not initialise, the synthesis
+        # that produced no audio, the exception caught below, an
+        # interruption arriving before playback started — left it False
+        # and fired the completion callback anyway. That callback settles
+        # a reminder as spoken, and `reminders.spec.md` promises the row
+        # stays owed until the speech has finished.
+        spoken = False
         
         # Signal speaking state to face widget
         self._notify_speaking_state(True)
@@ -554,6 +563,8 @@ class ChatterboxTTS:
                         break
                     pygame.time.wait(100)  # Check every 100ms
 
+                spoken = not interrupted
+
             finally:
                 # Cleanup
                 pygame.mixer.quit()
@@ -571,7 +582,7 @@ class ChatterboxTTS:
             self._notify_speaking_state(False)
             
             # Call completion callback if set and not interrupted
-            if self._completion_callback is not None and not interrupted:
+            if self._completion_callback is not None and spoken:
                 try:
                     self._completion_callback()
                 except Exception:
@@ -809,6 +820,15 @@ class PiperTTS:
         self._last_spoken_text = text
         self._should_interrupt.clear()
         interrupted = False
+        # Positive rather than negative: `interrupted` only ever became
+        # True inside the playback loop, so every other way out of this
+        # method — the engine that could not initialise, the synthesis
+        # that produced no audio, the exception caught below, an
+        # interruption arriving before playback started — left it False
+        # and fired the completion callback anyway. That callback settles
+        # a reminder as spoken, and `reminders.spec.md` promises the row
+        # stays owed until the speech has finished.
+        spoken = False
 
         # Signal speaking state to face widget
         self._notify_speaking_state(True)
@@ -925,6 +945,7 @@ class PiperTTS:
                             pass
                         self._audio_stream = None
 
+            spoken = not interrupted
             actual_duration = time.time() - start_time
             debug_log(f"Piper TTS complete: actual={actual_duration:.2f}s (audio={exact_duration:.2f}s)", "tts")
 
@@ -936,7 +957,7 @@ class PiperTTS:
             self._notify_speaking_state(False)
 
             # Call completion callback if set and not interrupted
-            if self._completion_callback is not None and not interrupted:
+            if self._completion_callback is not None and spoken:
                 try:
                     self._completion_callback()
                 except Exception as e:
@@ -1142,6 +1163,15 @@ class KokoroTTS:
         self._last_spoken_text = text
         self._should_interrupt.clear()
         interrupted = False
+        # Positive rather than negative: `interrupted` only ever became
+        # True inside the playback loop, so every other way out of this
+        # method — the engine that could not initialise, the synthesis
+        # that produced no audio, the exception caught below, an
+        # interruption arriving before playback started — left it False
+        # and fired the completion callback anyway. That callback settles
+        # a reminder as spoken, and `reminders.spec.md` promises the row
+        # stays owed until the speech has finished.
+        spoken = False
 
         self._notify_speaking_state(True)
 
@@ -1236,6 +1266,7 @@ class KokoroTTS:
                             pass
                         self._audio_stream = None
 
+            spoken = not interrupted
             actual_duration = time.time() - start_time
             debug_log(f"Kokoro TTS complete: actual={actual_duration:.2f}s (audio={exact_duration:.2f}s)", "tts")
 
@@ -1245,7 +1276,7 @@ class KokoroTTS:
         finally:
             self._is_speaking.clear()
             self._notify_speaking_state(False)
-            if self._completion_callback is not None and not interrupted:
+            if self._completion_callback is not None and spoken:
                 try:
                     self._completion_callback()
                 except Exception as e:
