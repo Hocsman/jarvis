@@ -60,7 +60,15 @@ Use the `/triage` skill for triaging open issues and discussions. It owns the fu
 
 ## Releases
 
-"Release" means fast-forwarding `main` to the current tip of `develop` and pushing it. First sync local `develop` with `origin/develop` so you ship the real head. No merge commit, no force push — just `git checkout main && git merge --ff-only develop && git push origin main`. This is what triggers the release workflow and the auto-close of issues referenced by `Closes #NNN` in the develop commits.
+"Release" means fast-forwarding `main` to the current tip of `develop` and pushing it. No merge commit, no force push.
+
+**Push to `fork`, never to `origin`.** In this checkout `origin` is the upstream project (`isair/jarvis`) and `fork` is ours (`Hocsman/jarvis`). The local `main` tracks `origin`, so it holds *upstream's* main and has diverged from our `develop` — `git checkout main && git merge --ff-only develop` fails there, and `git push origin main` would put our work on somebody else's project. Push the branch straight across instead, which is the same fast-forward without touching the local `main`:
+
+```bash
+git fetch fork && git push fork develop:main
+```
+
+Sync local `develop` with `fork/develop` first so you ship the real head. Releasing is what triggers the release workflow and the auto-close of issues referenced by `Closes #NNN` in the develop commits.
 
 ## Development Environment
 
