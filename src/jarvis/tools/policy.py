@@ -262,8 +262,9 @@ _HEADER = (
     "\n"
     "  Ce fichier a été généré depuis tes outils réels au premier\n"
     "  lancement, et il est à toi : rien ne le réécrit ensuite. Un outil\n"
-    "  apparu depuis et absent d'ici est traité comme destructif, donc\n"
-    "  il te sera demandé.\n"
+    "  installé depuis et absent d'ici retombe sur son risque : elle te\n"
+    "  demandera avant d'agir ou de détruire, mais pas avant de lire.\n"
+    "  Ajoute-le ici si tu veux en décider toi-même.\n"
     "-->\n"
 )
 

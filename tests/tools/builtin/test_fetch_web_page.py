@@ -17,6 +17,16 @@ def _make_response_mock(**attrs) -> Mock:
     resp = Mock(**attrs)
     resp.__enter__ = Mock(return_value=resp)
     resp.__exit__ = Mock(return_value=False)
+    # The body is streamed under a byte ceiling rather than read whole,
+    # so the double has to stream too: a mock that only answers
+    # `.content` measures a shape production no longer has.
+    corps = attrs.get("content")
+    if corps is None:
+        texte = attrs.get("text")
+        corps = texte.encode("utf-8") if isinstance(texte, str) else b""
+    resp.iter_content = Mock(return_value=iter([corps]))
+    if "encoding" not in attrs:
+        resp.encoding = "utf-8"
     return resp
 
 

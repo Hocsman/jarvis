@@ -978,10 +978,12 @@ def main() -> None:
 
     # MCP preflight: discover and cache external MCP tools
     mcps = getattr(cfg, "mcps", {}) or {}
+    _mcp_discovery_incomplete = False
     if mcps:
         print(f"📡 Discovering MCP tools from {len(mcps)} server(s)...", flush=True)
         try:
             mcp_tools, mcp_errors = initialize_mcp_tools(mcps, verbose=False)
+            _mcp_discovery_incomplete = bool(mcp_errors)
 
             # Group tools by server for display
             tools_by_server: dict = {}
@@ -1005,6 +1007,7 @@ def main() -> None:
         except Exception as e:
             debug_log(f"MCP discovery failed: {e}", "mcp")
             print(f"  ⚠️ MCP discovery failed: {e}", flush=True)
+            _mcp_discovery_incomplete = True
     else:
         print("📡 No MCP servers configured", flush=True)
 
@@ -1012,7 +1015,11 @@ def main() -> None:
     # here rather than earlier so the servers' tools are already in the
     # cache and land in the file next to the builtins.
     from .tools.registry import ensure_policy_file
-    ensure_policy_file(cfg)
+    # `_mcp_discovery_incomplete` is set above when a configured server
+    # raised or returned nothing. The file is written once and never
+    # rewritten, so writing it now would freeze it without that server's
+    # tools for good.
+    ensure_policy_file(cfg, discovery_failed=_mcp_discovery_incomplete)
 
     # A question whose card died with the process that raised it. Swept
     # here rather than in `Database.__init__`, because the memory viewer

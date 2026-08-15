@@ -103,6 +103,8 @@ def test_an_ordinary_page_still_works():
     reponse.is_redirect = False
     reponse.is_permanent_redirect = False
     reponse.content = b"<html><body><p>bonjour</p></body></html>"
+    reponse.encoding = "utf-8"
+    reponse.iter_content = lambda chunk_size=8192: iter([reponse.content])
     reponse.text = "<html><body><p>bonjour</p></body></html>"
     reponse.headers = {"Content-Type": "text/html"}
     reponse.raise_for_status = lambda: None

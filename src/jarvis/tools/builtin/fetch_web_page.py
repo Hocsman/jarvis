@@ -11,7 +11,7 @@ from ..types import ToolExecutionResult
 # this one had none, and a copy would be the one that drifts.
 from urllib.parse import urljoin
 
-from .web_search import _is_public_url
+from .web_search import _MAX_FETCH_BYTES, _is_public_url
 
 
 class FetchWebPageTool(Tool):
@@ -119,8 +119,30 @@ class FetchWebPageTool(Tool):
             # even if BeautifulSoup or the link extraction raises midway.
             with response:
                 response.raise_for_status()
-                response_content = response.content
-                response_text = response.text
+                # Streamed under the same ceiling `webSearch` uses, and
+                # shared rather than copied for the reason `_is_public_url`
+                # was: the two tools fetch the same web with the same
+                # trust in it. `response.content` held the whole body,
+                # `response.text` held a second copy of it, and the
+                # truncation to `max_chars` only happened afterwards —
+                # measured, an endless page read 164 MB. What that costs
+                # is not this tool: the daemon holds the reminder thread
+                # and the routine runner, so an exhausted process takes
+                # promises down with it.
+                morceaux: list[bytes] = []
+                lus = 0
+                for morceau in response.iter_content(chunk_size=8192):
+                    if not morceau:
+                        continue
+                    morceaux.append(morceau)
+                    lus += len(morceau)
+                    if lus >= _MAX_FETCH_BYTES:
+                        debug_log(
+                            f"fetchWebPage: page truncated at {lus} bytes", "tools")
+                        break
+                response_content = b"".join(morceaux)
+                response_text = response_content.decode(
+                    response.encoding or "utf-8", "replace")
             try:
                 from bs4 import BeautifulSoup
                 soup = BeautifulSoup(response_content, 'html.parser')

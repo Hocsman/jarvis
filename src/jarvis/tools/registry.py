@@ -416,8 +416,14 @@ def load_tool_policy(cfg: Settings):
     return policy
 
 
-def ensure_policy_file(cfg: Settings) -> None:
+def ensure_policy_file(cfg: Settings, *, discovery_failed: bool = False) -> None:
     """Write ``outils.md`` from the installed catalogue, once.
+
+    Deferred a boot when ``discovery_failed``: the file is written once
+    and never rewritten, so a first start with a server down would freeze
+    it without that server's tools — permanently, and with nothing in the
+    file to say anything is missing. Waiting costs one start-up; writing
+    early costs every card those tools will ever raise.
 
     Generated rather than shipped so the user opens it and finds their
     own tools by name. Written only when absent: once it exists it is
@@ -439,6 +445,13 @@ def ensure_policy_file(cfg: Settings) -> None:
         if path.exists():
             return
 
+        if discovery_failed:
+            debug_log("policy file deferred: MCP discovery incomplete", "tools")
+            print("  ⚠️ 🚪 outils.md pas encore écrit : un serveur MCP n'a pas "
+                  "répondu, et le fichier ne s'écrit qu'une fois. Il sera "
+                  "généré au prochain démarrage réussi.", flush=True)
+            return
+
         builtin_risks = {
             name: resolve_risk(name, tool, {})
             for name, tool in BUILTIN_TOOLS.items()
@@ -450,7 +463,14 @@ def ensure_policy_file(cfg: Settings) -> None:
 
         texte, refuses = render_policy_file(builtin_risks, mcp_risks)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(texte, encoding="utf-8")
+        # Written whole or not at all, like every other page the
+        # assistant owns. `path.exists()` above is what stops
+        # regeneration, so a body truncated halfway would be permanent —
+        # and it would read back clean, because the parser skips
+        # everything it does not recognise.
+        temporaire = path.with_name(f".{path.name}.{os.getpid()}")
+        temporaire.write_text(texte, encoding="utf-8")
+        os.replace(temporaire, path)
         debug_log(
             f"policy file written: {len(builtin_risks)} builtins, "
             f"{len(mcp_risks)} MCP tools, {len(refuses)} names refused",

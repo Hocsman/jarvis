@@ -200,7 +200,13 @@ def test_fetch_web_page_success(monkeypatch):
             </html>
             '''
             self.text = self.content.decode()
-        
+            self.encoding = "utf-8"
+
+        # The body is streamed under a byte ceiling, so the double
+        # streams too.
+        def iter_content(self, chunk_size=8192):
+            yield self.content
+
         def raise_for_status(self):
             pass
 
