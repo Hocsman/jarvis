@@ -355,7 +355,14 @@ class MemoryCore:
         path = self.path_for(section)
         try:
             return self._read_lines_strict(section)
-        except OSError as e:
+        except Exception as e:
+            # Broad on purpose, like `load_tool_policy`, and for the same
+            # case it names: a file the user reopened in a Windows editor
+            # and saved as ANSI. `read_text(encoding="utf-8")` raises
+            # `UnicodeDecodeError`, which is a `ValueError` rather than an
+            # `OSError`, so a narrower catch let it out of a read that
+            # promises to fail open — and out through `forget`, the
+            # memory viewer's own page, and the graph hand-over.
             debug_log(f"core read failed for {path.name} (non-fatal): {e}", "memory")
             return []
 

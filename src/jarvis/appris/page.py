@@ -73,7 +73,6 @@ _CORPS_RE = re.compile(
 )
 _CITATION_RE = re.compile(r"^\s*>\s*(?P<texte>.+?)\s*$")
 _COCHE_RE = re.compile(r"^\s*[xX]\s*$")
-_SUR_UNE_LIGNE = re.compile(r"^[^\r\n]{1,500}$")
 
 _COMMENT_OPEN, _COMMENT_CLOSE = "<!--", "-->"
 
@@ -267,6 +266,21 @@ def load_appris(cfg) -> List[Proposition]:
 # ── Writing ───────────────────────────────────────────────────────────
 
 
+def _tient_sur_une_ligne(texte: str, limite: int = 500) -> bool:
+    """Whether the reader would see one line here, not two.
+
+    Asked with `splitlines()`, the same call the parser uses, rather than
+    with a character class. A class has to predict what the reader splits
+    on, and `str.splitlines()` splits on more than `\r` and `\n`: U+2028,
+    U+2029, U+0085, the vertical tab and the form feed among them. A line
+    written past a class that missed one is read back as two, and the
+    second can carry a tick nobody ticked.
+    """
+    if not texte or len(texte) > limite:
+        return False
+    return len(texte.splitlines()) == 1
+
+
 def render_proposition(*, date: str, texte: str, citation: str) -> str:
     """One proposal as two lines, or "" when it cannot be written safely.
 
@@ -280,11 +294,11 @@ def render_proposition(*, date: str, texte: str, citation: str) -> str:
 
     if not re.fullmatch(_DATE, date):
         return ""
-    if not texte or not _SUR_UNE_LIGNE.match(texte) or len(texte) > TEXTE_MAX:
+    if not _tient_sur_une_ligne(texte, TEXTE_MAX):
         return ""
     if "~~" in texte or "~~" in citation:
         return ""
-    if citation and (not _SUR_UNE_LIGNE.match(citation) or len(citation) > CITATION_MAX):
+    if citation and not _tient_sur_une_ligne(citation, CITATION_MAX):
         return ""
 
     ligne = f"- [ ] {date} · {SOURCE_JOURNAL} : {texte}\n"

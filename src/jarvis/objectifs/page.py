@@ -61,7 +61,6 @@ _NOM_PROPRE = re.compile(r"^[\w-]{1,64}$", re.UNICODE)
 
 # One line, and one line only. What the user says arrives through the
 # same two lossy layers, and a line break in it forges file structure.
-_SUR_UNE_LIGNE = re.compile(r"^[^\r\n]{1,500}$")
 
 
 @dataclass(frozen=True)
@@ -86,6 +85,21 @@ class Objectif:
     @property
     def est_ouvert(self) -> bool:
         return not self.clos.strip()
+
+
+def _tient_sur_une_ligne(texte: str, limite: int = 500) -> bool:
+    """Whether the reader would see one line here, not two.
+
+    Asked with `splitlines()`, the same call the parser uses, rather than
+    with a character class. A class has to predict what the reader splits
+    on, and `str.splitlines()` splits on more than `\r` and `\n`: U+2028,
+    U+2029, U+0085, the vertical tab and the form feed among them. A line
+    written past a class that missed one is read back as two, and the
+    second can carry a tick nobody ticked.
+    """
+    if not texte or len(texte) > limite:
+        return False
+    return len(texte.splitlines()) == 1
 
 
 def parse_objectifs(text: str) -> Dict[str, Objectif]:
@@ -175,7 +189,7 @@ def render_objectif(*, nom: str, phrase: str, fini_quand: str,
     if not _NOM_PROPRE.match(nom or ""):
         debug_log(f"objectif not rendered: unusable name {nom!r}", "tools")
         return ""
-    if not _SUR_UNE_LIGNE.match(phrase or "") or not _SUR_UNE_LIGNE.match(
+    if not _tient_sur_une_ligne(phrase or "") or not _tient_sur_une_ligne(
         fini_quand or ""
     ):
         debug_log(f"objectif {nom} not rendered: unusable field", "tools")
@@ -187,7 +201,7 @@ def render_objectif(*, nom: str, phrase: str, fini_quand: str,
 
     gardes = [
         p for p in (points or [])
-        if _SUR_UNE_LIGNE.match(p.texte or "") and _NOM_PROPRE.match(p.source or "")
+        if _tient_sur_une_ligne(p.texte or "") and _NOM_PROPRE.match(p.source or "")
     ]
     if gardes:
         lines.append("points:")
@@ -198,7 +212,7 @@ def render_objectif(*, nom: str, phrase: str, fini_quand: str,
 def render_point(texte: str, *, source: str = SOURCE_DIT,
                  jour: Optional[str] = None) -> str:
     """One dated line, or empty when it could not be read back."""
-    if not _SUR_UNE_LIGNE.match(texte or ""):
+    if not _tient_sur_une_ligne(texte or ""):
         return ""
     return f"- {jour or date.today().isoformat()} · {source} · {texte.strip()}\n"
 
@@ -330,7 +344,7 @@ def _compose_clos(lignes: List[str], nom: str, valeur: str):
     by overwriting the line is a different act, and it is his.
     """
     debut, fin = _span(lignes, nom)
-    if debut is None or not _SUR_UNE_LIGNE.match(valeur or ""):
+    if debut is None or not _tient_sur_une_ligne(valeur or ""):
         return None
 
     apres = debut + 1

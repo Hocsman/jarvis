@@ -851,18 +851,31 @@ def run_tool_with_retries(
     # Check builtin tools first
     if name in BUILTIN_TOOLS:
         tool = BUILTIN_TOOLS[name]
-        return _finish(tool.execute(
-            db=db,
-            cfg=cfg,
-            tool_args=tool_args,
-            system_prompt=system_prompt,
-            original_prompt=original_prompt,
-            redacted_text=redacted_text,
-            max_retries=max_retries,
-            user_print=_user_print,
-            language=language,
-            origin=origin,
-        ))
+        # Wrapped like the MCP branch above, and for the reason written
+        # below: a call the gate allowed and that then went nowhere still
+        # happened. Unwrapped, an exception walks out through the whole
+        # funnel, kills the turn, and leaves the ledger claiming she never
+        # tried — and when the call came from an approval, its `demandé`
+        # row never closes either.
+        try:
+            return _finish(tool.execute(
+                db=db,
+                cfg=cfg,
+                tool_args=tool_args,
+                system_prompt=system_prompt,
+                original_prompt=original_prompt,
+                redacted_text=redacted_text,
+                max_retries=max_retries,
+                user_print=_user_print,
+                language=language,
+                origin=origin,
+            ))
+        except Exception as e:
+            debug_log(f"builtin tool '{name}' raised: {e}", "tools")
+            return _finish(ToolExecutionResult(
+                success=False, reply_text=None,
+                error_message=f"Tool '{name}' raised: {e}",
+            ))
 
     # Unknown tool
     debug_log(f"unknown tool requested: {tool_name}", "tools")

@@ -82,10 +82,17 @@ _DEFAULT_VERDICT = {
 # force — so everything he filed under `## Jamais` inherited `## Libre`.
 _HEADING_RE = re.compile(r"^\s*##\s+(?P<name>\S+)\s*(?P<note>.*)$", re.IGNORECASE)
 
-# Anything else opening with `##`. Not a heading this file understands,
+# Anything else opening with `#`. Not a heading this file understands,
 # and therefore the end of the current section rather than part of it:
-# the inheritance is what turned a typo into a permission.
-_PSEUDO_HEADING_RE = re.compile(r"^\s*##(\s|$)")
+# inheritance is what turns a typo into a permission, and the file's own
+# header invites him to move lines between sections, so he does reorganise
+# and does write `### Jamais`.
+#
+# Deliberately the complement of `_HEADING_RE` rather than a second
+# pattern of its own: a shape list has to keep up with the heading
+# pattern, and the one it replaces covered `## ` alone, so `###`, `####`
+# and `##Jamais` all fell through to the section above.
+_PSEUDO_HEADING_RE = re.compile(r"^\s*#")
 _ENTRY_RE = re.compile(r"^\s*-\s+(?P<name>\S+)\s*$")
 _COMMENT_OPEN, _COMMENT_CLOSE = "<!--", "-->"
 
