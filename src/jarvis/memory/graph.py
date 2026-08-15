@@ -247,8 +247,34 @@ CREATE TABLE IF NOT EXISTS memory_nodes (
     created_at       TEXT NOT NULL,
     updated_at       TEXT NOT NULL,
     data_token_count INTEGER NOT NULL DEFAULT 0,
+    -- The same three columns, accent- and case-folded. Search compares
+    -- against these so a question typed with accents finds a node the
+    -- extractor wrote without them. Stored rather than computed: folding
+    -- is a property of the row, and folding at query time cost one
+    -- Python call per column, per keyword, per row, over a full scan.
+    name_fold        TEXT NOT NULL DEFAULT '',
+    description_fold TEXT NOT NULL DEFAULT '',
+    data_fold        TEXT NOT NULL DEFAULT '',
     CHECK(parent_id IS NULL OR parent_id != id)
 );
+
+-- Filled by trigger rather than by each writer. There are five write
+-- sites today and nothing stops a sixth; a writer that forgot would
+-- leave a node searchable by nothing, which reads exactly like a node
+-- nobody wrote about.
+CREATE TRIGGER IF NOT EXISTS nodes_fold_ai AFTER INSERT ON memory_nodes BEGIN
+  UPDATE memory_nodes SET name_fold = fold(new.name),
+                          description_fold = fold(new.description),
+                          data_fold = fold(new.data)
+   WHERE id = new.id;
+END;
+CREATE TRIGGER IF NOT EXISTS nodes_fold_au AFTER UPDATE OF name, description, data
+ON memory_nodes BEGIN
+  UPDATE memory_nodes SET name_fold = fold(new.name),
+                          description_fold = fold(new.description),
+                          data_fold = fold(new.data)
+   WHERE id = new.id;
+END;
 
 CREATE INDEX IF NOT EXISTS idx_nodes_parent ON memory_nodes(parent_id);
 CREATE INDEX IF NOT EXISTS idx_nodes_last_accessed ON memory_nodes(last_accessed DESC);
@@ -286,7 +312,35 @@ class GraphMemoryStore:
     def _init_schema(self) -> None:
         with self._lock:
             self.conn.execute("PRAGMA foreign_keys = ON")
+            # A graph written before the folded columns existed reaches
+            # them here: `CREATE TABLE IF NOT EXISTS` leaves an existing
+            # table alone, so a column added to the DDL arrives only by
+            # `ALTER`. Each is attempted separately and independently —
+            # a half-migrated file is what a single combined attempt
+            # would leave behind.
+            for colonne in ("name_fold", "description_fold", "data_fold"):
+                try:
+                    self.conn.execute(
+                        f"ALTER TABLE memory_nodes ADD COLUMN {colonne} "
+                        "TEXT NOT NULL DEFAULT ''"
+                    )
+                except sqlite3.OperationalError:
+                    pass  # already there, or the table is not yet created
             self.conn.executescript(_GRAPH_SCHEMA_SQL)
+
+            # Fill what the writers never wrote: the rows that predate
+            # the columns, and any row whose folded text was lost. An
+            # empty fold on a non-empty field is unsearchable, which
+            # looks exactly like a node nobody wrote about.
+            self.conn.execute(
+                "UPDATE memory_nodes"
+                "   SET name_fold = fold(name),"
+                "       description_fold = fold(description),"
+                "       data_fold = fold(data)"
+                " WHERE (name_fold = '' AND name != '')"
+                "    OR (description_fold = '' AND description != '')"
+                "    OR (data_fold = '' AND data != '')"
+            )
             self.conn.commit()
 
     def _ensure_root(self) -> None:
@@ -761,9 +815,9 @@ class GraphMemoryStore:
             escaped = folded.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             pattern = f"%{escaped}%"
             score_parts.append(
-                "(CASE WHEN fold(name) LIKE ? ESCAPE '\\' THEN 3 ELSE 0 END"
-                " + CASE WHEN fold(description) LIKE ? ESCAPE '\\' THEN 3 ELSE 0 END"
-                " + CASE WHEN fold(data) LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END)"
+                "(CASE WHEN name_fold LIKE ? ESCAPE '\\' THEN 3 ELSE 0 END"
+                " + CASE WHEN description_fold LIKE ? ESCAPE '\\' THEN 3 ELSE 0 END"
+                " + CASE WHEN data_fold LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END)"
             )
             params.extend([pattern, pattern, pattern])
 

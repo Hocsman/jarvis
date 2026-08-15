@@ -34,6 +34,30 @@ The diary is untouched either way, so "Import from Diary" in the memory viewer r
 
 Called **only** from the daemon start-up path in `daemon.main()`. The memory viewer and reply engine instantiate `GraphMemoryStore` without triggering the migration, so a mid-session open never wipes anything.
 
+### Searching Without the Accents
+
+The extraction step works in English and writes "Cafe Rouviere"; he asks
+in French, with the accents. `LIKE` compares code points, so without
+folding the node is present, the search is correct, and nothing is found
+— the quietest kind of miss, since the only consequence is that she looks
+it up on the web again.
+
+`name_fold`, `description_fold` and `data_fold` hold the folded text and
+are what the search compares. They are filled by trigger rather than by
+each writer: there are five write sites and nothing stops a sixth, and a
+writer that forgot would leave a node searchable by nothing, which reads
+exactly like a node nobody wrote about. A graph written before the
+columns existed is migrated and backfilled when it is opened.
+
+Stored rather than computed, and that is the whole point. Wrapping the
+columns in the folding function at query time cost one Python call per
+column, per keyword, per row, over a full scan: measured on a thousand
+nodes, 86 ms at two keywords and 692 ms at sixteen, against 2.2 ms and
+13.6 ms once stored. The call sits on the reply path, which is the
+listener's own loop — the one draining a 64-frame audio queue at 20 ms a
+frame, so 1.28 s before microphone frames start being dropped. A search
+must not be able to eat what he is saying.
+
 ### Branch-Pinned Traversal
 
 `find_best_node(..., branch_root_id=...)` skips the recent/top entry points and descends from the given branch root only. Extraction pins every fact to the World root, so a looked-up fact cannot drift into the retained user subtrees.
