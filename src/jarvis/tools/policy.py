@@ -48,6 +48,12 @@ OUTCOME_REFUSED = "refusé"
 OUTCOME_ASKED = "demandé"
 OUTCOME_DECLINED = "décliné"
 OUTCOME_EXPIRED = "expiré"
+# He answered and she could not read it. Kept apart from `décliné`, which
+# says he was asked and said no, and from `expiré`, which says nobody
+# answered and nobody can any more. Both would put his name on a decision
+# he did not make — the reasoning the approval judge already applies when
+# it returns UNCLEAR on a timeout rather than DENIED.
+OUTCOME_UNREADABLE = "illisible"
 # A tool that could not proceed without something only the user can
 # supply, and asked. Distinct from `échec`, which says something broke,
 # and from `demandé`, which is the gate holding a pinned call: nothing is

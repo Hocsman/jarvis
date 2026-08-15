@@ -222,21 +222,31 @@ def _end_turn_with_question(result, dialogue_memory, redacted, *, tts, cfg,
 
 
 def _record_settled_action(db, cfg, settled, *, origin, redacted) -> None:
-    """Close a question's ledger episode when the user declined it."""
-    if settled.action is None or not settled.declined:
+    """Close a question's ledger episode, whichever way it ended.
+
+    Every ending except a grant writes here. A grant is settled by the
+    call itself, which writes `ok` or `échec` under the same id.
+
+    An answer she could not read closes the episode too: the card was
+    claimed and is gone, so nothing else can close it before the next
+    daemon start, and the sweep there would call it `expiré` — a word the
+    spec defines as never answered. He did answer.
+    """
+    if settled.action is None or settled.approval is not None:
         return
     try:
-        from ..tools.policy import OUTCOME_DECLINED
+        from ..tools.policy import OUTCOME_DECLINED, OUTCOME_UNREADABLE
         from ..tools.registry import _log_action
 
         action = settled.action
         _log_action(
             db, tool=action.tool, args=action.args, risk=action.risk,
-            verdict="demande", outcome=OUTCOME_DECLINED, query=redacted,
-            origin=origin, request_id=action.request_id,
+            verdict="demande",
+            outcome=OUTCOME_DECLINED if settled.declined else OUTCOME_UNREADABLE,
+            query=redacted, origin=origin, request_id=action.request_id,
         )
     except Exception as e:
-        debug_log(f"decline not recorded: {e}", "tools")
+        debug_log(f"confirmation outcome not recorded: {e}", "tools")
 
 
 def settle_pending_confirmation(*, cfg, dialogue_memory, utterance, origin) -> _Settled:
@@ -2980,13 +2990,25 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 # push ~2B models into "describe the structure back" or
                 # prior-confabulation failure modes. The helper encapsulates
                 # the gating, distil round-trip, NONE fallback, and logging.
-                effective_result = _maybe_digest_tool_result(
-                    cfg=cfg,
-                    query=redacted,
-                    tool_name=tool_name,
-                    raw_tool_result=result.reply_text,
-                )
-                if not result.success:
+                if result.refused:
+                    # « Elle n'a pas le droit » is not « ça n'a pas
+                    # marché ». The refusal text is written by code and
+                    # already addressed to the model, so it goes through
+                    # untouched: no distil to paraphrase it, no banner
+                    # telling the model to ask for what is missing —
+                    # nothing is missing, he said no — and no
+                    # `tool_failed`, which the carry-over guard reads to
+                    # re-widen next turn's allow-list with the tool he
+                    # forbade.
+                    effective_result = result.reply_text or ""
+                else:
+                    effective_result = _maybe_digest_tool_result(
+                        cfg=cfg,
+                        query=redacted,
+                        tool_name=tool_name,
+                        raw_tool_result=result.reply_text,
+                    )
+                if not result.success and not result.refused:
                     # A failed tool is where models fabricate: the question was
                     # factual, the honest answer is unsatisfying, and a
                     # plausible number is cheap to produce — and the user cannot
@@ -3042,7 +3064,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                         "role": "user",
                         "content": f"[Tool result: {tool_name}]\n{effective_result}{remainder_hint}",
                         "tool_name": tool_name,  # kept for duplicate detection
-                        "tool_failed": not result.success,
+                        "tool_failed": not result.success and not result.refused,
                     })
                 else:
                     messages.append({
@@ -3050,7 +3072,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                         "tool_call_id": tool_call_id,
                         "tool_name": tool_name,  # Include tool_name for duplicate detection
                         "content": effective_result,
-                        "tool_failed": not result.success,
+                        "tool_failed": not result.success and not result.refused,
                     })
                 debug_log(f"    ✅ tool result appended ({len(effective_result)} chars)", "planning")
 
