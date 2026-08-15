@@ -255,6 +255,18 @@ Every distinct LLM call in Jarvis, what feeds it, what consumes it, and how it i
 | 16 | Reminder time extractor | 0-1 | only inside setReminder | SMALL (via router chain) |
 | 17 | Routine recurrence extractor | 0-1 | only inside setRoutine | SMALL (reuses #16's chain) |
 | 18 | Goal completion judge | 0-1 | only inside noteGoal | SMALL (reuses #16's chain) |
+| 19 | Journal proposal reader | 0-1 | only inside reviewLearnings | LARGE (appris_model → reminder chain → chat model) |
+| 20 | Dictation cleanup | 0-1 | only when `dictation_filler_removal` is on | chat model, pinned to the local backend |
+
+## 20. Dictation Cleanup (optional, opt-in)
+
+- **File**: [src/jarvis/dictation/dictation_engine.py](src/jarvis/dictation/dictation_engine.py) — `_llm_clean_dictation()`.
+- **Trigger**: once per dictation, only when `dictation_filler_removal` is true (default false).
+- **Model / gating**: `cfg.llm_chat_model`, dispatched through the **local** backend regardless of `llm_provider`. Unlike #16-#19, which honour a pin and otherwise follow the provider, this one does not get that choice: it carries everything the user dictates, all day, into applications that have nothing to do with the assistant. Nothing local answering costs the cleanup and nothing else.
+- **Inputs**: the raw transcript.
+- **System prompt**: inline — remove fillers, hesitations and false starts, keep the meaning and the language.
+- **Output**: the cleaned text, or the raw transcript on any failure.
+- **Limits**: 5 s, hard-coded.
 
 ## Size-aware auto switches
 
@@ -269,9 +281,10 @@ Driven by `detect_model_size(model_name) → SMALL (≤7B) | LARGE (8B+)`:
 
 ## Config keys
 
-- Models: `llm_chat_model`, `intent_judge_model`, `tool_router_model` (the legacy `ollama_chat_model` key on disk is still readable as a fallback alias for the v1 → v2 config migration)
-- Flags: `memory_digest_enabled`, `tool_result_digest_enabled`, `llm_thinking_enabled`, `intent_judge_thinking_enabled`, `tool_selection_strategy`, `low_power_mode`
-- Timeouts: `llm_chat_timeout_sec` (45s), `llm_digest_timeout_sec` (8s, shared across #4/#5/#6), `llm_tools_timeout_sec`, `intent_judge_timeout_sec` (15s)
+- Models: `llm_chat_model`, `intent_judge_model`, `tool_router_model`, `planner_model`, `evaluator_model`, `confirmation_model`, `reminder_model`, `appris_model`, `embedding_model` (the legacy `ollama_chat_model` key on disk is still readable as a fallback alias for the v1 → v2 config migration)
+- Provider and destination: `llm_provider`, `llm_base_url`, `llm_api_key`, `llm_api_key_env`, `llm_extra_body`, `embedding_provider`, `embedding_base_url`, `auto_redact_before_cloud`. `llm_base_url` also decides local from remote: an auxiliary pin is honoured on a loopback or private-network endpoint and replaced by the chat model on a remote one.
+- Flags: `memory_digest_enabled`, `tool_result_digest_enabled`, `llm_thinking_enabled`, `intent_judge_thinking_enabled`, `tool_selection_strategy`, `low_power_mode`, `reminders_enabled`, `routines_enabled`, `dictation_filler_removal`, `dictation_thinking_enabled`, `response_language`
+- Timeouts: `llm_chat_timeout_sec` (45s), `llm_digest_timeout_sec` (8s, shared across #4/#5/#6), `llm_tools_timeout_sec`, `intent_judge_timeout_sec` (15s), `confirmation_timeout_sec`, `reminder_timeout_sec`, `appris_timeout_sec`, `confirmation_ttl_sec`
 - Caps: `agentic_max_turns` (8), `tool_search_max_calls` (3), `_LLM_MAX_SELECTED` (5), `_DIGEST_MAX_CHARS` (400), `_TOOL_DIGEST_MAX_CHARS` (600)
 - Runtime residency: `low_power_mode` skips startup LLM warmups and shortens Ollama `keep_alive` for intent judge and warmup calls from `"30m"` to `"1m"`. It does not change prompts, model selection, timeouts, or context limits.
 

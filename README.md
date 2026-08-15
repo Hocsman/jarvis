@@ -32,7 +32,7 @@
 
 **🔌 Extensible** - MCP integration connects Jarvis to thousands of tools: smart home, GitHub, Slack, databases, and more. Smart tool selection means adding more tools won't slow things down.
 
-**📊 Transparent progress** - We track what works (and what doesn't) with automated evals. [See current accuracy →](EVALS.md)
+**📊 Transparent progress** - We track what works (and what doesn't) with automated evals. [See the suite →](evals/)
 
 **🚧 Known limitations:** Jarvis is under active development. Primary development happens on macOS. Windows/Linux support may lag behind. We're building in the open, [issues](https://github.com/isair/jarvis/issues) and [contributions](https://github.com/isair/jarvis/pulls) welcome!
 - No mobile apps ([#17](https://github.com/isair/jarvis/issues/17))

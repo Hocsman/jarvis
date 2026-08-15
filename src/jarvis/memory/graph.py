@@ -677,13 +677,25 @@ class GraphMemoryStore:
 
     def touch_node(self, node_id: str) -> None:
         """Increment access_count and update last_accessed."""
+        self.touch_nodes([node_id])
+
+    def touch_nodes(self, node_ids: "list[str]") -> None:
+        """The same, for a whole result set, in one transaction.
+
+        A search touches every node it returns. One statement and one
+        commit each meant five write transactions — and five WAL fsyncs —
+        on the reply path, for bookkeeping nobody reads synchronously.
+        """
+        ids = [i for i in node_ids if i]
+        if not ids:
+            return
         now = datetime.now(timezone.utc).isoformat()
         with self._lock:
             self.conn.execute(
-                """UPDATE memory_nodes
-                   SET access_count = access_count + 1, last_accessed = ?
-                   WHERE id = ?""",
-                (now, node_id),
+                "UPDATE memory_nodes"
+                "   SET access_count = access_count + 1, last_accessed = ?"
+                f" WHERE id IN ({','.join('?' * len(ids))})",
+                (now, *ids),
             )
             self.conn.commit()
 
@@ -838,9 +850,8 @@ class GraphMemoryStore:
             rows = self.conn.execute(sql, params).fetchall()
             nodes = [self._row_to_node(r) for r in rows]
 
-        # Touch matched nodes (updates access tracking)
-        for node in nodes:
-            self.touch_node(node.id)
+        # Touch matched nodes (updates access tracking), in one go
+        self.touch_nodes([n.id for n in nodes])
 
         debug_log(f"Graph search for '{query}' found {len(nodes)} nodes", "memory")
         return nodes

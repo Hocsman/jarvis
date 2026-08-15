@@ -106,6 +106,10 @@ class ReminderScheduler:
         if self._ticks % _PRUNE_EVERY_TICKS == 0:
             try:
                 self._db.prune_rappels(90)
+                # The ledger too. Its only other caller is the memory
+                # viewer's Activity route, so an install that never
+                # opens that tab grew one row per tool call for ever.
+                self._db.prune_actions(90)
             except Exception as e:
                 debug_log(f"reminder prune skipped: {e}", "tools")
             # The journal keeps the same window as the ledger and the
