@@ -62,8 +62,32 @@ The settings window uses a sidebar navigation pattern: a fixed-width `QListWidge
 11. Memory & Dialogue
 12. Location
 13. Features (includes web search, Wikipedia fallback, low-power mode, startup tune, and dictation toggles)
-14. MCP Servers
-15. Advanced
+14. 🙋 Permissions
+15. ⏰ Rappels
+16. 🌅 Routines
+17. MCP Servers
+18. Advanced
+
+### 🙋 Permissions
+
+What the gate asks about before doing it, and how long a card waits.
+
+### ⏰ Rappels
+
+The master switch for a subsystem that speaks unprompted, plus the model
+that reads the hour out of his sentence. Both belong here rather than in
+`config.json`: one is the only way to stop it, and the other is the only
+way to keep the sentence he dictated off the network, since the reminder
+chain deliberately skips the cloud-safe rewrite.
+
+What a reminder says and when is not settable here — that is one
+sentence about one promise, not a number that applies to all of them.
+
+### 🌅 Routines
+
+The master switch and the two limits that decide when she gives up on an
+occurrence and when she gives up on a routine. What each routine may
+reach lives in `yuba/routines.md`, one block per routine.
 
 ### LLM Provider
 

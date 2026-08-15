@@ -68,6 +68,7 @@ CATEGORIES = [
     ("location", "📍 Location"),
     ("features", "✨ Features"),
     ("confirmation", "🙋 Permissions"),
+    ("reminders", "⏰ Rappels"),
     ("routines", "🌅 Routines"),
     ("mcps", "🔌 MCP Servers"),
     ("advanced", "🔧 Advanced"),
@@ -410,6 +411,30 @@ def _build_field_metadata() -> List[FieldMeta]:
     # them. These are the master switch and the two limits that decide
     # when she gives up on an occurrence and when she gives up on a
     # routine.
+    # A reminder speaks at a time he is not necessarily at the machine
+    # for, so the master switch belongs somewhere he can find it —
+    # `routines_enabled` next door has had one all along. `reminder_model`
+    # is here for a second reason: this prompt carries the sentence he
+    # dictated about his own life, and the reminder chain deliberately
+    # skips the cloud-safe rewrite, so pinning a local model is how he
+    # keeps it off the network. A privacy control nobody can find is a
+    # privacy control nobody uses.
+    f("reminders_enabled", "Rappels",
+      "Ce qu'elle te dit à l'heure dite. Coupé, rien ne part, "
+      "et rien n'est perdu",
+      "reminders", "bool")
+    f("reminder_model", "Modèle des rappels",
+      "Lit l'heure dans ta phrase. Épingle un modèle local et ta phrase "
+      "ne quitte pas la machine",
+      "reminders", "str")
+    f("reminder_default_hour", "Heure par défaut",
+      "Quand tu nommes un jour sans heure. Elle te le dit à voix haute "
+      "plutôt que de le choisir en silence",
+      "reminders", "int", min_val=0, max_val=23, step=1, suffix="h")
+    f("reminder_late_grace_sec", "Retard avant excuse",
+      "Au-delà, elle le dit quand même, en précisant de combien elle est "
+      "en retard. Elle ne l'abandonne jamais",
+      "reminders", "float", min_val=0, max_val=86400, step=300, suffix="s")
     f("routines_enabled", "Routines",
       "Ce qu'elle fait toute seule, à heure fixe. Coupé, aucune ne part, "
       "et aucune n'est perdue",
