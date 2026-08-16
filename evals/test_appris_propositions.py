@@ -188,7 +188,8 @@ class TestTheTwoReadersPartitionTheSameNote:
                 for c in propositions(cfg, _db(case), core=_core(tmp_path),
                                       deja=[]).gardes}
         sien = {normalise_fact(f)
-                for f in (extract_graph_memories(case.summary, cfg, JUDGE_MODEL) or [])}
+                for f in (extract_graph_memories(case.summary, cfg, JUDGE_MODEL,
+                                                 tools_used=["webSearch"]) or [])}
 
         print(f"\n  Proposals about him: {sorted(mien)}")
         print(f"  Facts about the world: {sorted(sien)}")

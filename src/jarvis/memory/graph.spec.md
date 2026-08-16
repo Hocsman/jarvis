@@ -22,6 +22,8 @@ These branches are created idempotently via `INSERT OR IGNORE` on stable IDs. Th
 
 Extraction writes to `world` only. The `user` and `directives` branches stay seeded so existing nodes remain visible in the memory viewer and readable by the one-time core migration, but nothing new lands there and nothing in them reaches the prompt.
 
+What may enter `world` at all is decided before extraction runs, by whether the summarised window actually contained a lookup — see [provenance.spec.md](provenance.spec.md).
+
 ### Legacy-Shape Migration
 
 `GraphMemoryStore.migrate_legacy_shape()` checks the on-disk graph against the expected shape at daemon start-up. The graph is non-conforming if root has any direct child that isn't one of the fixed branches, or if root's own `data` column is non-empty (cold-start writes that landed on root before the taxonomy existed).

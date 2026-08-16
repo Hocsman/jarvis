@@ -1188,6 +1188,38 @@ class DialogueMemory:
             chunks = [f"{role.title()}: {content}" for _, role, content in unsaved_messages]
             return chunks, self._last_ts
 
+    def tools_in_pending_window(self) -> List[str]:
+        """Names of the tools that ran while the pending chunks were made.
+
+        The window is the one `get_pending_chunks_with_snapshot` returns —
+        everything past `_last_saved_timestamp` — so a lookup that was
+        already summarised cannot vouch for the next window's prose.
+
+        Only the names cross. The payloads stay out of the diary, which is
+        what `_tool_turns` was excluded from `get_pending_chunks` for in
+        the first place; what the summariser must not see is the content,
+        not the fact that a call happened.
+
+        `_tool_turns` is capped and the engine clears it on
+        new-conversation entry, so a window whose calls have been evicted
+        reports none. That loses a real fact rather than inventing one,
+        which is the direction this has to fail in.
+        """
+        with self._lock:
+            noms: List[str] = []
+            for ts, msgs in self._tool_turns:
+                if ts <= self._last_saved_timestamp:
+                    continue
+                for m in msgs:
+                    for tc in (m.get("tool_calls") or []):
+                        nom = ((tc or {}).get("function") or {}).get("name")
+                        if nom and nom not in noms:
+                            noms.append(str(nom))
+                    nom = m.get("tool_name")
+                    if nom and nom not in noms:
+                        noms.append(str(nom))
+            return noms
+
     def has_pending_chunks(self) -> bool:
         """Check if there are unsaved messages. Thread-safe."""
         with self._lock:
@@ -1842,6 +1874,10 @@ def update_diary_from_dialogue_memory(
         pending_chunks, snapshot_timestamp = (
             dialogue_memory.get_pending_chunks_with_snapshot()
         )
+        # Read in the same breath as the chunks and before the summary's
+        # LLM call marks them saved: afterwards the window is gone and the
+        # graph would have to guess what the transcript already knew.
+        tools_used = dialogue_memory.tools_in_pending_window()
         debug_log(f"diary update: got {len(pending_chunks)} pending chunks from dialogue_memory", "memory")
 
         if not pending_chunks:
@@ -1894,6 +1930,11 @@ def update_diary_from_dialogue_memory(
                         summary=summary_text,
                         cfg=cfg,
                         chat_model=cfg.llm_chat_model,
+                        # Captured with the chunks, above. The summary is
+                        # cumulative for the day, so it carries prose from
+                        # earlier windows too; what this vouches for is
+                        # that *this* flush had a lookup behind it.
+                        tools_used=tools_used,
                         timeout_sec=graph_timeout,
                         thinking=thinking,
                         date_utc=today,

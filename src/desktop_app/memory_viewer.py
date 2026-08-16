@@ -1028,6 +1028,11 @@ def graph_import_diary() -> Response:
                         summary=summary_text,
                         cfg=settings,
                         chat_model=settings.llm_chat_model,
+                        # A stored summary is prose; which tools ran while
+                        # it was written is not recoverable from it. `None`
+                        # says so, and the facts land sourced `inconnu`
+                        # rather than claiming a lookup nobody witnessed.
+                        tools_used=None,
                         timeout_sec=settings.llm_chat_timeout_sec,
                         thinking=getattr(settings, 'llm_thinking_enabled', False),
                         date_utc=date_utc,

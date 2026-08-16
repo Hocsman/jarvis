@@ -220,6 +220,10 @@ def _run_extraction(case: ExtractionTestCase, config: MockConfig) -> list[str]:
         summary=case.summary,
         cfg=config,
         chat_model=config.llm_chat_model,
+        # Extraction quality is measured on a window that did look
+        # something up; whether an empty window extracts at all is a
+        # separate, deterministic question with its own unit suite.
+        tools_used=["webSearch"],
         timeout_sec=config.llm_chat_timeout_sec,
         thinking=False,
         date_utc=case.date_utc,

@@ -135,6 +135,11 @@ def _run_extraction(case: ExclusionCase, config: MockConfig) -> list[str]:
         summary=case.summary,
         cfg=config,
         chat_model=config.llm_chat_model,
+        # These cases are about what the extractor keeps and drops, so
+        # they run in a window that did have a lookup behind it. The
+        # empty-window rule has its own suite in
+        # ``tests/test_un_fait_du_monde_a_une_source.py``.
+        tools_used=["webSearch"],
         timeout_sec=config.llm_chat_timeout_sec,
         thinking=False,
         date_utc=case.date_utc,

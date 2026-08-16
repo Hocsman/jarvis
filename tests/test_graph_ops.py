@@ -85,7 +85,7 @@ class TestExtractGraphMemories:
             '["Acme Corp is based in London",'
             ' "Possessor (2020) is directed by Brandon Cronenberg"]'
         )
-        facts = extract_graph_memories("summary text", "http://localhost", "model")
+        facts = extract_graph_memories("summary text", "http://localhost", "model", tools_used=["webSearch"])
         assert facts == [
             "Acme Corp is based in London",
             "Possessor (2020) is directed by Brandon Cronenberg",
@@ -97,7 +97,7 @@ class TestExtractGraphMemories:
         prompt: user facts and standing instructions are the user's to
         state, and the extractor must be told so in as many words."""
         mock_llm.return_value = "[]"
-        extract_graph_memories("summary", "http://localhost", "model")
+        extract_graph_memories("summary", "http://localhost", "model", tools_used=["webSearch"])
 
         system_prompt = mock_llm.call_args.kwargs["system_prompt"]
         assert "NEVER EXTRACT ANYTHING ABOUT THE USER" in system_prompt
@@ -106,21 +106,21 @@ class TestExtractGraphMemories:
     def test_returns_empty_when_nothing_worth_storing(self, mock_llm):
 
         mock_llm.return_value = "[]"
-        facts = extract_graph_memories("just small talk", "http://localhost", "model")
+        facts = extract_graph_memories("just small talk", "http://localhost", "model", tools_used=["webSearch"])
         assert facts == []
 
     @patch("src.jarvis.memory.graph_ops.call_llm_direct")
     def test_handles_llm_returning_none(self, mock_llm):
 
         mock_llm.return_value = None
-        facts = extract_graph_memories("summary", "http://localhost", "model")
+        facts = extract_graph_memories("summary", "http://localhost", "model", tools_used=["webSearch"])
         assert facts == []
 
     @patch("src.jarvis.memory.graph_ops.call_llm_direct")
     def test_handles_malformed_json(self, mock_llm):
 
         mock_llm.return_value = "Here are some facts: not valid json"
-        facts = extract_graph_memories("summary", "http://localhost", "model")
+        facts = extract_graph_memories("summary", "http://localhost", "model", tools_used=["webSearch"])
         assert facts == []
 
     @patch("src.jarvis.memory.graph_ops.call_llm_direct")
@@ -132,14 +132,14 @@ class TestExtractGraphMemories:
             ' "Luna is a common name for a cat"]\n'
             'Hope that helps!'
         )
-        facts = extract_graph_memories("summary", "http://localhost", "model")
+        facts = extract_graph_memories("summary", "http://localhost", "model", tools_used=["webSearch"])
         assert len(facts) == 2
 
     @patch("src.jarvis.memory.graph_ops.call_llm_direct")
     def test_filters_empty_strings(self, mock_llm):
 
         mock_llm.return_value = '["Valid fact", "", "   ", "Another fact"]'
-        facts = extract_graph_memories("summary", "http://localhost", "model")
+        facts = extract_graph_memories("summary", "http://localhost", "model", tools_used=["webSearch"])
         assert facts == ["Valid fact", "Another fact"]
 
     @patch("src.jarvis.memory.graph_ops.call_llm_direct")
@@ -148,7 +148,7 @@ class TestExtractGraphMemories:
         other extraction prompts. Model output is a boundary we do not
         own, so a wrapped fact is read rather than dropped."""
         mock_llm.return_value = '[{"fact": "Acme Corp is based in London"}]'
-        facts = extract_graph_memories("summary", "http://localhost", "model")
+        facts = extract_graph_memories("summary", "http://localhost", "model", tools_used=["webSearch"])
         assert facts == ["Acme Corp is based in London"]
 
 
@@ -535,6 +535,7 @@ class TestUpdateGraphFromDialogue:
             summary="Acme Corp is in London; Kendal Mint Cake is from Cumbria",
             cfg=None,
             chat_model="model",
+            tools_used=["webSearch"],
         )
 
         assert len(result.stored) == 2
@@ -562,6 +563,7 @@ class TestUpdateGraphFromDialogue:
             summary="User said hello and asked about the weather",
             cfg=None,
             chat_model="model",
+            tools_used=["webSearch"],
         )
 
         assert result.stored == []
@@ -577,6 +579,7 @@ class TestUpdateGraphFromDialogue:
             summary="summary",
             cfg=None,
             chat_model="model",
+            tools_used=["webSearch"],
         )
 
         assert result.stored == []
@@ -601,6 +604,7 @@ class TestUpdateGraphFromDialogue:
             summary="User asked about Justin Bieber.",
             cfg=None,
             chat_model="model",
+            tools_used=["webSearch"],
         )
         assert len(result1.stored) == 1
         assert result1.skipped == 0
@@ -614,6 +618,7 @@ class TestUpdateGraphFromDialogue:
             summary="User asked about Justin Bieber.",
             cfg=None,
             chat_model="model",
+            tools_used=["webSearch"],
         )
         assert result2.stored == [], "duplicate fact should not be reported as learned"
         assert result2.skipped == 1, "duplicate must be counted so the CLI can still log it"
@@ -634,6 +639,7 @@ class TestUpdateGraphFromDialogue:
             summary="s",
             cfg=None,
             chat_model="model",
+            tools_used=["webSearch"],
         )
 
         mock_llm.return_value = (
@@ -644,6 +650,7 @@ class TestUpdateGraphFromDialogue:
             summary="s",
             cfg=None,
             chat_model="model",
+            tools_used=["webSearch"],
         )
         assert result.stored == [], "Turkish İ/i̇ variants should dedupe"
         assert result.skipped == 1
@@ -656,6 +663,7 @@ class TestUpdateGraphFromDialogue:
             summary="s",
             cfg=None,
             chat_model="model",
+            tools_used=["webSearch"],
         )
 
         mock_llm.return_value = (
@@ -666,6 +674,7 @@ class TestUpdateGraphFromDialogue:
             summary="s",
             cfg=None,
             chat_model="model",
+            tools_used=["webSearch"],
         )
         assert result.stored == [], "German ß should casefold to ss for dedupe"
         assert result.skipped == 1
@@ -695,6 +704,7 @@ class TestUpdateGraphFromDialogue:
             summary="User asked about Justin Bieber.",
             cfg=None,
             chat_model="model",
+            tools_used=["webSearch"],
         )
 
         assert result.stored == [], "duplicate on a child node should still dedupe"
@@ -1213,6 +1223,7 @@ class TestUpdateGraphMerge:
             summary="The gym opening time was corrected.",
             cfg=None,
             chat_model="model",
+            tools_used=["webSearch"],
         )
 
         stored = result.stored
@@ -1238,6 +1249,7 @@ class TestUpdateGraphMerge:
             summary="s",
             cfg=None,
             chat_model="model",
+            tools_used=["webSearch"],
         )
 
         stored = result.stored
@@ -1261,6 +1273,7 @@ class TestUpdateGraphMerge:
             summary="s",
             cfg=None,
             chat_model="model",
+            tools_used=["webSearch"],
         )
 
         stored = result.stored
