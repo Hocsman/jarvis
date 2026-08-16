@@ -20,7 +20,13 @@ from typing import Iterator, NamedTuple, Optional, Sequence
 
 from ..debug import debug_log
 from ..llm import get_llm_backend
-from .provenance import fact_line, fact_text, source_for_tools
+from .provenance import (
+    SOURCE_UNKNOWN,
+    fact_line,
+    fact_source,
+    fact_text,
+    source_for_tools,
+)
 from .core import (
     SECTION_PROFILE,
     SECTION_RULES,
@@ -51,6 +57,47 @@ def call_llm_direct(*, cfg, chat_model, system_prompt, user_content,
         timeout_sec=timeout_sec, thinking=thinking,
         num_ctx=num_ctx, temperature=temperature,
     )
+
+
+def _source_index(lines) -> dict:
+    """Map each line's claim to the provenance suffix it carried.
+
+    Built from what a node held before a merge plus what this flush is
+    adding, so the repair afterwards can recognise either.
+    """
+    index: dict = {}
+    for line in lines:
+        if not line or not line.strip():
+            continue
+        source = fact_source(line)
+        if source == SOURCE_UNKNOWN:
+            continue
+        index[normalise_fact(fact_text(line))] = line[len(fact_text(line)):]
+    return index
+
+
+def _reattach_sources(lines, index: dict) -> list:
+    """Give a rewritten node's lines their provenance back.
+
+    The merge is an LLM rewriting a whole node, and it does not reproduce
+    a suffix it was never asked to keep — which made the marker almost
+    never survive, since a populated node always takes the merge path.
+    Asking the rewrite to preserve an exact format would be asking an LLM
+    for the guarantee this area exists because LLMs do not give, so the
+    repair is deterministic and happens after it.
+
+    Wording is never touched. A line the rewrite reworded matches nothing
+    and stays bare, which reads as `inconnu` — the truthful answer, since
+    after a rewrite nobody can say what that sentence rested on.
+    """
+    repare = []
+    for line in lines:
+        if not line or not line.strip() or fact_source(line) != SOURCE_UNKNOWN:
+            repare.append(line)
+            continue
+        suffixe = index.get(normalise_fact(fact_text(line)))
+        repare.append(line + suffixe if suffixe else line)
+    return repare
 
 
 # ── Memory extraction from dialogue ───────────────────────────────────
@@ -896,18 +943,24 @@ def update_graph_from_dialogue(
     # fact here came out of the same summary of the same window.
     source = source_for_tools(tools_used)
 
-    # Group by destination node so each node gets a single merge call.
-    # The provenance suffix is composed here so both write paths below —
-    # the merge rewrite and the plain-append fallback — carry it.
+    # Grouped bare, so the merge is never handed a format to preserve.
+    # The suffix is written by the plain-append path, and put back by
+    # `_reattach_sources` after a rewrite.
     by_node: dict[str, list[str]] = {}
     for fact, node_id in pending:
-        by_node.setdefault(node_id, []).append(
-            fact_line(fact, source, date_utc))
+        by_node.setdefault(node_id, []).append(fact)
 
     stored: "list[tuple[str, str]]" = []
     for node_id, node_facts in by_node.items():
         node = store.get_node(node_id)
         node_name = node.name if node else node_id[:8]
+
+        # What every claim in play rests on, read before the rewrite can
+        # lose it: the node's existing lines keep whatever they carried,
+        # and this flush's facts get the window's source.
+        sources = _source_index((node.data or "").split("\n") if node else [])
+        sources.update(_source_index(
+            fact_line(f, source, date_utc) for f in node_facts))
 
         # Step 3: Merge — combine the existing node data with all
         # queued new facts in a single LLM rewrite. Subsumes
@@ -940,6 +993,18 @@ def update_graph_from_dialogue(
             debug_log(f"graph update: merge failed for node '{node_name}' — {e}", "memory")
 
         if merge_result.success:
+            # The rewrite hands lines back bare. Give them their
+            # provenance again before anything else reads the node: a
+            # line it reworded matches nothing and stays `inconnu`,
+            # which is the truthful reading of a sentence nobody can
+            # trace any more.
+            rewritten = store.get_node(node_id)
+            if rewritten and rewritten.data:
+                repare = "\n".join(
+                    _reattach_sources(rewritten.data.split("\n"), sources))
+                if repare != rewritten.data:
+                    store.update_node(node_id, data=repare)
+
             # Merge wrote the consolidated data. Only the facts the
             # rewrite actually retained get reported as stored — a
             # fact that was consolidated out (e.g. folded into a
@@ -965,7 +1030,7 @@ def update_graph_from_dialogue(
             # back to plain append for every queued fact so nothing
             # is lost.
             for fact in node_facts:
-                store.append_to_node(node_id, fact)
+                store.append_to_node(node_id, fact_line(fact, source, date_utc))
                 stored.append((fact, node_name))
                 debug_log(
                     f"graph update: appended '{fact[:50]}...' → "

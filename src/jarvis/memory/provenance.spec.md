@@ -128,13 +128,23 @@ so keying `incorporated_indices` on whole lines would report every
 genuinely merged fact as consolidated out: stored but never announced,
 which is the failure this work exists to remove.
 
-**A merged line keeps its provenance only if the rewrite kept it.** The
-merge is an LLM given the node's text; asking it to preserve an exact
-suffix is asking for the class of failure this file is about. A line it
-rewrote without one falls to `inconnu`, which is the truthful reading —
-after a rewrite, nobody can establish what the line rested on. Provenance
-therefore thins over a node's life rather than being guaranteed, and
-`inconnu` means what it says in both directions.
+**The merge is handed bare facts, and the suffixes are put back after
+it.** Asking an LLM to reproduce an exact format is asking for the class
+of failure this file is about, and it does not: measured in the field,
+the first fact written into a populated node came back with no marker at
+all. Since a populated node always takes the merge path, that is the
+normal case and not the edge — left alone, a suffix would almost never
+survive.
+
+So the repair is deterministic. Before the rewrite, every claim in play
+is indexed by its text: the lines the node already carried keep whatever
+they had, and this flush's facts take the window's source. Any line the
+rewrite hands back matching one of those keys gets its suffix again.
+Wording is never touched.
+
+A line the rewrite reworded matches nothing and stays bare, which reads
+as `inconnu` — the truthful answer, since after a rewrite nobody can say
+what that sentence rested on.
 
 ## What changes at the far end
 
