@@ -17,6 +17,7 @@ from typing import Optional, TYPE_CHECKING, Any
 from datetime import datetime
 
 from rapidfuzz import fuzz
+from .audio_capture import UtteranceCapture
 from .echo_detection import EchoDetector
 from .state_manager import StateManager, ListeningState
 from .wake_detection import is_wake_word_detected, extract_query_after_wake, is_stop_command
@@ -396,6 +397,13 @@ class VoiceListener(threading.Thread):
         self._frame_samples = 0
         self._samplerate = int(getattr(self.cfg, "sample_rate", 16000))
         self._vad: Optional = None
+
+        # Off unless he set the environment variable, and it says so when
+        # it is on. Announced here rather than at stream-open so a failure
+        # to query the audio device cannot swallow the notice.
+        self._input_device_name = ""
+        self._capture = UtteranceCapture.from_env()
+        self._capture.announce()
 
         # Initialise VAD if available
         if webrtcvad is not None and bool(getattr(self.cfg, "vad_enabled", True)):
@@ -2236,12 +2244,14 @@ class VoiceListener(threading.Thread):
             if "device" in stream_kwargs:
                 dev = sd.query_devices(stream_kwargs["device"])
                 device_name = dev.get('name', 'Unknown')
+                self._input_device_name = device_name
                 debug_log(f"using input device: {device_name} (index {stream_kwargs['device']})", "voice")
                 print(f"  🎤 Using audio device: {device_name}", flush=True)
             else:
                 debug_log("using system default input device", "voice")
                 try:
                     default_dev = sd.query_devices(sd.default.device[0])
+                    self._input_device_name = default_dev.get('name', 'Unknown')
                     print(f"  🎤 Using default device: {default_dev.get('name', 'Unknown')}", flush=True)
                 except Exception:
                     print("  🎤 Using system default input device", flush=True)
@@ -2628,6 +2638,15 @@ class VoiceListener(threading.Thread):
             if sys.platform == 'win32':
                 print(f"  ❌ Whisper error: {e}", flush=True)
             text = ""
+
+        # Before the empty-transcript return, so the corpus keeps the
+        # utterances that produced nothing: those are where a transducer
+        # and an autoregressive decoder differ most.
+        self._capture.save(
+            audio, self._samplerate, text,
+            model=str(getattr(self.cfg, "whisper_model", "")),
+            device=self._input_device_name,
+        )
 
         if not text or not text.strip():
             self.state_manager.check_hot_window_expiry(self.cfg.voice_debug)

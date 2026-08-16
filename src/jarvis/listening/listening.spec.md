@@ -358,6 +358,31 @@ If judge rejects but in hot window and non-echo:
     → Override rejection, dispatch as query
 ```
 
+## Keeping a Copy of an Utterance
+
+Off unless `JARVIS_SAVE_AUDIO=<directory>` is set in the environment.
+There is no config key, no default and no UI toggle: a microphone writing
+his voice to disk is the most sensitive thing here, and the only switch
+that cannot be left on by a past session is one that dies with the shell.
+When it is live the listener says so at startup, naming the directory.
+
+Each utterance is written as 16 kHz mono WAV with a JSON sidecar holding
+Whisper's hypothesis, the model, the input device, the duration and the
+RMS. `reference` and `keywords` are left empty for him to fill in:
+deriving a reference from the hypothesis would score the recogniser
+against itself.
+
+Utterances that transcribed to nothing are kept. Silence and noise are
+where an autoregressive decoder and a transducer part company, so a
+corpus of successes only would measure the easy half.
+
+The capture sits before the empty-transcript return and never raises:
+the listener's loop drains a 64-frame audio queue on a deadline, and a
+capture that threw would cost the sentence it was meant to record.
+
+`scripts/asr_bench.py` scores such a corpus across recognisers, reporting
+word and character error rates alongside recall on the declared keywords.
+
 ## Speaking Something Produced Elsewhere
 
 Some replies are not answers to an utterance: a tool approved by a click
