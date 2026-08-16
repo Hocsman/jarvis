@@ -684,9 +684,17 @@ class VoiceListener(threading.Thread):
                         # echo-tail hallucinations ("…regions like Steneti") as
                         # genuine user speech. The threshold lives on the echo
                         # detector so every salvage site shares one policy.
+                        # The stripper removes the part it recognised; the
+                        # remainder is only speech if it carries words she
+                        # did not say. Left as "whatever is left over", a
+                        # decimated tail of her own sentence rides through
+                        # as a query — the same absence-of-proof-for-proof
+                        # trade the echo override used to make.
                         min_words = self.echo_detector.min_salvage_words
                         if (salvaged != text_lower
-                                and len(salvaged.split()) >= min_words):
+                                and len(salvaged.split()) >= min_words
+                                and _carries_speech_she_did_not_say(
+                                    salvaged, self.echo_detector._last_tts_text or "")):
                             debug_log(
                                 f"salvaged user speech from hot-window echo+speech "
                                 f"chunk: '{salvaged}'",

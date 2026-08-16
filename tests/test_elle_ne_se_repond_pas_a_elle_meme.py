@@ -90,3 +90,37 @@ def test_it_does_not_key_on_a_language():
         "could not retrieve the weather for bagneux the service", dite) is False
     assert _carries_speech_she_did_not_say(
         "forget it play some music instead", dite) is True
+
+
+# ── And at the third site, where it leaked next ────────────────────────
+
+
+DITE_APPLE = (
+    "Pour la semaine prochaine — semaine du 17 août — Apple TV+ sort deux "
+    "programmes le vendredi 21 août : la saison 5 de la série animée pour "
+    "enfants Eau-Paisible, et le documentaire sportif The Dynasty : UConn "
+    "Huskies sur une équipe universitaire de basket. Pas de quoi faire "
+    "sauter au plafond, à moins que vous ne soyez fan de basket américain "
+    "ou de leçons de vie animées."
+)
+
+
+def test_the_tail_left_by_the_prefix_stripper_is_not_speech():
+    """Second trace, same day. The stripper cut the part it recognised and
+    kept "de leçons gagnées" — her own "de leçons de vie animées", mangled.
+    The judge, handed an already-cleaned fragment, read it as a query and a
+    turn ran. Whatever the stripper leaves over is not speech by default."""
+    assert _carries_speech_she_did_not_say(
+        "de leçons gagnées.", DITE_APPLE) is False
+
+
+def test_the_whole_unstripped_echo_is_not_speech_either():
+    assert _carries_speech_she_did_not_say(
+        "faire sauter au plafond des fans de baskets américains ou de "
+        "leçons gagnées.", DITE_APPLE) is False
+
+
+def test_a_real_ask_over_that_same_reply_survives():
+    """The control at this site: he cuts in with something of his own."""
+    assert _carries_speech_she_did_not_say(
+        "non attends, plutôt la météo à Bagneux", DITE_APPLE) is True
