@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from typing import Callable, Optional
 
 from ..debug import debug_log
+from .provenance import fact_text
 
 
 # ── Mutation listeners ─────────────────────────────────────────────────────
@@ -651,11 +652,18 @@ class GraphMemoryStore:
         node = self.get_node(node_id)
         if node is None or not node.data:
             return False
-        target = normalise_fact(fact)
+        # Compared on the claim, never on the whole line. The daily
+        # summary is cumulative and re-seeds the same facts on every
+        # flush, so matching lines with their provenance suffix attached
+        # would stop recognising a fact re-extracted on a later date and
+        # append a copy once per flush, for ever. It also lets a fact
+        # written before provenance existed dedupe against its own
+        # re-extraction. See ``provenance.spec.md``.
+        target = normalise_fact(fact_text(fact))
         if not target:
             return False
         for line in node.data.split("\n"):
-            if normalise_fact(line) == target:
+            if normalise_fact(fact_text(line)) == target:
                 return True
         return False
 

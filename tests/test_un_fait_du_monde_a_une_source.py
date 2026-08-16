@@ -153,7 +153,7 @@ def test_a_caller_that_cannot_establish_the_tools_still_extracts():
 def test_the_source_follows_what_actually_ran(outils, attendu):
     """A window that touched the web is `web` even when another tool ran
     too: the weaker guarantee is the one that has to be reported."""
-    from src.jarvis.memory.graph_ops import source_for_tools
+    from src.jarvis.memory.provenance import source_for_tools
 
     assert source_for_tools(outils) == attendu
 
@@ -161,7 +161,7 @@ def test_the_source_follows_what_actually_ran(outils, attendu):
 def test_there_is_no_word_for_a_fact_the_model_invented():
     """A fact with no tool behind it does not get a weaker label. It does
     not get written, which is what the empty-window rule above enforces."""
-    from src.jarvis.memory.graph_ops import SOURCES
+    from src.jarvis.memory.provenance import SOURCES
 
     assert "modèle" not in SOURCES
     assert set(SOURCES) == {"web", "outil", "inconnu"}

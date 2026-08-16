@@ -20,6 +20,7 @@ from typing import Iterator, NamedTuple, Optional, Sequence
 
 from ..debug import debug_log
 from ..llm import get_llm_backend
+from .provenance import fact_line, fact_text, source_for_tools
 from .core import (
     SECTION_PROFILE,
     SECTION_RULES,
@@ -50,42 +51,6 @@ def call_llm_direct(*, cfg, chat_model, system_prompt, user_content,
         timeout_sec=timeout_sec, thinking=thinking,
         num_ctx=num_ctx, temperature=temperature,
     )
-
-
-# ── Provenance of a world fact ────────────────────────────────────────
-#
-# One word per fact, recorded at write time, never inferred later. See
-# `provenance.spec.md`: the point is that provenance is a property of the
-# transcript, not a judgement about the prose.
-#
-# There is deliberately no word for "the model said it". A fact with no
-# tool behind it does not get a weaker label, it does not get written —
-# which is what the empty-window rule in `extract_graph_memories`
-# enforces.
-SOURCE_WEB = "web"          # an untrusted page was fetched in the window
-SOURCE_TOOL = "outil"       # some other tool ran: weather, MCP, builtin
-SOURCE_UNKNOWN = "inconnu"  # written before this existed, or unestablishable
-SOURCES = (SOURCE_WEB, SOURCE_TOOL, SOURCE_UNKNOWN)
-
-# Tools whose output is a page the assistant did not write.
-_WEB_TOOLS = frozenset({"webSearch", "fetchWebPage"})
-
-
-def source_for_tools(tools_used: Optional[Sequence[str]]) -> str:
-    """The one word describing what a window's facts rest on.
-
-    ``None`` means the caller could not establish the tools (importing a
-    historical summary, say) and is distinct from ``[]``, which means it
-    established that none ran.
-
-    A window that touched the web is ``web`` even when a trusted tool ran
-    beside it: the weaker guarantee is the one that has to be reported.
-    """
-    if not tools_used:
-        return SOURCE_UNKNOWN
-    if any(nom in _WEB_TOOLS for nom in tools_used):
-        return SOURCE_WEB
-    return SOURCE_TOOL
 
 
 # ── Memory extraction from dialogue ───────────────────────────────────
@@ -667,8 +632,13 @@ def merge_node_data(
     # cleaned set was consolidated out, treated as a duplicate, or
     # silently dropped — caller can then decide whether to skip
     # reporting or append-fallback.
+    # Keyed on the claim, never on the whole line. The rewrite is an LLM
+    # and will not reproduce a `· web · 2026-08-16` suffix verbatim, so
+    # matching whole lines would report every genuinely-merged fact as
+    # consolidated out — a fact stored but never announced, which is the
+    # failure this file's provenance work exists to remove.
     def _match_key(text: str) -> str:
-        return normalise_fact(text).rstrip(".,;:!?")
+        return normalise_fact(fact_text(text)).rstrip(".,;:!?")
 
     cleaned_keys = {_match_key(line) for line in cleaned if line.strip()}
     incorporated_indices: list[int] = []
@@ -922,10 +892,17 @@ def update_graph_from_dialogue(
         debug_log("graph update: nothing to merge after dedupe", "memory")
         return GraphUpdateResult(stored=[], skipped=skipped)
 
+    # What the window rests on, decided once for the whole flush: every
+    # fact here came out of the same summary of the same window.
+    source = source_for_tools(tools_used)
+
     # Group by destination node so each node gets a single merge call.
+    # The provenance suffix is composed here so both write paths below —
+    # the merge rewrite and the plain-append fallback — carry it.
     by_node: dict[str, list[str]] = {}
     for fact, node_id in pending:
-        by_node.setdefault(node_id, []).append(fact)
+        by_node.setdefault(node_id, []).append(
+            fact_line(fact, source, date_utc))
 
     stored: "list[tuple[str, str]]" = []
     for node_id, node_facts in by_node.items():

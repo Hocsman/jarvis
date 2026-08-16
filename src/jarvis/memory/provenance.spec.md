@@ -83,12 +83,58 @@ One word per fact, recorded at write time, never inferred later:
 | `outil` | Some other tool ran: weather, an MCP server, a builtin. Trusted as far as that tool is. |
 | `inconnu` | Written before this spec, or by a path that could not establish a source. |
 
-`inconnu` exists so the migration never lies. Rows that predate the
-column are marked, not rewritten and not deleted: guessing their source
-now would be the same mistake at a different moment.
+`inconnu` is what a line with no suffix already means, so facts written
+before this need no marking and no rewriting: guessing their source now
+would be the same mistake at a different moment.
 
 There is deliberately no `modèle` value. A fact the model produced with
 no tool behind it does not get a weaker label — it does not get written.
+
+## Where the source is written
+
+On the line, exactly as the core files do it. `profil.md` writes
+`- il habite à Genève · dit`; a world fact writes:
+
+```
+Le DGX Spark a 128 Go de mémoire unifiée · web · 2026-08-16
+```
+
+A fact is a line inside a node's `data` blob, not a row, and one node
+accumulates facts from many windows on many days. A column on the node
+would therefore describe the node and not the fact, which is the wrong
+granularity. Putting it on the line is also the idiom the reader already
+knows from the core, so there is one convention in the project rather
+than two.
+
+It follows that there is no migration and no schema change. A line
+written before this has no suffix, and a line with no suffix *is*
+`inconnu` — not by a rule that marks it, but by construction. Nothing is
+rewritten, nothing is guessed, and an existing graph cannot be damaged by
+a migration that goes wrong.
+
+The suffix is recognised only when it matches the vocabulary and an ISO
+date exactly (`· web|outil|inconnu · YYYY-MM-DD` at end of line). A fact
+whose own text happens to contain a middle dot is untouched.
+
+**Dedupe compares the fact, not the line.** The daily summary is
+cumulative and re-seeds the same facts on every flush, so
+`node_contains_fact` matching whole lines would stop recognising a fact
+re-extracted on a later date and append it again, once per flush, for
+ever. It compares the fact part.
+
+The merge step matches on the fact part for the same reason. It rewrites
+a whole node through an LLM, which will not reproduce a suffix verbatim,
+so keying `incorporated_indices` on whole lines would report every
+genuinely merged fact as consolidated out: stored but never announced,
+which is the failure this work exists to remove.
+
+**A merged line keeps its provenance only if the rewrite kept it.** The
+merge is an LLM given the node's text; asking it to preserve an exact
+suffix is asking for the class of failure this file is about. A line it
+rewrote without one falls to `inconnu`, which is the truthful reading —
+after a rewrite, nobody can establish what the line rested on. Provenance
+therefore thins over a node's life rather than being guaranteed, and
+`inconnu` means what it says in both directions.
 
 ## What changes at the far end
 
