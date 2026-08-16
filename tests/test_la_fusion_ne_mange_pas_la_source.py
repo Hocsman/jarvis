@@ -150,3 +150,53 @@ def test_a_fact_written_into_a_populated_node_keeps_its_source(mock_llm, tmp_pat
     assert fact_source(ligne[0]) == SOURCE_WEB, (
         f"la fusion a mangé la source : {ligne[0]!r}"
     )
+
+
+# ── Ce que la vraie fusion fait, mesuré sur sa base ────────────────────
+
+
+# Verbatim, before and after one real merge on his machine, 2026-08-16.
+# The rewrite moved the currency symbol, inserted narrow spaces, swapped
+# a hyphen for U+2011 and changed one word. An exact key — even folded
+# for case and whitespace — matches none of that, which is why the first
+# repair wrote nothing.
+AVANT = ("As of August 2026, a DDR5 RAM stick cost 450 €, a 171% increase "
+         "from 80 € two years prior, driven by AI demand.")
+APRES = ("As of August 2026, a DDR5 RAM stick cost €450, a 171 % increase "
+         "from €80 two years earlier, driven by AI demand.")
+
+
+def test_a_line_the_merge_retypeset_and_reworded_keeps_its_source():
+    """The measured failure, turned into the test that had to exist.
+
+    Same line, 94.2 similarity across the rewrite; the closest unrelated
+    fact in the same node scores 33.9. The gap is what makes this safe.
+    """
+    index = _source_index([fact_line(AVANT, SOURCE_WEB, "2026-08-16")])
+
+    rendu = _reattach_sources([APRES], index)
+
+    assert fact_source(rendu[0]) == SOURCE_WEB
+
+
+def test_a_different_fact_never_borrows_a_source():
+    """The control, and the risk this introduces: a loose match would
+    stamp `web` on a line that was never looked up."""
+    index = _source_index([fact_line(AVANT, SOURCE_WEB, "2026-08-16")])
+
+    rendu = _reattach_sources(
+        ["Grand Theft Auto VI is scheduled for release on November 19, 2026."],
+        index)
+
+    assert fact_source(rendu[0]) == SOURCE_UNKNOWN
+
+
+def test_a_fact_consolidated_beyond_recognition_falls_to_unknown():
+    """When the rewrite folds several lines into a pattern, nothing
+    matches and `inconnu` is the truthful answer."""
+    index = _source_index([fact_line(AVANT, SOURCE_WEB, "2026-08-16")])
+
+    rendu = _reattach_sources(["Les prix de la mémoire ont beaucoup monté."],
+                              index)
+
+    assert fact_source(rendu[0]) == SOURCE_UNKNOWN

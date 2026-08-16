@@ -18,6 +18,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Iterator, NamedTuple, Optional, Sequence
 
+from rapidfuzz import fuzz
+
 from ..debug import debug_log
 from ..llm import get_llm_backend
 from .provenance import (
@@ -59,6 +61,15 @@ def call_llm_direct(*, cfg, chat_model, system_prompt, user_content,
     )
 
 
+# How close a rewritten line must be to a claim we know the source of.
+# Measured on his graph after one real merge: the same line scored 94
+# across the rewrite, and the closest unrelated fact in the same node
+# scored 34. Set high in that gap — a line the rewrite consolidated
+# beyond recognition should fall to `inconnu` rather than borrow a source
+# it cannot claim.
+_REWRITE_MATCH = 85
+
+
 def _source_index(lines) -> dict:
     """Map each line's claim to the provenance suffix it carried.
 
@@ -95,7 +106,23 @@ def _reattach_sources(lines, index: dict) -> list:
         if not line or not line.strip() or fact_source(line) != SOURCE_UNKNOWN:
             repare.append(line)
             continue
-        suffixe = index.get(normalise_fact(fact_text(line)))
+        cle = normalise_fact(fact_text(line))
+        suffixe = index.get(cle)
+        if suffixe is None and index:
+            # The rewrite retypesets and rewords, so an exact key matches
+            # almost nothing: measured on his graph, one line came back
+            # with the currency symbol moved, narrow spaces inserted, a
+            # hyphen swapped for U+2011 and "prior" changed to "earlier".
+            # Similarity separates that cleanly — 94 for the same line
+            # across the rewrite, 34 for the closest unrelated fact in the
+            # same node — so the bar sits high in that gap.
+            meilleur, score = None, 0.0
+            for autre, suf in index.items():
+                s = fuzz.ratio(cle, autre)
+                if s > score:
+                    meilleur, score = suf, s
+            if score >= _REWRITE_MATCH:
+                suffixe = meilleur
         repare.append(line + suffixe if suffixe else line)
     return repare
 
