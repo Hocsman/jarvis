@@ -125,6 +125,34 @@ def _make_router_stub(tools):
     return _stub
 
 
+def _force_first_call_to(tool_name: str, args: dict):
+    """Make the model's opening turn a call to ``tool_name``, then hand the
+    conversation back to the real model.
+
+    Measuring how a model recovers from a refusal needs every draw to
+    reach the refusal. Left to itself a small model sometimes answers in
+    prose and never asks for anything, which scores as a failure to
+    recover when nothing was ever refused. Only the opening turn is
+    canned; the reaction being measured is the model's own.
+    """
+    # The engine's own indirection, not ``jarvis.llm``'s: they share a name
+    # and take different arguments. Captured before `patch` swaps it out.
+    from jarvis.reply.engine import chat_with_messages as _real_chat
+
+    state = {"done": False}
+
+    def _chat(*a, **kw):
+        if not state["done"]:
+            state["done"] = True
+            return {"message": {"content": "", "tool_calls": [{
+                "id": "call_1", "type": "function",
+                "function": {"name": tool_name, "arguments": dict(args)},
+            }]}}
+        return _real_chat(*a, **kw)
+
+    return _chat
+
+
 def _make_tool_runner(capture: ToolCallCapture, responder):
     """Wrap a responder that maps (name, args) -> reply_text into a
     ``run_tool_with_retries`` replacement."""
@@ -565,6 +593,117 @@ class TestToolSearchToolEscapeHatch:
         assert nav_idx > ts_idx, (
             f"chrome-devtools__navigate_page must be invoked AFTER "
             f"toolSearchTool. Sequence: {names}"
+        )
+
+
+# =============================================================================
+# 6b. The refusal names the way out
+# =============================================================================
+
+
+class TestRefusalNamesTheWayOut:
+    """A model that just asked for a tool it cannot have is the one model
+    that most needs to be told the escape hatch exists.
+
+    Field trace (2026-08-16, his machine, deepseek-v4-flash). The router
+    picked ``remember, stop, forget, toolSearchTool``; the model wanted to
+    search the web. It asked for ``webSearch`` three turns running, was
+    refused three times by the same sentence, and then answered from
+    nothing: it stated as fact that a model it had half-read in an earlier
+    search was "specialised in cybersecurity and vulnerability
+    exploitation". Three turns burned and a confabulation delivered in a
+    confident voice, with `toolSearchTool` sitting in the allow-list the
+    whole time.
+
+    The refusal listed it among four names and said nothing about what it
+    does. Naming a tool is not telling a model it is the way out.
+
+    The scenario below is the *météo* turn from the same session rather
+    than that one, because it is the only shape that discriminates. When
+    nothing in the allow-list can answer at all, the model reaches for the
+    hatch whatever the refusal says — measured 2/2 on both wordings, a
+    ceiling rather than a result. Here `webSearch` is right there and it
+    does answer, just worse than `getWeather` would, so the model has a
+    choice to make and the refusal is what tips it.
+
+    Measured interleaved, 25 draws an arm, on deepseek-v4-flash: the old
+    wording took the hatch 4/25 and averaged 3.2 tool calls, the current
+    one 24/25 at 2.0 calls (Fisher exact, two-tailed, p = 7.2e-09). The
+    losing runs are not near-misses: they are `webSearch, webSearch,
+    fetchWebPage, fetchWebPage` and worse, the model circling a substitute
+    it was never told it could replace.
+    """
+
+    @pytest.mark.eval
+    @requires_judge_llm
+    @pytest.mark.xfail(
+        reason=(
+            "Measured on deepseek-v4-flash (24/25 vs 4/25, p = 7.2e-09). "
+            "The suite's default judge is gemma4:e2b, which does not "
+            "invoke toolSearchTool at all — the neighbouring escape-hatch "
+            "eval carries the same caveat. Run with "
+            "EVAL_JUDGE_MODEL=<a native tool-calling model> to exercise it."
+        ),
+        strict=False,
+    )
+    def test_a_refused_model_reaches_for_the_hatch(
+        self, mock_config, eval_db, eval_dialogue_memory
+    ):
+        from jarvis.reply.engine import run_reply_engine
+
+        _configure(mock_config)
+        # The planner would union its own tool names into the allow-list
+        # this scenario holds fixed, and a draw where it added `getWeather`
+        # is a draw that was never refused.
+        mock_config.planner_enabled = False
+        capture = ToolCallCapture()
+
+        def _respond(name, args):
+            if name == "toolSearchTool":
+                return (
+                    "getWeather: Current conditions and forecast for a place.\n"
+                    "stop: Explicit end-of-turn sentinel."
+                )
+            if name == "getWeather":
+                return MOCK_WEATHER_PARIS
+            if name == "webSearch":
+                # The mediocre substitute the model must decide against.
+                return (
+                    "Web search results for 'météo Bagneux':\n"
+                    "Bagneux weather pages list hourly conditions.\n"
+                )
+            return "OK"
+
+        # His router pick, name for name. The loop appends `toolSearchTool`
+        # as the sixth, which is exactly what a `[:5]` slice eats.
+        router = _make_router_stub(
+            ["webSearch", "fetchWebPage", "remember", "stop", "forget"])
+        runner = _make_tool_runner(capture, _respond)
+
+        with patch("jarvis.reply.engine.select_tools", side_effect=router), \
+             patch("jarvis.reply.engine.run_tool_with_retries", side_effect=runner), \
+             patch("jarvis.reply.engine.chat_with_messages",
+                   side_effect=_force_first_call_to(
+                       "getWeather", {"location": "Bagneux, France"})), \
+             patch(
+                 "jarvis.reply.engine.get_location_context_with_timezone",
+                 return_value=("Location: Kensington, UK", None),
+             ):
+            reply = run_reply_engine(
+                db=eval_db, cfg=mock_config, tts=None,
+                text="What is the weather in Bagneux today?",
+                dialogue_memory=eval_dialogue_memory,
+            )
+
+        names = capture.tool_names()
+        print("\n📊 refusal names the way out:")
+        print(f"   tool calls: {names}")
+        print(f"   reply: {(reply or '')[:240]}...")
+
+        assert "toolSearchTool" in names, (
+            "After being refused a tool it asked for, the model must reach "
+            "for the escape hatch rather than circle the substitute that "
+            f"happens to be in the list. Tools called: {names}"
         )
 
 

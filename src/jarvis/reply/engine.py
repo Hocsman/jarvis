@@ -479,6 +479,52 @@ def _text_tool_call_guidance(allowed_names: list[str]) -> str:
     )
 
 
+# The two names the loop appends after the router's picks, in the order
+# it appends them. They are what a plain slice of the allow-list eats,
+# and it eats them exactly when the list is long — which is when they
+# matter most.
+_CONTROL_TOOLS = ("stop", "toolSearchTool")
+
+# How many ordinary tools the refusal names before it starts counting.
+_UNAVAILABLE_TOOLS_SHOWN = 5
+
+
+def _unavailable_tool_message(tool_name: str, allowed_tools: list[str]) -> str:
+    """The tool-role reply for a call the allow-list does not carry.
+
+    This is the one message a model reads at the moment it has just
+    proved its list is too narrow, so the two control tools are named in
+    full whatever the list's length: `toolSearchTool` is how it widens
+    the routing, and `stop` is how it says it is done. What gets trimmed
+    is the ordinary tools, and the count of what was trimmed is stated
+    rather than implied by an ellipsis.
+
+    They are named only when the allow-list actually carries them. A
+    routine envelope strips both on purpose, and advertising a tool the
+    gate will refuse spends the model's next turn on a closed door.
+    """
+    ordinary = [name for name in allowed_tools if name not in _CONTROL_TOOLS]
+    shown = ordinary[:_UNAVAILABLE_TOOLS_SHOWN]
+
+    parts = list(shown)
+    hidden = len(ordinary) - len(shown)
+    if hidden:
+        parts.append(f"(+{hidden} more)")
+    parts.extend(name for name in _CONTROL_TOOLS if name in allowed_tools)
+
+    message = (
+        f"Error: Tool '{tool_name}' is not available. "
+        f"Available tools: {', '.join(parts) or '(none)'}."
+    )
+    if "toolSearchTool" in allowed_tools:
+        message += (
+            " If none of these fit, call toolSearchTool with a short "
+            "description of what you are trying to do: it can surface a "
+            "tool that is not listed here."
+        )
+    return message
+
+
 def _is_malformed_model_output(content: str) -> bool:
     """Detect malformed / non-conversational LLM content that must not reach
     the user.
@@ -2765,7 +2811,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call_id,
-                    "content": f"Error: Tool '{tool_name}' is not available. Available tools: {', '.join(allowed_tools[:5])}{'...' if len(allowed_tools) > 5 else ''}"
+                    "content": _unavailable_tool_message(tool_name, allowed_tools),
                 })
                 continue
 

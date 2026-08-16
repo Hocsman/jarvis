@@ -33,6 +33,19 @@ The reply engine:
 2. Exposes `base_tools ∪ {stop, toolSearchTool}` per turn.
 3. On a `toolSearchTool` call, dispatches it (running `select_tools(query)` with the same strategy config), appends the tool result as normal, and merges the returned tool names into the allow-list for the next turn. Duplicates collapse; the list only grows.
 4. Neither `stop` nor `toolSearchTool` is ever removed.
+5. Refuses a call to any name outside the allow-list with a tool-role
+   error that names what *is* available. `stop` and `toolSearchTool` are
+   named in full however long the list is, and the error carries one
+   sentence saying `toolSearchTool` can surface a tool that is not
+   listed. Ordinary tools are trimmed past five, and the number trimmed
+   is stated rather than implied by an ellipsis.
+
+   A model that has just asked for a tool it cannot have is the one model
+   that most needs the escape hatch, so the refusal is the wrong message
+   to trim it out of. The two control tools are named only when the
+   allow-list genuinely carries them: under a routine envelope
+   `scope.allows` strips both, and advertising a tool the gate will
+   refuse spends the model's next turn on a closed door.
 
 Tools surfaced by `toolSearchTool` take effect from the NEXT turn onwards; the current turn's result is already committed. This is inherent to the agentic-loop rhythm and is not a bug.
 

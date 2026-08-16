@@ -107,6 +107,7 @@ Every distinct LLM call in Jarvis, what feeds it, what consumes it, and how it i
 
 - **File**: [src/jarvis/tools/builtin/tool_search.py](src/jarvis/tools/builtin/tool_search.py) — `toolSearchTool`.
 - **Trigger**: when the model explicitly invokes `toolSearchTool` during the loop. Capped at `tool_search_max_calls` (3) per reply.
+- **What prompts the invocation**: the system prompt tells the model to reach for it before ever saying "I cannot", and the engine's refusal for a call outside the allow-list names it explicitly with one line on what it does. That refusal is the highest-signal moment for this context — the model has just proved its routing was too narrow — so `stop` and `toolSearchTool` are always named there whatever the list's length, and only trimmed ordinary tools are counted away. Under a `RoutineScope` neither is in the allow-list and neither is offered.
 - **Model**: reuses the tool router (#7) — no separate LLM call here.
 - **Inputs**: self-contained query from the model.
 - **Output**: newline-separated tool names + one-liners, merged into the allow-list for the next turn.
