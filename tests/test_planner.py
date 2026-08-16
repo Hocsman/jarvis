@@ -148,9 +148,38 @@ class TestPlanQuery:
         assert plan_query(cfg, long, "", []) == []
 
     def test_missing_model_returns_empty(self):
-        cfg = _cfg(ollama_chat_model="")
+        """`llm_chat_model` is the field that decides; `ollama_chat_model`
+        has not been read here since the backend abstraction landed.
+
+        Emptying the wrong field left a model resolved, so the guard never
+        fired and the planner made a real call to whatever was listening
+        on localhost. It then passed or failed on whether that call came
+        back within the six-second timeout: green on CI where nothing
+        answers, green on a busy machine where the call times out, red on
+        an idle one. A network failure was standing in for the assertion,
+        which is a failure indistinguishable from a success.
+        """
+        cfg = _cfg(llm_chat_model="", planner_model="")
         long = "what films did the director of Possessor make?"
-        assert plan_query(cfg, long, "", []) == []
+
+        with patch.object(planner_mod, "call_llm_direct") as appel:
+            assert plan_query(cfg, long, "", []) == []
+
+        assert appel.call_count == 0, (
+            "no model resolved, so the planner must not reach for one"
+        )
+
+    def test_a_resolved_model_is_actually_called(self):
+        """The control. Emptying a field that decides nothing would make
+        the test above pass while measuring nothing at all."""
+        cfg = _cfg()
+        long = "what films did the director of Possessor make?"
+
+        with patch.object(planner_mod, "call_llm_direct",
+                          return_value="") as appel:
+            plan_query(cfg, long, "", [])
+
+        assert appel.call_count == 1
 
     def test_returns_parsed_steps(self):
         cfg = _cfg()
