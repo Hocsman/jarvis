@@ -266,6 +266,52 @@ except Exception:
     WhisperModel = None
 
 
+# A heard word counts as one she said when it matches any word of her
+# reply this closely. Deliberately loose, because ASR mangles echo:
+# 'perlet' for 'perplexe' scores 71, 'sahas' for 'saas' 89. Measured on
+# the day's real transcripts, the aggregate below is unchanged whether
+# this sits at 70, 80 or 90 — the design does not rest on the number.
+_ECHO_WORD_MATCH = 80
+
+# Above this share of unmatched words, the utterance carries something
+# she did not say. The two real echoes measured 0% and 18%; barge-in
+# measured 62% and 100%. This sits in the gap.
+_SPEECH_SHARE = 0.4
+
+
+def _carries_speech_she_did_not_say(heard: str, spoken: str) -> bool:
+    """True when enough of the utterance has no counterpart in her reply.
+
+    The echo override needs proof that the user said something, and its
+    old test was the *absence* of proof that they had not: `partial_ratio`
+    below a bar. That ratio looks for a contiguous window, so a decimated
+    echo — words dropped from the middle, others corrupted — stops
+    matching and reads as new content. A similarity measure that failed to
+    find its match is not evidence.
+
+    Per word nothing separates the two ('même' against 'semaine' scores
+    the same as a genuinely new word). Over the whole utterance it
+    separates cleanly, so the share is what decides.
+
+    Fails open: with nothing of hers to compare against, everything is
+    the user's.
+    """
+    import re
+
+    mots = re.findall(r"\w+", (heard or "").lower(), re.UNICODE)
+    if not mots:
+        return False
+    siens = re.findall(r"\w+", (spoken or "").lower(), re.UNICODE)
+    if not siens:
+        return True
+
+    neufs = sum(
+        1 for m in mots
+        if max((fuzz.ratio(m, s) for s in siens), default=0) < _ECHO_WORD_MATCH
+    )
+    return (neufs / len(mots)) > _SPEECH_SHARE
+
+
 _TRUNCATION_MARKS = ("...", "…")
 
 
@@ -1112,8 +1158,20 @@ class VoiceListener(threading.Thread):
                                     echo_score >= 70
                                     and text_words <= max(tts_words * 1.3, tts_words + 3)
                                 )
-                            if is_pure_echo:
-                                debug_log(f"🔇 Echo in hot window (echo reasoning confirmed, score={echo_score}): \"{text_lower}\"", "voice")
+                            # The judge read this as her own echo and said
+                            # so. Overriding that verdict takes proof the
+                            # user spoke, not the failure of a contiguous
+                            # ratio to find its match in a decimated echo.
+                            if is_pure_echo or not _carries_speech_she_did_not_say(
+                                text_lower, last_tts_text or ""
+                            ):
+                                debug_log(
+                                    f"🔇 Echo in hot window (echo reasoning confirmed, "
+                                    f"score={echo_score}, nothing she did not say): "
+                                    f"\"{text_lower}\"", "voice")
+                                print(f"  🔇 Heard (echo): \"{text_lower[:50]}"
+                                      f"{'...' if len(text_lower) > 50 else ''}\"",
+                                      flush=True)
                                 self._stop_thinking_tune()
                                 return
                             # Mixed echo+speech — override the echo reasoning
