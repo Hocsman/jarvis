@@ -11,11 +11,32 @@
 #   ./scripts/run_evals.sh --single     # Run with single model only (EVAL_JUDGE_MODEL)
 #
 # Environment variables:
-#   EVAL_JUDGE_MODEL    - Model to use for LLM-as-judge (default: gpt-oss:20b)
+#   EVAL_JUDGE_MODEL    - Model to use for LLM-as-judge (default: gemma4:e2b,
+#                         matching evals/helpers.py — the smallest supported
+#                         model is the canary, see MODEL_SMALL below)
 #   EVAL_JUDGE_BASE_URL - Ollama base URL (default: http://localhost:11434)
 #   EVAL_REPEAT_COUNT   - Number of times to run each test (default: 1; use 3 when tuning prompts to surface flakiness)
+#   PYTHON              - Interpreter to run pytest with (default: the first
+#                         of python3 / python found on PATH)
 
 set -e
+
+# Resolve the interpreter rather than assuming a bare `python` exists. On a
+# machine with only `python3`, or inside an environment that exposes its
+# interpreter by full path, the bare name is not found: pytest never starts,
+# every suite reports nothing, and the run looks like a completed one that
+# happened to fail. Measured here on 2026-08-16 — 338 eval cases, zero of
+# them executed.
+if [ -z "${PYTHON:-}" ]; then
+    if command -v python3 > /dev/null 2>&1; then
+        PYTHON="python3"
+    elif command -v python > /dev/null 2>&1; then
+        PYTHON="python"
+    else
+        echo "  ❌ No Python interpreter found. Set PYTHON=/path/to/python." >&2
+        exit 127
+    fi
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
@@ -110,7 +131,7 @@ run_evals_for_model() {
     # Build the pytest command (--tb=short for cleaner tracebacks, -s to capture stdout for judge notes)
     # Each test runs REPEAT_COUNT times for pass rate calculation
     local REPEAT_COUNT="${EVAL_REPEAT_COUNT:-1}"
-    local CMD="python -m pytest evals/ $PYTEST_ARGS --tb=short --count=$REPEAT_COUNT"
+    local CMD="$PYTHON -m pytest evals/ $PYTEST_ARGS --tb=short --count=$REPEAT_COUNT"
 
     if [ -n "$FILTER" ]; then
         if [ -n "$EXCLUDE_PATTERNS" ]; then
@@ -168,7 +189,7 @@ if [ "$MULTI_MODEL" = true ] && [ "$OLLAMA_AVAILABLE" = true ]; then
 
     # Merge reports into final EVALS.md
     if [ "$GENERATE_REPORT" = true ]; then
-        python "${SCRIPT_DIR}/merge_eval_reports.py" \
+        "$PYTHON" "${SCRIPT_DIR}/merge_eval_reports.py" \
             "${TEMP_DIR}/evals_small.md" "$MODEL_SMALL" \
             "${TEMP_DIR}/evals_large.md" "$MODEL_LARGE" \
             > "${PROJECT_ROOT}/EVALS.md"
@@ -179,8 +200,11 @@ if [ "$MULTI_MODEL" = true ] && [ "$OLLAMA_AVAILABLE" = true ]; then
     # Cleanup temp directory
     rm -rf "$TEMP_DIR"
 else
-    # Single model mode
-    export EVAL_JUDGE_MODEL="${EVAL_JUDGE_MODEL:-$MODEL_LARGE}"
+    # Single model mode. Defaults to the small tier, matching
+    # evals/helpers.py: two field regressions once slipped past CI because
+    # the evals only ran against the larger model, so the canary is the
+    # default and the upper tier is the opt-in.
+    export EVAL_JUDGE_MODEL="${EVAL_JUDGE_MODEL:-$MODEL_SMALL}"
     export EVAL_REPORT_PATH="${PROJECT_ROOT}/EVALS.md"
     run_evals_for_model "$EVAL_JUDGE_MODEL" "" || FINAL_EXIT_CODE=$?
 fi
@@ -189,8 +213,22 @@ echo ""
 echo "────────────────────────────────────────────────────────────────"
 if [ $FINAL_EXIT_CODE -eq 0 ]; then
     echo "  ✅ All evaluations passed!"
+elif [ $FINAL_EXIT_CODE -eq 1 ]; then
+    echo "  ⚠️  Some evaluations failed (exit code: 1)"
 else
-    echo "  ⚠️  Some evaluations failed (exit code: $FINAL_EXIT_CODE)"
+    # Anything else is pytest failing to run rather than tests failing:
+    # 5 is "no tests collected", 4 a usage error, 126/127 a shell-level
+    # failure to start the interpreter at all. Reporting those as failed
+    # evaluations is the shape of the bug this suite exists to catch —
+    # a run that measured nothing, wearing the face of one that did.
+    echo "  ❌ The suite did not run (exit code: $FINAL_EXIT_CODE)."
+    case $FINAL_EXIT_CODE in
+        5)   echo "     pytest collected no tests. Check the filter argument." ;;
+        4)   echo "     pytest usage error. Check the arguments passed through." ;;
+        126|127) echo "     '$PYTHON' could not be executed. Set PYTHON=/path/to/python." ;;
+        *)   echo "     pytest exited $FINAL_EXIT_CODE before reporting results." ;;
+    esac
+    echo "     Nothing was measured — this is not a set of failing evals."
 fi
 echo ""
 echo "  📖 Legend:"
