@@ -266,6 +266,40 @@ except Exception:
     WhisperModel = None
 
 
+_TRUNCATION_MARKS = ("...", "…")
+
+
+def _query_is_an_unfinished_fragment(heard: str, query: str) -> bool:
+    """True when the judge handed back the tail of a sentence still being said.
+
+    A minimum-length guard cannot do this job — it is the wrong axis. The
+    fragment observed in the field, "Quel est pour toi", is four words and
+    seventeen characters; every legitimate short query is shorter, and
+    "tell me more" is one the judge's own prompt names as valid. Any
+    threshold catching the fragment kills those.
+
+    Truncation is the signal, and Whisper writes it: the transcript ends
+    in an ellipsis. On its own that is not enough, because the judge is
+    told to resolve a topic-less question against earlier segments, and
+    when it does the query is a new sentence rather than a slice of this
+    one. So both have to hold: the utterance was cut off, and the query is
+    still just a piece of it.
+
+    Punctuation rather than vocabulary, so it does not privilege a
+    language. Fails open: no ellipsis, no opinion.
+    """
+    import re
+
+    heard = (heard or "").strip()
+    query = (query or "").strip()
+    if not heard or not query:
+        return False
+    if not heard.endswith(_TRUNCATION_MARKS):
+        return False
+    plat = re.sub(r"\s+", " ", heard.rstrip("… .").lower())
+    return re.sub(r"\s+", " ", query.lower()) in plat
+
+
 def _is_faster_whisper_turbo_supported() -> bool:
     """Check if the installed faster-whisper supports the large-v3-turbo model."""
     try:
@@ -927,6 +961,20 @@ class VoiceListener(threading.Thread):
                                 f"\"{judge_query}\" (heard: \"{text_lower[:80]}\")",
                                 "voice",
                             )
+                        # Half a sentence waits for its other half. The
+                        # segment is deliberately left unprocessed so the
+                        # next utterance's judge call sees both halves and
+                        # can compose the whole question.
+                        if _query_is_an_unfinished_fragment(text_lower, hot_query):
+                            debug_log(
+                                f"⏳ holding unfinished fragment: \"{hot_query}\" "
+                                f"(heard: \"{text_lower[:80]}\")", "voice",
+                            )
+                            print("  ⏳ Sentence still going, waiting for the rest",
+                                  flush=True)
+                            self._stop_thinking_tune()
+                            return
+
                         debug_log(f"✅ Intent judge accepted ({intent_judgment.confidence}): \"{hot_query}\"", "voice")
                         self.state_manager.cancel_hot_window_activation()
                         self._transcript_buffer.mark_segment_processed(text_lower)
