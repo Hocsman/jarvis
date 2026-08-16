@@ -210,7 +210,7 @@ At the start of each reply cycle, the reply engine enriches the system prompt wi
 2. **Not gated on the extractor.** The graph is a SQLite `LIKE` scan, no LLM and no embedding. Reaching it through an LLM call would trade a network round trip for a local one and call it a saving, so a plan that named a lookup opens the graph directly. The recall gate shuts the extractor and the diary; it does not shut the graph.
 3. **Search**: keywords, questions and plan terms are joined, stop-worded, and used to find matching nodes (up to 5 results with data previews). Fewer than two content words is treated as too thin to search — one generic term against a LIKE match surfaces noise, and noise in the prompt costs more than a search she pays for again.
 4. **Skipped entirely** when none of the three produced anything. A utility query (the time, a sum) has nothing to look up.
-5. Results are injected as things she looked up in earlier conversations, explicitly framed as describing the world rather than the user, and explicitly losing to the core sections above on any conflict.
+5. Results are injected as what she has kept from earlier conversations, explicitly framed as describing the world rather than the user, and explicitly losing to the core sections above on any conflict. The envelope claims no provenance of its own: each line carries its own (`· web` / `· outil` / `· inconnu`, see [provenance.spec.md](provenance.spec.md)) and the envelope explains only the markers actually present in the block. A line with no marker is named as one nobody recorded a source for, and the model is told not to present it as something it established.
 
 No tool calls needed. The LLM sees relevant graph memories as part of its system context.
 

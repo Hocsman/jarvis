@@ -525,6 +525,52 @@ def _unavailable_tool_message(tool_name: str, allowed_tools: list[str]) -> str:
     return message
 
 
+def _graph_context_block(graph_parts: list) -> str:
+    """Introduce the graph hits to the model, claiming only what they say.
+
+    The block used to open with "Things you looked up in earlier
+    conversations", which is a provenance claim made over every line at
+    once — including lines written before provenance was recorded, and
+    lines read off a page the assistant does not vouch for.
+
+    Each line already ends with what it rests on, because that is how it
+    is stored (see ``provenance.spec.md``). What was missing is that the
+    model had no idea those words meant anything. Only the words actually
+    present are explained: a block of trusted-tool lines should not spend
+    prompt on `web`.
+    """
+    from ..memory.provenance import SOURCE_TOOL, SOURCE_UNKNOWN, SOURCE_WEB
+
+    if not graph_parts:
+        return ""
+
+    corps = "\n".join(graph_parts)
+    legende = {
+        SOURCE_WEB: ("`· web` was read on a page you did not write, on the "
+                     "date shown, and can be wrong or out of date"),
+        SOURCE_TOOL: ("`· outil` came back from a tool you ran on the date "
+                      "shown"),
+        SOURCE_UNKNOWN: ("`· inconnu`, or no marker at all, means nobody "
+                         "recorded where it came from — do not present it "
+                         "as something you established"),
+    }
+    presentes = [texte for source, texte in legende.items()
+                 if source == SOURCE_UNKNOWN or f"· {source}" in corps]
+    # A line with no marker is the `inconnu` case, so that entry stands
+    # whenever anything is shown at all.
+
+    return (
+        "What you have kept from earlier conversations (films, places, "
+        "businesses, techniques, events — you have access to this, it "
+        "just is not in the current session). It describes the world, "
+        "not the user: what is true about the user is in the sections "
+        "above, and those win if this disagrees with them.\n"
+        "Each line ends with where it came from. "
+        + "; ".join(presentes) + ".\n"
+        + corps
+    )
+
+
 def _is_malformed_model_output(content: str) -> bool:
     """Detect malformed / non-conversational LLM content that must not reach
     the user.
@@ -1849,14 +1895,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
 
                 if graph_parts:
                     raw_graph_parts = list(graph_parts)
-                    graph_context = (
-                        "Things you looked up in earlier conversations and kept "
-                        "(films, places, businesses, techniques, events — you have "
-                        "access to this, it just is not in the current session). "
-                        "It describes the world, not the user: what is true about "
-                        "the user is in the sections above, and those win if this "
-                        "disagrees with them:\n" + "\n".join(graph_parts)
-                    )
+                    graph_context = _graph_context_block(graph_parts)
                     names_str = ", ".join(name for name, _ in node_annotations[:4] if name)
                     print(f"  🧠 Knowledge: {len(graph_parts)} nodes — {names_str}", flush=True)
                     for name, reason in node_annotations[:4]:

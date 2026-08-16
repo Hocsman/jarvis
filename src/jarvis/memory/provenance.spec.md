@@ -141,15 +141,25 @@ therefore thins over a node's life rather than being guaranteed, and
 A stored fact stops being a bare sentence. What is displayed, and what is
 injected into a later system prompt, says what it rests on.
 
-The injection today frames graph results as "things she looked up in
-earlier conversations". For a row whose source is `inconnu` that sentence
-asserts more than anyone established, so the framing follows the source
-rather than the branch.
+The envelope around injected graph results claims no provenance of its
+own. It used to open with "Things you looked up in earlier
+conversations", which is a claim made over every line at once, including
+the ones nobody recorded a source for.
 
-For `web`, the framing names it as read on a page on a date. The reader —
-the model in a later turn, or the user in the memory viewer — can then
-tell "DGX Spark has 128 GB unified memory" from "Mythos 5 scores 78% on
-ExploitBench" without having to already know which is which.
+Instead it says what the block *is* — kept from earlier conversations,
+describing the world and not the user, losing to the core on any
+conflict — and then explains the markers the lines carry. `web` is named
+as read on a page on a date and possibly wrong; `inconnu`, or no marker,
+is named as a line the model must not present as something it
+established.
+
+Only the markers actually present are explained, so a block of
+tool-sourced lines does not spend prompt on `web`.
+
+The reader — the model in a later turn, or the user in the memory
+viewer — can then tell "DGX Spark has 128 GB unified memory · outil"
+from "Mythos 5 scores 78% on ExploitBench · web" without having to
+already know which is which.
 
 ## What this does not do
 
