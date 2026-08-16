@@ -3510,7 +3510,7 @@ def main() -> int:
                 splash.set_status("Model check complete!")
                 app.processEvents()
 
-        splash.set_status("Loading Jarvis...")
+        splash.set_status("Loading Yuba...")
         print("Initializing JarvisSystemTray...", flush=True)
         tray_instance = JarvisSystemTray(
             ollama_runtime_ownership=ollama_runtime_ownership,
