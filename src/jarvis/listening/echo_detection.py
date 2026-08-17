@@ -55,7 +55,8 @@ class EchoDetector:
         self._utterance_end_time: float = 0.0
     
     def track_tts_start(self, tts_text: str, baseline_energy: float = 0.0045,
-                        exact_duration: Optional[float] = None) -> None:
+                        exact_duration: Optional[float] = None,
+                        continues: bool = False) -> None:
         """
         Track when TTS starts speaking.
 
@@ -63,9 +64,29 @@ class EchoDetector:
             tts_text: Text being spoken by TTS
             baseline_energy: Current audio energy baseline
             exact_duration: Exact audio duration in seconds (from Piper synthesis)
+            continues: True when this is a later chunk of a reply already
+                being spoken. The reference text then accumulates instead
+                of being replaced, and the start time is left alone.
+
+                A streamed reply arrives sentence by sentence, and every
+                consumer of ``_last_tts_text`` compares what the microphone
+                heard against it. Replacing it per chunk would leave an
+                echo of the first sentence — reaching the mic while the
+                third plays — compared against the third, matching nothing,
+                and taken for the user. The reference is the reply, never
+                the chunk.
+
+                The start time is not restamped either: echo windows are
+                timed from when she began speaking, and pushing that
+                forward on each chunk would let a late echo look like
+                fresh speech.
         """
-        self._tts_start_time = time.time()
-        self._last_tts_text = tts_text.lower().strip()
+        if continues and self._last_tts_text:
+            self._last_tts_text = (
+                self._last_tts_text + " " + tts_text.lower().strip()).strip()
+        else:
+            self._tts_start_time = time.time()
+            self._last_tts_text = tts_text.lower().strip()
         self._tts_energy_baseline = baseline_energy
         self._tts_exact_duration = exact_duration
 
