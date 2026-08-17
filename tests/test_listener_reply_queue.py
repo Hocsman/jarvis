@@ -43,6 +43,9 @@ def listener():
     obj._reply_queue = None
     # Bits `_speak_reply` touches that a real listener sets up in __init__.
     obj._tune_player = None
+    # Nothing was streamed, so `_speak_reply` says the whole reply — the
+    # path every one of these tests is about.
+    obj._streamed_chars = 0
     obj.state_manager = MagicMock()
     obj._recent_audio_energy = []
     obj.tts.is_speaking.return_value = False

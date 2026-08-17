@@ -116,3 +116,42 @@ def test_the_text_is_unchanged_by_the_journey(nom):
     vus = _draine(moteur)
 
     assert "veste" in vus[0][0]
+
+
+# ── Le marqueur de fin ─────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("nom", MOTEURS)
+def test_a_callback_with_no_text_fires_once_everything_queued_has_been_said(nom):
+    """A streamed reply whose last sentence ends on punctuation leaves no
+    tail, so the completion callback has nothing to ride on. It gets an
+    item of its own: empty text, one callback, spoken after the rest.
+
+    Without it the hot window would have to open on the last *chunk*,
+    which the streaming path cannot identify while it is still streaming.
+    """
+    moteur = _moteur(nom)
+    fin = lambda: None
+
+    moteur.speak("Première phrase ici.")
+    moteur.speak("Dernière phrase.")
+    moteur.speak("", completion_callback=fin)
+
+    items = []
+    while not moteur._q.empty():
+        items.append(moteur._q.get_nowait())
+
+    assert [t for t, _, _ in items] == ["Première phrase ici.",
+                                        "Dernière phrase.", ""]
+    assert items[-1][1] is fin
+
+
+@pytest.mark.parametrize("nom", MOTEURS)
+def test_empty_text_with_no_callback_is_still_dropped(nom):
+    """The control. Silence with nothing to announce stays out of the
+    queue, as it always has."""
+    moteur = _moteur(nom)
+
+    moteur.speak("   ")
+
+    assert moteur._q.empty()

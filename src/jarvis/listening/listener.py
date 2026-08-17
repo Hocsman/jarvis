@@ -482,6 +482,11 @@ class VoiceListener(threading.Thread):
         # it is on. Announced here rather than at stream-open so a failure
         # to query the audio device cannot swallow the notice.
         self._input_device_name = ""
+        # How much of the current reply streaming already spoke. Read by
+        # `_speak_reply` to know whether it has a tail to say or a whole
+        # reply, and reset there so a turn that never streamed behaves
+        # exactly as before.
+        self._streamed_chars = 0
         self._capture = UtteranceCapture.from_env()
         self._capture.announce()
 
@@ -569,7 +574,40 @@ class VoiceListener(threading.Thread):
         except Exception as e:
             debug_log(f"failed to set face state to LISTENING: {e}", "voice")
 
-    def track_tts_start(self, tts_text: str) -> None:
+    def _speak_as_it_comes(self):
+        """A token callback that speaks each sentence as it closes.
+
+        Returns ``None`` when there is nothing to speak into, so the
+        caller can hand the engine no callback at all and keep today's
+        buffered path.
+
+        The chunks carry no completion callback: the reply's one callback
+        is attached at the end by `_speak_reply`, because it opens the hot
+        window and doing that mid-reply would take her own next sentence
+        for a follow-up.
+        """
+        if not (self.tts and self.tts.enabled):
+            return None
+
+        from ..output.streaming import SentenceStreamer
+
+        decoupeur = SentenceStreamer()
+        self._streamed_chars = 0
+
+        def _sur_jeton(delta: str) -> None:
+            try:
+                for phrase in decoupeur.feed(delta):
+                    self.track_tts_start(phrase, continues=self._streamed_chars > 0)
+                    self.tts.speak(phrase)
+                    self._streamed_chars += len(phrase) + 1
+            except Exception as e:
+                # Never let delivery break generation: the buffered path
+                # at the end still says the whole reply.
+                debug_log(f"streaming TTS chunk failed, falling back: {e}", "voice")
+
+        return _sur_jeton
+
+    def track_tts_start(self, tts_text: str, continues: bool = False) -> None:
         """Called when TTS starts speaking."""
         if self.tts and self.tts.enabled:
             # Calculate baseline energy from recent audio samples
@@ -577,7 +615,8 @@ class VoiceListener(threading.Thread):
             if self._recent_audio_energy:
                 baseline_energy = sum(self._recent_audio_energy) / len(self._recent_audio_energy)
 
-            self.echo_detector.track_tts_start(tts_text, baseline_energy)
+            self.echo_detector.track_tts_start(tts_text, baseline_energy,
+                                               continues=continues)
 
     def activate_hot_window(self) -> None:
         """Activate hot window after TTS completion."""
@@ -1348,6 +1387,7 @@ class VoiceListener(threading.Thread):
                     language=self._last_detected_language,
                     origin="voix",
                     heard=getattr(self, "_last_transcript", None),
+                    on_token=self._speak_as_it_comes(),
                 )
         except Exception as e:
             # Log the error visibly - this should never happen silently
@@ -1396,6 +1436,25 @@ class VoiceListener(threading.Thread):
                 debug_log(f"TTS exact duration: {duration:.2f}s", "voice")
                 if self.echo_detector:
                     self.echo_detector._tts_exact_duration = duration
+
+            # What streaming already said, if anything. The chunks are
+            # spoken as they close; what is left here is the tail — and
+            # when the last sentence ended on punctuation there is none,
+            # so the completion callback rides the end-of-reply marker
+            # instead. It has to fire exactly once, after everything:
+            # firing per chunk would open the hot window mid-reply and
+            # invite her own next sentence in as a follow-up.
+            deja_dit = self._streamed_chars
+            self._streamed_chars = 0
+
+            if deja_dit:
+                reste = reply[deja_dit:].strip()
+                debug_log(f"TTS tail after streaming ({len(reste)} chars)", "voice")
+                if reste:
+                    self.track_tts_start(reste, continues=True)
+                self.tts.speak(reste, completion_callback=_on_tts_complete,
+                               duration_callback=_on_duration_known)
+                return
 
             # Track TTS start for echo detection with actual text
             self.track_tts_start(reply)

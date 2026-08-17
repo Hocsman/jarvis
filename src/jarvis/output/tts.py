@@ -461,8 +461,14 @@ class ChatterboxTTS:
 
     def speak(self, text: str, completion_callback: Optional[Callable[[], None]] = None,
               duration_callback: Optional[Callable[[float], None]] = None) -> None:
-        if not self.enabled or not text.strip():
+        if not self.enabled:
             return
+        if not text.strip() and completion_callback is None:
+            return
+        # Empty text with a callback is the end-of-reply marker. A streamed
+        # reply whose last sentence ends on punctuation leaves no tail, so
+        # the callback has nothing to ride on; it gets an item of its own,
+        # spoken after everything queued before it.
         # Lazy start the worker thread and lazy init on first speak
         if self._thread is None:
             self.start()
@@ -491,6 +497,11 @@ class ChatterboxTTS:
             except queue.Empty:
                 continue
             if not texte:
+                if _fin is not None:
+                    try:
+                        _fin()
+                    except Exception as e:
+                        debug_log(f"TTS end-of-reply callback error: {e}", "tts")
                 continue
             self._completion_callback = _fin
             self._duration_callback = _duree
@@ -785,8 +796,14 @@ class PiperTTS:
 
     def speak(self, text: str, completion_callback: Optional[Callable[[], None]] = None,
               duration_callback: Optional[Callable[[float], None]] = None) -> None:
-        if not self.enabled or not text.strip():
+        if not self.enabled:
             return
+        if not text.strip() and completion_callback is None:
+            return
+        # Empty text with a callback is the end-of-reply marker. A streamed
+        # reply whose last sentence ends on punctuation leaves no tail, so
+        # the callback has nothing to ride on; it gets an item of its own,
+        # spoken after everything queued before it.
         # Lazy start the worker thread
         if self._thread is None:
             self.start()
@@ -821,6 +838,11 @@ class PiperTTS:
             except queue.Empty:
                 continue
             if not texte:
+                if _fin is not None:
+                    try:
+                        _fin()
+                    except Exception as e:
+                        debug_log(f"TTS end-of-reply callback error: {e}", "tts")
                 continue
             self._completion_callback = _fin
             self._duration_callback = _duree
@@ -1138,8 +1160,14 @@ class KokoroTTS:
 
     def speak(self, text: str, completion_callback: Optional[Callable[[], None]] = None,
               duration_callback: Optional[Callable[[float], None]] = None) -> None:
-        if not self.enabled or not text.strip():
+        if not self.enabled:
             return
+        if not text.strip() and completion_callback is None:
+            return
+        # Empty text with a callback is the end-of-reply marker. A streamed
+        # reply whose last sentence ends on punctuation leaves no tail, so
+        # the callback has nothing to ride on; it gets an item of its own,
+        # spoken after everything queued before it.
         if self._thread is None:
             self.start()
         # The callbacks travel with their text. Set on the engine, they
@@ -1172,6 +1200,11 @@ class KokoroTTS:
             except queue.Empty:
                 continue
             if not texte:
+                if _fin is not None:
+                    try:
+                        _fin()
+                    except Exception as e:
+                        debug_log(f"TTS end-of-reply callback error: {e}", "tts")
                 continue
             self._completion_callback = _fin
             self._duration_callback = _duree
