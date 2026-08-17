@@ -59,9 +59,26 @@ inventing one, which is the direction this has to fail in.
 
 ## The rule that does the work
 
-**A window in which no tool ran contains no lookups, so it yields no
-world facts.** Extraction is skipped before the LLM call, not filtered
-after it.
+**A window in which nothing looked anything up contains no lookups, so it
+yields no world facts.** Extraction is skipped before the LLM call, not
+filtered after it.
+
+Running a tool is not the same as having consulted something. `stop` and
+`toolSearchTool` steer; `remember`, `forget`, `logMeal`, `setReminder`
+and the goal tools write; `fetchMeals`, `listGoals` and `reviewLearnings`
+read his own records, which are not the world. Only the rest counts, and
+only the rest decides the source label — a window that merely wrote a
+reminder looked nothing up.
+
+Observed 2026-08-17: a turn whose only tool was `toolSearchTool` — which
+returns a list of tool *names* — satisfied the gate as first written.
+Nothing reached the graph that day only because the extractor refused the
+content for an unrelated reason. Counting "a tool ran" as "something was
+learned" is the error this file exists to prevent, made one level in.
+
+An unrecognised name counts as a lookup. Every MCP server's tools land
+there, one usually does consult something, and dropping them all would
+lose real facts to guard against a mislabelled source.
 
 This is the whole of the defence against the observed failure, and it
 costs nothing: the assistant answering from its own priors or from what

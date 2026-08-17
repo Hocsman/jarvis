@@ -31,6 +31,35 @@ SOURCES = (SOURCE_WEB, SOURCE_TOOL, SOURCE_UNKNOWN)
 # Tools whose output is a page the assistant did not write.
 _WEB_TOOLS = frozenset({"webSearch", "fetchWebPage"})
 
+# Tools that consult nothing: they write, they steer, or they read his own
+# records. Running one is not having looked anything up, and counting it
+# as such is the error this module exists to prevent, made one level in.
+#
+# Observed 2026-08-17: a turn whose only tool was `toolSearchTool` — which
+# returns a list of tool *names* — satisfied the gate. Nothing was written
+# that day only because the extractor refused the content for an
+# unrelated reason.
+#
+# An unrecognised name counts as a lookup. Every MCP server's tools land
+# here, and one usually does consult something; dropping them all would
+# lose real facts to guard against a mislabelled source, which is the
+# expensive direction to be wrong in.
+_NOT_A_LOOKUP = frozenset({
+    # control
+    "stop", "toolSearchTool", "refreshMCPTools",
+    # writes
+    "remember", "forget", "logMeal", "deleteMeal",
+    "setReminder", "setRoutine", "cancelRoutine",
+    "setGoal", "noteGoal", "closeGoal",
+    # read his own records, which are not the world
+    "fetchMeals", "listGoals", "reviewLearnings",
+})
+
+
+def lookup_tools(tools_used: Optional[Sequence[str]]) -> list:
+    """The subset that actually brought something in from outside."""
+    return [n for n in (tools_used or []) if n not in _NOT_A_LOOKUP]
+
 # The source travels on the fact's own line, the way `profil.md` writes
 # `- il habite à Genève · dit`. A fact is a line inside a node's `data`
 # blob and one node accumulates facts from many windows on many days, so

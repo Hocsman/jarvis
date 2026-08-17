@@ -27,6 +27,7 @@ from .provenance import (
     fact_line,
     fact_source,
     fact_text,
+    lookup_tools,
     source_for_tools,
 )
 from .core import (
@@ -161,9 +162,10 @@ def extract_graph_memories(
         date_utc: Optional date string (YYYY-MM-DD) for the diary entry.
             Included as a date prefix on each fact for temporal context.
     """
-    if tools_used is not None and not tools_used:
-        debug_log("graph memory extraction: no tool ran in this window, "
-                  "nothing was looked up", "memory")
+    if tools_used is not None and not lookup_tools(tools_used):
+        debug_log("graph memory extraction: nothing in this window looked "
+                  f"anything up (tools: {list(tools_used) or 'none'})",
+                  "memory")
         return []
     system_prompt = (
         "You extract EXTERNAL FACTS the assistant looked up during a "
@@ -968,7 +970,9 @@ def update_graph_from_dialogue(
 
     # What the window rests on, decided once for the whole flush: every
     # fact here came out of the same summary of the same window.
-    source = source_for_tools(tools_used)
+    # Only what actually consulted something decides the label: a window
+    # that merely wrote a reminder looked nothing up.
+    source = source_for_tools(lookup_tools(tools_used) if tools_used else tools_used)
 
     # Grouped bare, so the merge is never handed a format to preserve.
     # The suffix is written by the plain-append path, and put back by
