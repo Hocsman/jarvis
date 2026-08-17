@@ -452,7 +452,7 @@ class ChatterboxTTS:
             pass
         self._stop.set()
         try:
-            self._q.put_nowait("")
+            self._q.put_nowait(("", None, None))
         except Exception:
             pass
         self._thread.join(timeout=2.0)
@@ -466,12 +466,17 @@ class ChatterboxTTS:
         # Lazy start the worker thread and lazy init on first speak
         if self._thread is None:
             self.start()
-        self._completion_callback = completion_callback
-        self._duration_callback = duration_callback
+        # The callbacks travel with their text. Set on the engine, they
+        # would belong to whatever was said last rather than to this
+        # utterance, and a reply spoken sentence by sentence would fire
+        # the last chunk's callback after the first chunk finished —
+        # opening the hot window mid-reply. Only the worker writes them,
+        # as it dequeues the item it is about to speak.
+        _callbacks = (completion_callback, duration_callback)
         # Preprocess text for speech (convert links to readable descriptions)
         processed_text = _preprocess_for_speech(text)
         try:
-            self._q.put_nowait(processed_text)
+            self._q.put_nowait((processed_text, *_callbacks))
         except Exception:
             pass
 
@@ -482,11 +487,14 @@ class ChatterboxTTS:
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                text = self._q.get(timeout=0.5)
+                texte, _fin, _duree = self._q.get(timeout=0.5)
             except queue.Empty:
                 continue
-            if not text:
+            if not texte:
                 continue
+            self._completion_callback = _fin
+            self._duration_callback = _duree
+            text = texte
             try:
                 self._speak_once(text)
             except Exception:
@@ -768,7 +776,7 @@ class PiperTTS:
             pass
         self._stop.set()
         try:
-            self._q.put_nowait("")
+            self._q.put_nowait(("", None, None))
         except Exception:
             pass
         self._thread.join(timeout=2.0)
@@ -782,12 +790,17 @@ class PiperTTS:
         # Lazy start the worker thread
         if self._thread is None:
             self.start()
-        self._completion_callback = completion_callback
-        self._duration_callback = duration_callback
+        # The callbacks travel with their text. Set on the engine, they
+        # would belong to whatever was said last rather than to this
+        # utterance, and a reply spoken sentence by sentence would fire
+        # the last chunk's callback after the first chunk finished —
+        # opening the hot window mid-reply. Only the worker writes them,
+        # as it dequeues the item it is about to speak.
+        _callbacks = (completion_callback, duration_callback)
         # Preprocess text for speech
         processed_text = _preprocess_for_speech(text)
         try:
-            self._q.put_nowait(processed_text)
+            self._q.put_nowait((processed_text, *_callbacks))
         except Exception:
             pass
 
@@ -804,11 +817,14 @@ class PiperTTS:
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                text = self._q.get(timeout=0.5)
+                texte, _fin, _duree = self._q.get(timeout=0.5)
             except queue.Empty:
                 continue
-            if not text:
+            if not texte:
                 continue
+            self._completion_callback = _fin
+            self._duration_callback = _duree
+            text = texte
             try:
                 self._speak_once(text)
             except Exception as e:
@@ -1113,7 +1129,7 @@ class KokoroTTS:
             pass
         self._stop.set()
         try:
-            self._q.put_nowait("")
+            self._q.put_nowait(("", None, None))
         except Exception:
             pass
         self._thread.join(timeout=2.0)
@@ -1126,11 +1142,16 @@ class KokoroTTS:
             return
         if self._thread is None:
             self.start()
-        self._completion_callback = completion_callback
-        self._duration_callback = duration_callback
+        # The callbacks travel with their text. Set on the engine, they
+        # would belong to whatever was said last rather than to this
+        # utterance, and a reply spoken sentence by sentence would fire
+        # the last chunk's callback after the first chunk finished —
+        # opening the hot window mid-reply. Only the worker writes them,
+        # as it dequeues the item it is about to speak.
+        _callbacks = (completion_callback, duration_callback)
         processed_text = _preprocess_for_speech(text)
         try:
-            self._q.put_nowait(processed_text)
+            self._q.put_nowait((processed_text, *_callbacks))
         except Exception:
             pass
 
@@ -1147,11 +1168,14 @@ class KokoroTTS:
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                text = self._q.get(timeout=0.5)
+                texte, _fin, _duree = self._q.get(timeout=0.5)
             except queue.Empty:
                 continue
-            if not text:
+            if not texte:
                 continue
+            self._completion_callback = _fin
+            self._duration_callback = _duree
+            text = texte
             try:
                 self._speak_once(text)
             except Exception as e:
