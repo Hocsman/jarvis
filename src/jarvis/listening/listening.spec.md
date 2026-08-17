@@ -313,6 +313,20 @@ If the intent judge later rejects the query (and no hot window override applies)
 | `whisper_min_confidence` | 0.3 | Minimum `avg_logprob`-derived confidence score for a transcribed segment. Segments below this are discarded before the intent judge sees them. |
 | `whisper_no_speech_threshold` | 0.5 | Hard cutoff on Whisper's `no_speech_prob` field. Any segment at or above this value is discarded **regardless of `avg_logprob`** — Whisper can be confident about a hallucinated phrase even when no real speech is present (e.g. the "MBC 뉴스" hallucination on background noise). This filter runs before the `avg_logprob` check so it catches high-confidence hallucinations that would otherwise survive. Applies to both the faster-whisper and MLX backends. |
 
+**Repetition guard.** Past the confidence filters, a transcript is
+discarded when it loops: one word over half the tokens, the same word
+three times running, a short character pattern repeating, or **a phrase
+of two to ten words repeated three times back to back**. The last is not
+covered by the others — measured on "There we go." thirteen times over
+air-conditioning hum, no single word reaches a third of the tokens and
+none ever falls twice in a row, because the other two sit between each
+repetition.
+
+Three repeats, never two: people say things twice ("oui oui, vas-y"), and
+a guard that ate an emphatic repeat would cost real sentences. Each
+hallucination that survives costs an intent-judge call on the cloud model
+to be told it is not directed.
+
 Note: the intent judge has no enable flag. A connection error puts it in a 30-second back-off during which `judge()` returns without calling the backend; the listener still takes its no-verdict path, so the hot-window override keeps the follow-up and the unavailability is printed to standard output. Outside a hot window, text-based wake detection answers as usual.
 
 ## State Transitions

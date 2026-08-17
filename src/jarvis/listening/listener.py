@@ -1669,6 +1669,35 @@ class VoiceListener(threading.Thread):
         if len(text_stripped) < 6:
             return False
 
+        # --- Phrase-level repetition detection ---
+        # Whisper loops on phrases as readily as on words, and the word
+        # rules below cannot see it: in the field trace that prompted
+        # this — "There we go." thirteen times over air-conditioning
+        # hum — no single word reaches half the tokens (0.33) and none
+        # ever falls twice in a row, because two others sit between each
+        # repetition.
+        #
+        # Three consecutive repeats, not two: he says things twice
+        # ("oui oui, vas-y", "c'est bon, c'est bon") and a bar of two
+        # would eat him mid-sentence.
+        mots = re.findall(r"\w+", text_stripped.lower(), re.UNICODE)
+        for n in range(2, 11):
+            if len(mots) < n * 3:
+                break
+            for debut in range(len(mots) - n * 3 + 1):
+                bloc = mots[debut:debut + n]
+                repeats, pos = 1, debut + n
+                while (pos + n <= len(mots)
+                       and mots[pos:pos + n] == bloc):
+                    repeats += 1
+                    pos += n
+                if repeats >= 3:
+                    debug_log(
+                        f"repetitive hallucination detected: phrase "
+                        f"{' '.join(bloc)!r} repeated {repeats}x in "
+                        f"'{text_stripped[:50]}...'", "voice")
+                    return True
+
         # --- Character-level repetition detection ---
         # Remove all whitespace to detect patterns like "Jろ Jろ Jろ" or "JろJろJろ"
         text_no_space = re.sub(r'\s+', '', text_stripped.lower())
