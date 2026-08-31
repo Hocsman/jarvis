@@ -733,7 +733,9 @@ class VoiceListener(threading.Thread):
                         if (salvaged != text_lower
                                 and len(salvaged.split()) >= min_words
                                 and _carries_speech_she_did_not_say(
-                                    salvaged, self.echo_detector._last_tts_text or "")):
+                                    salvaged, self.echo_detector._last_tts_text or "")
+                                and self.echo_detector.utterance_carries_a_voice(
+                                    utterance_energy)):
                             debug_log(
                                 f"salvaged user speech from hot-window echo+speech "
                                 f"chunk: '{salvaged}'",
@@ -1209,8 +1211,18 @@ class VoiceListener(threading.Thread):
                             # so. Overriding that verdict takes proof the
                             # user spoke, not the failure of a contiguous
                             # ratio to find its match in a decimated echo.
-                            if is_pure_echo or not _carries_speech_she_did_not_say(
-                                text_lower, last_tts_text or ""
+                            # Two proofs, because either alone was fooled.
+                            # Text alone answered "yes, new words" to a
+                            # hallucinated "Thank you." over her French
+                            # reply, and she answered it. Energy alone
+                            # cannot tell his voice from a door slamming.
+                            # A barge-in is words she did not say, spoken
+                            # loudly enough to have been spoken.
+                            if is_pure_echo or not (
+                                _carries_speech_she_did_not_say(
+                                    text_lower, last_tts_text or "")
+                                and self.echo_detector.utterance_carries_a_voice(
+                                    utterance_energy)
                             ):
                                 debug_log(
                                     f"🔇 Echo in hot window (echo reasoning confirmed, "

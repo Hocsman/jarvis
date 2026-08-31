@@ -267,7 +267,23 @@ The fuzzy check acts as a fast, reliable safety net. The intent judge provides d
 
    Absence of a fuzzy match is not evidence of speech. `partial_ratio` looks for a contiguous window, so an echo Whisper decimated — words dropped from the middle, others corrupted — stops matching and used to read as new content, which had her run a full turn on her own voice. Per word nothing separates the two: `même` against `semaine` scores what a genuinely new word scores. Over the whole utterance it separates cleanly, and stably — measured on real transcripts, the two echoes sat at 0% and 18% and barge-in at 62% and 100%, unchanged whether the per-word bar is 70, 80 or 90.
 
+   **And it takes a voice.** Text alone cannot separate a hallucination
+   from a barge-in: Whisper turned background noise into "Thank you."
+   over her French reply, the words-she-did-not-say test answered yes
+   because there were, and she replied to it. A hallucination produces
+   words *nobody* said, so that premise fails on it.
+
+   What separates them is that one of them moved air. Overriding an echo
+   verdict therefore needs both: words she did not say, and an utterance
+   whose energy rises above the ambient floor recorded when she started
+   speaking, by the same `energy_spike_threshold` the detector already
+   applies to this question in the post-TTS cooldown. Either test alone
+   was fooled — text by a hallucination, energy by a door slamming.
+
    Fails open: with no TTS text to compare against, everything is the user's.
+   The energy half fails open twice over — no baseline, or an energy of
+   zero, which is the listener's "not measured" value rather than a claim
+   of silence.
 
 Example:
 ```

@@ -93,6 +93,32 @@ class EchoDetector:
         duration_info = f", exact_duration={exact_duration:.2f}s" if exact_duration else ""
         debug_log(f"TTS started, text_len={len(tts_text)}, baseline_energy={baseline_energy:.4f}{duration_info}", "echo")
     
+    def utterance_carries_a_voice(self, utterance_energy: float) -> bool:
+        """True when the utterance has someone's voice on top of the echo.
+
+        Text cannot tell a hallucination from a barge-in: Whisper turned
+        background noise into "Thank you." while she was speaking French,
+        and "are there words here she did not say?" answered yes, because
+        there were. She replied to it.
+
+        What separates them is that one of them moved air. A person
+        talking over her puts their voice on top of the echo and the level
+        rises above the ambient floor recorded when she started speaking;
+        noise dreamt into words does not.
+
+        Reuses `energy_spike_threshold`, the multiplier the detector
+        already applies to this same question in the post-TTS cooldown,
+        rather than inventing a second number for the same physics.
+
+        Fails open twice over. With no baseline there is nothing to
+        compare against, and an energy of zero is the listener's "not
+        measured" value rather than a claim of silence — treating either
+        as noise would eat real speech.
+        """
+        if self._tts_energy_baseline <= 0 or utterance_energy <= 0:
+            return True
+        return utterance_energy > self._tts_energy_baseline * self.energy_spike_threshold
+
     def track_tts_finish(self) -> None:
         """Track when TTS finishes speaking."""
         self._last_tts_finish_time = time.time()
