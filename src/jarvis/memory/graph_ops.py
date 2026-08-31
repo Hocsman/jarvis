@@ -71,6 +71,38 @@ def call_llm_direct(*, cfg, chat_model, system_prompt, user_content,
 _REWRITE_MATCH = 85
 
 
+_DIGITS = re.compile(r"\d+")
+
+
+def _numbers_are_grounded(cleaned, inputs) -> bool:
+    """True when every digit run in the rewrite already went in.
+
+    The rewrite may drop a figure — consolidation is meant to shrink — but
+    it may not invent one. Measured on his graph, 2026-08-17: a battery
+    life of 19 hours came back out of the merge as 26. Three repeats were
+    correct, so it is occasional rather than systematic, and nothing saw
+    it happen.
+
+    The growth guard cannot: it counts *lines* against the lines that
+    went in, so a digit changed inside a line passes by construction.
+    Numbers are where a rewrite does the most damage per character — a
+    reworded sentence is still roughly the fact, a wrong figure is a
+    different fact wearing the same words, and it is the shape a later
+    answer quotes with confidence.
+
+    Refusing is safe: the caller falls back to plain append, so a false
+    positive costs consolidation, never a fact.
+    """
+    connus = set()
+    for line in inputs:
+        connus.update(_DIGITS.findall(line or ""))
+    for line in cleaned:
+        for n in _DIGITS.findall(line or ""):
+            if n not in connus:
+                return False
+    return True
+
+
 def _source_index(lines) -> dict:
     """Map each line's claim to the provenance suffix it carried.
 
@@ -695,6 +727,17 @@ def merge_node_data(
         debug_log(
             f"merge: rejected rewrite — {len(cleaned)} lines exceeds "
             f"guard cap of {max_kept}",
+            "memory",
+        )
+        return MergeResult(success=False)
+
+    # The guard above counts lines, so a digit changed inside one passes
+    # it. Numbers are where a rewrite does the most damage per character,
+    # and this one was observed changing 19 hours into 26.
+    if not _numbers_are_grounded(cleaned, list(existing_lines) + list(sanitised_new)):
+        debug_log(
+            "merge: rejected rewrite — it carries a figure that was in "
+            "neither the node nor the new facts",
             "memory",
         )
         return MergeResult(success=False)

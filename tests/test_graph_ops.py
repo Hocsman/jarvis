@@ -954,7 +954,11 @@ class TestMergeNodeData:
         cap = existing_count + len(new_facts) + _MERGE_GROWTH_SLACK
 
         # At the cap → accepted.
-        at_cap = '{"facts": [' + ", ".join(f'"L{i}."' for i in range(cap)) + "]}"
+        # Digit-free labels: this case pins the line-count boundary, and
+        # a synthetic "L0." would trip the numeric-grounding guard for
+        # carrying a figure neither input had.
+        _etiquette = lambda i: "L" * (i + 1) + "."
+        at_cap = '{"facts": [' + ", ".join(f'"{_etiquette(i)}"' for i in range(cap)) + "]}"
         mock_llm.return_value = at_cap
         result = merge_node_data(
             store=store, node_id=node.id, new_facts=new_facts,
@@ -966,7 +970,7 @@ class TestMergeNodeData:
         node2 = store.create_node(
             name="T2", description="d", data="E1.\nE2.", parent_id="user",
         )
-        over_cap = '{"facts": [' + ", ".join(f'"L{i}."' for i in range(cap + 1)) + "]}"
+        over_cap = '{"facts": [' + ", ".join(f'"{_etiquette(i)}"' for i in range(cap + 1)) + "]}"
         mock_llm.return_value = over_cap
         result = merge_node_data(
             store=store, node_id=node2.id, new_facts=new_facts,
