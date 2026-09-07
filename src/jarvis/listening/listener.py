@@ -1716,6 +1716,30 @@ class VoiceListener(threading.Thread):
 
         return filtered
 
+    def _transcription_announcement(self, text: str) -> str:
+        """The console line for one transcription — heard, or thrown away.
+
+        The announcement used to print before the guards ran, and the
+        rejection only reached the debug log, which is off by default. On
+        2026-08-17 the console filled with a hundred and ten repetitions
+        of "I" being announced as Heard, over and over, while the guard
+        was catching every one of them. The system was behaving and the
+        only surface he reads said otherwise — the day's motif inverted,
+        a success wearing the face of a failure, and just as expensive: a
+        log that cannot be trusted is a log nobody judges by.
+
+        What is discarded says so, briefly, with its reason. Repeating
+        the garbage under a different emoji would fix nothing.
+        """
+        if not text or not text.strip():
+            return ""
+        separator = "" if self._first_utterance else f"\n{'─' * 50}"
+        self._first_utterance = False
+        if self._is_repetitive_hallucination(text):
+            apercu = text.strip()[:40]
+            return f"{separator}\n  🔇 Discarded (repetition): \"{apercu}…\""
+        return f'{separator}\n📝 Heard: "{text}"'
+
     def _is_repetitive_hallucination(self, text: str) -> bool:
         """
         Detect repetitive hallucinations that Whisper produces on quiet/ambiguous audio.
@@ -2866,11 +2890,9 @@ class VoiceListener(threading.Thread):
             self.state_manager.check_hot_window_expiry(self.cfg.voice_debug)
             return
 
-        # Log successful transcription — separator omitted on the first utterance since
-        # there is no prior turn to visually separate from.
-        separator = "" if self._first_utterance else f"\n{'─' * 50}"
-        self._first_utterance = False
-        print(f"{separator}\n📝 Heard: \"{text}\"", flush=True)
+        annonce = self._transcription_announcement(text)
+        if annonce:
+            print(annonce, flush=True)
 
         # Filter out repetitive hallucinations (e.g., "don't don't don't...")
         if self._is_repetitive_hallucination(text):
