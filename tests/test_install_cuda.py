@@ -291,7 +291,7 @@ def test_stale_marker_with_missing_dlls_redownloads(workdir: Path):
     """A marker left over from a half-successful install must not skip work."""
     # Pretend a previous install wrote the marker but only one DLL survived
     # (e.g. AV quarantined the rest).
-    (workdir / ".cuda_installed").write_text("nvidia-cublas-cu12==12.9.1.4\n")
+    (workdir / ".cuda_installed").write_text("nvidia-cublas-cu12==12.9.1.4\n", encoding="utf-8")
     (workdir / "cublas64_12.dll").write_bytes(b"\x00" * 4096)
 
     wheels = _build_wheels()

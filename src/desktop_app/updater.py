@@ -477,7 +477,7 @@ if [ $open_rc -ne 0 ]; then
 fi
 rm -rf {escaped_temp}
 '''
-        script_path.write_text(script_content)
+        script_path.write_text(script_content, encoding="utf-8")
         script_path.chmod(0o755)
 
         subprocess.Popen([str(script_path)], start_new_session=True)
@@ -545,7 +545,7 @@ echo Launching updated Jarvis...
 start "" "{escaped_installed_exe}"
 rmdir /s /q "{escaped_temp}"
 '''
-        batch_script.write_text(batch_content)
+        batch_script.write_text(batch_content, encoding="utf-8")
 
         subprocess.Popen(
             ["cmd", "/c", str(batch_script)],
@@ -613,7 +613,7 @@ mv {escaped_new_app} {escaped_app_dir}
 {escaped_jarvis} &
 rm -rf {escaped_temp}
 '''
-        script_path.write_text(script_content)
+        script_path.write_text(script_content, encoding="utf-8")
         script_path.chmod(0o755)
 
         subprocess.Popen([str(script_path)], start_new_session=True)

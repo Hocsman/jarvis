@@ -1,6 +1,7 @@
 """Tests for auto-update functionality."""
 
 import os
+import shutil
 import subprocess
 import sys
 import pytest
@@ -21,6 +22,19 @@ from desktop_app.updater import (
     _escape_batch_path,
     _escape_shell_path,
 )
+
+
+def _usable_bash() -> str | None:
+    """Path to a bash that can run the generated installer script, or ``None``.
+
+    The script is a macOS installer, so running it needs POSIX semantics
+    throughout: the ``:`` that separates PATH entries, the executable bit on
+    the stubs the test shadows ``open`` and ``xattr`` with, and a shebang the
+    kernel honours. Windows offers none of those, whichever bash is on PATH.
+    """
+    if os.name != "posix":
+        return None
+    return shutil.which("bash")
 
 
 def _zipfile_extract_for_tests(zip_path: Path, dest_dir: Path) -> None:
@@ -629,7 +643,7 @@ class TestInstallUpdateWindows:
                 # Read the batch script content
                 batch_path = Path(args[2])
                 if batch_path.exists():
-                    batch_content_captured.append(batch_path.read_text())
+                    batch_content_captured.append(batch_path.read_text(encoding="utf-8"))
             return MagicMock()
 
         with patch("desktop_app.updater.get_app_path", return_value=mock_app_path):
@@ -691,7 +705,7 @@ class TestInstallUpdateWindows:
             if args[0] == "cmd" and args[1] == "/c":
                 batch_path = Path(args[2])
                 if batch_path.exists():
-                    batch_content_captured.append(batch_path.read_text())
+                    batch_content_captured.append(batch_path.read_text(encoding="utf-8"))
             return MagicMock()
 
         with patch("desktop_app.updater.get_app_path", return_value=mock_app_path):
@@ -755,7 +769,7 @@ class TestInstallUpdateMacos:
             if len(args) == 1 and args[0].endswith("update.sh"):
                 script_path = Path(args[0])
                 if script_path.exists():
-                    script_content_captured.append(script_path.read_text())
+                    script_content_captured.append(script_path.read_text(encoding="utf-8"))
             return MagicMock()
 
         with patch("desktop_app.updater._extract_macos_bundle", side_effect=_zipfile_extract_for_tests):
@@ -847,7 +861,7 @@ class TestInstallUpdateMacos:
 
         def capture_popen(args, **kwargs):
             if len(args) == 1 and args[0].endswith("update.sh"):
-                script_content_captured.append(Path(args[0]).read_text())
+                script_content_captured.append(Path(args[0]).read_text(encoding="utf-8"))
             return MagicMock()
 
         with patch("desktop_app.updater._extract_macos_bundle", side_effect=_zipfile_extract_for_tests):
@@ -877,6 +891,10 @@ class TestInstallUpdateMacos:
         This test executes the generated script in a sandbox where `open` is
         stubbed to exit non-zero, and asserts the fallback binary runs.
         """
+        bash = _usable_bash()
+        if bash is None:
+            pytest.skip("the generated macOS installer script needs a POSIX host")
+
         import plistlib
         import re
         import time
@@ -893,7 +911,7 @@ class TestInstallUpdateMacos:
         # shell script that writes a marker file we can check for.
         marker_path = tmp_path / "fallback_fired.marker"
         stub_binary = app_source / "Contents" / "MacOS" / "Jarvis"
-        stub_binary.write_text(f'#!/bin/bash\necho fired > {marker_path}\n')
+        stub_binary.write_text(f'#!/bin/bash\necho fired > {marker_path}\n', encoding="utf-8")
         stub_binary.chmod(0o755)
 
         with zipfile.ZipFile(zip_path, "w") as zf:
@@ -909,9 +927,9 @@ class TestInstallUpdateMacos:
         # `if [ -x "$LSREGISTER" ]` guard skips it cleanly.
         stub_dir = tmp_path / "path_stubs"
         stub_dir.mkdir()
-        (stub_dir / "open").write_text("#!/bin/bash\nexit 1\n")
+        (stub_dir / "open").write_text("#!/bin/bash\nexit 1\n", encoding="utf-8")
         (stub_dir / "open").chmod(0o755)
-        (stub_dir / "xattr").write_text("#!/bin/bash\nexit 0\n")
+        (stub_dir / "xattr").write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
         (stub_dir / "xattr").chmod(0o755)
 
         from desktop_app.updater import install_update_macos
@@ -921,7 +939,7 @@ class TestInstallUpdateMacos:
         def capture_popen(args, **kwargs):
             if len(args) == 1 and args[0].endswith("update.sh"):
                 captured["script"] = Path(args[0])
-                captured["text"] = captured["script"].read_text()
+                captured["text"] = captured["script"].read_text(encoding="utf-8")
             return MagicMock()
 
         with patch("desktop_app.updater._extract_macos_bundle", side_effect=_zipfile_extract_for_tests):
@@ -963,13 +981,13 @@ class TestInstallUpdateMacos:
         # Fallback nohup also redirects to $LOG_FILE; neutralise it.
         script_text = script_text.replace('>> "$LOG_FILE" 2>&1', '>/dev/null 2>&1')
         runnable = tmp_path / "run.sh"
-        runnable.write_text(script_text)
+        runnable.write_text(script_text, encoding="utf-8")
         runnable.chmod(0o755)
 
         env = os.environ.copy()
         env["PATH"] = f"{stub_dir}{os.pathsep}{env.get('PATH', '')}"
         result = subprocess.run(
-            ["bash", str(runnable)],
+            [bash, str(runnable)],
             env=env,
             capture_output=True,
             text=True,
@@ -1021,7 +1039,7 @@ class TestInstallUpdateMacos:
         # actually execute it. The fake "runs" the command by extracting
         # the zip so the rest of the installer sees the expected bundle.
         fake_ditto = tmp_path / "fake_ditto"
-        fake_ditto.write_text("")
+        fake_ditto.write_text("", encoding="utf-8")
 
         run_calls = []
 
@@ -1062,7 +1080,7 @@ class TestInstallUpdateMacos:
         zip_path = tmp_path / "bundle.zip"
         payload_dir = tmp_path / "payload"
         payload_dir.mkdir()
-        (payload_dir / "hello.txt").write_text("hi")
+        (payload_dir / "hello.txt").write_text("hi", encoding="utf-8")
         with zipfile.ZipFile(zip_path, "w") as zf:
             zf.write(payload_dir / "hello.txt", arcname="hello.txt")
 
@@ -1075,7 +1093,7 @@ class TestInstallUpdateMacos:
         with patch("desktop_app.updater.DITTO_PATH", str(missing_ditto)):
             _extract_macos_bundle(zip_path, dest)
 
-        assert (dest / "hello.txt").read_text() == "hi", (
+        assert (dest / "hello.txt").read_text(encoding="utf-8") == "hi", (
             "fallback must still extract the zip when ditto is unavailable"
         )
 
@@ -1100,7 +1118,7 @@ class TestInstallUpdateMacos:
         mock_app_path.mkdir(parents=True)
 
         fake_ditto = tmp_path / "fake_ditto"
-        fake_ditto.write_text("")
+        fake_ditto.write_text("", encoding="utf-8")
 
         def fake_run(args, **kwargs):
             raise subprocess.CalledProcessError(returncode=1, cmd=args)
@@ -1154,7 +1172,7 @@ class TestInstallUpdateLinux:
                 # Read the shell script content
                 script_path = Path(args[0])
                 if script_path.exists():
-                    script_content_captured.append(script_path.read_text())
+                    script_content_captured.append(script_path.read_text(encoding="utf-8"))
             return MagicMock()
 
         with patch("desktop_app.updater.get_app_path", return_value=mock_app_dir):

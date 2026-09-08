@@ -93,6 +93,6 @@ class TestConfigWiring:
         import json
         from src.jarvis.config import load_settings
         cfg = tmp_path / "config.json"
-        cfg.write_text(json.dumps({"tts_engine": "kokoro"}))
+        cfg.write_text(json.dumps({"tts_engine": "kokoro"}), encoding="utf-8")
         monkeypatch.setenv("JARVIS_CONFIG_PATH", str(cfg))
         assert load_settings().tts_engine == "kokoro"

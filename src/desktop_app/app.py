@@ -836,7 +836,7 @@ def get_existing_instance_pid() -> Optional[int]:
     lock_file = get_lock_file_path()
     try:
         if lock_file.exists():
-            content = lock_file.read_text().strip()
+            content = lock_file.read_text(encoding="utf-8").strip()
             if content.isdigit():
                 return int(content)
     except Exception:

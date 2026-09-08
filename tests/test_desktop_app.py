@@ -1107,7 +1107,7 @@ class TestSingleInstanceLock:
             assert result is True
             # PID should be readable from a separate handle because the lock
             # is at _LOCK_OFFSET, not at byte 0.
-            content = lock_file.read_text().strip()
+            content = lock_file.read_text(encoding="utf-8").strip()
             assert content == str(os.getpid()), (
                 f"Lock file should contain current PID {os.getpid()}, got {content!r}"
             )

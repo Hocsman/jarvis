@@ -115,7 +115,7 @@ class TestPiperTTSErrorHandling:
 
         # Create a fake model file but no config
         model_file = tmp_path / "custom-voice.onnx"
-        model_file.write_text("fake model")
+        model_file.write_text("fake model", encoding="utf-8")
 
         tts = PiperTTS(enabled=True, model_path=str(model_file))
 
@@ -173,7 +173,7 @@ class TestPiperTTSWithMocking:
 
         # Create model file but not config
         model_file = tmp_path / "test-voice.onnx"
-        model_file.write_text("fake model")
+        model_file.write_text("fake model", encoding="utf-8")
 
         tts = PiperTTS(enabled=True, model_path=str(model_file))
 

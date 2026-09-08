@@ -101,7 +101,7 @@ class JarvisStateManager(QObject):
         # First check file (for cross-process), then fall back to memory
         try:
             if os.path.exists(self._state_file):
-                with open(self._state_file, 'r') as f:
+                with open(self._state_file, 'r', encoding='utf-8') as f:
                     content = f.read().strip()
                     return JarvisState(content)
         except (ValueError, OSError):
@@ -114,7 +114,7 @@ class JarvisStateManager(QObject):
     def _write_state(self, state: JarvisState) -> None:
         """Write state to file for cross-process communication."""
         try:
-            with open(self._state_file, 'w') as f:
+            with open(self._state_file, 'w', encoding='utf-8') as f:
                 f.write(state.value)
         except OSError:
             # File write failed - state won't be shared across processes

@@ -229,7 +229,7 @@ def test_the_page_still_parses(viewer):
         pytest.skip("node not installed")
 
     for script in re.findall(r"<script>(.*?)</script>", index(), re.DOTALL):
-        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as f:
             f.write(script)
             path = f.name
         try:

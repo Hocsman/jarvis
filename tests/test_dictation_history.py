@@ -93,14 +93,14 @@ class TestDictationHistory:
 
     def test_empty_file_loads_gracefully(self, tmp_path):
         path = tmp_path / "history.json"
-        path.write_text("")
+        path.write_text("", encoding="utf-8")
         from src.jarvis.dictation.history import DictationHistory
         h = DictationHistory(path=path)
         assert h.count == 0
 
     def test_corrupt_file_loads_gracefully(self, tmp_path):
         path = tmp_path / "history.json"
-        path.write_text("not valid json{{{")
+        path.write_text("not valid json{{{", encoding="utf-8")
         from src.jarvis.dictation.history import DictationHistory
         h = DictationHistory(path=path)
         assert h.count == 0
@@ -139,7 +139,7 @@ class TestDictationHistory:
         external_entries = [
             {"id": "aaa", "text": "from daemon", "timestamp": 1.0, "duration": 0.5},
         ]
-        path.write_text(json.dumps(external_entries))
+        path.write_text(json.dumps(external_entries), encoding="utf-8")
 
         # Before reload, in-memory state is stale
         assert h.count == 0

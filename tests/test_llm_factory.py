@@ -199,7 +199,7 @@ class TestPerProviderModelResolution:
         import json
         cfg_path = tmp_path / "config.json"
         cfg.setdefault("_config_version", 2)  # skip migration noise
-        cfg_path.write_text(json.dumps(cfg))
+        cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
         monkeypatch.setenv("JARVIS_CONFIG_PATH", str(cfg_path))
         from jarvis.config import load_settings
         return load_settings()
@@ -267,7 +267,7 @@ class TestConfigMigration:
                     "ollama_embed_model": "my-embed",
                 }
             )
-        )
+        , encoding="utf-8")
         monkeypatch.setenv("JARVIS_CONFIG_PATH", str(cfg_path))
 
         # Reload the module so cached config-path defaults reset.
@@ -282,7 +282,7 @@ class TestConfigMigration:
         # Old fields stay populated for compatibility.
         assert settings.ollama_base_url == "http://1.2.3.4:11434"
         # Migration is persisted to disk.
-        on_disk = json.loads(cfg_path.read_text())
+        on_disk = json.loads(cfg_path.read_text(encoding="utf-8"))
         assert on_disk["_config_version"] == 2
         assert on_disk["llm_provider"] == "ollama"
         assert on_disk["llm_base_url"] == "http://1.2.3.4:11434"
@@ -305,7 +305,7 @@ class TestConfigMigration:
                     "ollama_chat_model": "gemma4:e2b",
                 }
             )
-        )
+        , encoding="utf-8")
         monkeypatch.setenv("JARVIS_CONFIG_PATH", str(cfg_path))
 
         from jarvis.config import load_settings
@@ -323,7 +323,7 @@ class TestConfigMigration:
         import json
 
         cfg_path = tmp_path / "config.json"
-        cfg_path.write_text(json.dumps({"_config_version": 1}))
+        cfg_path.write_text(json.dumps({"_config_version": 1}), encoding="utf-8")
         monkeypatch.setenv("JARVIS_CONFIG_PATH", str(cfg_path))
 
         from jarvis.config import load_settings
@@ -334,6 +334,6 @@ class TestConfigMigration:
         # Defaults flow through when nothing was explicitly set.
         assert settings.llm_base_url == settings.ollama_base_url
         # Migration runs without touching keys that have no source.
-        on_disk = json.loads(cfg_path.read_text())
+        on_disk = json.loads(cfg_path.read_text(encoding="utf-8"))
         assert on_disk["_config_version"] == 2
         assert on_disk["llm_provider"] == "ollama"
