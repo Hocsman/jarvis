@@ -129,6 +129,34 @@ def _isolate_user_config_path(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("JARVIS_CONFIG_PATH", str(sandbox / "config.json"))
 
 
+@pytest.fixture(autouse=True)
+def _isolate_dictation_history(tmp_path_factory, monkeypatch):
+    """Redirect the dictation history's default path to a per-session tempfile.
+
+    ``DictationHistory()`` falls back to the user's data directory, and the
+    dictation engine builds one whenever a caller passes none, so a test that
+    omits the argument appends synthetic entries to the same file a real
+    user's dictations live in. Running the suite is not permission to write
+    there, and a guard here is worth more than every call site remembering.
+    """
+    target = tmp_path_factory.mktemp("jarvis_dictation_sandbox") / "dictation_history.json"
+
+    # The suite imports modules both as ``jarvis.x`` and as ``src.jarvis.x``,
+    # which are two distinct module objects. Patching one leaves the other
+    # pointing at the real file.
+    import importlib
+
+    patched = 0
+    for path in ("jarvis.dictation.history", "src.jarvis.dictation.history"):
+        try:
+            module = importlib.import_module(path)
+        except ImportError:
+            continue
+        monkeypatch.setattr(module, "_default_history_path", lambda: target)
+        patched += 1
+    assert patched, "neither dictation history module could be imported"
+
+
 @pytest.fixture
 def mock_config():
     """Provide a mock configuration for unit tests."""

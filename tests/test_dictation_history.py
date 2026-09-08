@@ -12,6 +12,30 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
+# Isolation from the user's own history
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_a_history_built_without_a_path_leaves_the_users_file_alone():
+    """A test that forgets to inject a history must not reach the real one.
+
+    ``DictationHistory()`` falls back to the user's data directory, and the
+    dictation engine builds one whenever a caller passes none, so a single
+    omitted argument drops synthetic entries into the file a real user's
+    dictations live in. Running the suite is not permission to write there.
+    """
+    from jarvis.dictation.history import DictationHistory
+
+    real = Path.home() / ".local" / "share" / "jarvis" / "dictation_history.json"
+    before = real.read_bytes() if real.exists() else None
+
+    DictationHistory().add("dictée de test", 0.5)
+
+    after = real.read_bytes() if real.exists() else None
+    assert after == before, f"the suite wrote to {real}"
+
+
+# ---------------------------------------------------------------------------
 # DictationHistory storage tests
 # ---------------------------------------------------------------------------
 
