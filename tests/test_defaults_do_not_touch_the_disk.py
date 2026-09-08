@@ -36,3 +36,20 @@ def test_resolving_the_default_db_path_creates_nothing(tmp_path, monkeypatch):
         f"resolving the default created {chemin.parent}"
     )
     assert list(faux_home.iterdir()) == [], "the home directory was touched"
+
+
+@pytest.mark.unit
+def test_resolving_the_default_voice_creates_nothing(tmp_path, monkeypatch):
+    """Same rule for the voice models: naming the file is not fetching it."""
+    faux_home = tmp_path / "profil"
+    faux_home.mkdir()
+    monkeypatch.setenv("USERPROFILE", str(faux_home))
+    monkeypatch.setenv("HOME", str(faux_home))
+
+    from jarvis.output.tts import _get_default_piper_model_path
+
+    chemin = Path(_get_default_piper_model_path("français"))
+
+    assert chemin.suffix == ".onnx"
+    assert not chemin.parent.exists(), f"resolving the default created {chemin.parent}"
+    assert list(faux_home.iterdir()) == [], "the home directory was touched"
