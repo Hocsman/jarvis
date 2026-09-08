@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from jarvis import daemon
+from jarvis.utils.console import force_utf8_stream
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -34,8 +34,8 @@ def test_console_setup_run_twice_leaves_the_stream_writable():
     buffer = io.BytesIO()
     stream = io.TextIOWrapper(buffer, encoding='ascii', errors='strict')
 
-    daemon._force_utf8_stream(stream)
-    daemon._force_utf8_stream(stream)
+    force_utf8_stream(stream)
+    force_utf8_stream(stream)
     gc.collect()
 
     assert not buffer.closed
@@ -50,7 +50,7 @@ def test_console_setup_upgrades_the_encoding_to_utf8():
     buffer = io.BytesIO()
     stream = io.TextIOWrapper(buffer, encoding='ascii', errors='strict')
 
-    daemon._force_utf8_stream(stream)
+    force_utf8_stream(stream)
 
     assert stream.encoding.lower().replace('-', '') == 'utf8'
 
@@ -63,8 +63,8 @@ def test_console_setup_tolerates_a_stream_it_cannot_reconfigure():
         def write(self, text):
             return len(text)
 
-    daemon._force_utf8_stream(PlainWriter())
-    daemon._force_utf8_stream(None)
+    force_utf8_stream(PlainWriter())
+    force_utf8_stream(None)
 
 
 @pytest.mark.integration

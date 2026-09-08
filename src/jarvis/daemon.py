@@ -17,33 +17,9 @@ os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 os.environ.setdefault('MKL_NUM_THREADS', '1')
 os.environ.setdefault('OMP_NUM_THREADS', '1')
 
-# Fix Windows console encoding for Unicode/emoji characters
-# Skip in bundled mode (frozen) - encoding is handled by desktop_app.py
-def _force_utf8_stream(stream):
-    """Switch one standard stream to UTF-8, in place.
+from .utils.console import force_utf8_console
 
-    Reconfiguring leaves the stream object, and the buffer beneath it, exactly
-    as the caller found them. Wrapping the stream in a replacement would not:
-    this module is imported under more than one identity (``jarvis.daemon`` and
-    ``src.jarvis.daemon``), so the wrapper left by the earlier import loses its
-    last reference, its finaliser closes the buffer both wrappers write
-    through, and every later write raises.
-
-    A stream that offers no ``reconfigure``, such as a custom writer, is left
-    exactly as it is.
-    """
-    reconfigure = getattr(stream, 'reconfigure', None)
-    if reconfigure is None:
-        return
-    try:
-        reconfigure(encoding='utf-8', errors='replace')
-    except (ValueError, OSError):
-        pass
-
-
-if sys.platform == 'win32' and not getattr(sys, 'frozen', False):
-    _force_utf8_stream(sys.stdout)
-    _force_utf8_stream(sys.stderr)
+force_utf8_console()
 
 from typing import Optional
 from faster_whisper import WhisperModel
