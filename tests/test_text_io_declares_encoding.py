@@ -9,6 +9,11 @@ Emoji are everywhere here by design (``CLAUDE.md`` requires them in command
 line output), and user paths carry accents, so the gap is reached in normal
 use rather than in some corner case. This test walks the source and asks every
 text-mode call to say which encoding it means.
+
+One shape is deliberately out of reach: a bare ``x.open()`` carrying no
+mode, because the same call covers ``wave.open`` and other binary APIs and
+telling them apart would take more than the syntax. Calls that name a text
+mode are caught wherever they sit.
 """
 
 from __future__ import annotations
@@ -51,16 +56,24 @@ def _offenders(source: str) -> list[tuple[int, str]]:
             if mode in TEXT_MODES:
                 found.append((node.lineno, func.attr))
         elif isinstance(func, ast.Name) and func.id == "open":
-            # A bare ``open`` only. ``wave.open`` and friends are binary APIs
-            # that take no encoding at all.
             mode = _mode(node, 1)
             if mode is None or mode in TEXT_MODES:
                 found.append((node.lineno, "open"))
+        elif isinstance(func, ast.Attribute) and func.attr == "open":
+            # ``path.open("w")`` takes its mode first, ``codecs.open(f, "w")``
+            # second, and ``webbrowser.open(url)`` is not file I/O at all. Only
+            # a recognisable mode identifies one, so a call carrying none is
+            # left alone rather than guessed at: ``wave.open(f)`` opens bytes.
+            mode = _mode(node, 0)
+            if mode not in TEXT_MODES:
+                mode = _mode(node, 1)
+            if mode in TEXT_MODES:
+                found.append((node.lineno, f"{func.attr}()"))
     return found
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("tree", ["src", "tests"])
+@pytest.mark.parametrize("tree", ["src", "tests", "evals", "scripts"])
 def test_every_text_io_call_names_its_encoding(tree):
     reported = []
     for path in sorted((ROOT / tree).rglob("*.py")):

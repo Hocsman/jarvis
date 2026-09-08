@@ -616,6 +616,20 @@ class TestInstallUpdateWindows:
     """Tests for Windows update installation."""
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("nom_os,attendu", [("nt", "oem"), ("posix", "utf-8")])
+    def test_the_batch_encoding_follows_the_host_that_runs_it(self, nom_os, attendu, monkeypatch):
+        """cmd.exe parses a .bat in the OEM code page; nothing else does.
+
+        Pinned here rather than inferred from a round trip: writing and
+        reading through the same helper agrees with itself whatever it
+        returns, so it would stay green if the choice were wrong.
+        """
+        from desktop_app.updater import _batch_file_encoding
+
+        monkeypatch.setattr("desktop_app.updater.os.name", nom_os)
+        assert _batch_file_encoding() == attendu
+
+    @pytest.mark.unit
     def test_an_accented_path_survives_into_the_batch_script(self, tmp_path):
         """cmd.exe reads a .bat in the console's OEM code page.
 
@@ -677,7 +691,7 @@ class TestInstallUpdateWindows:
         mock_app_path.write_bytes(b"old executable")
 
         # Import here to avoid issues with platform checks
-        from desktop_app.updater import install_update_windows
+        from desktop_app.updater import install_update_windows, _batch_file_encoding
 
         # Capture the batch script content via the Popen call
         batch_content_captured = []
@@ -687,7 +701,7 @@ class TestInstallUpdateWindows:
                 # Read the batch script content
                 batch_path = Path(args[2])
                 if batch_path.exists():
-                    batch_content_captured.append(batch_path.read_text(encoding="utf-8"))
+                    batch_content_captured.append(batch_path.read_text(encoding=_batch_file_encoding()))
             return MagicMock()
 
         with patch("desktop_app.updater.get_app_path", return_value=mock_app_path):
@@ -741,7 +755,7 @@ class TestInstallUpdateWindows:
         mock_app_path.parent.mkdir(parents=True)
         mock_app_path.write_bytes(b"old executable")
 
-        from desktop_app.updater import install_update_windows
+        from desktop_app.updater import install_update_windows, _batch_file_encoding
 
         batch_content_captured = []
 
@@ -749,7 +763,7 @@ class TestInstallUpdateWindows:
             if args[0] == "cmd" and args[1] == "/c":
                 batch_path = Path(args[2])
                 if batch_path.exists():
-                    batch_content_captured.append(batch_path.read_text(encoding="utf-8"))
+                    batch_content_captured.append(batch_path.read_text(encoding=_batch_file_encoding()))
             return MagicMock()
 
         with patch("desktop_app.updater.get_app_path", return_value=mock_app_path):

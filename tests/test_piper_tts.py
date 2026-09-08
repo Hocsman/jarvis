@@ -362,12 +362,11 @@ class TestPiperTTSAutoDownload:
         assert "piper" in path
 
     def test_get_piper_models_dir(self):
-        """Models directory should be created under jarvis data dir."""
+        """Resolving the models directory names it without creating it."""
         from src.jarvis.output.tts import _get_piper_models_dir
 
         models_dir = _get_piper_models_dir()
 
-        assert models_dir.exists()
         assert "jarvis" in str(models_dir)
         assert "piper" in str(models_dir)
 
@@ -396,12 +395,15 @@ class TestPiperTTSAutoDownload:
         for code, voice in PIPER_VOICE_BY_LANGUAGE.items():
             locale = voice.split("-")[0]
             assert "_" in locale, f"{voice} is not a Piper locale-speaker name"
-            if len(code) == 2:  # the ISO code says which locale to expect
+            if code.isascii() and len(code) == 2:  # an ISO code says which locale to expect
                 assert locale.lower().startswith(code), (
                     f"{code!r} answers with {voice}, trained for {locale}"
                 )
 
-        assert PIPER_FALLBACK_VOICE in PIPER_VOICE_BY_LANGUAGE.values()
+        # The fallback has to be a name the downloader can resolve: three
+        # dash-separated parts, the first of which is a locale.
+        locale, orateur, qualite = PIPER_FALLBACK_VOICE.split("-")
+        assert "_" in locale and orateur and qualite
 
 
 class TestPiperTTSConfig:

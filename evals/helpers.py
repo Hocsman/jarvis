@@ -282,7 +282,7 @@ def _real_default_settings():
 
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "config.json")
-            with open(path, "w") as fh:
+            with open(path, "w", encoding="utf-8") as fh:
                 json.dump({}, fh)
             previous = os.environ.get("JARVIS_CONFIG_PATH")
             os.environ["JARVIS_CONFIG_PATH"] = path
