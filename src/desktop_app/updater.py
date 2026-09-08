@@ -498,11 +498,9 @@ def _batch_file_encoding() -> str:
     the user's disk, so an accent in a home directory is ordinary; written in
     any other encoding, every path in the script points nowhere.
 
-    The ``oem`` codec exists only on Windows, which is also the only place the
-    file is ever executed. Elsewhere the script is written to be read back by
-    a test, and UTF-8 keeps that lossless. ``os.name`` decides rather than
-    ``sys.platform`` because tests patch the latter to exercise this path from
-    a POSIX host, where the codec would not resolve.
+    The ``oem`` codec is registered only on Windows, which is also the only
+    place the file is executed, so ``os.name`` decides: elsewhere UTF-8 keeps
+    the generated text readable.
     """
     return "oem" if os.name == "nt" else "utf-8"
 
