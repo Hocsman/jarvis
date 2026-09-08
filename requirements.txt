@@ -33,8 +33,15 @@ nvidia-cudnn-cu12>=9.0.0; sys_platform == "win32"
 mlx-whisper>=0.4.0; sys_platform == "darwin" and platform_machine == "arm64"
 
 # Desktop app dependencies
-PyQt6>=6.6.0
-PyQt6-WebEngine>=6.6.0
+# Qt 6.10 and later do not load on Windows: Qt6Core.dll fails with
+# STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139) even though every import in its
+# dependency tree resolves against the DLLs the loader picks. 6.9.1 is the
+# release the suite is green on there, so Windows holds it exactly and the
+# other platforms stay on the newest.
+PyQt6>=6.6.0; sys_platform != "win32"
+PyQt6==6.9.1; sys_platform == "win32"
+PyQt6-WebEngine>=6.6.0; sys_platform != "win32"
+PyQt6-WebEngine==6.9.0; sys_platform == "win32"
 psutil>=5.9.0
 # Note: 6.13.0+ has VC runtime pre-loading fix for Windows
 pyinstaller>=6.13.0
