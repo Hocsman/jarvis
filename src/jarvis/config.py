@@ -63,9 +63,15 @@ def _default_dictation_hotkey() -> str:
 
 
 def _default_db_path() -> str:
-    base = Path.home() / ".local" / "share" / "jarvis"
-    base.mkdir(parents=True, exist_ok=True)
-    return str(base / "jarvis.db")
+    """Where the database lives when the user pins no path.
+
+    Resolving it creates nothing: the directory is made by whoever needs it,
+    which is ``Database`` before it connects and the menu item that reveals
+    the folder. Building it here instead would put a directory in the user's
+    profile every time anything merely read the default, the settings parser
+    and the test suite included.
+    """
+    return str(Path.home() / ".local" / "share" / "jarvis" / "jarvis.db")
 
 
 @dataclass(frozen=True)
