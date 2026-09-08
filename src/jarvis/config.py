@@ -2,11 +2,13 @@ import ipaddress
 import os
 import sys
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 from dotenv import load_dotenv
+import requests
 
 
 # ============================================================================
@@ -522,8 +524,33 @@ def _is_local_endpoint(base_url: str) -> bool:
                 or ip.is_reserved or ip.is_unspecified)
 
 
+_ollama_reachable_cache: dict[str, tuple[float, bool]] = {}
+
+
+def is_ollama_reachable(base_url: str = "http://127.0.0.1:11434", timeout: float = 0.5) -> bool:
+    """Check whether a local Ollama instance is reachable.
+
+    Cached with a short TTL so repeated config reads do not block on network I/O.
+    """
+    now = time.monotonic()
+    cached = _ollama_reachable_cache.get(base_url)
+    if cached is not None and now - cached[0] < 5.0:
+        return cached[1]
+
+    reachable = False
+    try:
+        resp = requests.get(f"{base_url.rstrip('/')}/api/version", timeout=timeout)
+        reachable = resp.status_code == 200
+    except Exception:
+        reachable = False
+
+    _ollama_reachable_cache[base_url] = (now, reachable)
+    return reachable
+
+
 def _cloud_safe_model(value: str, field: str, provider: str,
-                      base_url: str, fallback: str) -> str:
+                      base_url: str, fallback: str,
+                      ollama_base_url: str = "http://127.0.0.1:11434") -> str:
     """Keep auxiliary model names valid for the endpoint actually in use.
 
     Jarvis runs several small LLM tasks (intent judge, tool router,
@@ -531,7 +558,11 @@ def _cloud_safe_model(value: str, field: str, provider: str,
     endpoint namespaces its model IDs as ``vendor/model`` and answers
     HTTP 400 ("X is not a valid model ID") to a bare local tag like
     ``gemma4:e2b``, so the auxiliary task dies for no gain: those get the
-    chat model instead.
+    chat model instead when no local Ollama instance is reachable.
+
+    When local Ollama is reachable, bare model tags are kept because the
+    auxiliary backend dispatcher will route them to Ollama, eliminating cloud
+    latency for intent judging and tool routing.
 
     A local OpenAI-compatible server is the opposite case. A bare name is
     the only shape it accepts, and the pin is the whole reason the user
@@ -545,6 +576,8 @@ def _cloud_safe_model(value: str, field: str, provider: str,
     if provider != "openai_compatible" or "/" in value:
         return value
     if _is_local_endpoint(base_url):
+        return value
+    if is_ollama_reachable(ollama_base_url):
         return value
     if not fallback or fallback == value:
         return value
@@ -1053,7 +1086,8 @@ def load_settings() -> Settings:
     # Intent Judge - always used when available
     intent_judge_model = str(merged.get("intent_judge_model", "gemma4:e2b"))
     intent_judge_model = _cloud_safe_model(
-        intent_judge_model, "intent_judge_model", llm_provider, llm_base_url, llm_chat_model)
+        intent_judge_model, "intent_judge_model", llm_provider, llm_base_url, llm_chat_model,
+        ollama_base_url=ollama_base_url)
     intent_judge_timeout_sec = float(merged.get("intent_judge_timeout_sec", 10.0))
 
     # Transcript Buffer - ambient speech context for intent judge (separate from dialogue)
@@ -1085,10 +1119,12 @@ def load_settings() -> Settings:
         tool_selection_strategy = "llm"
     tool_router_model = str(merged.get("tool_router_model", "") or "").strip()
     tool_router_model = _cloud_safe_model(
-        tool_router_model, "tool_router_model", llm_provider, llm_base_url, llm_chat_model)
+        tool_router_model, "tool_router_model", llm_provider, llm_base_url, llm_chat_model,
+        ollama_base_url=ollama_base_url)
     evaluator_model = str(merged.get("evaluator_model", "") or "").strip()
     evaluator_model = _cloud_safe_model(
-        evaluator_model, "evaluator_model", llm_provider, llm_base_url, llm_chat_model)
+        evaluator_model, "evaluator_model", llm_provider, llm_base_url, llm_chat_model,
+        ollama_base_url=ollama_base_url)
     _eval_raw = merged.get("evaluator_enabled", None)
     evaluator_enabled: Optional[bool]
     if _eval_raw is None:
@@ -1097,7 +1133,8 @@ def load_settings() -> Settings:
         evaluator_enabled = bool(_eval_raw)
     planner_model = str(merged.get("planner_model", "") or "").strip()
     planner_model = _cloud_safe_model(
-        planner_model, "planner_model", llm_provider, llm_base_url, llm_chat_model)
+        planner_model, "planner_model", llm_provider, llm_base_url, llm_chat_model,
+        ollama_base_url=ollama_base_url)
     planner_enabled = bool(merged.get("planner_enabled", True))
     try:
         planner_timeout_sec = float(merged.get("planner_timeout_sec", 6.0))

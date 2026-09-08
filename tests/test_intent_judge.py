@@ -574,7 +574,7 @@ class TestWarmUp:
             ok = judge.warm_up()
 
         assert ok is True
-        gb.assert_called_once_with(cfg)
+        gb.assert_called_once_with(cfg, "gemma4:e2b")
         args, kwargs = backend.warm_up.call_args
         assert args[0] == "gemma4:e2b"
         assert kwargs.get("timeout_sec") and kwargs["timeout_sec"] >= 60.0

@@ -24,6 +24,7 @@ from ..tools.confirmation import (
 from ..debug import debug_log
 from ..llm import (
     extract_text_from_response,
+    get_auxiliary_backend,
     get_embedding_backend,
     get_llm_backend,
     ToolsNotSupportedError,
@@ -1463,13 +1464,14 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         # Only announce the phase on a cache miss: a cache hit is instant, and
         # a stage label that flashes for a millisecond is noise, not progress.
         _stage("routing")
+        router_model = resolve_tool_router_model(cfg)
         routed_tools = select_tools(
             query=redacted,
             builtin_tools=BUILTIN_TOOLS,
             mcp_tools=mcp_tools,
             strategy=strategy,
-            llm_backend=get_llm_backend(cfg),
-            llm_model=resolve_tool_router_model(cfg),
+            llm_backend=get_auxiliary_backend(cfg, router_model),
+            llm_model=router_model,
             llm_timeout_sec=float(getattr(cfg, "llm_tools_timeout_sec", 8.0)),
             embedding_backend=get_embedding_backend(cfg),
             embed_model=cfg.embedding_model,
