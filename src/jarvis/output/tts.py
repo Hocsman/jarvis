@@ -28,37 +28,39 @@ PIPER_VOICE_BASE_URL = "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0
 # language, just the one that has to be picked when nothing else applies.
 PIPER_FALLBACK_VOICE = "en_GB-alan-medium"
 
-# Which voice speaks which language. Piper names its voices by locale and
-# speaker, so nothing in the string "français" yields ``fr_FR-siwis-medium``:
-# the pairing has to be stated. Each language lists the spellings a user
-# might write in ``response_language`` (its own name, its English name, its
-# ISO 639-1 code); case and accents are stripped before the lookup, so one
-# spelling covers "Français" and "francais" alike. Supporting one more
-# language is one line here, and a language nobody has listed still speaks,
-# with the fallback voice, rather than falling silent.
-_PIPER_VOICES: tuple[tuple[tuple[str, ...], str], ...] = (
-    (("fr", "francais", "french"), "fr_FR-siwis-medium"),
-    (("en", "english"), PIPER_FALLBACK_VOICE),
-    (("es", "espanol", "spanish"), "es_ES-davefx-medium"),
-    (("de", "deutsch", "german"), "de_DE-thorsten-medium"),
-    (("it", "italiano", "italian"), "it_IT-riccardo-x_low"),
-    (("nl", "nederlands", "dutch"), "nl_NL-mls-medium"),
-    (("pt", "portugues", "portuguese"), "pt_BR-faber-medium"),
-    (("pl", "polski", "polish"), "pl_PL-darkman-medium"),
-    (("ru", "russkij", "russian"), "ru_RU-dmitri-medium"),
-    (("tr", "turkce", "turkish"), "tr_TR-dfki-medium"),
-    (("zh", "zhongwen", "chinese", "mandarin"), "zh_CN-huayan-medium"),
-)
-
-PIPER_VOICE_BY_LANGUAGE = {
-    nom: voix for spellings, voix in _PIPER_VOICES for nom in spellings
-}
-
-
 def _normalise_language(value: str) -> str:
     """Lower-case and strip accents, so spelling variants meet as one key."""
     decompose = unicodedata.normalize("NFKD", value.strip().lower())
     return "".join(c for c in decompose if not unicodedata.combining(c))
+
+
+# Which voice speaks which language. Piper names its voices by locale and
+# speaker, so nothing in the string "français" yields ``fr_FR-siwis-medium``:
+# the pairing has to be stated. Each language lists the spellings a user
+# might write in ``response_language``: its own name, its English name and
+# its ISO 639-1 code. Supporting one more language is one line here, and a
+# language nobody has listed still speaks, with the fallback voice, rather
+# than falling silent.
+_PIPER_VOICES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("fr", "français", "french"), "fr_FR-siwis-medium"),
+    (("en", "english"), PIPER_FALLBACK_VOICE),
+    (("es", "español", "spanish"), "es_ES-davefx-medium"),
+    (("de", "deutsch", "german"), "de_DE-thorsten-medium"),
+    (("it", "italiano", "italian"), "it_IT-riccardo-x_low"),
+    (("nl", "nederlands", "dutch"), "nl_NL-mls-medium"),
+    (("pt", "português", "portuguese"), "pt_BR-faber-medium"),
+    (("pl", "polski", "polish"), "pl_PL-darkman-medium"),
+    (("ru", "русский", "russian"), "ru_RU-dmitri-medium"),
+    (("tr", "türkçe", "turkish"), "tr_TR-dfki-medium"),
+    (("zh", "中文", "chinese", "mandarin"), "zh_CN-huayan-medium"),
+)
+
+# Keyed on the normalised form, so a name may be written here the way its
+# speakers write it: "türkçe" and "türkçe" typed without the cedilla meet on
+# the same key, and so do "Français" and "francais".
+PIPER_VOICE_BY_LANGUAGE = {
+    _normalise_language(nom): voix for spellings, voix in _PIPER_VOICES for nom in spellings
+}
 
 
 def _piper_voice_for_language(language: Optional[str]) -> str:
@@ -71,10 +73,12 @@ def _piper_voice_for_language(language: Optional[str]) -> str:
 
 
 def _get_piper_models_dir() -> Path:
-    """Get the directory for storing Piper voice models."""
-    base = Path.home() / ".local" / "share" / "jarvis" / "models" / "piper"
-    base.mkdir(parents=True, exist_ok=True)
-    return base
+    """Where Piper voice models are kept.
+
+    Resolving it creates nothing: only the download writes there, and it
+    creates the directory itself.
+    """
+    return Path.home() / ".local" / "share" / "jarvis" / "models" / "piper"
 
 
 def _get_default_piper_model_path(language: Optional[str] = None) -> str:
@@ -126,6 +130,7 @@ def _download_piper_voice(voice_name: str, progress_callback: Optional[Callable[
 
     # Target paths
     models_dir = _get_piper_models_dir()
+    models_dir.mkdir(parents=True, exist_ok=True)
     onnx_path = models_dir / f"{voice_name}.onnx"
     json_path = models_dir / f"{voice_name}.onnx.json"
 
@@ -738,6 +743,21 @@ class PiperTTS:
         self._audio_stream = None
         self._audio_lock = threading.Lock()
 
+    def _cached_fallback_voice(self) -> Optional[tuple[str, str]]:
+        """The fallback voice and its config, if both already sit on disk.
+
+        Offered only when the language chose the voice. A pinned
+        ``model_path`` is a choice, and quietly speaking with another voice
+        would answer a question the user did not ask.
+        """
+        if self.model_path:
+            return None
+        secours = os.path.expanduser(_get_default_piper_model_path(None))
+        config = secours + ".json"
+        if os.path.exists(secours) and os.path.exists(config):
+            return secours, config
+        return None
+
     def _resolved_model_path(self) -> str:
         """The voice this engine speaks with.
 
@@ -788,14 +808,25 @@ class PiperTTS:
                     downloaded_path = _download_piper_voice(voice_name, progress_callback=progress)
 
                     if not downloaded_path:
-                        self._init_error = f"Failed to download voice: {voice_name}"
-                        debug_log(f"Piper TTS init failed: {self._init_error}", "tts")
-                        self._initialized = True
-                        return False
-
-                    model_path = downloaded_path
-                    config_path = model_path + ".json"
-                    print("✓ Voice downloaded successfully!", file=sys.stderr, flush=True)
+                        secours = self._cached_fallback_voice()
+                        if secours is None:
+                            self._init_error = f"Failed to download voice: {voice_name}"
+                            debug_log(f"Piper TTS init failed: {self._init_error}", "tts")
+                            self._initialized = True
+                            return False
+                        model_path, config_path = secours
+                        repli = os.path.basename(model_path).replace(".onnx", "")
+                        debug_log(
+                            f"{voice_name} unavailable, speaking with {repli}", "tts"
+                        )
+                        print(
+                            f"⚠️  Voice {voice_name} unavailable, speaking with {repli}",
+                            file=sys.stderr, flush=True,
+                        )
+                    else:
+                        model_path = downloaded_path
+                        config_path = model_path + ".json"
+                        print("✓ Voice downloaded successfully!", file=sys.stderr, flush=True)
 
                 # Final check that files exist
                 if not os.path.exists(model_path):
@@ -1440,7 +1471,10 @@ def create_tts_engine(
     piper_noise_w: float = 0.8,
     piper_sentence_silence: float = 0.2,
     response_language: Optional[str] = None,
-    # Kokoro parameters
+    # Kokoro parameters. ``response_language`` governs the Piper voice
+    # only: Kokoro takes its voice from ``kokoro_voice`` and its language
+    # from ``kokoro_lang_code``, and Chatterbox has no notion of one, so
+    # both need their voice set by hand.
     kokoro_voice: str = "ff_siwis",
     kokoro_lang_code: str = "f",
     kokoro_speed: float = 1.0,
