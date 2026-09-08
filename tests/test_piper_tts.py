@@ -352,11 +352,11 @@ class TestPiperTTSAutoDownload:
 
     def test_get_default_model_path(self):
         """Default model path should be in ~/.local/share/jarvis/models/piper/."""
-        from src.jarvis.output.tts import _get_default_piper_model_path, PIPER_DEFAULT_VOICE
+        from src.jarvis.output.tts import _get_default_piper_model_path, PIPER_FALLBACK_VOICE
 
         path = _get_default_piper_model_path()
 
-        assert PIPER_DEFAULT_VOICE in path
+        assert PIPER_FALLBACK_VOICE in path
         assert path.endswith(".onnx")
         assert "jarvis" in path
         assert "piper" in path
@@ -383,14 +383,25 @@ class TestPiperTTSAutoDownload:
         # But initialization should use the default
         # (we don't actually init here to avoid downloads in tests)
 
-    def test_default_voice_is_reasonable(self):
-        """Default voice should be a reasonable choice."""
-        from src.jarvis.output.tts import PIPER_DEFAULT_VOICE
+    def test_every_listed_voice_matches_the_language_it_answers(self):
+        """The table pairs a language with a voice trained for it.
 
-        # Should be British English
-        assert PIPER_DEFAULT_VOICE.startswith("en_GB")
-        # Should include quality indicator
-        assert "medium" in PIPER_DEFAULT_VOICE or "high" in PIPER_DEFAULT_VOICE
+        Asserting which voice is the fallback would freeze today's choice;
+        what has to hold is that no entry pairs a language with a voice
+        from another one, since that mismatch is inaudible in the table and
+        obvious to whoever is spoken to.
+        """
+        from src.jarvis.output.tts import PIPER_VOICE_BY_LANGUAGE, PIPER_FALLBACK_VOICE
+
+        for code, voice in PIPER_VOICE_BY_LANGUAGE.items():
+            locale = voice.split("-")[0]
+            assert "_" in locale, f"{voice} is not a Piper locale-speaker name"
+            if len(code) == 2:  # the ISO code says which locale to expect
+                assert locale.lower().startswith(code), (
+                    f"{code!r} answers with {voice}, trained for {locale}"
+                )
+
+        assert PIPER_FALLBACK_VOICE in PIPER_VOICE_BY_LANGUAGE.values()
 
 
 class TestPiperTTSConfig:
