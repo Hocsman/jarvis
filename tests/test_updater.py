@@ -616,6 +616,50 @@ class TestInstallUpdateWindows:
     """Tests for Windows update installation."""
 
     @pytest.mark.unit
+    def test_an_accented_path_survives_into_the_batch_script(self, tmp_path):
+        """cmd.exe reads a .bat in the console's OEM code page.
+
+        Not UTF-8, and not the ANSI one either. The paths interpolated into
+        the script come from the user's own disk, so a home directory with an
+        accent in it is the ordinary case, not the exotic one: written in the
+        wrong encoding, the update deletes nothing and starts nothing because
+        every path in the script points somewhere that does not exist.
+        """
+        import subprocess
+        import zipfile
+        from unittest.mock import patch, MagicMock
+
+        from desktop_app.updater import install_update_windows, _batch_file_encoding
+
+        accentue = tmp_path / "Frédéric" / "Programmes"
+        accentue.mkdir(parents=True)
+        zip_path = tmp_path / "update.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("Jarvis.exe", b"mock executable content")
+        app_path = accentue / "Jarvis.exe"
+        app_path.write_bytes(b"old executable")
+
+        relu = []
+
+        def capture_popen(args, **kwargs):
+            if args[0] == "cmd" and args[1] == "/c":
+                chemin = Path(args[2])
+                if chemin.exists():
+                    relu.append(chemin.read_text(encoding=_batch_file_encoding()))
+            return MagicMock()
+
+        with patch("desktop_app.updater.get_app_path", return_value=app_path):
+            with patch.object(subprocess, "CREATE_NO_WINDOW", 0x08000000, create=True):
+                with patch("desktop_app.updater.subprocess.Popen", side_effect=capture_popen):
+                    install_update_windows(zip_path)
+
+        assert relu, "no batch script was generated"
+        assert "Frédéric" in relu[0], (
+            "the accented directory did not survive the write: cmd.exe would "
+            "read a path that does not exist"
+        )
+
+    @pytest.mark.unit
     def test_batch_script_waits_for_pid(self, tmp_path):
         """Verify the Windows batch script waits for the current process to exit."""
         import os

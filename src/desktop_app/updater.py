@@ -490,6 +490,23 @@ rm -rf {escaped_temp}
         return False
 
 
+def _batch_file_encoding() -> str:
+    """The encoding cmd.exe reads a ``.bat`` in.
+
+    Batch files are parsed in the console's OEM code page, which is neither
+    UTF-8 nor the ANSI one. The paths interpolated into the script come from
+    the user's disk, so an accent in a home directory is ordinary; written in
+    any other encoding, every path in the script points nowhere.
+
+    The ``oem`` codec exists only on Windows, which is also the only place the
+    file is ever executed. Elsewhere the script is written to be read back by
+    a test, and UTF-8 keeps that lossless. ``os.name`` decides rather than
+    ``sys.platform`` because tests patch the latter to exercise this path from
+    a POSIX host, where the codec would not resolve.
+    """
+    return "oem" if os.name == "nt" else "utf-8"
+
+
 def install_update_windows(download_path: Path) -> bool:
     """Install update on Windows.
 
@@ -545,7 +562,7 @@ echo Launching updated Jarvis...
 start "" "{escaped_installed_exe}"
 rmdir /s /q "{escaped_temp}"
 '''
-        batch_script.write_text(batch_content, encoding="utf-8")
+        batch_script.write_text(batch_content, encoding=_batch_file_encoding())
 
         subprocess.Popen(
             ["cmd", "/c", str(batch_script)],
