@@ -65,7 +65,6 @@ remets seulement ce qui compte :
   "llm_chat_model": "deepseek/deepseek-v4-flash",
   "intent_judge_model": "openai/gpt-oss-120b",
   "tool_router_model": "openai/gpt-oss-120b",
-  "fast_model": "openai/gpt-oss-120b",
   "embedding_provider": "ollama",
   "ollama_chat_model": "gemma4:e2b",
   "whisper_model": "large-v3-turbo",
@@ -78,6 +77,19 @@ remets seulement ce qui compte :
   "llm_extra_body": {"provider": {"sort": "throughput"}}
 }
 ```
+
+⚠️ **Ce bloc est un point de départ, pas un inventaire.** La config du
+Mac fait foi : ouvre-la et relève ce qui y est vraiment. Une clé que le
+code ne connaît pas est conservée dans le fichier et **ignorée en
+silence** — ce modèle contenait `fast_model`, recopié d'une vraie config
+sans vérifier que quoi que ce soit le lisait. Rien ne l'aurait signalé.
+
+Les clés de modèles que le code reconnaît sont `llm_chat_model`,
+`intent_judge_model`, `tool_router_model`, `planner_model`,
+`evaluator_model`, `appris_model`, `confirmation_model`,
+`reminder_model`, `embedding_model`, `ollama_chat_model`,
+`ollama_embed_model` et `whisper_model`. Celles qu'on ne met pas
+retombent sur leurs valeurs par défaut.
 
 **À laisser tomber au premier lancement** : tout ce qui commence par
 `tts_piper_` (chemins macOS), `location_ip_address` (l'IP d'ici), et
