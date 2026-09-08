@@ -79,7 +79,6 @@ remets seulement ce qui compte :
   "llm_chat_model": "deepseek/deepseek-v4-flash",
   "intent_judge_model": "openai/gpt-oss-120b",
   "tool_router_model": "openai/gpt-oss-120b",
-  "fast_model": "openai/gpt-oss-120b",
   "embedding_provider": "ollama",
   "ollama_chat_model": "gemma4:e2b",
   "whisper_model": "large-v3-turbo",

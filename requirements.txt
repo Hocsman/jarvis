@@ -42,6 +42,10 @@ PyQt6>=6.6.0; sys_platform != "win32"
 PyQt6==6.9.1; sys_platform == "win32"
 PyQt6-WebEngine>=6.6.0; sys_platform != "win32"
 PyQt6-WebEngine==6.9.0; sys_platform == "win32"
+# The failing DLLs ship in the Qt runtime wheels, not the bindings, so those
+# are held too: pinning only the bindings leaves the runtime free to move.
+PyQt6-Qt6==6.9.2; sys_platform == "win32"
+PyQt6-WebEngine-Qt6==6.9.2; sys_platform == "win32"
 psutil>=5.9.0
 # Note: 6.13.0+ has VC runtime pre-loading fix for Windows
 pyinstaller>=6.13.0
