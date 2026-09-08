@@ -2179,10 +2179,11 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
             guidance.append("\n" + warm_profile_block)
 
         # What he is working towards, so she recognises the subject when
-        # it comes up. Withheld from a routine turn for the same reason
-        # the profile is: his goals are his life, and a pass summarising
-        # his mail has no business knowing them.
-        if scope is None:
+        # it comes up. Withheld from a routine turn unless the routine's
+        # block explicitly asks for memory (« mémoire: oui »): his goals
+        # are his life, and a pass summarising his mail has no business
+        # knowing them.
+        if scope is None or getattr(scope, "memoire", False):
             try:
                 from ..objectifs.prompt import format_objectifs_block
 
