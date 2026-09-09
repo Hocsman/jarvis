@@ -53,20 +53,21 @@ The settings window uses a sidebar navigation pattern: a fixed-width `QListWidge
 2. LLM Provider
 3. Text-to-Speech
 4. Piper TTS
-5. Chatterbox TTS
-6. Voice Input (includes microphone device selection)
-7. Wake Word
-8. Speech Recognition (Whisper)
-9. Voice Activity Detection
-10. Timing & Windows
-11. Memory & Dialogue
-12. Location
-13. Features (includes web search, Wikipedia fallback, low-power mode, startup tune, and dictation toggles)
-14. 🙋 Permissions
-15. ⏰ Rappels
-16. 🌅 Routines
-17. MCP Servers
-18. Advanced
+5. Kokoro TTS
+6. Chatterbox TTS
+7. Voice Input (includes microphone device selection)
+8. Wake Word
+9. Speech Recognition (Whisper)
+10. Voice Activity Detection
+11. Timing & Windows
+12. Memory & Dialogue
+13. Location
+14. Features (includes web search, Wikipedia fallback, low-power mode, startup tune, and dictation toggles)
+15. 🙋 Permissions
+16. ⏰ Rappels
+17. 🌅 Routines
+18. MCP Servers
+19. Advanced
 
 ### 🙋 Permissions
 
