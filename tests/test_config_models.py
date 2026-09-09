@@ -108,7 +108,7 @@ class TestLowPowerModeConfig:
         from jarvis.config import load_settings
 
         cfg_path = tmp_path / "config.json"
-        cfg_path.write_text(_json.dumps({"low_power_mode": True}))
+        cfg_path.write_text(_json.dumps({"low_power_mode": True}), encoding="utf-8")
         monkeypatch.setenv("JARVIS_CONFIG_PATH", str(cfg_path))
 
         settings = load_settings()
@@ -144,7 +144,7 @@ class TestWhisperHallucinationFilterDefaults:
         from jarvis.config import load_settings
 
         cfg_path = tmp_path / "config.json"
-        cfg_path.write_text(_json.dumps({"whisper_no_speech_threshold": 0.72}))
+        cfg_path.write_text(_json.dumps({"whisper_no_speech_threshold": 0.72}), encoding="utf-8")
         monkeypatch.setenv("JARVIS_CONFIG_PATH", str(cfg_path))
 
         settings = load_settings()

@@ -2,7 +2,7 @@ from __future__ import annotations
 from typing import Optional
 from datetime import datetime, timezone
 
-from ..llm import get_llm_backend
+from ..llm import get_auxiliary_backend, get_llm_backend
 from ..debug import debug_log
 
 
@@ -12,7 +12,7 @@ def call_llm_direct(*, cfg, chat_model, system_prompt, user_content,
     """Local indirection: route enrichment LLM calls through the backend
     configured by ``cfg.llm_provider``. Tests patch this single symbol
     to intercept every enrichment call."""
-    return get_llm_backend(cfg).direct(
+    return get_auxiliary_backend(cfg, chat_model).direct(
         chat_model, system_prompt, user_content,
         timeout_sec=timeout_sec, thinking=thinking,
         num_ctx=num_ctx, temperature=temperature, max_tokens=max_tokens,

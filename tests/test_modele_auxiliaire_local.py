@@ -66,10 +66,34 @@ def test_a_box_on_his_network_counts_as_local(tmp_path, monkeypatch):
     assert got.tool_router_model == "qwen3-1.7b-instruct"
 
 
+def test_a_remote_endpoint_keeps_bare_pin_when_ollama_is_available(tmp_path, monkeypatch):
+    """When a local Ollama server is running, bare auxiliary model pins are
+    preserved rather than rewritten to the cloud chat model, because they
+    will be executed locally via Ollama.
+    """
+    import src.jarvis.config as config
+    monkeypatch.setattr(config, "is_ollama_reachable", lambda *args, **kwargs: True)
+
+    got = _settings_from(tmp_path, monkeypatch, {
+        "llm_provider": "openai_compatible",
+        "llm_base_url": "https://openrouter.ai/api/v1",
+        "llm_chat_model": "deepseek/deepseek-v4-flash",
+        "tool_router_model": "qwen2.5:3b",
+        "intent_judge_model": "qwen2.5:3b",
+    })
+
+    assert got.tool_router_model == "qwen2.5:3b"
+    assert got.intent_judge_model == "qwen2.5:3b"
+
+
 def test_a_remote_endpoint_still_rescues_a_stale_local_tag(tmp_path, monkeypatch):
-    """The rewrite is not wrong, it was only wrong about which endpoints
-    it applies to. A bare Ollama tag sent to a remote endpoint 400s and
-    the auxiliary task dies for no gain."""
+    """The rewrite rescues a stale local tag when local Ollama is not
+    reachable, because a bare tag sent to a remote endpoint fails with
+    HTTP 400.
+    """
+    import src.jarvis.config as config
+    monkeypatch.setattr(config, "is_ollama_reachable", lambda *args, **kwargs: False)
+
     got = _settings_from(tmp_path, monkeypatch, {
         "llm_provider": "openai_compatible",
         "llm_base_url": "https://openrouter.ai/api/v1",
@@ -84,6 +108,9 @@ def test_a_discarded_pin_is_announced(tmp_path, monkeypatch, capsys):
     """Nothing downstream shows the effective value: the settings window
     reads the raw JSON off disk, and three of these four fields have no
     field there at all."""
+    import src.jarvis.config as config
+    monkeypatch.setattr(config, "is_ollama_reachable", lambda *args, **kwargs: False)
+
     _settings_from(tmp_path, monkeypatch, {
         "llm_provider": "openai_compatible",
         "llm_base_url": "https://openrouter.ai/api/v1",
@@ -100,6 +127,9 @@ def test_a_discarded_pin_is_announced(tmp_path, monkeypatch, capsys):
 def test_the_announcement_does_not_repeat_on_every_reload(tmp_path, monkeypatch, capsys):
     """`debug_log` reloads the settings every couple of seconds. A line
     printed on each reload is a line he learns to scroll past."""
+    import src.jarvis.config as config
+    monkeypatch.setattr(config, "is_ollama_reachable", lambda *args, **kwargs: False)
+
     valeurs = {
         "llm_provider": "openai_compatible",
         "llm_base_url": "https://openrouter.ai/api/v1",

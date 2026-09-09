@@ -34,7 +34,7 @@
 
 **📊 Transparent progress** - We track what works (and what doesn't) with automated evals. [See the suite →](evals/)
 
-**🚧 Known limitations:** Jarvis is under active development. Primary development happens on macOS. Windows/Linux support may lag behind. We're building in the open, [issues](https://github.com/isair/jarvis/issues) and [contributions](https://github.com/isair/jarvis/pulls) welcome!
+**🚧 Known limitations:** Jarvis is under active development. Primary development happens on macOS. Windows/Linux support may lag behind. On Windows, Qt is held at 6.9: 6.10 and later fail to load `Qt6Core.dll`, so upgrading PyQt6 by hand breaks the app. We're building in the open, [issues](https://github.com/isair/jarvis/issues) and [contributions](https://github.com/isair/jarvis/pulls) welcome!
 - No mobile apps ([#17](https://github.com/isair/jarvis/issues/17))
 - "Stop" commands during speech sometimes get filtered as echo ([#24](https://github.com/isair/jarvis/issues/24))
 - Dictation is not available on macOS 26+ (Tahoe) due to a pynput incompatibility ([#172](https://github.com/isair/jarvis/issues/172))
@@ -409,13 +409,13 @@ Customise the hotkey in Settings or `config.json`:
 
 **Piper TTS (default)** - Neural TTS that auto-downloads on first use (~60MB):
 - Works out of the box - no setup required
-- High-quality British English male voice (en_GB-alan-medium)
+- The voice follows `response_language`: French, Spanish, German, Italian, Dutch, Portuguese, Polish, Russian, Turkish, Chinese and English each have one. Any other language speaks with `en_GB-alan-medium`.
 - Fast local synthesis with exact duration tracking
 
-To use different Piper voices, download from [HuggingFace](https://huggingface.co/rhasspy/piper-voices) and set:
+To pick a voice yourself, browse [HuggingFace](https://huggingface.co/rhasspy/piper-voices) and set the path below. It overrides the language, and the file is downloaded on first use if it is not already there:
 ```json
 {
-  "tts_piper_model_path": "~/.local/share/jarvis/models/piper/en_GB-alan-medium.onnx"
+  "tts_piper_model_path": "~/.local/share/jarvis/models/piper/fr_FR-siwis-medium.onnx"
 }
 ```
 
@@ -642,8 +642,9 @@ cd jarvis
 # macOS
 bash scripts/run_macos.sh
 
-# Windows (with Micromamba)
-pwsh -ExecutionPolicy Bypass -File scripts\run_windows.ps1
+# Windows (install Micromamba first: winget install --id Mamba.Micromamba -e)
+powershell -ExecutionPolicy Bypass -File scriptsun_windows.ps1
+un_windows.ps1
 
 # Linux
 bash scripts/run_linux.sh

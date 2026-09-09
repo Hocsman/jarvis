@@ -229,7 +229,7 @@ def create_test_config():
     }
 
     import json
-    with open(config_path, 'w') as f:
+    with open(config_path, 'w', encoding='utf-8') as f:
         json.dump(test_config, f, indent=2)
 
     print(f"✅ Created test config: {config_path}")

@@ -125,7 +125,14 @@ def _ligne_due(db, tz: str, heure: int = 7):
 
 @pytest.fixture
 def horloge_new_york(monkeypatch):
-    """The daemon's own clock six hours behind the row's zone."""
+    """The daemon's own clock six hours behind the row's zone.
+
+    Shifting the zone of the process clock goes through ``time.tzset``, which
+    POSIX provides and Windows does not: there ``TZ`` never reaches
+    ``localtime``, so the zone gap this case rests on cannot be created at all.
+    """
+    if not hasattr(time, "tzset"):
+        pytest.skip("shifting the process clock's zone needs time.tzset (POSIX only)")
     monkeypatch.setenv("TZ", "America/New_York")
     time.tzset()
     yield

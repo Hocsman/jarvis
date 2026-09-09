@@ -836,7 +836,7 @@ def get_existing_instance_pid() -> Optional[int]:
     lock_file = get_lock_file_path()
     try:
         if lock_file.exists():
-            content = lock_file.read_text().strip()
+            content = lock_file.read_text(encoding="utf-8").strip()
             if content.isdigit():
                 return int(content)
     except Exception:
@@ -3077,18 +3077,9 @@ def _ollama_runtime_flags(cfg) -> tuple[bool, bool]:
 
 def main() -> int:
     """Main entry point for the desktop app."""
-    # Fix Windows console encoding for Unicode/emoji characters
-    # Only for non-frozen apps - frozen apps redirect stdout to crash log
-    if sys.platform == 'win32' and not getattr(sys, 'frozen', False):
-        try:
-            import io
-            # Only wrap if stdout has a proper binary buffer
-            if hasattr(sys.stdout, 'buffer') and hasattr(sys.stdout.buffer, 'write'):
-                sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-            if hasattr(sys.stderr, 'buffer') and hasattr(sys.stderr.buffer, 'write'):
-                sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
-        except Exception:
-            pass
+    from jarvis.utils.console import force_utf8_console
+
+    force_utf8_console()
 
     # Required for PyInstaller: must be called before any multiprocessing
     # Without this, bundled apps can spawn infinite copies of themselves

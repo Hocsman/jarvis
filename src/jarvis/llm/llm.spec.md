@@ -17,6 +17,8 @@ from jarvis.llm import (
     OpenAICompatibleBackend,     # implementation: OpenAI-compatible servers
     ToolsNotSupportedError,
     get_llm_backend,             # factory: settings → chat backend
+    get_auxiliary_backend,       # factory: settings + model → auxiliary backend
+    get_private_backend,         # factory: settings + pinned → private backend
     get_embedding_backend,       # factory: settings → embedding backend
     call_llm_direct,             # base-URL helper (see below)
     call_llm_streaming,
@@ -95,7 +97,9 @@ Capping generation instead (`max_tokens`) does **not** work here: the JSON arriv
 
 ### Factory dispatch
 
-- `get_llm_backend(cfg)` reads `llm_provider`. For `openai_compatible` it resolves `llm_base_url` (falling back to `ollama_base_url`); for `ollama` it uses `ollama_base_url` directly so a stale `llm_base_url` from a previous OpenAI-compatible config cannot leak into the Ollama backend. `llm_api_key` is read regardless (sent only when non-empty).
+- `get_llm_backend(cfg, model=None)` reads `llm_provider`. For `openai_compatible` it resolves `llm_base_url` (falling back to `ollama_base_url`); for `ollama` it uses `ollama_base_url` directly so a stale `llm_base_url` from a previous OpenAI-compatible config cannot leak into the Ollama backend. When `model` is specified as a bare local tag (without a vendor slash) on a remote OpenAI-compatible endpoint, it routes directly to local Ollama via `_SurLaMachine`. `llm_api_key` is read regardless (sent only when non-empty).
+- `get_auxiliary_backend(cfg, model=None)` routes auxiliary classification passes (intent judge, tool router). Bare local model tags on remote providers execute via local Ollama without leaving the machine.
+- `get_private_backend(cfg, pinned)` routes privacy-sensitive contexts carrying user life data (reminders, routines, goals, learning propositions) to local Ollama whenever a model pin is specified.
 - `get_embedding_backend(cfg)` reads `embedding_provider` (falls back to `llm_provider` when unset), resolves `embedding_base_url` (falls back per-provider: `llm_base_url` for OpenAI-compatible, `ollama_base_url` for Ollama), and `embedding_api_key` (falls back to `llm_api_key`).
 - Construction is fail-soft: an unset URL becomes the default Ollama URL, so `get_*_backend` never raises. Errors surface at request time, not construction time.
 - Backends are **memoised** by their resolved connection parameters (provider, URL, key, redaction flag, `llm_extra_body`). A single reply makes many `get_llm_backend` calls; returning one cached instance lets them share the backend's persistent HTTP session (keep-alive) instead of each paying a fresh TLS handshake and the provider's cold-start. `clear_backend_cache()` drops the cache after a config reload so the next call rebuilds against the new settings.

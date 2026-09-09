@@ -111,8 +111,20 @@ class MockConfig:
             self.embedding_model = self.ollama_embed_model
 
 
+@pytest.fixture(scope="session")
+def _bac_a_sable(tmp_path_factory):
+    """One directory for the whole run.
+
+    ``mktemp`` scans the session's temp root on every call to find the next
+    free suffix, so calling it once per test makes the cost quadratic in the
+    number of tests. The isolation these fixtures need is a distinct *file*
+    per test, which a name inside one directory gives just as well.
+    """
+    return tmp_path_factory.mktemp("jarvis_sandbox")
+
+
 @pytest.fixture(autouse=True)
-def _isolate_user_config_path(tmp_path_factory, monkeypatch):
+def _isolate_user_config_path(_bac_a_sable, request, monkeypatch):
     """Redirect ``default_config_path`` to a per-session tempfile so a test
     that calls ``load_settings`` (or any other code path that resolves the
     user's config) cannot read or overwrite ``~/.config/jarvis/config.json``.
@@ -122,11 +134,37 @@ def _isolate_user_config_path(tmp_path_factory, monkeypatch):
     trigger a write) directly. This fixture is a belt-and-braces guard so
     a half-mocked test cannot reach the real config file.
     """
-    sandbox = tmp_path_factory.mktemp("jarvis_config_sandbox")
-    monkeypatch.setattr(
-        "jarvis.config.default_config_path", lambda: sandbox / "config.json"
-    )
-    monkeypatch.setenv("JARVIS_CONFIG_PATH", str(sandbox / "config.json"))
+    sandbox = _bac_a_sable / f"config-{abs(hash(request.node.nodeid)):x}.json"
+    monkeypatch.setattr("jarvis.config.default_config_path", lambda: sandbox)
+    monkeypatch.setenv("JARVIS_CONFIG_PATH", str(sandbox))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_dictation_history(_bac_a_sable, request, monkeypatch):
+    """Redirect the dictation history's default path to a per-session tempfile.
+
+    ``DictationHistory()`` falls back to the user's data directory, and the
+    dictation engine builds one whenever a caller passes none, so a test that
+    omits the argument appends synthetic entries to the same file a real
+    user's dictations live in. Running the suite is not permission to write
+    there, and a guard here is worth more than every call site remembering.
+    """
+    target = _bac_a_sable / f"dictation-{abs(hash(request.node.nodeid)):x}.json"
+
+    # The suite imports modules both as ``jarvis.x`` and as ``src.jarvis.x``,
+    # which are two distinct module objects. Patching one leaves the other
+    # pointing at the real file.
+    import importlib
+
+    patched = 0
+    for path in ("jarvis.dictation.history", "src.jarvis.dictation.history"):
+        try:
+            module = importlib.import_module(path)
+        except ImportError:
+            continue
+        monkeypatch.setattr(module, "_default_history_path", lambda: target)
+        patched += 1
+    assert patched, "neither dictation history module could be imported"
 
 
 @pytest.fixture

@@ -299,10 +299,10 @@ One filter runs last, after every branch that can add a name, so nothing
 survives outside the envelope. `stop` and `toolSearchTool` are not
 appended, and `RoutineScope.allows` would refuse them anyway.
 
-The warm profile block is withheld unless the routine's block says
-`mémoire: oui`. Every line of it is a line of the user's private life
-leaving the machine while they sleep, and a routine does not need to know
-who they are to summarise their mail.
+The warm profile block and open goals block are withheld unless the
+routine's block says `mémoire: oui`. Every line of them is a line of the
+user's private life leaving the machine while they sleep, and a routine
+does not need to know who they are to summarise their mail.
 
 An attended turn — no `scope` — is untouched by all of this.
 

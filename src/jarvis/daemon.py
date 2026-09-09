@@ -17,18 +17,9 @@ os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 os.environ.setdefault('MKL_NUM_THREADS', '1')
 os.environ.setdefault('OMP_NUM_THREADS', '1')
 
-# Fix Windows console encoding for Unicode/emoji characters
-# Skip in bundled mode (frozen) - encoding is handled by desktop_app.py
-if sys.platform == 'win32' and not getattr(sys, 'frozen', False):
-    try:
-        import io
-        # Only wrap if stdout has a proper binary buffer (not a custom writer)
-        if hasattr(sys.stdout, 'buffer') and hasattr(sys.stdout.buffer, 'write'):
-            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-        if hasattr(sys.stderr, 'buffer') and hasattr(sys.stderr.buffer, 'write'):
-            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
-    except Exception:
-        pass
+from .utils.console import force_utf8_console
+
+force_utf8_console()
 
 from typing import Optional
 from faster_whisper import WhisperModel
@@ -1154,6 +1145,7 @@ def main() -> None:
         piper_noise_scale=cfg.tts_piper_noise_scale,
         piper_noise_w=cfg.tts_piper_noise_w,
         piper_sentence_silence=cfg.tts_piper_sentence_silence,
+        response_language=cfg.response_language,
         # Kokoro parameters
         kokoro_voice=cfg.tts_kokoro_voice,
         kokoro_lang_code=cfg.tts_kokoro_lang_code,

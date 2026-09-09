@@ -200,7 +200,7 @@ class TestConfigRoundTrip:
             "llm_api_key": "sk-stub",
             "llm_chat_model": "stub-chat",
             "embedding_model": "stub-embed",
-        }))
+        }), encoding="utf-8")
         monkeypatch.setenv("JARVIS_CONFIG_PATH", str(cfg_path))
 
         from jarvis.config import load_settings

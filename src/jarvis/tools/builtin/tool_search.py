@@ -13,7 +13,7 @@ from ..base import Tool, ToolContext
 from ..types import ToolExecutionResult
 from ..selection import select_tools, ToolSelectionStrategy
 from ...debug import debug_log
-from ...llm import get_embedding_backend, get_llm_backend
+from ...llm import get_auxiliary_backend, get_embedding_backend, get_llm_backend
 
 
 def _resolve_router_model(cfg) -> str:
@@ -97,13 +97,14 @@ class ToolSearchTool(Tool):
             mcp_tools = {}
 
         try:
+            router_model = _resolve_router_model(cfg)
             selected = select_tools(
                 query=query,
                 builtin_tools=BUILTIN_TOOLS,
                 mcp_tools=mcp_tools,
                 strategy=strategy,
-                llm_backend=get_llm_backend(cfg),
-                llm_model=_resolve_router_model(cfg),
+                llm_backend=get_auxiliary_backend(cfg, router_model),
+                llm_model=router_model,
                 llm_timeout_sec=float(getattr(cfg, "llm_tools_timeout_sec", 8.0)),
                 embedding_backend=get_embedding_backend(cfg),
                 embed_model=cfg.embedding_model,

@@ -66,7 +66,7 @@ class TestOrbParticlesConfigFlag:
     def test_default_is_true(self, tmp_path, monkeypatch) -> None:
         """Fresh install: config doesn't set the key -> True."""
         cfg_path = tmp_path / "jarvis.json"
-        cfg_path.write_text(json.dumps({}))
+        cfg_path.write_text(json.dumps({}), encoding="utf-8")
         monkeypatch.setenv("JARVIS_CONFIG_PATH", str(cfg_path))
 
         from jarvis.config import load_settings
@@ -77,7 +77,7 @@ class TestOrbParticlesConfigFlag:
     def test_explicit_false(self, tmp_path, monkeypatch) -> None:
         """Users who want a quieter orb set the key to False."""
         cfg_path = tmp_path / "jarvis.json"
-        cfg_path.write_text(json.dumps({"ui": {"orb_particles_enabled": False}}))
+        cfg_path.write_text(json.dumps({"ui": {"orb_particles_enabled": False}}), encoding="utf-8")
         monkeypatch.setenv("JARVIS_CONFIG_PATH", str(cfg_path))
 
         from jarvis.config import load_settings
@@ -89,7 +89,7 @@ class TestOrbParticlesConfigFlag:
         """JSON has bool literals but users sometimes write 'false'
         as a string by mistake. We coerce common false-y strings."""
         cfg_path = tmp_path / "jarvis.json"
-        cfg_path.write_text(json.dumps({"ui": {"orb_particles_enabled": "false"}}))
+        cfg_path.write_text(json.dumps({"ui": {"orb_particles_enabled": "false"}}), encoding="utf-8")
         monkeypatch.setenv("JARVIS_CONFIG_PATH", str(cfg_path))
 
         from jarvis.config import load_settings
@@ -101,7 +101,7 @@ class TestOrbParticlesConfigFlag:
         """``"orb_particles_enabled": 0`` is honest typo territory.
         Coerced to False via Python's bool() rules."""
         cfg_path = tmp_path / "jarvis.json"
-        cfg_path.write_text(json.dumps({"ui": {"orb_particles_enabled": 0}}))
+        cfg_path.write_text(json.dumps({"ui": {"orb_particles_enabled": 0}}), encoding="utf-8")
         monkeypatch.setenv("JARVIS_CONFIG_PATH", str(cfg_path))
 
         from jarvis.config import load_settings

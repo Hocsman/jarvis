@@ -43,7 +43,7 @@ def test_the_page_has_a_script():
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 def test_the_script_parses():
     for i, script in enumerate(_scripts(_page_html())):
-        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as f:
             f.write(script)
             path = f.name
         try:

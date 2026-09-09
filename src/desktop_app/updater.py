@@ -477,7 +477,7 @@ if [ $open_rc -ne 0 ]; then
 fi
 rm -rf {escaped_temp}
 '''
-        script_path.write_text(script_content)
+        script_path.write_text(script_content, encoding="utf-8")
         script_path.chmod(0o755)
 
         subprocess.Popen([str(script_path)], start_new_session=True)
@@ -488,6 +488,21 @@ rm -rf {escaped_temp}
         debug_log(f"macOS update failed: {e}", "updater")
         shutil.rmtree(temp_dir, ignore_errors=True)
         return False
+
+
+def _batch_file_encoding() -> str:
+    """The encoding cmd.exe reads a ``.bat`` in.
+
+    Batch files are parsed in the console's OEM code page, which is neither
+    UTF-8 nor the ANSI one. The paths interpolated into the script come from
+    the user's disk, so an accent in a home directory is ordinary; written in
+    any other encoding, every path in the script points nowhere.
+
+    The ``oem`` codec is registered only on Windows, which is also the only
+    place the file is executed, so ``os.name`` decides: elsewhere UTF-8 keeps
+    the generated text readable.
+    """
+    return "oem" if os.name == "nt" else "utf-8"
 
 
 def install_update_windows(download_path: Path) -> bool:
@@ -545,7 +560,7 @@ echo Launching updated Jarvis...
 start "" "{escaped_installed_exe}"
 rmdir /s /q "{escaped_temp}"
 '''
-        batch_script.write_text(batch_content)
+        batch_script.write_text(batch_content, encoding=_batch_file_encoding())
 
         subprocess.Popen(
             ["cmd", "/c", str(batch_script)],
@@ -613,7 +628,7 @@ mv {escaped_new_app} {escaped_app_dir}
 {escaped_jarvis} &
 rm -rf {escaped_temp}
 '''
-        script_path.write_text(script_content)
+        script_path.write_text(script_content, encoding="utf-8")
         script_path.chmod(0o755)
 
         subprocess.Popen([str(script_path)], start_new_session=True)

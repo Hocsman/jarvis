@@ -292,7 +292,7 @@ class TestConfigSaveLogic:
     def test_only_non_defaults_are_saved(self):
         """Saving default values should produce an empty config file."""
         defaults = get_default_config()
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding="utf-8") as f:
             f.write('{}')
             cfg_path = Path(f.name)
 
@@ -315,7 +315,7 @@ class TestConfigSaveLogic:
 
     def test_changed_values_are_preserved(self):
         """Non-default values should survive a save/load round-trip."""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding="utf-8") as f:
             f.write('{}')
             cfg_path = Path(f.name)
 
@@ -337,7 +337,7 @@ class TestConfigSaveLogic:
 
     def test_unknown_keys_preserved_on_save(self):
         """Keys not in FIELD_METADATA (e.g. mcps) should survive save."""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding="utf-8") as f:
             json.dump({"mcps": {"test": {"url": "http://example.com"}},
                         "_config_version": 1}, f)
             cfg_path = Path(f.name)
@@ -476,7 +476,7 @@ class TestMCPConfigSaveLogic:
 
     def test_mcps_saved_when_present(self):
         """MCP configs should be written to the config file."""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding="utf-8") as f:
             json.dump({}, f)
             cfg_path = Path(f.name)
 
@@ -502,7 +502,7 @@ class TestMCPConfigSaveLogic:
 
     def test_empty_mcps_not_saved(self):
         """When mcps is empty, it should not be written to config."""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding="utf-8") as f:
             json.dump({}, f)
             cfg_path = Path(f.name)
 

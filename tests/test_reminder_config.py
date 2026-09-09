@@ -122,12 +122,15 @@ def test_the_same_holds_for_the_approval_judge(tmp_path, monkeypatch):
 
 def test_an_auxiliary_model_is_still_made_cloud_safe(tmp_path, monkeypatch):
     """The filter is not wrong, it is just wrong for these two. A stale
-    local tag on the tool router still gets rescued, or the router
-    400s and the whole turn degrades.
+    local tag on the tool router still gets rescued when no local Ollama
+    instance is reachable, or the router 400s and the whole turn degrades.
 
     The endpoint is spelled out because it is what decides: the provider
     name alone covers local servers too, and on those a bare name is the
     only shape that works."""
+    import src.jarvis.config as config
+    monkeypatch.setattr(config, "is_ollama_reachable", lambda *args, **kwargs: False)
+
     got = _settings_from(tmp_path, monkeypatch, {
         "llm_provider": "openai_compatible",
         "llm_base_url": "https://openrouter.ai/api/v1",

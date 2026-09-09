@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional, List
 
 from ..debug import debug_log
-from ..llm import get_llm_backend
+from ..llm import get_auxiliary_backend, get_llm_backend
 from .transcript_buffer import TranscriptSegment
 
 
@@ -46,7 +46,7 @@ def warm_up_chat_model(cfg, model: str, timeout: float) -> bool:
     if not model:
         return False
     try:
-        ok = get_llm_backend(cfg).warm_up(
+        ok = get_llm_backend(cfg, model).warm_up(
             model,
             timeout_sec=timeout,
             keep_alive=_ollama_keep_alive_for_power_mode(cfg),
@@ -424,7 +424,7 @@ Examples:
                 {"role": "user", "content": user_prompt},
             ]
             try:
-                resp = get_llm_backend(self.config.cfg).chat(
+                resp = get_llm_backend(self.config.cfg, self.config.model).chat(
                     self.config.model,
                     messages,
                     timeout_sec=self.config.timeout_sec,

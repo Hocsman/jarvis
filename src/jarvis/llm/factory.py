@@ -98,19 +98,29 @@ def _build_uncached(
     return OllamaBackend(base_url)
 
 
-def get_llm_backend(settings: Any) -> LLMBackend:
+def get_llm_backend(settings: Any, model: Optional[str] = None) -> LLMBackend:
     """Return the configured chat backend.
 
     ``llm_base_url`` is the OpenAI-compatible server's URL; the Ollama path
     uses ``ollama_base_url``. Keeping each provider on its own URL field
     means toggling ``llm_provider`` back to Ollama can never leave the
     backend pointed at a stale OpenAI-compatible URL.
+
+    When ``model`` is specified as a bare local tag (without a vendor slash)
+    on a remote OpenAI-compatible provider, the model cannot run on the
+    remote endpoint. It routes to local Ollama instead, eliminating cloud
+    network latency for auxiliary classification and routing passes.
     """
+    model_str = (model or "").strip()
     provider = _resolve_provider(getattr(settings, "llm_provider", None))
     if provider == _OPENAI_COMPATIBLE:
         base_url = _str_attr(settings, "llm_base_url") or _str_attr(
             settings, "ollama_base_url", _DEFAULT_OLLAMA_URL
         )
+        from ..config import _is_local_endpoint
+
+        if model_str and not _is_local_endpoint(base_url) and "/" not in model_str:
+            return get_llm_backend(_SurLaMachine(settings))
     else:
         base_url = _str_attr(settings, "ollama_base_url", _DEFAULT_OLLAMA_URL)
     api_key = _str_attr(settings, "llm_api_key") or None
@@ -204,3 +214,15 @@ def get_private_backend(settings: Any, pinned: str) -> LLMBackend:
     if not (pinned or "").strip():
         return get_llm_backend(settings)
     return get_llm_backend(_SurLaMachine(settings))
+
+
+def get_auxiliary_backend(settings: Any, model: Optional[str] = None) -> LLMBackend:
+    """The backend for auxiliary classification and routing tasks.
+
+    Delegates to :func:`get_llm_backend` with the requested model name so
+    bare local tags are routed to local Ollama while namespaced tags and
+    local endpoints stay on the configured chat provider.
+    """
+    return get_llm_backend(settings, model=model)
+
+
