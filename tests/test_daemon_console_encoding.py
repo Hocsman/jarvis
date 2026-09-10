@@ -67,6 +67,19 @@ def test_console_setup_tolerates_a_stream_it_cannot_reconfigure():
     force_utf8_stream(None)
 
 
+@pytest.mark.unit
+def test_tee_wrapper_delegates_reconfigure_and_force_utf8():
+    from jarvis.main import _Tee
+    buffer = io.BytesIO()
+    stream = io.TextIOWrapper(buffer, encoding='ascii', errors='strict')
+    log_buffer = io.StringIO()
+    tee = _Tee(stream, log_buffer)
+
+    force_utf8_stream(tee)
+    assert stream.encoding.lower().replace('-', '') == 'utf8'
+    assert hasattr(tee, 'reconfigure')
+
+
 @pytest.mark.integration
 def test_importing_the_daemon_under_both_module_paths_keeps_stdout_open():
     """The end-to-end shape of the bug, on the import paths the suite uses.

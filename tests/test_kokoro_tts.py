@@ -51,6 +51,20 @@ class TestKokoroInterface:
         assert tts.lang_code == "f"
         assert tts.speed == 1.0
 
+    def test_start_preloads_pipeline_module_safely(self, monkeypatch):
+        tts = KokoroTTS(enabled=True)
+        started_threads = []
+
+        class MockThread:
+            def __init__(self, target=None, daemon=False, name=None):
+                started_threads.append(name)
+            def start(self):
+                pass
+
+        monkeypatch.setattr("threading.Thread", MockThread)
+        tts.start()
+        assert "kokoro-init" in started_threads
+
 
 class TestEngineSelection:
     def test_kokoro_engine_resolves_to_kokoro(self):

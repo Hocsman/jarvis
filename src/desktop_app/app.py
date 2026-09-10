@@ -2524,6 +2524,10 @@ class JarvisSystemTray:
                 # treat a non-TTY stdin as "no monitor" on non-Windows, and a
                 # stray /dev/null wouldn't kill it.
                 env["JARVIS_STDIN_IPC"] = "1"
+                # Ensure child process always encodes stdout/stderr as UTF-8
+                # so emojis and Unicode diagnostics never crash on Windows codepages.
+                env["PYTHONIOENCODING"] = "utf-8"
+                env["PYTHONUTF8"] = "1"
 
                 # Use creationflags to prevent console window popup on Windows
                 # CREATE_NEW_PROCESS_GROUP is needed for CTRL_BREAK_EVENT to work

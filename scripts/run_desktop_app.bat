@@ -26,6 +26,8 @@ REM Navigate to project root (use for-loop to resolve .. reliably across shells)
 for %%I in ("%~dp0..") do set "PROJECT_ROOT=%%~fI"
 cd /d "%PROJECT_ROOT%"
 set "PYTHONPATH=%PROJECT_ROOT%\src;%PYTHONPATH%"
+set "PYTHONIOENCODING=utf-8"
+set "PYTHONUTF8=1"
 
 REM Resolve mamba env: prefer this checkout's own, fall back to the main
 REM repo's when running from a git worktree (worktrees share one env).

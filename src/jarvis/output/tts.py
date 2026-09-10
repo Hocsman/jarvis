@@ -1225,6 +1225,22 @@ class KokoroTTS:
     def start(self) -> None:
         if not self.enabled or self._thread is not None:
             return
+
+        # Pre-import Kokoro and resolve phonemizer on the calling thread so
+        # underlying C-runtime DLLs (PyTorch, SciPy, OpenBLAS) are loaded
+        # sequentially before background workers start. Concurrent DLL loading
+        # of OpenBLAS and cuBLAS across threads causes a loader lock deadlock
+        # on Windows.
+        try:
+            if "PHONEMIZER_ESPEAK_LIBRARY" not in os.environ:
+                lib = _find_espeak_library()
+                if lib:
+                    os.environ["PHONEMIZER_ESPEAK_LIBRARY"] = lib
+                    debug_log(f"Kokoro TTS espeak-ng library: {lib}", "tts")
+            from kokoro import KPipeline  # noqa: F401
+        except Exception as e:
+            debug_log(f"Kokoro TTS pre-import: {e}", "tts")
+
         # The first-use HF download + pipeline load is slow (tens of
         # seconds), so warm it in the background instead of blocking daemon
         # startup. The worker's _ensure_initialized re-checks under the same
