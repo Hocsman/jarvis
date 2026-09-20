@@ -643,8 +643,7 @@ cd jarvis
 bash scripts/run_macos.sh
 
 # Windows (install Micromamba first: winget install --id Mamba.Micromamba -e)
-powershell -ExecutionPolicy Bypass -File scriptsun_windows.ps1
-un_windows.ps1
+powershell -ExecutionPolicy Bypass -File scripts\run_windows.ps1
 
 # Linux
 bash scripts/run_linux.sh
