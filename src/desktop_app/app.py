@@ -1325,6 +1325,7 @@ class MemoryViewerWindow(QMainWindow):
 
                 # Ensure UTF-8 encoding for subprocess (Windows cp1252 can't handle emojis)
                 env["PYTHONIOENCODING"] = "utf-8"
+                env["PYTHONUTF8"] = "1"
 
                 # Use creationflags to prevent console window popup on Windows
                 creationflags = 0
