@@ -199,12 +199,14 @@ def get_private_backend(settings: Any, pinned: str) -> LLMBackend:
     fortnight of diary the learning step mines. Each specifies that
     pinning a model is how he keeps that sentence off the network.
 
-    A name never did that. :func:`get_llm_backend` picks the endpoint
-    from ``llm_provider`` and never looks at the model, so a pinned local
-    tag was sent to the cloud — verified, the request reached
+    A name never did that. Called without a model, :func:`get_llm_backend`
+    picks the endpoint from ``llm_provider`` alone, so a pinned local tag
+    was sent to the cloud — verified, the request reached
     ``https://openrouter.ai/api/v1`` carrying his sentence, and the tag
-    would have been rejected there anyway. The setting changed a name and
-    nothing else while its documentation promised privacy.
+    would have been rejected there anyway. The model-aware form exists for
+    auxiliary passes (a bare tag handed over as ``model`` on a remote
+    provider routes to local Ollama), but a privacy pin must not depend on
+    the caller remembering to pass it.
 
     So a pin decides the destination too. With nothing pinned there is
     nothing to honour and the ordinary provider applies: a user who never
