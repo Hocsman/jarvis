@@ -853,7 +853,7 @@ class TestIntentJudgeFallback:
 
         # The endpoint lives on the settings object the judge dispatches
         # through, not on its own config: every LLM call goes via
-        # `get_llm_backend(cfg)`.
+        # `get_auxiliary_backend(cfg, model)`.
         judge = IntentJudge(IntentJudgeConfig(
             cfg=SimpleNamespace(
                 llm_provider="ollama",
