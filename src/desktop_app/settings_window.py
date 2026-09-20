@@ -217,6 +217,10 @@ def _build_field_metadata() -> List[FieldMeta]:
     # --- Kokoro TTS ---
     f("tts_kokoro_voice", "Voice", "Kokoro voice ID (e.g. ff_siwis)",
       "kokoro", "str")
+    f("tts_kokoro_lang_code", "Language Code",
+      "Kokoro language code — must match the voice's language "
+      "(e.g. f for French, a for American English)",
+      "kokoro", "str")
     f("tts_kokoro_speed", "Speed", "Speech speed scale (1.0 = normal)",
       "kokoro", "float", min_val=0.5, max_val=2.0, step=0.05)
 

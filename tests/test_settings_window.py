@@ -192,6 +192,30 @@ class TestLLMProviderFields:
             assert fm is not None and fm.nullable, f"'{key}' should be nullable"
 
 
+class TestKokoroFields:
+    """Kokoro's voice and language code are a pair: the pipeline is built
+    with ``lang_code`` and a voice whose prefix belongs to another language
+    cannot synthesise, so a GUI-only user must be able to set both."""
+
+    def _field(self, key):
+        for fm in FIELD_METADATA:
+            if fm.key == key:
+                return fm
+        return None
+
+    def test_kokoro_category_exposes_voice_language_and_speed(self):
+        for key in ("tts_kokoro_voice", "tts_kokoro_lang_code", "tts_kokoro_speed"):
+            fm = self._field(key)
+            assert fm is not None and fm.category == "kokoro", (
+                f"'{key}' should be exposed in the 'kokoro' category"
+            )
+
+    def test_kokoro_lang_code_default_matches_config(self):
+        fm = self._field("tts_kokoro_lang_code")
+        assert fm is not None and fm.field_type == "str"
+        assert get_default_config()["tts_kokoro_lang_code"] == "f"
+
+
 class TestMinimalConfigInvariant:
     """``_is_default_value`` decides whether a field is omitted from
     config.json. An emptied nullable provider field (reads back as None)
