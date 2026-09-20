@@ -11,8 +11,13 @@ work unchanged), and that the other engines still resolve correctly.
 
 from __future__ import annotations
 
+import os
+import sys
+import types
+
 import pytest
 
+import src.jarvis.output.tts as tts_module
 from src.jarvis.output.tts import (
     create_tts_engine,
     KokoroTTS,
@@ -52,18 +57,69 @@ class TestKokoroInterface:
         assert tts.speed == 1.0
 
     def test_start_preloads_pipeline_module_safely(self, monkeypatch):
-        tts = KokoroTTS(enabled=True)
-        started_threads = []
+        """On Windows the heavy Kokoro import happens on the calling thread,
+        before any worker starts — concurrent DLL loading is what deadlocks
+        there — and the espeak-ng library path is resolved first."""
+        events = []
+
+        class _RecordingModule(types.ModuleType):
+            def __getattr__(self, name):
+                events.append(("import", name))
+                return type(name, (), {})
 
         class MockThread:
             def __init__(self, target=None, daemon=False, name=None):
-                started_threads.append(name)
+                events.append(("thread", name))
+
             def start(self):
                 pass
 
+        monkeypatch.setitem(sys.modules, "kokoro", _RecordingModule("kokoro"))
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(tts_module, "_find_espeak_library",
+                            lambda: "/usr/lib/libespeak-ng.so.1")
         monkeypatch.setattr("threading.Thread", MockThread)
-        tts.start()
-        assert "kokoro-init" in started_threads
+        saved_espeak = os.environ.pop("PHONEMIZER_ESPEAK_LIBRARY", None)
+        try:
+            KokoroTTS(enabled=True).start()
+
+            assert ("import", "KPipeline") in events
+            assert ("thread", "kokoro-init") in events
+            assert events.index(("import", "KPipeline")) < events.index(
+                ("thread", "kokoro-init"))
+            assert (os.environ["PHONEMIZER_ESPEAK_LIBRARY"]
+                    == "/usr/lib/libespeak-ng.so.1")
+        finally:
+            os.environ.pop("PHONEMIZER_ESPEAK_LIBRARY", None)
+            if saved_espeak is not None:
+                os.environ["PHONEMIZER_ESPEAK_LIBRARY"] = saved_espeak
+
+    def test_start_skips_the_pre_import_off_windows(self, monkeypatch):
+        """The loader-lock deadlock the pre-import prevents is
+        Windows-specific; elsewhere start() keeps the pure background
+        warm-up and never imports Kokoro on the calling thread."""
+        events = []
+
+        class _RecordingModule(types.ModuleType):
+            def __getattr__(self, name):
+                events.append(("import", name))
+                return type(name, (), {})
+
+        class MockThread:
+            def __init__(self, target=None, daemon=False, name=None):
+                events.append(("thread", name))
+
+            def start(self):
+                pass
+
+        monkeypatch.setitem(sys.modules, "kokoro", _RecordingModule("kokoro"))
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr("threading.Thread", MockThread)
+
+        KokoroTTS(enabled=True).start()
+
+        assert ("import", "KPipeline") not in events
+        assert ("thread", "kokoro-init") in events
 
 
 class TestEngineSelection:
