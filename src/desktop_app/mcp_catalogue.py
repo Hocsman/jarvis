@@ -8,7 +8,9 @@ Selection criteria:
 - Must NOT duplicate Jarvis built-in tools (web search, page fetch, file ops,
   memory/recall, weather, screenshot/OCR, meals).
 - Wizard-featured entries must be zero-config (no API keys).
-- All entries must be from the official @modelcontextprotocol org or widely trusted.
+- Official @modelcontextprotocol servers are preferred; a widely-used or
+  sole-viable community server is admitted when the official set has no
+  equivalent (the catalogue already carries a few personal-org entries).
 """
 
 from __future__ import annotations
@@ -144,7 +146,8 @@ CATALOGUE: List[MCPEntry] = [
         args=["-y", "@striderlabs/mcp-spotify"],
         needs_api_key=True,
         api_key_env_var="SPOTIFY_CLIENT_ID",
-        api_key_hint="Create an app at https://developer.spotify.com/dashboard",
+        api_key_hint="Create an app at https://developer.spotify.com/dashboard and add "
+                     "http://localhost:8888/callback as a Redirect URI in its settings",
         category="media",
     ),
     MCPEntry(
