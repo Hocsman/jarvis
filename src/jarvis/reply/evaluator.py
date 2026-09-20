@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from ..debug import debug_log
-from ..llm import get_llm_backend
+from ..llm import get_auxiliary_backend
 from ..utils.redact import redact
 
 
@@ -30,9 +30,10 @@ def call_llm_direct(*, cfg, chat_model, system_prompt, user_content,
                     timeout_sec=10.0, thinking=False, num_ctx=4096,
                     temperature=None):
     """Local indirection: route the evaluator's chat call through the
-    backend configured by ``cfg.llm_provider``. Tests patch this symbol
-    to intercept the single LLM call point."""
-    return get_llm_backend(cfg).direct(
+    auxiliary dispatcher, so a bare ``evaluator_model`` tag on a remote
+    provider runs on local Ollama instead of dying on its HTTP 400.
+    Tests patch this symbol to intercept the single LLM call point."""
+    return get_auxiliary_backend(cfg, chat_model).direct(
         chat_model, system_prompt, user_content,
         timeout_sec=timeout_sec, thinking=thinking,
         num_ctx=num_ctx, temperature=temperature,

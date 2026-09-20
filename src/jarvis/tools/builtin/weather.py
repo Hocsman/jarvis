@@ -3,7 +3,7 @@
 import requests
 from typing import Dict, Any, Optional
 from ...debug import debug_log
-from ...llm import get_llm_backend
+from ...llm import get_auxiliary_backend
 from ...utils.location import get_location_info
 from ..base import Tool, ToolContext
 from ..types import ToolExecutionResult
@@ -52,7 +52,7 @@ def _extract_place_from_user_text(text: str, cfg) -> Optional[str]:
     user_prompt = f"User utterance: {text}\n\nPlace:"
 
     try:
-        resp = get_llm_backend(cfg).direct(
+        resp = get_auxiliary_backend(cfg, model).direct(
             model, sys_prompt, user_prompt,
             timeout_sec=float(getattr(cfg, "llm_tools_timeout_sec", 8.0)),
         )
