@@ -223,7 +223,7 @@ class _HeadlessStateManager:
         from desktop_app.face_widget import JarvisState
         try:
             if os.path.exists(self._state_file):
-                with open(self._state_file, 'r') as f:
+                with open(self._state_file, 'r', encoding="utf-8") as f:
                     return JarvisState(f.read().strip())
         except (ValueError, OSError):
             pass
@@ -237,7 +237,7 @@ class _HeadlessStateManager:
 
     def _write_state(self, state):
         try:
-            with open(self._state_file, 'w') as f:
+            with open(self._state_file, 'w', encoding="utf-8") as f:
                 f.write(state.value)
         except OSError:
             pass
@@ -325,7 +325,7 @@ class TestJarvisStateManager:
         state_file = os.path.join(tempfile.gettempdir(), "jarvis_state")
 
         # Create file with SPEAKING state (leftover from previous session)
-        with open(state_file, 'w') as f:
+        with open(state_file, 'w', encoding="utf-8") as f:
             f.write("speaking")
 
         # Reset singleton to simulate a fresh app launch
@@ -357,7 +357,7 @@ class TestJarvisStateManager:
         sm.set_state(JarvisState.SPEAKING)
 
         # Verify file contains correct state (for cross-process sharing)
-        with open(state_file, 'r') as f:
+        with open(state_file, 'r', encoding="utf-8") as f:
             content = f.read().strip()
         assert content == "speaking"
 
@@ -365,7 +365,7 @@ class TestJarvisStateManager:
         assert sm.state == JarvisState.SPEAKING
 
         # Simulate external process updating state (daemon writes to file)
-        with open(state_file, 'w') as f:
+        with open(state_file, 'w', encoding="utf-8") as f:
             f.write("thinking")
 
         # Same instance should pick up change from file
@@ -382,7 +382,7 @@ class TestJarvisStateManager:
         state_file = os.path.join(tempfile.gettempdir(), "jarvis_state")
 
         # Create file with invalid content
-        with open(state_file, 'w') as f:
+        with open(state_file, 'w', encoding="utf-8") as f:
             f.write("invalid_state")
 
         # Get state manager - should reinitialize with ASLEEP
@@ -392,6 +392,6 @@ class TestJarvisStateManager:
         assert sm.state == JarvisState.ASLEEP
 
         # File should be fixed
-        with open(state_file, 'r') as f:
+        with open(state_file, 'r', encoding="utf-8") as f:
             content = f.read().strip()
         assert content == "asleep"

@@ -263,7 +263,7 @@ class TestIntentJudge:
             TranscriptSegment("jarvis what time is it", 1000.0, 1002.0),
         ]
 
-        with patch('jarvis.listening.intent_judge.get_llm_backend', return_value=backend):
+        with patch('jarvis.listening.intent_judge.get_auxiliary_backend', return_value=backend):
             result = judge.judge(
                 segments,
                 wake_timestamp=1000.5,
@@ -290,7 +290,7 @@ class TestIntentJudge:
         }
         segments = [TranscriptSegment("jarvis time", 1000.0, 1001.0)]
 
-        with patch("jarvis.listening.intent_judge.get_llm_backend", return_value=backend):
+        with patch("jarvis.listening.intent_judge.get_auxiliary_backend", return_value=backend):
             judge.judge(segments)
 
         extra_options = backend.chat.call_args.kwargs["extra_options"]
@@ -310,7 +310,7 @@ class TestIntentJudge:
         }
         segments = [TranscriptSegment("jarvis time", 1000.0, 1001.0)]
 
-        with patch("jarvis.listening.intent_judge.get_llm_backend", return_value=backend):
+        with patch("jarvis.listening.intent_judge.get_auxiliary_backend", return_value=backend):
             judge.judge(segments)
 
         extra_options = backend.chat.call_args.kwargs["extra_options"]
@@ -324,7 +324,7 @@ class TestIntentJudge:
 
         segments = [TranscriptSegment("test", 1000.0, 1001.0)]
 
-        with patch('jarvis.listening.intent_judge.get_llm_backend', return_value=backend):
+        with patch('jarvis.listening.intent_judge.get_auxiliary_backend', return_value=backend):
             result = judge.judge(segments)
 
         assert result is None
@@ -335,7 +335,7 @@ class TestIntentJudge:
         judge = IntentJudge()
         segments = [TranscriptSegment("test", 1000.0, 1001.0)]
 
-        with patch('jarvis.listening.intent_judge.get_llm_backend') as _gb:
+        with patch('jarvis.listening.intent_judge.get_auxiliary_backend') as _gb:
             _gb.return_value.chat.return_value = None
             result = judge.judge(segments)
 
@@ -356,7 +356,7 @@ class TestIntentJudge:
 
         segments = [TranscriptSegment("test", 1000.0, 1001.0)]
 
-        with patch('jarvis.listening.intent_judge.get_llm_backend') as _gb:
+        with patch('jarvis.listening.intent_judge.get_auxiliary_backend') as _gb:
             _gb.return_value.chat.return_value = None
             judge.judge(segments)
 
@@ -374,7 +374,7 @@ class TestIntentJudge:
 
         segments = [TranscriptSegment("test", 1000.0, 1001.0)]
 
-        with patch('jarvis.listening.intent_judge.get_llm_backend') as _gb:
+        with patch('jarvis.listening.intent_judge.get_auxiliary_backend') as _gb:
             _gb.return_value.chat.return_value = None
             judge.judge(segments)
 
@@ -394,7 +394,7 @@ class TestIntentJudge:
 
         segments = [TranscriptSegment("test", 1000.0, 1001.0)]
 
-        with patch('jarvis.listening.intent_judge.get_llm_backend') as _gb:
+        with patch('jarvis.listening.intent_judge.get_auxiliary_backend') as _gb:
             import requests as _rq
             _gb.return_value.chat.side_effect = _rq.ConnectionError("refused")
             judge.judge(segments)
@@ -412,7 +412,7 @@ class TestIntentJudge:
         judge = IntentJudge()
         segments = [TranscriptSegment("test", 1000.0, 1001.0)]
 
-        with patch('jarvis.listening.intent_judge.get_llm_backend') as _gb:
+        with patch('jarvis.listening.intent_judge.get_auxiliary_backend') as _gb:
             _gb.return_value.chat.return_value = None
             judge.judge(segments)
 
@@ -427,7 +427,7 @@ class TestIntentJudge:
         judge = IntentJudge()
         segments = [TranscriptSegment("test", 1000.0, 1001.0)]
 
-        with patch('jarvis.listening.intent_judge.get_llm_backend') as _gb:
+        with patch('jarvis.listening.intent_judge.get_auxiliary_backend') as _gb:
             _gb.return_value.chat.side_effect = real_requests.ConnectionError(
                 "HTTPConnectionPool(host='internal-server.example.com', port=11434)"
             )
@@ -446,7 +446,7 @@ class TestIntentJudge:
         backend.chat.return_value = {"message": {"content": '{"directed": false, "query": "", "stop": false, "confidence": "high", "reasoning": "ok"}'}}
         segments = [TranscriptSegment("test", 1000.0, 1001.0)]
 
-        with patch('jarvis.listening.intent_judge.get_llm_backend', return_value=backend):
+        with patch('jarvis.listening.intent_judge.get_auxiliary_backend', return_value=backend):
             result = judge.judge(segments)
 
         assert result is not None
@@ -569,12 +569,12 @@ class TestWarmUp:
         backend = MagicMock()
         backend.warm_up.return_value = True
         with patch(
-            "jarvis.listening.intent_judge.get_llm_backend", return_value=backend
+            "jarvis.listening.intent_judge.get_auxiliary_backend", return_value=backend
         ) as gb:
             ok = judge.warm_up()
 
         assert ok is True
-        gb.assert_called_once_with(cfg)
+        gb.assert_called_once_with(cfg, "gemma4:e2b")
         args, kwargs = backend.warm_up.call_args
         assert args[0] == "gemma4:e2b"
         assert kwargs.get("timeout_sec") and kwargs["timeout_sec"] >= 60.0
@@ -589,7 +589,7 @@ class TestWarmUp:
         backend = MagicMock()
         backend.warm_up.return_value = True
         with patch(
-            "jarvis.listening.intent_judge.get_llm_backend", return_value=backend
+            "jarvis.listening.intent_judge.get_auxiliary_backend", return_value=backend
         ):
             assert judge.warm_up() is True
 
@@ -604,7 +604,7 @@ class TestWarmUp:
         backend = MagicMock()
         backend.warm_up.return_value = False
         with patch(
-            "jarvis.listening.intent_judge.get_llm_backend", return_value=backend
+            "jarvis.listening.intent_judge.get_auxiliary_backend", return_value=backend
         ):
             assert judge.warm_up() is False
 
@@ -617,7 +617,7 @@ class TestWarmUp:
         backend = MagicMock()
         backend.warm_up.side_effect = RuntimeError("boom")
         with patch(
-            "jarvis.listening.intent_judge.get_llm_backend", return_value=backend
+            "jarvis.listening.intent_judge.get_auxiliary_backend", return_value=backend
         ):
             assert judge.warm_up() is False
 
@@ -677,7 +677,7 @@ class TestEchoFollowUpPattern:
             ),
         ]
 
-        with patch('jarvis.listening.intent_judge.get_llm_backend', return_value=backend):
+        with patch('jarvis.listening.intent_judge.get_auxiliary_backend', return_value=backend):
             result = judge.judge(
                 segments,
                 wake_timestamp=None,
@@ -763,7 +763,7 @@ class TestCurrentSegmentMarker:
             TranscriptSegment("no thank you", 1002.0, 1003.0),
         ]
 
-        with patch('jarvis.listening.intent_judge.get_llm_backend', return_value=backend) as _gb:
+        with patch('jarvis.listening.intent_judge.get_auxiliary_backend', return_value=backend) as _gb:
             judge.judge(
                 segments,
                 wake_timestamp=None,

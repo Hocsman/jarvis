@@ -308,7 +308,7 @@ def test_absolute_path_command_skips_which(monkeypatch, tmp_path):
 
     # Create a fake executable file at an absolute path
     fake_exe = tmp_path / "node.exe"
-    fake_exe.write_text("fake")
+    fake_exe.write_text("fake", encoding="utf-8")
     fake_exe.chmod(0o755)
 
     mcps = {
@@ -476,7 +476,7 @@ class TestResolveCommand:
 
         # Create a fake executable in a temp dir
         fake_npx = tmp_path / "npx"
-        fake_npx.write_text("#!/bin/sh")
+        fake_npx.write_text("#!/bin/sh", encoding="utf-8")
         fake_npx.chmod(0o755)
 
         # Inject our temp dir into the extra paths list
@@ -519,9 +519,9 @@ class TestResolveCommand:
         v22 = tmp_path / "v22.22.0" / "bin"
         v18.mkdir(parents=True)
         v22.mkdir(parents=True)
-        (v18 / "npx").write_text("#!/bin/sh")
+        (v18 / "npx").write_text("#!/bin/sh", encoding="utf-8")
         (v18 / "npx").chmod(0o755)
-        (v22 / "npx").write_text("#!/bin/sh")
+        (v22 / "npx").write_text("#!/bin/sh", encoding="utf-8")
         (v22 / "npx").chmod(0o755)
 
         monkeypatch.setattr(
@@ -548,7 +548,7 @@ class TestResolveCommand:
         from jarvis.tools.external.mcp_client import _resolve_command
 
         fake = tmp_path / "my-server"
-        fake.write_text("#!/bin/sh")
+        fake.write_text("#!/bin/sh", encoding="utf-8")
         fake.chmod(0o755)
         assert _resolve_command(str(fake)) == str(fake)
 
@@ -569,7 +569,7 @@ class TestConnectStdioPathInjection:
         from jarvis.tools.external.mcp_client import MCPClient
 
         fake_npx = tmp_path / "npx"
-        fake_npx.write_text("#!/bin/sh")
+        fake_npx.write_text("#!/bin/sh", encoding="utf-8")
         fake_npx.chmod(0o755)
 
         monkeypatch.setattr(
@@ -604,7 +604,7 @@ class TestConnectStdioPathInjection:
         from jarvis.tools.external.mcp_client import MCPClient
 
         fake_npx = tmp_path / "npx"
-        fake_npx.write_text("#!/bin/sh")
+        fake_npx.write_text("#!/bin/sh", encoding="utf-8")
         fake_npx.chmod(0o755)
 
         monkeypatch.setattr(

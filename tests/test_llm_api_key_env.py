@@ -15,7 +15,7 @@ import pytest
 
 def _write_cfg(tmp_path, monkeypatch, data: dict):
     p = tmp_path / "jarvis.json"
-    p.write_text(json.dumps(data))
+    p.write_text(json.dumps(data), encoding="utf-8")
     monkeypatch.setenv("JARVIS_CONFIG_PATH", str(p))
 
 

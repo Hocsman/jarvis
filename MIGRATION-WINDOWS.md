@@ -15,12 +15,23 @@ le noyau mémoire et tout le travail des deux derniers jours.
 
 ## 2. Créer l'environnement et lancer
 
+Le script *utilise* micromamba, il ne l'installe pas : sans lui il bascule
+sur `python -m venv`, où `webrtcvad` réclame Visual C++ Build Tools. Pose-le
+d'abord, puis ouvre un nouveau terminal.
+
 ```powershell
-pwsh -ExecutionPolicy Bypass -File scripts\run_windows.ps1
+winget install --id Mamba.Micromamba -e
 ```
 
-Le script installe micromamba, crée `.mamba_env` en Python 3.12, installe
-PyAV depuis conda-forge puis les `requirements.txt`.
+`pwsh` est PowerShell 7, qui n'est pas livré avec Windows ; `powershell`
+suffit.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_windows.ps1
+```
+
+Il crée `.mamba_env` en Python 3.12, installe PyAV depuis conda-forge puis
+les `requirements.txt`.
 
 ⚠️ **Il lance `jarvis.daemon`, pas l'application de bureau.** Tu auras la
 voix en console, sans icône de barre des tâches, sans orbe, sans écran de
@@ -53,7 +64,10 @@ cours.
 
 ## 5. La config
 
-Elle vit dans `%LOCALAPPDATA%\Jarvis\config.json`. **Ne recopie pas celle
+Elle vit dans `%USERPROFILE%\.config\jarvis\config.json`. Ni
+`default_config_path()` ni `_default_db_path()` n'ont de branche Windows :
+ils résolvent `Path.home()` partout. `%LOCALAPPDATA%\Jarvis` ne sert qu'aux
+journaux et au verrou d'instance, jamais à la mémoire. **Ne recopie pas celle
 du Mac** : elle contient des chemins macOS. Pars d'une config neuve et
 remets seulement ce qui compte :
 
@@ -110,7 +124,7 @@ Copie :
 
 ```
   depuis   ~/.local/share/jarvis/
-  vers     %LOCALAPPDATA%\Jarvis\
+  vers     %USERPROFILE%\.local\share\jarvis\
 ```
 
 Ce qui compte là-dedans :
@@ -132,8 +146,11 @@ canal que tu contrôles, pas par un service tiers.
 .\.mamba_env\python.exe -m pytest tests\ -q
 ```
 
-3900 tests environ. Rien n'y est spécifique à macOS, donc ils doivent
-tous passer. Si quelque chose casse, c'est un vrai signal Windows.
+Autour de 3900 tests, dont 4 sautés : deux qui réclament POSIX (`time.tzset`
+pour décaler la zone de l'horloge, et le script d'installation macOS, qui a
+besoin du séparateur de PATH et du bit d'exécution d'un vrai Unix), plus deux
+sauts de chemin Unix préexistants. Tout le reste doit passer. Un échec est un
+vrai signal Windows.
 
 ---
 

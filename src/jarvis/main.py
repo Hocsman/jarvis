@@ -42,11 +42,18 @@ class _Tee:
         except Exception:
             pass
 
+    def reconfigure(self, *args, **kwargs):
+        if hasattr(self._stream, "reconfigure"):
+            return self._stream.reconfigure(*args, **kwargs)
+
     def __getattr__(self, name):
         return getattr(self._stream, name)
 
 
 def _install_sink() -> None:
+    from .utils.console import force_utf8_console
+    force_utf8_console()
+
     path = os.environ.get("JARVIS_DEBUG_FILE", "").strip()
     if not path:
         return

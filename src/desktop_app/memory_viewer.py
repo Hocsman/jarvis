@@ -46,6 +46,7 @@ def get_db() -> sqlite3.Connection:
     global _db_conn
     if _db_conn is None:
         db_path = _get_db_path()
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         _db_conn = sqlite3.connect(db_path, check_same_thread=False)
         _db_conn.row_factory = sqlite3.Row
     return _db_conn

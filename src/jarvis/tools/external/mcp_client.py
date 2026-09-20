@@ -219,7 +219,7 @@ class MCPClient:
         # Suppress MCP server stderr noise (npm warnings, usage banners, etc.)
         # from polluting the daemon's log output.
         # Must use a real file (not StringIO) because the subprocess needs fileno().
-        devnull = open(os.devnull, "w")
+        devnull = open(os.devnull, "w", encoding="utf-8")
         # Build the underlying transport CM eagerly so any synchronous
         # construction error closes devnull instead of leaking it. The
         # wrapper guarantees the handle is also closed on every async

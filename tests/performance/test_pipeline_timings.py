@@ -112,7 +112,7 @@ def _write_report(rec: TimingRecorder, name: str) -> Path:
             for c in rec.calls
         ],
     }
-    path.write_text(json.dumps(payload, indent=2))
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return path
 
 

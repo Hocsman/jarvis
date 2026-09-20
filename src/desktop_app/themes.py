@@ -519,7 +519,7 @@ def _ensure_icons() -> dict[str, str]:
     for name, svg in icons.items():
         path = os.path.join(_icon_dir, f"{name}.svg")
         if not os.path.exists(path):
-            with open(path, "w") as f:
+            with open(path, "w", encoding="utf-8") as f:
                 f.write(svg)
         paths[name] = path.replace("\\", "/")
     return paths

@@ -1,7 +1,9 @@
 import ipaddress
 import os
+import socket
 import sys
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -63,9 +65,15 @@ def _default_dictation_hotkey() -> str:
 
 
 def _default_db_path() -> str:
-    base = Path.home() / ".local" / "share" / "jarvis"
-    base.mkdir(parents=True, exist_ok=True)
-    return str(base / "jarvis.db")
+    """Where the database lives when the user pins no path.
+
+    Resolving it creates nothing: the directory is made by whoever needs it,
+    which is ``Database`` before it connects and the menu item that reveals
+    the folder. Building it here instead would put a directory in the user's
+    profile every time anything merely read the default, the settings parser
+    and the test suite included.
+    """
+    return str(Path.home() / ".local" / "share" / "jarvis" / "jarvis.db")
 
 
 @dataclass(frozen=True)
@@ -474,13 +482,13 @@ def load_config() -> Dict[str, Any]:
     return {**defaults, **cfg_json}
 
 
-# Pins already discarded in this process. `debug_log` reloads the settings
-# every couple of seconds, and a warning repeated at that rate is a
-# warning the user learns to scroll past.
-_discarded_pins: set = set()
+# Pin decisions already announced in this process. `debug_log` reloads the
+# settings every couple of seconds, and a line repeated at that rate is a
+# line the user learns to scroll past.
+_announced_pins: set = set()
 
 
-def _is_local_endpoint(base_url: str) -> bool:
+def is_local_endpoint(base_url: str) -> bool:
     """Whether this URL points at a server on this machine or this network.
 
     The OpenAI-compatible provider covers both ends of the range: a
@@ -516,8 +524,49 @@ def _is_local_endpoint(base_url: str) -> bool:
                 or ip.is_reserved or ip.is_unspecified)
 
 
+_ollama_reachable_cache: dict[str, tuple[float, bool]] = {}
+
+# How long a reachability verdict is reused. The settings parser runs on
+# every ``debug_log`` reload, so without caching each reload would block on
+# a probe; 30s is short enough that starting Ollama is picked up quickly.
+_OLLAMA_REACHABILITY_TTL_SEC = 30.0
+
+
+def is_ollama_reachable(base_url: str = "http://127.0.0.1:11434", timeout: float = 0.5) -> bool:
+    """Check whether a local Ollama instance is reachable.
+
+    A bare TCP connect, not an HTTP request: the question is whether a
+    server listens there at all, and a socket answers it without honouring
+    HTTP(S)_PROXY — a proxy must never decide whether a *local* server is
+    up — and without building a throwaway session per probe.
+
+    Cached for ``_OLLAMA_REACHABILITY_TTL_SEC`` so repeated config reads do
+    not block on network I/O. Any failure is False, the safe direction: a
+    False verdict just rescues a bare auxiliary pin to the chat model.
+    """
+    now = time.monotonic()
+    cached = _ollama_reachable_cache.get(base_url)
+    if cached is not None and now - cached[0] < _OLLAMA_REACHABILITY_TTL_SEC:
+        return cached[1]
+
+    reachable = False
+    try:
+        parsed = urlparse(base_url if "//" in base_url else f"//{base_url}")
+        host = parsed.hostname
+        port = parsed.port or 11434
+        if host:
+            with socket.create_connection((host, port), timeout=timeout):
+                reachable = True
+    except Exception:
+        reachable = False
+
+    _ollama_reachable_cache[base_url] = (now, reachable)
+    return reachable
+
+
 def _cloud_safe_model(value: str, field: str, provider: str,
-                      base_url: str, fallback: str) -> str:
+                      base_url: str, fallback: str,
+                      ollama_base_url: str = "http://127.0.0.1:11434") -> str:
     """Keep auxiliary model names valid for the endpoint actually in use.
 
     Jarvis runs several small LLM tasks (intent judge, tool router,
@@ -525,7 +574,11 @@ def _cloud_safe_model(value: str, field: str, provider: str,
     endpoint namespaces its model IDs as ``vendor/model`` and answers
     HTTP 400 ("X is not a valid model ID") to a bare local tag like
     ``gemma4:e2b``, so the auxiliary task dies for no gain: those get the
-    chat model instead.
+    chat model instead when no local Ollama instance is reachable.
+
+    When local Ollama is reachable, bare model tags are kept because the
+    auxiliary backend dispatcher will route them to Ollama, eliminating cloud
+    latency for intent judging and tool routing.
 
     A local OpenAI-compatible server is the opposite case. A bare name is
     the only shape it accepts, and the pin is the whole reason the user
@@ -538,13 +591,24 @@ def _cloud_safe_model(value: str, field: str, provider: str,
         return value
     if provider != "openai_compatible" or "/" in value:
         return value
-    if _is_local_endpoint(base_url):
+    if is_local_endpoint(base_url):
+        return value
+    if is_ollama_reachable(ollama_base_url):
+        mark = (field, value, "kept")
+        if mark not in _announced_pins:
+            _announced_pins.add(mark)
+            from .debug import debug_log
+            debug_log(
+                f"pinned model kept: {field}={value} — local Ollama is "
+                "reachable, so auxiliary calls route to it",
+                "config",
+            )
         return value
     if not fallback or fallback == value:
         return value
     mark = (field, value, fallback)
-    if mark not in _discarded_pins:
-        _discarded_pins.add(mark)
+    if mark not in _announced_pins:
+        _announced_pins.add(mark)
         print(f"⚠️ Pinned model ignored: {field}", flush=True)
         print(f"   📌 pinned: {value}", flush=True)
         print(f"   ☁️ remote endpoint: {base_url}", flush=True)
@@ -1047,7 +1111,8 @@ def load_settings() -> Settings:
     # Intent Judge - always used when available
     intent_judge_model = str(merged.get("intent_judge_model", "gemma4:e2b"))
     intent_judge_model = _cloud_safe_model(
-        intent_judge_model, "intent_judge_model", llm_provider, llm_base_url, llm_chat_model)
+        intent_judge_model, "intent_judge_model", llm_provider, llm_base_url, llm_chat_model,
+        ollama_base_url=ollama_base_url)
     intent_judge_timeout_sec = float(merged.get("intent_judge_timeout_sec", 10.0))
 
     # Transcript Buffer - ambient speech context for intent judge (separate from dialogue)
@@ -1079,10 +1144,12 @@ def load_settings() -> Settings:
         tool_selection_strategy = "llm"
     tool_router_model = str(merged.get("tool_router_model", "") or "").strip()
     tool_router_model = _cloud_safe_model(
-        tool_router_model, "tool_router_model", llm_provider, llm_base_url, llm_chat_model)
+        tool_router_model, "tool_router_model", llm_provider, llm_base_url, llm_chat_model,
+        ollama_base_url=ollama_base_url)
     evaluator_model = str(merged.get("evaluator_model", "") or "").strip()
     evaluator_model = _cloud_safe_model(
-        evaluator_model, "evaluator_model", llm_provider, llm_base_url, llm_chat_model)
+        evaluator_model, "evaluator_model", llm_provider, llm_base_url, llm_chat_model,
+        ollama_base_url=ollama_base_url)
     _eval_raw = merged.get("evaluator_enabled", None)
     evaluator_enabled: Optional[bool]
     if _eval_raw is None:
@@ -1091,7 +1158,8 @@ def load_settings() -> Settings:
         evaluator_enabled = bool(_eval_raw)
     planner_model = str(merged.get("planner_model", "") or "").strip()
     planner_model = _cloud_safe_model(
-        planner_model, "planner_model", llm_provider, llm_base_url, llm_chat_model)
+        planner_model, "planner_model", llm_provider, llm_base_url, llm_chat_model,
+        ollama_base_url=ollama_base_url)
     planner_enabled = bool(merged.get("planner_enabled", True))
     try:
         planner_timeout_sec = float(merged.get("planner_timeout_sec", 6.0))

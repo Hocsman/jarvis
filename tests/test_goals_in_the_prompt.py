@@ -182,3 +182,54 @@ def test_a_routine_turn_is_not_given_his_goals(tmp_path):
         )
 
     assert "Datadog" not in seen.get("system", "")
+
+
+def test_a_routine_turn_with_memoire_is_given_his_goals(tmp_path):
+    """Opt-in, per routine: when memoire=True, the routine receives his
+    goals just like it receives the warm profile."""
+    from unittest.mock import MagicMock, patch
+
+    from src.jarvis.memory.conversation import DialogueMemory
+    from src.jarvis.reply.engine import run_reply_engine
+    from src.jarvis.routines.scope import RoutineScope
+
+    cfg = MagicMock()
+    cfg.db_path = str(tmp_path / "t.db")
+    cfg.llm_chat_model = "test-large"
+    cfg.mcps = {}
+    cfg.voice_debug = False
+    cfg.memory_digest_enabled = False
+    cfg.tool_result_digest_enabled = False
+    cfg.location_enabled = False
+    cfg.llm_thinking_enabled = False
+    cfg.agentic_max_turns = 8
+    cfg.memory_enrichment_source = "diary"
+    cfg.tool_selection_strategy = "all"
+    cfg.tool_carryover_max_turns = 2
+    cfg.tool_carryover_per_entry_chars = 1200
+    cfg.tool_search_max_calls = 3
+    cfg.llm_chat_timeout_sec = 45.0
+    cfg.llm_tools_timeout_sec = 8.0
+    _write(cfg, OUVERT)
+
+    seen = {}
+
+    def _capture(**kw):
+        messages = kw.get("messages") or []
+        seen.setdefault("system", messages[0].get("content", "") if messages else "")
+        return {"message": {"content": "ok"}}
+
+    with patch("src.jarvis.reply.engine.plan_query", return_value=[]), \
+         patch("src.jarvis.reply.engine.extract_search_params_for_memory",
+               return_value={}), \
+         patch("src.jarvis.reply.engine.chat_with_messages", side_effect=_capture), \
+         patch("src.jarvis.reply.engine.extract_text_from_response",
+               return_value="ok"):
+        run_reply_engine(
+            db=MagicMock(), cfg=cfg, tts=None, text="briefing du matin",
+            dialogue_memory=DialogueMemory(), origin="routine",
+            scope=RoutineScope(nom="matin", outils=["webSearch"], memoire=True),
+        )
+
+    assert "Datadog" in seen.get("system", "")
+

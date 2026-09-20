@@ -1107,7 +1107,7 @@ class TestSingleInstanceLock:
             assert result is True
             # PID should be readable from a separate handle because the lock
             # is at _LOCK_OFFSET, not at byte 0.
-            content = lock_file.read_text().strip()
+            content = lock_file.read_text(encoding="utf-8").strip()
             assert content == str(os.getpid()), (
                 f"Lock file should contain current PID {os.getpid()}, got {content!r}"
             )
@@ -1359,3 +1359,32 @@ class TestMemoryViewerModulePath:
         assert module_path == "desktop_app.memory_viewer", (
             f"Module path should be 'desktop_app.memory_viewer', found '{module_path}'"
         )
+
+
+class TestDaemonSubprocessEnv:
+    """The environment handed to the daemon child process.
+
+    The daemon prints emojis and Unicode diagnostics; Windows consoles
+    default to a narrow codepage, so the child must be forced to UTF-8.
+    """
+
+    def test_daemon_child_env_forces_utf8(self):
+        from desktop_app.app import _daemon_subprocess_env
+
+        env = _daemon_subprocess_env()
+        assert env["PYTHONIOENCODING"] == "utf-8"
+        assert env["PYTHONUTF8"] == "1"
+
+    def test_daemon_child_env_enables_stdin_ipc(self):
+        from desktop_app.app import _daemon_subprocess_env
+
+        assert _daemon_subprocess_env()["JARVIS_STDIN_IPC"] == "1"
+
+    def test_daemon_child_env_prepends_src_to_pythonpath(self, monkeypatch):
+        from desktop_app.app import _daemon_subprocess_env
+
+        monkeypatch.setenv("PYTHONPATH", "existing")
+        env = _daemon_subprocess_env()
+        head, _, tail = env["PYTHONPATH"].partition(os.pathsep)
+        assert os.path.basename(os.path.normpath(head)) == "src"
+        assert tail == "existing"

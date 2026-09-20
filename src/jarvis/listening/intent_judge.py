@@ -2,8 +2,8 @@
 
 Receives full context (transcript buffer, TTS history, state) and makes
 informed decisions about whether speech is directed at the assistant and
-what the actual query is. Routes through ``jarvis.llm.get_llm_backend``
-so the active provider (Ollama, OpenAI-compatible) handles the call.
+what the actual query is. Routes through ``jarvis.llm.get_auxiliary_backend``
+so a bare judge-model tag on a remote provider runs on local Ollama.
 """
 
 import json
@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional, List
 
 from ..debug import debug_log
-from ..llm import get_llm_backend
+from ..llm import get_auxiliary_backend
 from .transcript_buffer import TranscriptSegment
 
 
@@ -46,7 +46,7 @@ def warm_up_chat_model(cfg, model: str, timeout: float) -> bool:
     if not model:
         return False
     try:
-        ok = get_llm_backend(cfg).warm_up(
+        ok = get_auxiliary_backend(cfg, model).warm_up(
             model,
             timeout_sec=timeout,
             keep_alive=_ollama_keep_alive_for_power_mode(cfg),
@@ -114,8 +114,8 @@ class IntentJudgeConfig:
 
     ``cfg`` is the Jarvis Settings object (or any duck-type with the same
     LLM provider attributes); the judge dispatches every chat call through
-    ``get_llm_backend(cfg)``. ``model`` carries the per-call model name
-    (typically ``cfg.intent_judge_model``).
+    ``get_auxiliary_backend(cfg, model)``. ``model`` carries the per-call
+    model name (typically ``cfg.intent_judge_model``).
     """
 
     assistant_name: str = "Jarvis"
@@ -424,7 +424,7 @@ Examples:
                 {"role": "user", "content": user_prompt},
             ]
             try:
-                resp = get_llm_backend(self.config.cfg).chat(
+                resp = get_auxiliary_backend(self.config.cfg, self.config.model).chat(
                     self.config.model,
                     messages,
                     timeout_sec=self.config.timeout_sec,
@@ -494,9 +494,9 @@ Examples:
 def create_intent_judge(cfg) -> IntentJudge:
     """Build an :class:`IntentJudge` bound to the Jarvis settings.
 
-    The judge dispatches every chat call through ``get_llm_backend(cfg)``,
-    so the active provider (Ollama / OpenAI-compatible) handles the wire
-    shape automatically.
+    The judge dispatches every chat call through
+    ``get_auxiliary_backend(cfg, model)``, so the active provider
+    (Ollama / OpenAI-compatible) handles the wire shape automatically.
     """
     config = IntentJudgeConfig(
         assistant_name=str(getattr(cfg, "wake_word", "jarvis")).capitalize(),

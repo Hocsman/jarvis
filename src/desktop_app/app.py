@@ -99,6 +99,28 @@ class RuntimeStatusSnapshot:
     mcp_count: int
 
 
+def _daemon_subprocess_env() -> dict:
+    """Environment for the daemon child process.
+
+    PYTHONPATH points at ``src`` for source runs. JARVIS_STDIN_IPC tells the
+    daemon we own its stdin, so it starts the stdin monitor (chat query-in
+    IPC) — without it the daemon treats a non-TTY stdin as "no monitor" on
+    non-Windows, and a stray /dev/null would kill it. PYTHONIOENCODING and
+    PYTHONUTF8 force UTF-8 stdout/stderr so emojis and Unicode diagnostics
+    never crash on Windows codepages.
+    """
+    env = os.environ.copy()
+    src_path = Path(__file__).parent.parent  # Go up to src/
+    if "PYTHONPATH" in env:
+        env["PYTHONPATH"] = f"{src_path}{os.pathsep}{env['PYTHONPATH']}"
+    else:
+        env["PYTHONPATH"] = str(src_path)
+    env["JARVIS_STDIN_IPC"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    return env
+
+
 def _collect_runtime_status_snapshot(
     *,
     is_listening: bool,
@@ -836,7 +858,7 @@ def get_existing_instance_pid() -> Optional[int]:
     lock_file = get_lock_file_path()
     try:
         if lock_file.exists():
-            content = lock_file.read_text().strip()
+            content = lock_file.read_text(encoding="utf-8").strip()
             if content.isdigit():
                 return int(content)
     except Exception:
@@ -1303,6 +1325,7 @@ class MemoryViewerWindow(QMainWindow):
 
                 # Ensure UTF-8 encoding for subprocess (Windows cp1252 can't handle emojis)
                 env["PYTHONIOENCODING"] = "utf-8"
+                env["PYTHONUTF8"] = "1"
 
                 # Use creationflags to prevent console window popup on Windows
                 creationflags = 0
@@ -2511,19 +2534,7 @@ class JarvisSystemTray:
             else:
                 # When not bundled, use subprocess as before
                 python_exe = sys.executable
-
-                # Set up environment with PYTHONPATH for source runs
-                env = os.environ.copy()
-                src_path = Path(__file__).parent.parent  # Go up to src/
-                if "PYTHONPATH" in env:
-                    env["PYTHONPATH"] = f"{src_path}{os.pathsep}{env['PYTHONPATH']}"
-                else:
-                    env["PYTHONPATH"] = str(src_path)
-                # Signal the daemon that we own its stdin (chat query-in IPC)
-                # so it starts the stdin monitor. Without this the daemon would
-                # treat a non-TTY stdin as "no monitor" on non-Windows, and a
-                # stray /dev/null wouldn't kill it.
-                env["JARVIS_STDIN_IPC"] = "1"
+                env = _daemon_subprocess_env()
 
                 # Use creationflags to prevent console window popup on Windows
                 # CREATE_NEW_PROCESS_GROUP is needed for CTRL_BREAK_EVENT to work
@@ -3077,18 +3088,9 @@ def _ollama_runtime_flags(cfg) -> tuple[bool, bool]:
 
 def main() -> int:
     """Main entry point for the desktop app."""
-    # Fix Windows console encoding for Unicode/emoji characters
-    # Only for non-frozen apps - frozen apps redirect stdout to crash log
-    if sys.platform == 'win32' and not getattr(sys, 'frozen', False):
-        try:
-            import io
-            # Only wrap if stdout has a proper binary buffer
-            if hasattr(sys.stdout, 'buffer') and hasattr(sys.stdout.buffer, 'write'):
-                sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-            if hasattr(sys.stderr, 'buffer') and hasattr(sys.stderr.buffer, 'write'):
-                sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
-        except Exception:
-            pass
+    from jarvis.utils.console import force_utf8_console
+
+    force_utf8_console()
 
     # Required for PyInstaller: must be called before any multiprocessing
     # Without this, bundled apps can spawn infinite copies of themselves

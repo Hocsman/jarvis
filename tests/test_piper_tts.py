@@ -115,7 +115,7 @@ class TestPiperTTSErrorHandling:
 
         # Create a fake model file but no config
         model_file = tmp_path / "custom-voice.onnx"
-        model_file.write_text("fake model")
+        model_file.write_text("fake model", encoding="utf-8")
 
         tts = PiperTTS(enabled=True, model_path=str(model_file))
 
@@ -173,7 +173,7 @@ class TestPiperTTSWithMocking:
 
         # Create model file but not config
         model_file = tmp_path / "test-voice.onnx"
-        model_file.write_text("fake model")
+        model_file.write_text("fake model", encoding="utf-8")
 
         tts = PiperTTS(enabled=True, model_path=str(model_file))
 
@@ -352,22 +352,21 @@ class TestPiperTTSAutoDownload:
 
     def test_get_default_model_path(self):
         """Default model path should be in ~/.local/share/jarvis/models/piper/."""
-        from src.jarvis.output.tts import _get_default_piper_model_path, PIPER_DEFAULT_VOICE
+        from src.jarvis.output.tts import _get_default_piper_model_path, PIPER_FALLBACK_VOICE
 
         path = _get_default_piper_model_path()
 
-        assert PIPER_DEFAULT_VOICE in path
+        assert PIPER_FALLBACK_VOICE in path
         assert path.endswith(".onnx")
         assert "jarvis" in path
         assert "piper" in path
 
     def test_get_piper_models_dir(self):
-        """Models directory should be created under jarvis data dir."""
+        """Resolving the models directory names it without creating it."""
         from src.jarvis.output.tts import _get_piper_models_dir
 
         models_dir = _get_piper_models_dir()
 
-        assert models_dir.exists()
         assert "jarvis" in str(models_dir)
         assert "piper" in str(models_dir)
 
@@ -383,14 +382,28 @@ class TestPiperTTSAutoDownload:
         # But initialization should use the default
         # (we don't actually init here to avoid downloads in tests)
 
-    def test_default_voice_is_reasonable(self):
-        """Default voice should be a reasonable choice."""
-        from src.jarvis.output.tts import PIPER_DEFAULT_VOICE
+    def test_every_listed_voice_matches_the_language_it_answers(self):
+        """The table pairs a language with a voice trained for it.
 
-        # Should be British English
-        assert PIPER_DEFAULT_VOICE.startswith("en_GB")
-        # Should include quality indicator
-        assert "medium" in PIPER_DEFAULT_VOICE or "high" in PIPER_DEFAULT_VOICE
+        Asserting which voice is the fallback would freeze today's choice;
+        what has to hold is that no entry pairs a language with a voice
+        from another one, since that mismatch is inaudible in the table and
+        obvious to whoever is spoken to.
+        """
+        from src.jarvis.output.tts import PIPER_VOICE_BY_LANGUAGE, PIPER_FALLBACK_VOICE
+
+        for code, voice in PIPER_VOICE_BY_LANGUAGE.items():
+            locale = voice.split("-")[0]
+            assert "_" in locale, f"{voice} is not a Piper locale-speaker name"
+            if code.isascii() and len(code) == 2:  # an ISO code says which locale to expect
+                assert locale.lower().startswith(code), (
+                    f"{code!r} answers with {voice}, trained for {locale}"
+                )
+
+        # The fallback has to be a name the downloader can resolve: three
+        # dash-separated parts, the first of which is a locale.
+        locale, orateur, qualite = PIPER_FALLBACK_VOICE.split("-")
+        assert "_" in locale and orateur and qualite
 
 
 class TestPiperTTSConfig:

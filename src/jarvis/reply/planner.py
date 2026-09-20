@@ -40,7 +40,7 @@ import re
 from typing import List, Optional, Sequence, Tuple
 
 from ..debug import debug_log
-from ..llm import get_llm_backend
+from ..llm import get_auxiliary_backend
 from ..tools.naming import is_plain_name, one_line
 
 
@@ -48,12 +48,13 @@ def call_llm_direct(*, cfg, chat_model, system_prompt, user_content,
                     timeout_sec=10.0, thinking=False, num_ctx=4096,
                     temperature=None):
     """Local indirection: route the planner's chat call through the
-    backend configured by ``cfg.llm_provider``.
+    auxiliary dispatcher, so a bare ``planner_model`` tag on a remote
+    provider runs on local Ollama instead of dying on its HTTP 400.
 
     Kept module-level so tests can patch this single symbol to intercept
     every planner LLM call without reaching into the backend ABC.
     """
-    return get_llm_backend(cfg).direct(
+    return get_auxiliary_backend(cfg, chat_model).direct(
         chat_model, system_prompt, user_content,
         timeout_sec=timeout_sec, thinking=thinking,
         num_ctx=num_ctx, temperature=temperature,

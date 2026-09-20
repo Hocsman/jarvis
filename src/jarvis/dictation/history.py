@@ -15,10 +15,12 @@ from typing import Any, Dict, List, Optional
 
 
 def _default_history_path() -> Path:
-    """Return the default path for dictation history storage."""
-    base = Path.home() / ".local" / "share" / "jarvis"
-    base.mkdir(parents=True, exist_ok=True)
-    return base / "dictation_history.json"
+    """Where the dictation history lives when no path is given.
+
+    Resolving it creates nothing: ``_save`` creates the directory before it
+    writes, which is the only moment one is needed.
+    """
+    return Path.home() / ".local" / "share" / "jarvis" / "dictation_history.json"
 
 
 class DictationHistory:

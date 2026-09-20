@@ -440,13 +440,13 @@ class TestExtractPlaceFromUserText:
         assert _extract_place_from_user_text("weather in London", cfg) is None
 
     def _patched_backend(self, return_value):
-        """Build a context manager that patches ``get_llm_backend`` at the
-        weather module import site so the place extractor sees a stubbed
-        backend whose ``.direct()`` returns ``return_value``."""
+        """Build a context manager that patches ``get_auxiliary_backend``
+        at the weather module import site so the place extractor sees a
+        stubbed backend whose ``.direct()`` returns ``return_value``."""
         backend = Mock()
         backend.direct.return_value = return_value
         return patch(
-            "src.jarvis.tools.builtin.weather.get_llm_backend",
+            "src.jarvis.tools.builtin.weather.get_auxiliary_backend",
             return_value=backend,
         )
 

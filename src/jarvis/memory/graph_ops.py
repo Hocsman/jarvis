@@ -6,9 +6,9 @@ Keeps graph.py as a pure data store (SQLite only). This module handles:
 - Best-node traversal (greedy descent via recent → top → root entry points)
 - Auto-split when a node exceeds the token threshold
 
-All LLM calls go through the configured backend (factory dispatch on
-``cfg.llm_provider``); the local ``call_llm_direct`` wrapper is the
-single intercept point tests patch.
+All LLM calls go through the auxiliary dispatcher (a bare picker model tag
+on a remote provider runs on local Ollama); the local ``call_llm_direct``
+wrapper is the single intercept point tests patch.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from typing import Iterator, NamedTuple, Optional, Sequence
 from rapidfuzz import fuzz
 
 from ..debug import debug_log
-from ..llm import get_llm_backend
+from ..llm import get_auxiliary_backend
 from .provenance import (
     SOURCE_UNKNOWN,
     fact_line,
@@ -52,10 +52,11 @@ from .graph import (
 def call_llm_direct(*, cfg, chat_model, system_prompt, user_content,
                     timeout_sec=10.0, thinking=False, num_ctx=4096,
                     temperature=None):
-    """Local indirection: route graph-ops LLM calls through the backend
-    configured by ``cfg.llm_provider``. Tests patch this single symbol
-    to intercept every LLM round-trip in this module."""
-    return get_llm_backend(cfg).direct(
+    """Local indirection: route graph-ops LLM calls through the auxiliary
+    dispatcher, so a bare picker model tag on a remote provider runs on
+    local Ollama instead of dying on its HTTP 400. Tests patch this single
+    symbol to intercept every LLM round-trip in this module."""
+    return get_auxiliary_backend(cfg, chat_model).direct(
         chat_model, system_prompt, user_content,
         timeout_sec=timeout_sec, thinking=thinking,
         num_ctx=num_ctx, temperature=temperature,

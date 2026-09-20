@@ -192,6 +192,30 @@ class TestLLMProviderFields:
             assert fm is not None and fm.nullable, f"'{key}' should be nullable"
 
 
+class TestKokoroFields:
+    """Kokoro's voice and language code are a pair: the pipeline is built
+    with ``lang_code`` and a voice whose prefix belongs to another language
+    cannot synthesise, so a GUI-only user must be able to set both."""
+
+    def _field(self, key):
+        for fm in FIELD_METADATA:
+            if fm.key == key:
+                return fm
+        return None
+
+    def test_kokoro_category_exposes_voice_language_and_speed(self):
+        for key in ("tts_kokoro_voice", "tts_kokoro_lang_code", "tts_kokoro_speed"):
+            fm = self._field(key)
+            assert fm is not None and fm.category == "kokoro", (
+                f"'{key}' should be exposed in the 'kokoro' category"
+            )
+
+    def test_kokoro_lang_code_default_matches_config(self):
+        fm = self._field("tts_kokoro_lang_code")
+        assert fm is not None and fm.field_type == "str"
+        assert get_default_config()["tts_kokoro_lang_code"] == "f"
+
+
 class TestMinimalConfigInvariant:
     """``_is_default_value`` decides whether a field is omitted from
     config.json. An emptied nullable provider field (reads back as None)
@@ -292,7 +316,7 @@ class TestConfigSaveLogic:
     def test_only_non_defaults_are_saved(self):
         """Saving default values should produce an empty config file."""
         defaults = get_default_config()
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding="utf-8") as f:
             f.write('{}')
             cfg_path = Path(f.name)
 
@@ -315,7 +339,7 @@ class TestConfigSaveLogic:
 
     def test_changed_values_are_preserved(self):
         """Non-default values should survive a save/load round-trip."""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding="utf-8") as f:
             f.write('{}')
             cfg_path = Path(f.name)
 
@@ -337,7 +361,7 @@ class TestConfigSaveLogic:
 
     def test_unknown_keys_preserved_on_save(self):
         """Keys not in FIELD_METADATA (e.g. mcps) should survive save."""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding="utf-8") as f:
             json.dump({"mcps": {"test": {"url": "http://example.com"}},
                         "_config_version": 1}, f)
             cfg_path = Path(f.name)
@@ -476,7 +500,7 @@ class TestMCPConfigSaveLogic:
 
     def test_mcps_saved_when_present(self):
         """MCP configs should be written to the config file."""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding="utf-8") as f:
             json.dump({}, f)
             cfg_path = Path(f.name)
 
@@ -502,7 +526,7 @@ class TestMCPConfigSaveLogic:
 
     def test_empty_mcps_not_saved(self):
         """When mcps is empty, it should not be written to config."""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding="utf-8") as f:
             json.dump({}, f)
             cfg_path = Path(f.name)
 

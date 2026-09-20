@@ -298,7 +298,7 @@ The Knowledge tab hides the `user` and `directives` branches once they are empty
 
 | File | macOS | Windows | Linux |
 |------|-------|---------|-------|
-| Config | `~/.config/jarvis/` | `%APPDATA%\jarvis\` | `~/.config/jarvis/` |
-| Database | `~/.local/share/jarvis/` | `%LOCALAPPDATA%\jarvis\` | `~/.local/share/jarvis/` |
+| Config | `~/.config/jarvis/` | `%USERPROFILE%\.config\jarvis\` | `~/.config/jarvis/` |
+| Database | `~/.local/share/jarvis/` | `%USERPROFILE%\.local\share\jarvis\` | `~/.local/share/jarvis/` |
 | Crash logs | `~/Library/Logs/Jarvis/` | `%LOCALAPPDATA%\Jarvis\` | `~/.jarvis/` |
 | Instance lock | `~/Library/Application Support/Jarvis/` | `%LOCALAPPDATA%\Jarvis\` | `~/.jarvis/` |

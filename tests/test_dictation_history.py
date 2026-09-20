@@ -12,6 +12,30 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
+# Isolation from the user's own history
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_a_history_built_without_a_path_leaves_the_users_file_alone():
+    """A test that forgets to inject a history must not reach the real one.
+
+    ``DictationHistory()`` falls back to the user's data directory, and the
+    dictation engine builds one whenever a caller passes none, so a single
+    omitted argument drops synthetic entries into the file a real user's
+    dictations live in. Running the suite is not permission to write there.
+    """
+    from jarvis.dictation.history import DictationHistory
+
+    real = Path.home() / ".local" / "share" / "jarvis" / "dictation_history.json"
+    before = real.read_bytes() if real.exists() else None
+
+    DictationHistory().add("dictée de test", 0.5)
+
+    after = real.read_bytes() if real.exists() else None
+    assert after == before, f"the suite wrote to {real}"
+
+
+# ---------------------------------------------------------------------------
 # DictationHistory storage tests
 # ---------------------------------------------------------------------------
 
@@ -93,14 +117,14 @@ class TestDictationHistory:
 
     def test_empty_file_loads_gracefully(self, tmp_path):
         path = tmp_path / "history.json"
-        path.write_text("")
+        path.write_text("", encoding="utf-8")
         from src.jarvis.dictation.history import DictationHistory
         h = DictationHistory(path=path)
         assert h.count == 0
 
     def test_corrupt_file_loads_gracefully(self, tmp_path):
         path = tmp_path / "history.json"
-        path.write_text("not valid json{{{")
+        path.write_text("not valid json{{{", encoding="utf-8")
         from src.jarvis.dictation.history import DictationHistory
         h = DictationHistory(path=path)
         assert h.count == 0
@@ -139,7 +163,7 @@ class TestDictationHistory:
         external_entries = [
             {"id": "aaa", "text": "from daemon", "timestamp": 1.0, "duration": 0.5},
         ]
-        path.write_text(json.dumps(external_entries))
+        path.write_text(json.dumps(external_entries), encoding="utf-8")
 
         # Before reload, in-memory state is stale
         assert h.count == 0

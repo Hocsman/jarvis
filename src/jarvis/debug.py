@@ -33,11 +33,16 @@ def _is_debug_enabled() -> bool:
     global _last_check_time, _cached_voice_debug
     now = time.time()
     if _cached_voice_debug is None or (now - _last_check_time) > _CACHE_TTL_SECONDS:
+        # Claim the slot before reloading: the settings parser itself logs
+        # (a kept auxiliary pin announces itself), and a re-entrant call
+        # here must see a settled answer rather than reload again.
+        _last_check_time = now
+        if _cached_voice_debug is None:
+            _cached_voice_debug = False
         try:
             _cached_voice_debug = bool(load_settings().voice_debug)
         except Exception:
             _cached_voice_debug = False
-        _last_check_time = now
     return bool(_cached_voice_debug)
 
 

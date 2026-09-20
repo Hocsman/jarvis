@@ -528,10 +528,11 @@ def utterance_channel_available(cfg) -> bool:
 
 def _ask_model(cfg, system: str, user: str, timeout_sec: float) -> Optional[str]:
     """One call, returning the model's whole reply as text."""
-    from ..llm import get_llm_backend
+    from ..llm import get_auxiliary_backend
 
-    response = get_llm_backend(cfg).chat(
-        _resolve_judge_model(cfg),
+    model = _resolve_judge_model(cfg)
+    response = get_auxiliary_backend(cfg, model).chat(
+        model,
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
         timeout_sec=timeout_sec,
     )

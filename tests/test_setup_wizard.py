@@ -397,14 +397,14 @@ class TestProviderChoicePage:
         from pathlib import Path
         page = ProviderChoicePage.__new__(ProviderChoicePage)
 
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
             f.write("{}")
             cfg_path = Path(f.name)
         try:
             with patch("jarvis.config.default_config_path", return_value=cfg_path):
                 page._selected = "openai_compatible"
                 assert page.validatePage() is True
-            saved = json.loads(cfg_path.read_text())
+            saved = json.loads(cfg_path.read_text(encoding="utf-8"))
             assert saved["llm_provider"] == "openai_compatible"
         finally:
             cfg_path.unlink(missing_ok=True)
@@ -417,7 +417,7 @@ class TestProviderChoicePage:
         from pathlib import Path
         page = ProviderChoicePage.__new__(ProviderChoicePage)
 
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
             json.dump({
                 "llm_provider": "openai_compatible",
                 "llm_base_url": "http://localhost:1234/v1",
@@ -430,7 +430,7 @@ class TestProviderChoicePage:
             with patch("jarvis.config.default_config_path", return_value=cfg_path):
                 page._selected = "ollama"
                 assert page.validatePage() is True
-            saved = json.loads(cfg_path.read_text())
+            saved = json.loads(cfg_path.read_text(encoding="utf-8"))
             assert saved.get("llm_provider", "ollama") == "ollama"
             for stale in ("llm_base_url", "llm_api_key", "llm_chat_model",
                           "embedding_model", "embedding_base_url", "embedding_api_key"):
@@ -454,7 +454,7 @@ class TestProviderChoicePage:
         openai_compatible config preselects the OpenAI card."""
         import tempfile, json
         from pathlib import Path
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
             json.dump({"llm_provider": "openai_compatible"}, f)
             cfg_path = Path(f.name)
         try:
@@ -469,7 +469,7 @@ class TestProviderChoicePage:
         """A config without llm_provider (the default install) preselects Ollama."""
         import tempfile, json
         from pathlib import Path
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
             f.write("{}")
             cfg_path = Path(f.name)
         try:
@@ -486,7 +486,7 @@ class TestProviderChoicePage:
         uncheck the other (and update the selection)."""
         import tempfile
         from pathlib import Path
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
             f.write("{}")
             cfg_path = Path(f.name)
         try:
@@ -510,7 +510,7 @@ class TestProviderChoicePage:
         import tempfile
         from pathlib import Path
         from PyQt6.QtWidgets import QLabel
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
             f.write("{}")
             cfg_path = Path(f.name)
         try:
@@ -541,7 +541,7 @@ class TestProviderChoicePage:
         import tempfile
         from pathlib import Path
         from desktop_app.setup_wizard import SetupWizard
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
             f.write("{}")
             cfg_path = Path(f.name)
         try:
@@ -582,7 +582,7 @@ class TestOpenAICompatiblePage:
         from pathlib import Path
         page = OpenAICompatiblePage.__new__(OpenAICompatiblePage)
 
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
             json.dump({"llm_provider": "openai_compatible"}, f)
             cfg_path = Path(f.name)
         try:
@@ -591,7 +591,7 @@ class TestOpenAICompatiblePage:
                     "http://localhost:1234/v1", "sk-secret", "lmstudio/gemma", "text-embed-3",
                 ))
                 assert page.validatePage() is True
-            saved = json.loads(cfg_path.read_text())
+            saved = json.loads(cfg_path.read_text(encoding="utf-8"))
             assert saved["llm_provider"] == "openai_compatible"
             assert saved["llm_base_url"] == "http://localhost:1234/v1"
             assert saved["llm_api_key"] == "sk-secret"
@@ -607,7 +607,7 @@ class TestOpenAICompatiblePage:
         from pathlib import Path
         page = OpenAICompatiblePage.__new__(OpenAICompatiblePage)
 
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
             f.write("{}")
             cfg_path = Path(f.name)
         try:
@@ -616,7 +616,7 @@ class TestOpenAICompatiblePage:
                     "http://localhost:1234/v1", "", "lmstudio/gemma", "",
                 ))
                 assert page.validatePage() is True
-            saved = json.loads(cfg_path.read_text())
+            saved = json.loads(cfg_path.read_text(encoding="utf-8"))
             assert "llm_api_key" not in saved
             assert "embedding_model" not in saved
         finally:
@@ -638,7 +638,7 @@ class TestOpenAICompatiblePage:
         details into the form fields so they are not re-typed."""
         import tempfile, json
         from pathlib import Path
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
             json.dump({
                 "llm_provider": "openai_compatible",
                 "llm_base_url": "http://lmstudio:1234/v1",
@@ -1108,7 +1108,7 @@ class TestMCPPage:
         from pathlib import Path
         from jarvis.config import _load_json
 
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding="utf-8") as f:
             json.dump({}, f)
             cfg_path = Path(f.name)
 
@@ -1150,7 +1150,7 @@ class TestMCPPage:
         from pathlib import Path
         from jarvis.config import _load_json
 
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding="utf-8") as f:
             json.dump({"mcps": {"custom-server": {"transport": "stdio", "command": "node", "args": []}}}, f)
             cfg_path = Path(f.name)
 
@@ -1195,7 +1195,7 @@ class TestSearchProvidersPage:
         from pathlib import Path
         from jarvis.config import _load_json
 
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
             json.dump({}, f)
             cfg_path = Path(f.name)
         try:
@@ -1217,7 +1217,7 @@ class TestSearchProvidersPage:
         from pathlib import Path
         from jarvis.config import _load_json
 
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
             json.dump({}, f)
             cfg_path = Path(f.name)
         try:
@@ -1237,7 +1237,7 @@ class TestSearchProvidersPage:
         from pathlib import Path
         from jarvis.config import _load_json
 
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
             json.dump({}, f)
             cfg_path = Path(f.name)
         try:
@@ -1256,7 +1256,7 @@ class TestSearchProvidersPage:
         from pathlib import Path
         from jarvis.config import _load_json
 
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
             json.dump({"brave_search_api_key": "old-key"}, f)
             cfg_path = Path(f.name)
         try:
@@ -1275,7 +1275,7 @@ class TestSearchProvidersPage:
         from pathlib import Path
         from jarvis.config import _load_json
 
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
             json.dump({"ollama_chat_model": "gpt-oss:20b", "mcps": {"x": {}}}, f)
             cfg_path = Path(f.name)
         try:
