@@ -37,7 +37,7 @@ def _juge_en_repos(listener):
     juge = create_intent_judge(listener.cfg)
     import requests
 
-    with patch("jarvis.listening.intent_judge.get_llm_backend") as backend:
+    with patch("jarvis.listening.intent_judge.get_auxiliary_backend") as backend:
         backend.return_value.chat.side_effect = requests.exceptions.ConnectionError(
             "connection refused"
         )
@@ -105,7 +105,7 @@ def test_the_back_off_still_spares_the_dead_server():
     _juge_en_repos(listener)
     _fenetre_chaude(listener)
 
-    with patch("jarvis.listening.intent_judge.get_llm_backend") as backend:
+    with patch("jarvis.listening.intent_judge.get_auxiliary_backend") as backend:
         listener._process_transcript("tell me more about that")
 
     assert not backend.called

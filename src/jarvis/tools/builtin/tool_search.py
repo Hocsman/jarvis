@@ -13,7 +13,7 @@ from ..base import Tool, ToolContext
 from ..types import ToolExecutionResult
 from ..selection import select_tools, ToolSelectionStrategy
 from ...debug import debug_log
-from ...llm import get_auxiliary_backend, get_embedding_backend, get_llm_backend
+from ...llm import get_auxiliary_backend, get_embedding_backend
 
 
 def _resolve_router_model(cfg) -> str:

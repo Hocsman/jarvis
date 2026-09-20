@@ -2,7 +2,7 @@ from __future__ import annotations
 from typing import Optional
 from datetime import datetime, timezone
 
-from ..llm import get_auxiliary_backend, get_llm_backend
+from ..llm import get_auxiliary_backend
 from ..debug import debug_log
 
 
