@@ -99,6 +99,28 @@ class RuntimeStatusSnapshot:
     mcp_count: int
 
 
+def _daemon_subprocess_env() -> dict:
+    """Environment for the daemon child process.
+
+    PYTHONPATH points at ``src`` for source runs. JARVIS_STDIN_IPC tells the
+    daemon we own its stdin, so it starts the stdin monitor (chat query-in
+    IPC) — without it the daemon treats a non-TTY stdin as "no monitor" on
+    non-Windows, and a stray /dev/null would kill it. PYTHONIOENCODING and
+    PYTHONUTF8 force UTF-8 stdout/stderr so emojis and Unicode diagnostics
+    never crash on Windows codepages.
+    """
+    env = os.environ.copy()
+    src_path = Path(__file__).parent.parent  # Go up to src/
+    if "PYTHONPATH" in env:
+        env["PYTHONPATH"] = f"{src_path}{os.pathsep}{env['PYTHONPATH']}"
+    else:
+        env["PYTHONPATH"] = str(src_path)
+    env["JARVIS_STDIN_IPC"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    return env
+
+
 def _collect_runtime_status_snapshot(
     *,
     is_listening: bool,
@@ -2511,23 +2533,7 @@ class JarvisSystemTray:
             else:
                 # When not bundled, use subprocess as before
                 python_exe = sys.executable
-
-                # Set up environment with PYTHONPATH for source runs
-                env = os.environ.copy()
-                src_path = Path(__file__).parent.parent  # Go up to src/
-                if "PYTHONPATH" in env:
-                    env["PYTHONPATH"] = f"{src_path}{os.pathsep}{env['PYTHONPATH']}"
-                else:
-                    env["PYTHONPATH"] = str(src_path)
-                # Signal the daemon that we own its stdin (chat query-in IPC)
-                # so it starts the stdin monitor. Without this the daemon would
-                # treat a non-TTY stdin as "no monitor" on non-Windows, and a
-                # stray /dev/null wouldn't kill it.
-                env["JARVIS_STDIN_IPC"] = "1"
-                # Ensure child process always encodes stdout/stderr as UTF-8
-                # so emojis and Unicode diagnostics never crash on Windows codepages.
-                env["PYTHONIOENCODING"] = "utf-8"
-                env["PYTHONUTF8"] = "1"
+                env = _daemon_subprocess_env()
 
                 # Use creationflags to prevent console window popup on Windows
                 # CREATE_NEW_PROCESS_GROUP is needed for CTRL_BREAK_EVENT to work
