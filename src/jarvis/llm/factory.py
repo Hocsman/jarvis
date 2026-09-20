@@ -20,6 +20,7 @@ from .backend import LLMBackend
 from .ollama import OllamaBackend
 from .openai_compatible import OpenAICompatibleBackend
 from .redacting import RedactingBackend
+from ..config import is_local_endpoint
 
 
 _OLLAMA = "ollama"
@@ -117,9 +118,7 @@ def get_llm_backend(settings: Any, model: Optional[str] = None) -> LLMBackend:
         base_url = _str_attr(settings, "llm_base_url") or _str_attr(
             settings, "ollama_base_url", _DEFAULT_OLLAMA_URL
         )
-        from ..config import _is_local_endpoint
-
-        if model_str and not _is_local_endpoint(base_url) and "/" not in model_str:
+        if model_str and not is_local_endpoint(base_url) and "/" not in model_str:
             return get_llm_backend(_SurLaMachine(settings))
     else:
         base_url = _str_attr(settings, "ollama_base_url", _DEFAULT_OLLAMA_URL)

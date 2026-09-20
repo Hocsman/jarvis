@@ -1,5 +1,6 @@
 import ipaddress
 import os
+import socket
 import sys
 import json
 import time
@@ -8,7 +9,6 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 from dotenv import load_dotenv
-import requests
 
 
 # ============================================================================
@@ -482,13 +482,13 @@ def load_config() -> Dict[str, Any]:
     return {**defaults, **cfg_json}
 
 
-# Pins already discarded in this process. `debug_log` reloads the settings
-# every couple of seconds, and a warning repeated at that rate is a
-# warning the user learns to scroll past.
-_discarded_pins: set = set()
+# Pin decisions already announced in this process. `debug_log` reloads the
+# settings every couple of seconds, and a line repeated at that rate is a
+# line the user learns to scroll past.
+_announced_pins: set = set()
 
 
-def _is_local_endpoint(base_url: str) -> bool:
+def is_local_endpoint(base_url: str) -> bool:
     """Whether this URL points at a server on this machine or this network.
 
     The OpenAI-compatible provider covers both ends of the range: a
@@ -526,21 +526,37 @@ def _is_local_endpoint(base_url: str) -> bool:
 
 _ollama_reachable_cache: dict[str, tuple[float, bool]] = {}
 
+# How long a reachability verdict is reused. The settings parser runs on
+# every ``debug_log`` reload, so without caching each reload would block on
+# a probe; 30s is short enough that starting Ollama is picked up quickly.
+_OLLAMA_REACHABILITY_TTL_SEC = 30.0
+
 
 def is_ollama_reachable(base_url: str = "http://127.0.0.1:11434", timeout: float = 0.5) -> bool:
     """Check whether a local Ollama instance is reachable.
 
-    Cached with a short TTL so repeated config reads do not block on network I/O.
+    A bare TCP connect, not an HTTP request: the question is whether a
+    server listens there at all, and a socket answers it without honouring
+    HTTP(S)_PROXY — a proxy must never decide whether a *local* server is
+    up — and without building a throwaway session per probe.
+
+    Cached for ``_OLLAMA_REACHABILITY_TTL_SEC`` so repeated config reads do
+    not block on network I/O. Any failure is False, the safe direction: a
+    False verdict just rescues a bare auxiliary pin to the chat model.
     """
     now = time.monotonic()
     cached = _ollama_reachable_cache.get(base_url)
-    if cached is not None and now - cached[0] < 5.0:
+    if cached is not None and now - cached[0] < _OLLAMA_REACHABILITY_TTL_SEC:
         return cached[1]
 
     reachable = False
     try:
-        resp = requests.get(f"{base_url.rstrip('/')}/api/version", timeout=timeout)
-        reachable = resp.status_code == 200
+        parsed = urlparse(base_url if "//" in base_url else f"//{base_url}")
+        host = parsed.hostname
+        port = parsed.port or 11434
+        if host:
+            with socket.create_connection((host, port), timeout=timeout):
+                reachable = True
     except Exception:
         reachable = False
 
@@ -575,15 +591,24 @@ def _cloud_safe_model(value: str, field: str, provider: str,
         return value
     if provider != "openai_compatible" or "/" in value:
         return value
-    if _is_local_endpoint(base_url):
+    if is_local_endpoint(base_url):
         return value
     if is_ollama_reachable(ollama_base_url):
+        mark = (field, value, "kept")
+        if mark not in _announced_pins:
+            _announced_pins.add(mark)
+            from .debug import debug_log
+            debug_log(
+                f"pinned model kept: {field}={value} — local Ollama is "
+                "reachable, so auxiliary calls route to it",
+                "config",
+            )
         return value
     if not fallback or fallback == value:
         return value
     mark = (field, value, fallback)
-    if mark not in _discarded_pins:
-        _discarded_pins.add(mark)
+    if mark not in _announced_pins:
+        _announced_pins.add(mark)
         print(f"⚠️ Pinned model ignored: {field}", flush=True)
         print(f"   📌 pinned: {value}", flush=True)
         print(f"   ☁️ remote endpoint: {base_url}", flush=True)

@@ -31,7 +31,7 @@ def _settings_from(tmp_path, monkeypatch, values: dict):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     import src.jarvis.config as config
 
-    monkeypatch.setattr(config, "_discarded_pins", set(), raising=False)
+    monkeypatch.setattr(config, "_announced_pins", set(), raising=False)
     return load_settings()
 
 
@@ -142,3 +142,40 @@ def test_the_announcement_does_not_repeat_on_every_reload(tmp_path, monkeypatch,
     load_settings()
 
     assert "gemma4:e2b" not in capsys.readouterr().out
+
+
+def test_a_kept_pin_announces_the_local_route(tmp_path, monkeypatch):
+    """A bare pin kept because local Ollama is reachable must be
+    diagnosable: if the pinned model was never pulled, the auxiliary
+    calls 404, and this log line is what points at the cause."""
+    import src.jarvis.config as config
+    import src.jarvis.debug as debug
+    monkeypatch.setattr(config, "is_ollama_reachable", lambda *args, **kwargs: True)
+    lines = []
+    monkeypatch.setattr(
+        debug, "debug_log",
+        lambda message, category="debug": lines.append((message, category)),
+    )
+
+    _settings_from(tmp_path, monkeypatch, {
+        "llm_provider": "openai_compatible",
+        "llm_base_url": "https://openrouter.ai/api/v1",
+        "llm_chat_model": "deepseek/deepseek-v4-flash",
+        "tool_router_model": "qwen2.5:3b",
+    })
+
+    assert any(
+        "tool_router_model" in message and "qwen2.5:3b" in message
+        for message, _category in lines
+    ), f"no kept-pin log line in {lines!r}"
+
+
+def test_is_local_endpoint_is_a_public_config_helper():
+    """The LLM factory imports it at module top, so the helper is public:
+    a cross-package import of a private name would make the factory depend
+    on config internals."""
+    from src.jarvis import config
+
+    assert config.is_local_endpoint("http://127.0.0.1:11434") is True
+    assert config.is_local_endpoint("http://192.168.1.42:8000/v1") is True
+    assert config.is_local_endpoint("https://openrouter.ai/api/v1") is False
