@@ -11,6 +11,10 @@ from types import SimpleNamespace
 
 import pytest
 
+# The suite replaces the helper with a refusal by default; these tests run
+# the real one against the fake Hub below.
+pytestmark = pytest.mark.real_download_helper
+
 
 PATTERNS = ["config.json", "model.bin", "tokenizer.json"]
 REPO = "Systran/faster-whisper-medium.en"

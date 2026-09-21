@@ -205,6 +205,77 @@ def _isolate_memory_core(_bac_a_sable, request, monkeypatch):
     assert patched, "neither memory core module could be imported"
 
 
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "real_download_helper: runs the real download_snapshot_with_progress; "
+        "the test fakes the Hugging Face Hub it talks to",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_hugging_face_hub(_bac_a_sable, request, monkeypatch):
+    """Keep every test off the Hugging Face Hub and out of the user's model cache.
+
+    The listener fetches its Whisper snapshot before it builds the model, so a
+    test that stubs ``WhisperModel`` alone still downloads gigabytes into
+    ``~/.cache/huggingface``. The fetch is ``download_snapshot_with_progress``,
+    which the listener imports from ``jarvis.utils.hf_download`` at call time,
+    so that module attribute is replaced by a refusal. A test of the helper
+    itself carries the ``real_download_helper`` marker and fakes the Hub on
+    its own.
+
+    Underneath, whatever reaches huggingface_hub by another road finds it
+    offline, with its cache in the sandbox. huggingface_hub reads both
+    switches from the environment once, into module constants, so the
+    constants are patched as well as the variables (which still reach any
+    process a test spawns). Its HTTP sessions settle their offline mode when
+    they are built and are kept per thread, so they are dropped on the way in
+    and on the way out.
+    """
+    cache = _bac_a_sable / "huggingface" / "hub"
+    monkeypatch.setenv("HF_HUB_CACHE", str(cache))
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    try:
+        import huggingface_hub.constants
+    except ImportError:
+        # No huggingface_hub, so no Hub client and no helper to stand in for.
+        yield
+        return
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_CACHE", str(cache))
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_OFFLINE", True)
+
+    if request.node.get_closest_marker("real_download_helper") is None:
+        def _refuse_download(repo_id, *args, **kwargs):
+            raise RuntimeError(f"the test suite does not download {repo_id} from the Hugging Face Hub")
+
+        # Same two module identities as the fixtures above.
+        import importlib
+
+        patched = 0
+        for path in ("jarvis.utils.hf_download", "src.jarvis.utils.hf_download"):
+            try:
+                module = importlib.import_module(path)
+            except ImportError:
+                continue
+            monkeypatch.setattr(module, "download_snapshot_with_progress", _refuse_download)
+            patched += 1
+        assert patched, "neither hf_download module could be imported"
+
+    # The sessions live in the half of huggingface_hub that needs requests.
+    # A test module that stubs requests at collection breaks that half, and
+    # with it any session to drop; the layers above stand regardless.
+    try:
+        from huggingface_hub.utils import reset_sessions
+    except Exception:
+        reset_sessions = None
+    if reset_sessions is not None:
+        reset_sessions()
+    yield
+    if reset_sessions is not None:
+        reset_sessions()
+
+
 @pytest.fixture
 def mock_config():
     """Provide a mock configuration for unit tests."""
