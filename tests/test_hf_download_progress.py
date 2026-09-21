@@ -1,9 +1,13 @@
 """Behavioural tests for download_snapshot_with_progress.
 
 No network: huggingface_hub.snapshot_download and HfApi are faked, and the
-blob growth of a real download is simulated by writing into a fake cache.
+blob growth of a real download is simulated in a fake cache. A fake blob is
+an empty file whose size, as the helper reads it, is set by the test, so a
+simulated gigabyte costs the disk nothing.
 """
 
+import os
+import pathlib
 import re
 import threading
 import time
@@ -19,17 +23,46 @@ pytestmark = pytest.mark.real_download_helper
 PATTERNS = ["config.json", "model.bin", "tokenizer.json"]
 REPO = "Systran/faster-whisper-medium.en"
 
+_MIB = 1024 * 1024
+# What simulating a download of any size may cost the disk.
+_DISK_BUDGET = 16 * _MIB
 
-def _make_fake_snapshot(blobs_dir, steps_mb, step_delay=0.1):
-    """A fake snapshot_download that grows a blob file like a real download."""
+
+def _bytes_written_by_this_process():
+    """Bytes this process has handed to the operating system for writing, or
+    None where the platform does not count them."""
+    try:
+        import psutil
+        counters = psutil.Process().io_counters()
+    except Exception:
+        return None
+    return getattr(counters, "write_chars", counters.write_bytes)
+
+
+def _bytes_on_disk(root):
+    return sum(os.stat(path).st_size for path in root.rglob("*") if path.is_file())
+
+
+def _make_fake_snapshot(fake_hub, steps_mb, step_delay=0.1):
+    """A fake snapshot_download that grows a blob like a real download."""
     def fake(repo_id, allow_patterns=None, **kwargs):
-        target = blobs_dir / "abc123.incomplete"
-        target.parent.mkdir(parents=True, exist_ok=True)
+        target = fake_hub.blobs / "abc123.incomplete"
         for mb in steps_mb:
-            target.write_bytes(b"\0" * (mb * 1024 * 1024))
+            fake_hub.grow_blob(target, mb * _MIB)
             time.sleep(step_delay)
-        return str(blobs_dir.parent)
+        return str(fake_hub.blobs.parent)
     return fake
+
+
+class _ReportedSize:
+    """A stat result that reports a fake blob's simulated size."""
+
+    def __init__(self, real, size):
+        self._real = real
+        self.st_size = size
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
 
 
 def _fake_model_info(total_mb, include_non_matching=False):
@@ -60,7 +93,26 @@ def fake_hub(monkeypatch, tmp_path):
             return self.info
 
     monkeypatch.setattr(huggingface_hub, "HfApi", FakeHfApi)
-    return SimpleNamespace(cache=cache, blobs=blobs, monkeypatch=monkeypatch, hf=huggingface_hub)
+
+    # The helper measures a download by the st_size of the files in the
+    # blobs directory, so that is the one thing a fake blob lies about.
+    reported_sizes = {}
+    real_stat = pathlib.Path.stat
+
+    def stat(self, *args, **kwargs):
+        result = real_stat(self, *args, **kwargs)
+        size = reported_sizes.get(self)
+        return result if size is None else _ReportedSize(result, size)
+
+    monkeypatch.setattr(pathlib.Path, "stat", stat)
+
+    def grow_blob(path, size_bytes):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+        reported_sizes[path] = size_bytes
+
+    return SimpleNamespace(cache=cache, blobs=blobs, monkeypatch=monkeypatch, hf=huggingface_hub,
+                           grow_blob=grow_blob)
 
 
 def _progress_lines(capsys):
@@ -74,7 +126,7 @@ def test_progress_lines_show_done_total_and_rate(monkeypatch, fake_hub, capsys):
 
     fake_hub.monkeypatch.setattr(
         fake_hub.hf, "snapshot_download",
-        _make_fake_snapshot(fake_hub.blobs, steps_mb=[400, 900, 1530], step_delay=0.2),
+        _make_fake_snapshot(fake_hub, steps_mb=[400, 900, 1530], step_delay=0.2),
     )
 
     download_snapshot_with_progress(REPO, PATTERNS, "Whisper 'medium.en'",
@@ -84,6 +136,29 @@ def test_progress_lines_show_done_total_and_rate(monkeypatch, fake_hub, capsys):
     assert lines, "expected at least one progress line during the download"
     assert any(re.search(r"\d+/1530 MB · [\d.]+ MB/s", line) for line in lines), lines
     assert any("Whisper 'medium.en'" in line for line in lines)
+
+
+@pytest.mark.unit
+def test_simulating_a_large_download_costs_the_disk_next_to_nothing(monkeypatch, fake_hub, capsys):
+    """The fake stands in for a 1.5 GB model without writing one: the helper
+    sees the whole size while the disk sees a few bytes."""
+    from jarvis.utils.hf_download import download_snapshot_with_progress
+
+    fake_hub.monkeypatch.setattr(
+        fake_hub.hf, "snapshot_download",
+        _make_fake_snapshot(fake_hub, steps_mb=[400, 900, 1530], step_delay=0.2),
+    )
+
+    written_before = _bytes_written_by_this_process()
+    download_snapshot_with_progress(REPO, PATTERNS, "Whisper 'medium.en'",
+                                    poll_interval_sec=0.05)
+    written_after = _bytes_written_by_this_process()
+
+    lines = _progress_lines(capsys)
+    assert any("1530/1530 MB" in line for line in lines), lines
+    assert _bytes_on_disk(fake_hub.cache) <= _DISK_BUDGET
+    if written_before is not None:
+        assert written_after - written_before <= _DISK_BUDGET
 
 
 @pytest.mark.unit
@@ -97,7 +172,7 @@ def test_progress_without_total_size_falls_back_to_so_far(monkeypatch, fake_hub,
     fake_hub.monkeypatch.setattr(fake_hub.hf, "HfApi", FailingApi)
     fake_hub.monkeypatch.setattr(
         fake_hub.hf, "snapshot_download",
-        _make_fake_snapshot(fake_hub.blobs, steps_mb=[400, 900], step_delay=0.2),
+        _make_fake_snapshot(fake_hub, steps_mb=[400, 900], step_delay=0.2),
     )
 
     download_snapshot_with_progress(REPO, PATTERNS, "Whisper 'medium.en'",
@@ -142,9 +217,8 @@ def test_stalled_download_reports_it_is_still_alive(monkeypatch, fake_hub, capsy
     from jarvis.utils.hf_download import download_snapshot_with_progress
 
     def stalled_snapshot(repo_id, allow_patterns=None, **kwargs):
-        fake_hub.blobs.mkdir(parents=True, exist_ok=True)
-        (fake_hub.blobs / "abc.incomplete").write_bytes(b"\0" * (10 * 1024 * 1024))
-        time.sleep(1.0)  # no growth after the initial write
+        fake_hub.grow_blob(fake_hub.blobs / "abc.incomplete", 10 * _MIB)
+        time.sleep(1.0)  # no growth after the first 10 MB
         return str(fake_hub.blobs.parent)
 
     fake_hub.monkeypatch.setattr(fake_hub.hf, "snapshot_download", stalled_snapshot)
@@ -162,7 +236,7 @@ def test_total_size_ignores_files_outside_allow_patterns(monkeypatch, fake_hub, 
 
     fake_hub.monkeypatch.setattr(
         fake_hub.hf, "snapshot_download",
-        _make_fake_snapshot(fake_hub.blobs, steps_mb=[1530], step_delay=0.3),
+        _make_fake_snapshot(fake_hub, steps_mb=[1530], step_delay=0.3),
     )
     # model_info carries a 5 MB README.md which does not match the patterns
     import huggingface_hub
@@ -214,7 +288,7 @@ def test_progress_lines_survive_a_console_that_cannot_print_unicode(monkeypatch,
     monkeypatch.setattr(hf_download, "print", cp1252_print, raising=False)
     fake_hub.monkeypatch.setattr(
         fake_hub.hf, "snapshot_download",
-        _make_fake_snapshot(fake_hub.blobs, steps_mb=[400, 900], step_delay=0.2),
+        _make_fake_snapshot(fake_hub, steps_mb=[400, 900], step_delay=0.2),
     )
 
     result = hf_download.download_snapshot_with_progress(
