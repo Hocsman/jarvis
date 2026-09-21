@@ -349,3 +349,34 @@ def test_other_oserrors_do_not_retry(monkeypatch, fake_hub):
         hf_download.download_snapshot_with_progress(
             REPO, PATTERNS, "Whisper 'medium.en'", poll_interval_sec=0.05,
         )
+
+
+@pytest.mark.unit
+def test_progress_never_dips_when_completed_files_leave_the_blobs_dir(monkeypatch, fake_hub, capsys):
+    """On no-symlink systems huggingface_hub MOVES finished files out of
+    blobs, shrinking the watched directory mid-download: the displayed
+    progress must stay monotonic."""
+    from jarvis.utils.hf_download import download_snapshot_with_progress
+
+    def shrinking_snapshot(repo_id, allow_patterns=None, **kwargs):
+        target = fake_hub.blobs / "big.incomplete"
+        fake_hub.blobs.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"\0" * (900 * 1024 * 1024))
+        time.sleep(0.2)
+        # huggingface_hub moves a completed file out: the directory shrinks
+        target.write_bytes(b"\0" * (300 * 1024 * 1024))
+        time.sleep(0.2)
+        target.write_bytes(b"\0" * (1000 * 1024 * 1024))
+        time.sleep(0.2)
+        return str(fake_hub.blobs.parent)
+
+    fake_hub.monkeypatch.setattr(fake_hub.hf, "snapshot_download", shrinking_snapshot)
+
+    download_snapshot_with_progress(REPO, PATTERNS, "Whisper 'medium.en'",
+                                    poll_interval_sec=0.05)
+
+    lines = _progress_lines(capsys)
+    shown = [int(m.group(1)) for line in lines
+             for m in [re.search(r"(\d+)/1530 MB", line)] if m]
+    assert shown, "expected progress lines"
+    assert shown == sorted(shown), f"progress dipped: {shown}"
