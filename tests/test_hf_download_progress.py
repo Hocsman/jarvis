@@ -228,6 +228,11 @@ def test_symlink_privilege_error_retries_with_copies(monkeypatch, fake_hub, caps
     import jarvis.utils.hf_download as hf_download
     import huggingface_hub.file_download as fd
 
+    # The fix writes into huggingface_hub's process-global probe cache;
+    # snapshot and restore it so the rest of the session is unaffected.
+    probe_cache = dict(fd._are_symlinks_supported_in_dir)
+    monkeypatch.setattr(fd, "_are_symlinks_supported_in_dir", probe_cache)
+
     attempts = []
 
     def flaky_snapshot(repo_id, allow_patterns=None, **kwargs):
