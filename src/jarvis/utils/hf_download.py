@@ -25,6 +25,16 @@ from ..debug import debug_log
 _MB = 1024 * 1024
 
 
+def _emit(line: str) -> None:
+    """Print a progress line, degrading to ASCII on consoles that cannot
+    encode the emoji (the daemon forces UTF-8, but this helper must never
+    crash a download on a misconfigured console)."""
+    try:
+        print(line, flush=True)
+    except UnicodeEncodeError:
+        print(line.encode("ascii", "replace").decode("ascii"), flush=True)
+
+
 def _blobs_dir(repo_id: str) -> Path:
     return (Path(huggingface_hub.constants.HF_HUB_CACHE)
             / f"models--{repo_id.replace('/', '--')}" / "blobs")
@@ -77,11 +87,32 @@ def download_snapshot_with_progress(
 
     result: dict = {}
 
-    def _run() -> None:
+    def _snapshot() -> str:
         try:
-            result["path"] = huggingface_hub.snapshot_download(
+            return huggingface_hub.snapshot_download(
                 repo_id, allow_patterns=allow_patterns,
             )
+        except OSError as e:
+            # WinError 1314 (privilege not held) can escape huggingface_hub's
+            # symlink support probe on Windows and kills a fully downloaded
+            # snapshot at the pointer-creation step. Force the copy fallback
+            # and retry once; any other OSError propagates untouched.
+            if getattr(e, "winerror", None) != 1314:
+                raise
+            import huggingface_hub.file_download as fd
+            repo_cache = Path(huggingface_hub.constants.HF_HUB_CACHE) / f"models--{repo_id.replace('/', '--')}"
+            fd._are_symlinks_supported_in_dir[str(repo_cache.expanduser().resolve())] = False
+            for key in list(fd._are_symlinks_supported_in_dir):
+                fd._are_symlinks_supported_in_dir[key] = False
+            _emit("  ⚠️  Windows denied symlink creation; storing plain file copies instead")
+            debug_log(f"symlink creation failed (WinError 1314), retrying {repo_id} with copies", "voice")
+            return huggingface_hub.snapshot_download(
+                repo_id, allow_patterns=allow_patterns,
+            )
+
+    def _run() -> None:
+        try:
+            result["path"] = _snapshot()
         except BaseException as e:  # re-raised on the caller thread below
             result["error"] = e
 
@@ -103,18 +134,18 @@ def download_snapshot_with_progress(
             done_mb = current / _MB
             if total_bytes:
                 total_mb = total_bytes / _MB
-                print(f"  ⬇️ Downloading {description} · {min(done_mb, total_mb):.0f}/{total_mb:.0f} MB "
-                      f"· {rate_mb_s:.1f} MB/s", flush=True)
+                _emit(f"  ⬇️ Downloading {description} · {min(done_mb, total_mb):.0f}/{total_mb:.0f} MB "
+                      f"· {rate_mb_s:.1f} MB/s")
             else:
-                print(f"  ⬇️ Downloading {description} · {done_mb:.0f} MB so far "
-                      f"· {rate_mb_s:.1f} MB/s", flush=True)
+                _emit(f"  ⬇️ Downloading {description} · {done_mb:.0f} MB so far "
+                      f"· {rate_mb_s:.1f} MB/s")
             last_bytes = current
             last_moved_at = now
             last_print_at = now
             stall_announced = False
         elif not stall_announced and now - last_moved_at >= stall_after_sec and current > 0:
-            print(f"  ⬇️ Still downloading {description} (no data for "
-                  f"{int(now - last_moved_at)}s)...", flush=True)
+            _emit(f"  ⬇️ Still downloading {description} (no data for "
+                  f"{int(now - last_moved_at)}s)...")
             stall_announced = True
 
     worker.join()

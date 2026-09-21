@@ -191,3 +191,78 @@ def test_returns_snapshot_path(monkeypatch, fake_hub):
     result = download_snapshot_with_progress(REPO, PATTERNS, "Whisper 'medium.en'",
                                              poll_interval_sec=0.05)
     assert result == "/snap/shot/path"
+
+
+@pytest.mark.unit
+def test_progress_lines_survive_a_console_that_cannot_print_unicode(monkeypatch, fake_hub):
+    """Windows consoles without the UTF-8 forcing raise UnicodeEncodeError on
+    the emoji; the download must degrade to ASCII lines, never crash."""
+    import jarvis.utils.hf_download as hf_download
+
+    printed = []
+
+    def cp1252_print(*args, **kwargs):
+        text = " ".join(str(a) for a in args)
+        if any(ord(c) > 127 for c in text):
+            raise UnicodeEncodeError("charmap", text, 0, 1, "character maps to <undefined>")
+        printed.append(text)
+
+    monkeypatch.setattr(hf_download, "print", cp1252_print, raising=False)
+    fake_hub.monkeypatch.setattr(
+        fake_hub.hf, "snapshot_download",
+        _make_fake_snapshot(fake_hub.blobs, steps_mb=[400, 900], step_delay=0.2),
+    )
+
+    result = hf_download.download_snapshot_with_progress(
+        REPO, PATTERNS, "Whisper 'medium.en'", poll_interval_sec=0.05,
+    )
+
+    assert result  # no exception escaped
+    assert any("Downloading" in line and "MB/s" in line for line in printed), printed
+
+
+@pytest.mark.unit
+def test_symlink_privilege_error_retries_with_copies(monkeypatch, fake_hub, capsys):
+    """WinError 1314 (no symlink privilege) must not kill a completed download:
+    force huggingface_hub's copy fallback and retry once. Upstream issue #636."""
+    import jarvis.utils.hf_download as hf_download
+    import huggingface_hub.file_download as fd
+
+    attempts = []
+
+    def flaky_snapshot(repo_id, allow_patterns=None, **kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            err = OSError("A required privilege is not held by the client")
+            err.winerror = 1314
+            raise err
+        return "/snap/shot/path"
+
+    fake_hub.monkeypatch.setattr(fake_hub.hf, "snapshot_download", flaky_snapshot)
+
+    result = hf_download.download_snapshot_with_progress(
+        REPO, PATTERNS, "Whisper 'medium.en'", poll_interval_sec=0.05,
+    )
+
+    assert result == "/snap/shot/path"
+    assert len(attempts) == 2
+    # The probe cache is forced to "unsupported" so the retry copies files
+    assert fd._are_symlinks_supported_in_dir
+    assert all(v is False for v in fd._are_symlinks_supported_in_dir.values())
+
+
+@pytest.mark.unit
+def test_other_oserrors_do_not_retry(monkeypatch, fake_hub):
+    import jarvis.utils.hf_download as hf_download
+
+    def disk_full(repo_id, allow_patterns=None, **kwargs):
+        err = OSError("No space left on device")
+        err.winerror = 112
+        raise err
+
+    fake_hub.monkeypatch.setattr(fake_hub.hf, "snapshot_download", disk_full)
+
+    with pytest.raises(OSError, match="No space"):
+        hf_download.download_snapshot_with_progress(
+            REPO, PATTERNS, "Whisper 'medium.en'", poll_interval_sec=0.05,
+        )
