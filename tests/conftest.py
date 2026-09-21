@@ -169,14 +169,15 @@ def _isolate_dictation_history(_bac_a_sable, request, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _isolate_memory_core(_bac_a_sable, request, monkeypatch):
-    """Keep the core of a database with no path of its own out of the working directory.
+    """Keep the core of a database with no absolute path out of the working directory.
 
     ``MemoryCore.for_config`` places the core beside the database. The test
-    config's database is ``:memory:``, whose parent is ``.``, so the core
-    resolved against whichever directory the suite ran from, the repository
-    root included, where ``git add -A`` would publish it. A database with no
+    configurations use ``:memory:``, whose parent is ``.``, so the core would
+    resolve against whichever directory a run starts from, the repository root
+    included, where ``git add -A`` would publish it. A database with no
     absolute path gets its core in the sandbox, one per test. An absolute path
-    keeps the real resolution, so the tests that exercise it still do.
+    keeps the real resolution, so the tests that exercise it exercise the real
+    code.
     """
     coeur = _bac_a_sable / f"core-{abs(hash(request.node.nodeid)):x}"
 

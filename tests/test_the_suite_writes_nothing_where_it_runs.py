@@ -17,25 +17,33 @@ import pytest
 # The suite imports modules under both names, and they are distinct objects.
 MODULES = ("jarvis.memory.core", "src.jarvis.memory.core")
 
+DEPOT = Path(__file__).resolve().parent.parent
 
-def _hors_du_repertoire_courant(chemin: Path) -> bool:
-    ici = Path.cwd().resolve()
+
+def _hors_du_depot(chemin: Path) -> bool:
+    """Outside the repository, which is what ``git add -A`` would publish.
+
+    Compared with the repository rather than the working directory: the
+    sandbox sits under the system temp folder, inside the user profile, so a
+    run started from the profile would see the sandbox beneath its working
+    directory while nothing reached the repository at all.
+    """
     cible = chemin.resolve()
-    return cible != ici and ici not in cible.parents
+    return cible != DEPOT and DEPOT not in cible.parents
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("module", MODULES)
-def test_the_test_config_keeps_its_core_out_of_the_working_directory(module, mock_config):
+def test_the_test_config_keeps_its_core_out_of_the_repository(module, mock_config):
     core = importlib.import_module(module).MemoryCore.for_config(mock_config)
 
     assert core.directory.is_absolute(), core.directory
-    assert _hors_du_repertoire_courant(core.directory), core.directory
+    assert _hors_du_depot(core.directory), core.directory
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("module", MODULES)
-def test_what_a_test_remembers_is_written_outside_the_working_directory(module, mock_config):
+def test_what_a_test_remembers_is_written_outside_the_repository(module, mock_config):
     """The directory is not enough: the file actually written is what leaks."""
     noyau = importlib.import_module(module)
     core = noyau.MemoryCore.for_config(mock_config)
@@ -44,4 +52,4 @@ def test_what_a_test_remembers_is_written_outside_the_working_directory(module, 
     fichier = core.path_for(noyau.SECTION_PROFILE)
 
     assert fichier.exists(), fichier
-    assert _hors_du_repertoire_courant(fichier), fichier
+    assert _hors_du_depot(fichier), fichier
