@@ -44,13 +44,15 @@ def _blobs_size_bytes(repo_id: str) -> int:
     return total
 
 
-def _expected_total_bytes(repo_id: str, allow_patterns: List[str]) -> Optional[int]:
+def _expected_total_bytes(repo_id: str, allow_patterns: Optional[List[str]]) -> Optional[int]:
     """Best-effort total size of the files snapshot_download will fetch."""
     try:
         info = huggingface_hub.HfApi().model_info(repo_id, files_metadata=True)
         total = 0
         for sibling in info.siblings or []:
-            if any(fnmatch.fnmatch(sibling.rfilename, pat) for pat in allow_patterns):
+            if allow_patterns is None or any(
+                fnmatch.fnmatch(sibling.rfilename, pat) for pat in allow_patterns
+            ):
                 total += sibling.size or 0
         return total or None
     except Exception as e:
@@ -60,7 +62,7 @@ def _expected_total_bytes(repo_id: str, allow_patterns: List[str]) -> Optional[i
 
 def download_snapshot_with_progress(
     repo_id: str,
-    allow_patterns: List[str],
+    allow_patterns: Optional[List[str]],
     description: str,
     *,
     poll_interval_sec: float = 5.0,

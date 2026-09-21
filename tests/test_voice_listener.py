@@ -1860,3 +1860,58 @@ class TestWeatherBannerExample:
 
         listener2 = self._make_listener(location_enabled=False)
         assert "Helix?" in listener2._weather_example("Helix")
+
+
+class TestWhisperDownloadProgressWiring:
+    """The listener pre-downloads the model snapshot with visible progress
+    before WhisperModel runs, so a 1.5 GB download is no longer silent."""
+
+    def _run_listener_once(self, mock_cfg, whisper_side_effect=None):
+        mock_whisper_model = MagicMock()
+        with patch("jarvis.listening.listener.sys") as mock_sys:
+            mock_sys.platform = "linux"
+            with patch("jarvis.listening.listener.FASTER_WHISPER_AVAILABLE", True):
+                with patch("jarvis.listening.listener.MLX_WHISPER_AVAILABLE", False):
+                    with patch("jarvis.listening.listener.WhisperModel",
+                               side_effect=whisper_side_effect or (lambda *a, **k: mock_whisper_model)) as mock_class:
+                        with patch("jarvis.listening.listener.sd") as mock_sd:
+                            mock_sd.query_devices.return_value = [{"name": "Test Mic", "max_input_channels": 1}]
+                            mock_sd.InputStream.side_effect = Exception("Stop test here")
+
+                            from jarvis.listening.listener import VoiceListener
+                            listener = VoiceListener(MagicMock(), mock_cfg, MagicMock(), MagicMock())
+                            listener.run()
+        return listener, mock_class
+
+    def test_predownload_runs_before_whisper_model_with_repo(self):
+        order = []
+
+        def fake_download(repo_id, allow_patterns=None, description=None, **kwargs):
+            order.append(("download", repo_id))
+            return "/snap/path"
+
+        def fake_model(model_name, *args, **kwargs):
+            order.append(("model", model_name))
+            return MagicMock()
+
+        mock_cfg = _create_mock_config(whisper_model="medium")
+        with patch("jarvis.utils.hf_download.download_snapshot_with_progress",
+                   side_effect=fake_download) as mock_dl:
+            listener, mock_class = self._run_listener_once(mock_cfg, whisper_side_effect=fake_model)
+
+        mock_dl.assert_called_once()
+        repo_id = mock_dl.call_args[0][0]
+        assert repo_id == "Systran/faster-whisper-medium"
+        # WhisperModel still receives the model NAME, not a local path
+        assert mock_class.call_args[0][0] == "medium"
+        # Download happens before the model constructor
+        assert order[0][0] == "download" and order[1][0] == "model"
+
+    def test_predownload_failure_does_not_block_model_load(self):
+        mock_cfg = _create_mock_config(whisper_model="medium")
+        with patch("jarvis.utils.hf_download.download_snapshot_with_progress",
+                   side_effect=ConnectionError("offline")):
+            listener, mock_class = self._run_listener_once(mock_cfg)
+
+        assert mock_class.call_count >= 1
+        assert listener.model is not None

@@ -376,6 +376,44 @@ def _get_mlx_model_repo(model_name: str) -> str:
     return model_map.get(model_name, f"mlx-community/whisper-{model_name}-mlx")
 
 
+# faster-whisper fetches exactly these files (faster_whisper/utils.py).
+_WHISPER_ALLOW_PATTERNS = [
+    "config.json", "preprocessor_config.json", "model.bin", "tokenizer.json", "vocabulary.*",
+]
+
+
+def _predownload_whisper_snapshot(model_name: str) -> None:
+    """Best-effort visible download of the faster-whisper snapshot.
+
+    faster-whisper silences huggingface_hub's progress bars, and the desktop
+    app never shows a TTY, so a multi-GB first-run download used to print
+    nothing for minutes. This surfaces progress. Failures are deliberately
+    swallowed: WhisperModel's own cache/429/offline paths handle them.
+    """
+    try:
+        from faster_whisper.utils import _MODELS as fw_models
+        repo_id = fw_models.get(model_name, f"Systran/faster-whisper-{model_name}")
+    except Exception:
+        repo_id = f"Systran/faster-whisper-{model_name}"
+    try:
+        from ..utils.hf_download import download_snapshot_with_progress
+        download_snapshot_with_progress(
+            repo_id, _WHISPER_ALLOW_PATTERNS, f"Whisper '{model_name}'",
+        )
+    except Exception as e:
+        debug_log(f"Whisper pre-download incomplete, WhisperModel takes over: {e}", "voice")
+
+
+def _predownload_mlx_snapshot(model_name: str, repo_id: str) -> None:
+    """Same visible download for the MLX path, which downloads inside
+    mlx_whisper.transcribe with the same silence problem."""
+    try:
+        from ..utils.hf_download import download_snapshot_with_progress
+        download_snapshot_with_progress(repo_id, None, f"MLX Whisper '{model_name}'")
+    except Exception as e:
+        debug_log(f"MLX Whisper pre-download incomplete, transcribe takes over: {e}", "voice")
+
+
 def _clear_corrupted_whisper_cache(error_message: str) -> bool:
     """Clear a corrupted Whisper model cache directory.
 
@@ -2176,6 +2214,7 @@ class VoiceListener(threading.Thread):
                     # silent audio trips the no-speech short-circuit and leaves the decode
                     # path cold, so the first real utterance still pays the full cost.
                     if np is not None:
+                        _predownload_mlx_snapshot(model_name, self._mlx_model_repo)
                         rng = np.random.default_rng(0)
                         warmup_audio = rng.standard_normal(self._samplerate).astype(np.float32) * 0.01
                         _ = mlx_whisper.transcribe(
@@ -2251,6 +2290,7 @@ class VoiceListener(threading.Thread):
                 try:
                     cpu_threads = (os.cpu_count() or 4) if try_device in ("cpu", "auto") else 0
                     print(f"     🎤 Loading Whisper '{model_name}' (device={try_device}, compute={try_compute})...", flush=True)
+                    _predownload_whisper_snapshot(model_name)
                     self.model = WhisperModel(
                         model_name, device=try_device, compute_type=try_compute,
                         cpu_threads=cpu_threads,
@@ -2291,6 +2331,7 @@ class VoiceListener(threading.Thread):
                         if cache_cleared:
                             try:
                                 print(f"     🎤 Re-downloading Whisper '{model_name}'...", flush=True)
+                                _predownload_whisper_snapshot(model_name)
                                 self.model = WhisperModel(
                                     model_name, device=try_device, compute_type=try_compute,
                                     cpu_threads=cpu_threads,
@@ -2330,6 +2371,7 @@ class VoiceListener(threading.Thread):
                             print(f"  ⏳ Rate limited by HuggingFace, retrying in {wait}s ({retry_num}/{_max_retries})...", flush=True)
                             time.sleep(wait)
                             try:
+                                _predownload_whisper_snapshot(model_name)
                                 self.model = WhisperModel(
                                     model_name, device=try_device, compute_type=try_compute,
                                     cpu_threads=cpu_threads,

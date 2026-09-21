@@ -457,6 +457,10 @@ When components are unavailable, the system degrades gracefully:
 
 Whisper model loading handles transient download failures automatically:
 
+### Visible Progress and Resume
+
+Before `WhisperModel` (faster-whisper) or the first MLX `transcribe` call runs, the listener pre-downloads the model's HuggingFace snapshot with `download_snapshot_with_progress` (`jarvis/utils/hf_download.py`). faster-whisper silences huggingface_hub's progress bars and the daemon never has a TTY, so without this a multi-GB first-run download printed nothing. The helper watches the repo's `blobs` cache directory and prints a throttled `⬇️ Downloading … X/Y MB · rate` line (or `X MB so far` when the total size cannot be learned), plus a "still downloading" line if the transfer stalls. A warm cache prints nothing. Pre-download failures never block loading: `WhisperModel`'s own offline/cache paths take over. Resume on interruption is huggingface_hub's `.incomplete` + HTTP `Range` mechanism, so a killed download continues where it stopped.
+
 ### Corrupted Cache Recovery
 
 If the HuggingFace model cache is corrupted (e.g. from an interrupted download), the system detects the CTranslate2 "unable to open file" error, deletes the parent `models--` cache directory, and retries the download once. If the retry also fails, a message guides the user to manually delete the cache.

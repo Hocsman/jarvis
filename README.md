@@ -608,6 +608,8 @@ Get API key at [composio.dev](https://composio.dev)
 
 **First startup takes a bit** - Jarvis pre-warms the Whisper, chat, and intent-judge models before announcing "Listening!" so the first engagement feels instant. This adds a few seconds on cold start and is bounded at 60 s. If Ollama is slow, Jarvis will start listening anyway and load the models on demand. Enable **Low Power Mode** in Settings to skip LLM startup warmup.
 
+**First startup downloads the speech model** - On the very first launch Jarvis downloads the Whisper model (up to ~1.5 GB depending on the chosen size) and shows progress lines (`⬇️ Downloading … X/Y MB · rate`) in the log. A slow connection keeps printing progress as long as data flows. An interrupted download resumes where it stopped on the next launch.
+
 **Jarvis doesn't hear me** - Check microphone permissions, speak clearly after "Jarvis"
 
 **Not sure what is running** - Open the tray menu and click **🩺 Runtime Status**. It shows whether Jarvis is listening, whether Low Power Mode is active, whether Ollama is needed/running, which models are configured, and how many MCP servers are enabled.
