@@ -232,17 +232,32 @@ def _isolate_hugging_face_hub(_bac_a_sable, request, monkeypatch):
     process a test spawns). Its HTTP sessions settle their offline mode when
     they are built and are kept per thread, so they are dropped on the way in
     and on the way out.
+
+    The developer's credentials stay out of reach the same way. huggingface_hub
+    reads a token from ``HF_TOKEN`` first, then from the token file under its
+    home, whenever it builds a request, so the variables are cleared and the
+    token file and stored tokens move into the sandbox with the cache. A token
+    belongs to the person who logged in, and the suite runs anonymous.
     """
-    cache = _bac_a_sable / "huggingface" / "hub"
+    home = _bac_a_sable / "huggingface"
+    cache = home / "hub"
+    token = home / "token"
+    monkeypatch.setenv("HF_HOME", str(home))
     monkeypatch.setenv("HF_HUB_CACHE", str(cache))
+    monkeypatch.setenv("HF_TOKEN_PATH", str(token))
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
     try:
         import huggingface_hub.constants
     except ImportError:
         # No huggingface_hub, so no Hub client and no helper to stand in for.
         yield
         return
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HOME", str(home))
     monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_CACHE", str(cache))
+    monkeypatch.setattr(huggingface_hub.constants, "HF_TOKEN_PATH", str(token))
+    monkeypatch.setattr(huggingface_hub.constants, "HF_STORED_TOKENS_PATH", str(home / "stored_tokens"))
     monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_OFFLINE", True)
 
     if request.node.get_closest_marker("real_download_helper") is None:

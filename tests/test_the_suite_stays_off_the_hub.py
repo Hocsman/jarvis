@@ -9,8 +9,10 @@ to that.
 
 The tripwire refuses every name lookup and connection to a host other than
 this machine while it is armed, and records every open, listing and write
-that lands in a Hub repository folder (``models--<org>--<name>``). The session
-sandbox is the only place such a folder may be touched.
+that lands in a Hub repository folder (``models--<org>--<name>``) or on a
+Hugging Face credential file (``token``, ``stored_tokens``). The session
+sandbox is the only place either may be touched: a developer's token belongs
+to them, and the suite runs anonymous.
 """
 
 import os
@@ -30,6 +32,7 @@ _FILE_EVENTS = {
     "shutil.copyfile", "shutil.move",
 }
 _LOOPBACK = {None, "", b"", "localhost", b"localhost", "::1", b"::1"}
+_CREDENTIAL_NAMES = {"token", "stored_tokens"}
 
 _armed: list = []
 _hook_installed = False
@@ -39,6 +42,7 @@ class _Tripwire:
     def __init__(self):
         self.network: list = []
         self.repo_folders: list = []
+        self.credentials: list = []
 
 
 def _is_loopback(host) -> bool:
@@ -66,6 +70,8 @@ def _audit(event, args):
                 path = os.fsdecode(arg)
                 if "models--" in path:
                     wire.repo_folders.append((event, path))
+                elif os.path.basename(path.rstrip("\\/")) in _CREDENTIAL_NAMES:
+                    wire.credentials.append((event, path))
 
 
 @pytest.fixture
@@ -125,17 +131,21 @@ def _hub_session_built_before_the_test():
 
 @pytest.mark.unit
 def test_a_hub_request_is_refused_before_it_leaves_the_machine(
-    _hub_session_built_before_the_test, tripwire,
+    _hub_session_built_before_the_test, tripwire, tmp_path_factory,
 ):
     """Any code path that asks the Hub directly, past the listener's own
     fetch, is refused offline, even on a thread that talked to the Hub
-    before the test began."""
+    before the test began, and reads none of the developer's credentials
+    while it builds the request."""
     import huggingface_hub
 
     with pytest.raises(Exception):
         huggingface_hub.HfApi().model_info("jarvis-tests/never-published")
 
     assert tripwire.network == [], f"the request reached for the network: {tripwire.network}"
+    assert _outside(tripwire.credentials, tmp_path_factory.getbasetemp()) == [], (
+        f"the request read a Hugging Face credential outside the sandbox: {tripwire.credentials}"
+    )
 
 
 @pytest.mark.unit
