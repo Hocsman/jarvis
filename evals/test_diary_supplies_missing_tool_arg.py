@@ -1,15 +1,47 @@
 """
-End-to-end eval — single-turn flow where the user's location lives only
-in the diary from a past conversation. The planner must emit
-``searchMemory``, the diary must surface "Manchester", and ``getWeather``
-must then be invoked with ``location='Manchester'``.
+End-to-end eval: single-turn flow where the user's home city lives only
+in the diary from a past conversation. The diary must surface
+"Manchester", and the composed ``webSearch`` query must carry it.
+
+The behaviour under test: when a tool argument is missing from the user's
+utterance, the diary supplies it. The query is a personalised
+recommendation ("for me"), which the planner's contract routes through
+``searchMemory`` (planner.py rule 2), and the tool whose argument has to
+carry the recalled city is ``webSearch``. The weather tool cannot play this
+role — its contract (src/jarvis/tools/builtin/weather.py) instructs the
+model to call it with empty args and let the tool auto-derive the
+location, so a diary-supplied city would never appear in its arguments.
 
 This stresses the diary-recall path. It complements the carry-over
 guard's hot-window path (covered by
 ``evals/test_followup_supplies_missing_tool_arg.py``) by exercising the
 slower long-term-memory path: the user said "I live in Manchester" days
-ago, the conversation has lapsed, and now the user asks "how's the
-weather, Jarvis?" with no live geoip and nothing in the hot window.
+ago, the conversation has lapsed, and now the user asks for a restaurant
+with no live geoip and nothing in the hot window.
+
+The planner is pinned to the plan its contract gives this query when
+``webSearch`` is routed: the ``searchMemory`` directive first (rule 2), a
+``webSearch`` step with a concrete argument (rule 4), then the synthesis
+step (rule 8). The pin makes the diary pass deterministic; whether the
+planner emits the directive for a personalised query is guarded on its
+own by ``evals/test_planner_personalisation.py``. The step carries no
+city, because the planner runs before memory and never sees it. It uses
+the ``query=`` key the planner's own examples teach rather than the
+tool's ``search_query``, so the step resolver turns it into a call with a
+model round-trip, as in production, not through its deterministic fast
+path.
+
+Once the engine strips the directive, the plan still holds a tool step,
+which keeps two branches live. The ACTION PLAN block reaches the system
+prompt on every tier, and on small models plan-driven direct-exec
+resolves the ``webSearch`` call from the step text, the prior tool
+results and the tool schema before the chat model runs. The memory digest
+is not among those inputs, so on that path the diary city has no way into
+the argument: that is the gap this eval exists to catch. Routing runs
+before the planner and stays live (the pinned step also puts
+``webSearch`` in the allow-list), as does everything after the planner:
+keyword extraction, diary search, digest, the step resolver and the chat
+loop.
 
 Memory-recall reliability on small models is itself an open failure
 mode separate from the tool carry-over guard. If gemma4:e2b consistently
@@ -37,16 +69,16 @@ from helpers import (
 _DIARY_MANCHESTER = [
     (
         "2026-04-26",
-        "The user mentioned they live in Manchester and prefer celsius "
-        "for weather queries.",
+        "The user mentioned they live in Manchester and have been trying "
+        "new vegetarian restaurants around the Northern Quarter.",
     ),
 ]
 
 
-_MANCHESTER_FORECAST = (
-    "Weather for Manchester, UK:\n"
-    "Today: 12°C, overcast. High 14°C, low 8°C.\n"
-    "Tomorrow: 13°C, light rain, high 15°C, low 9°C."
+_MANCHESTER_RESTAURANTS = (
+    "Top result: Bundobust, Manchester — vegetarian Indian street food in "
+    "the city centre, highly rated. Also listed: Dishoom Manchester and "
+    "The Allotment Vegan Eatery, both well reviewed."
 )
 
 
@@ -55,19 +87,10 @@ def _make_runner(capture: ToolCallCapture):
 
     def _runner(db, cfg, tool_name, tool_args, **kwargs):
         capture.record(tool_name, tool_args or {})
-        if tool_name == "getWeather":
-            location = ((tool_args or {}).get("location") or "").strip()
-            if not location:
-                return ToolExecutionResult(
-                    success=False,
-                    reply_text=(
-                        "I couldn't auto-detect your location. Please "
-                        "tell me which city to check the weather for."
-                    ),
-                )
+        if tool_name == "webSearch":
             return ToolExecutionResult(
                 success=True,
-                reply_text=_MANCHESTER_FORECAST,
+                reply_text=_MANCHESTER_RESTAURANTS,
             )
         return ToolExecutionResult(success=True, reply_text="OK")
 
@@ -77,11 +100,11 @@ def _make_runner(capture: ToolCallCapture):
 @pytest.mark.eval
 @requires_judge_llm
 class TestDiarySuppliesMissingToolArg:
-    """Diary-recall path: location surfaced from a prior conversation
-    grounds the getWeather call without needing the hot window or
-    explicit user re-statement."""
+    """Diary-recall path: the user's home city, surfaced from a prior
+    conversation, grounds the composed webSearch query without the hot
+    window or an explicit re-statement."""
 
-    def test_diary_location_grounds_get_weather_call(
+    def test_diary_location_grounds_restaurant_search(
         self, mock_config, eval_db, eval_dialogue_memory,
     ):
         from jarvis.reply.engine import run_reply_engine
@@ -97,13 +120,28 @@ class TestDiarySuppliesMissingToolArg:
 
         capture = ToolCallCapture()
 
+        # Pin the plan the planner's contract gives this query: memory
+        # first, then a webSearch step written without memory (the planner
+        # never sees it), then the reply. The tool step keeps the ACTION
+        # PLAN block and, on small models, plan-driven direct-exec live,
+        # so the webSearch argument is composed on the path production
+        # takes. That composition is the behaviour under test.
+        forced_plan = [
+            "searchMemory topic='user home city and dining preferences'",
+            "webSearch query='good restaurants tonight'",
+            "Reply to the user with the combined findings.",
+        ]
+
         with patch(
+            "jarvis.reply.engine.plan_query",
+            return_value=forced_plan,
+        ), patch(
             "jarvis.reply.engine.run_tool_with_retries",
             side_effect=_make_runner(capture),
         ):
             response = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
-                text="how's the weather, Jarvis?",
+                text="know any good restaurants for me tonight?",
                 dialogue_memory=eval_dialogue_memory,
             )
 
@@ -117,16 +155,16 @@ class TestDiarySuppliesMissingToolArg:
 
         # The reply must actually use the recalled location, both at the
         # tool call layer and in the user-facing reply.
-        weather_calls = [c for c in capture.calls if c["name"] == "getWeather"]
+        search_calls = [c for c in capture.calls if c["name"] == "webSearch"]
         manchester_calls = [
-            c for c in weather_calls
-            if "manchester" in (c["args"].get("location") or "").lower()
+            c for c in search_calls
+            if "manchester" in (c["args"].get("search_query") or "").lower()
         ]
         assert manchester_calls, (
-            "getWeather was not invoked with location='Manchester' even "
-            "though the diary contains the user's stated location. The "
-            "memory enrichment → tool argument grounding path is broken. "
-            f"All getWeather calls: {[c['args'] for c in weather_calls]}. "
+            "webSearch was not composed with Manchester even though the "
+            "diary contains the user's stated home city. The memory "
+            "enrichment → tool argument grounding path is broken. "
+            f"All webSearch calls: {[c['args'] for c in search_calls]}. "
             f"Tools observed: {capture.tool_names()}. "
             f"Response: {(response or '')[:400]}"
         )
