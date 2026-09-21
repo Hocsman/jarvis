@@ -22,3 +22,7 @@ qt.conf
 
 # Auto-generated version file (created at build time)
 src/jarvis/_version.py
+
+# The memory core belongs to the user's data directory, never to the
+# repository: a copy here can only have come from a leak, and must not ship.
+/yuba/
