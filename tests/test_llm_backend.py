@@ -274,6 +274,62 @@ class TestOllamaBackendWarmUp:
         assert sent["keep_alive"] == "1m"
 
 
+class TestOllamaBackendPromptCaching:
+    """Every Ollama chat payload must explicitly request prompt caching so
+    the server keeps the KV state of the request and reuses it when the
+    next request starts with the same prefix."""
+
+    @patch("jarvis.llm.requests.post")
+    def test_chat_payload_requests_prompt_caching(self, mock_post):
+        from jarvis.llm import OllamaBackend
+
+        mock_post.return_value = _make_response(json_data={"message": {"content": "ok"}})
+        backend = OllamaBackend("http://localhost:11434")
+
+        backend.chat("any", [{"role": "user", "content": "hi"}])
+
+        sent = mock_post.call_args.kwargs["json"]
+        assert sent["cache_prompt"] is True
+
+    @patch("jarvis.llm.requests.post")
+    def test_direct_payload_requests_prompt_caching(self, mock_post):
+        from jarvis.llm import OllamaBackend
+
+        mock_post.return_value = _make_response(json_data={"message": {"content": "ok"}})
+        backend = OllamaBackend("http://localhost:11434")
+
+        backend.direct("gemma4:e2b", "sys", "user")
+
+        sent = mock_post.call_args.kwargs["json"]
+        assert sent["cache_prompt"] is True
+
+    @patch("jarvis.llm.requests.post")
+    def test_streaming_payload_requests_prompt_caching(self, mock_post):
+        from jarvis.llm import OllamaBackend
+
+        mock_post.return_value = _make_response(
+            iter_lines=[b'{"message": {"content": "hi"}}']
+        )
+        backend = OllamaBackend("http://localhost:11434")
+
+        backend.streaming("gemma4:e2b", "sys", "user")
+
+        sent = mock_post.call_args.kwargs["json"]
+        assert sent["cache_prompt"] is True
+
+    @patch("jarvis.llm.requests.post")
+    def test_chat_payload_allows_overriding_cache_prompt_in_extra_options(self, mock_post):
+        from jarvis.llm import OllamaBackend
+
+        mock_post.return_value = _make_response(json_data={"message": {"content": "ok"}})
+        backend = OllamaBackend("http://localhost:11434")
+
+        backend.chat("any", [{"role": "user", "content": "hi"}], extra_options={"cache_prompt": False})
+
+        sent = mock_post.call_args.kwargs["json"]
+        assert sent["cache_prompt"] is False
+
+
 # ---------------------------------------------------------------------------
 # OllamaBackend — direct edge cases
 # ---------------------------------------------------------------------------
@@ -510,3 +566,75 @@ class TestFunctionStyleEntryPoints:
         from jarvis.llm import extract_text_from_response
 
         assert extract_text_from_response({"message": {"content": "hi"}}) == "hi"
+
+
+class TestMessageSanitisation:
+    def test_strip_nonstandard_message_fields_strips_internal_keys(self):
+        from jarvis.llm.backend import strip_nonstandard_message_fields
+
+        raw_messages = [
+            {
+                "role": "system",
+                "content": "You are Jarvis.",
+                "_is_context_injected": True,
+                "_is_tool_guidance": False,
+            },
+            {
+                "role": "user",
+                "content": "Result",
+                "tool_name": "webSearch",
+                "tool_failed": False,
+            },
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "1", "type": "function", "function": {"name": "f"}}],
+                "_extra_meta": 123,
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "1",
+                "content": "done",
+                "name": "f",
+                "internal_flag": True,
+            },
+            {
+                "role": "developer",
+                "content": "test dev",
+                "custom_field": "preserved_for_unknown_role",
+            },
+        ]
+        sanitised = strip_nonstandard_message_fields(raw_messages)
+        assert sanitised[0] == {"role": "system", "content": "You are Jarvis."}
+        assert sanitised[1] == {"role": "user", "content": "Result"}
+        assert sanitised[2] == {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "1", "type": "function", "function": {"name": "f"}}],
+        }
+        assert sanitised[3] == {
+            "role": "tool",
+            "tool_call_id": "1",
+            "content": "done",
+        }
+        # Roles not in _ALLOWED_FIELDS_BY_ROLE are preserved as-is
+        assert sanitised[4] == {
+            "role": "developer",
+            "content": "test dev",
+            "custom_field": "preserved_for_unknown_role",
+        }
+
+    @patch("jarvis.llm.requests.post")
+    def test_ollama_chat_strips_internal_fields(self, mock_post):
+        from jarvis.llm import OllamaBackend
+
+        mock_post.return_value = _make_response(json_data={"message": {"content": "ok"}})
+        backend = OllamaBackend("http://localhost:11434")
+
+        backend.chat(
+            "any",
+            [{"role": "system", "content": "sys", "_is_context_injected": True}],
+        )
+
+        sent = mock_post.call_args.kwargs["json"]
+        assert sent["messages"] == [{"role": "system", "content": "sys"}]

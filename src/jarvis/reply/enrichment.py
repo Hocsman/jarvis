@@ -55,7 +55,7 @@ def extract_search_params_for_memory(query: str, cfg, chat_model: str,
         if context_hint and context_hint.strip():
             hint_block = (
                 "ALREADY IN CONTEXT (the assistant can already see this, so do NOT "
-                "generate questions whose answers are present here — those facts do not "
+                "generate questions whose answers are present here: those facts do not "
                 "need to be pulled from long-term memory):\n"
                 f"{context_hint.strip()}"
             )
@@ -70,10 +70,8 @@ Extract:
 2. TIME RANGE: If mentioned, convert to exact timestamps
 3. QUESTIONS: What implicit personal questions does this query need answered from stored knowledge about the user? These are things the assistant would need to know about the user to give a personalised answer. Omit if the query needs no personal context, OR if the answer is already visible in the ALREADY IN CONTEXT block below.
 
-{hint_block}
-
 Respond ONLY with JSON in this format:
-{{"keywords": ["keyword1", "keyword2"], "questions": ["what are the user's food preferences?"], "from": "2025-08-21T00:00:00Z", "to": "2025-08-21T23:59:59Z"}}
+{"keywords": ["keyword1", "keyword2"], "questions": ["what are the user's food preferences?"], "from": "2025-08-21T00:00:00Z", "to": "2025-08-21T23:59:59Z"}
 
 Rules:
 - keywords: content topics only (no time words like "yesterday", "today"). Include both specific terms and general category tags when applicable (e.g., for recipes or meal prep you could include "cooking" and "nutrition").
@@ -83,18 +81,21 @@ Rules:
 - omit from/to if no time mentioned
 
 Examples:
-"what did we discuss about the warhammer project?" → {{"keywords": ["warhammer", "project", "figures", "gaming", "tabletop"]}}
-"what did I eat yesterday?" → {{"keywords": ["eat", "food", "cooking", "nutrition"], "from": "2025-08-21T00:00:00Z", "to": "2025-08-21T23:59:59Z"}}
-"remember that password I mentioned today?" → {{"keywords": ["password", "accounts", "security", "credentials"], "from": "2025-08-22T00:00:00Z", "to": "2025-08-22T23:59:59Z"}}
-"what news might interest me?" → {{"keywords": ["interests", "hobbies", "preferences", "likes", "passionate"], "questions": ["what topics interest the user?", "what are the user's hobbies?"]}}
-"news of interest to me" / "news that would interest me" / "news interesting for me" / "recall my interests and search for news on them" → {{"keywords": ["interests", "hobbies", "preferences", "likes", "passionate"], "questions": ["what topics interest the user?", "what are the user's hobbies?"]}}
-"recommend a restaurant I'd enjoy" (no location in context) → {{"keywords": ["food preferences", "restaurants", "cuisine", "dining", "favorites"], "questions": ["what cuisine does the user like?", "where is the user located?"]}}
-"recommend a restaurant I'd enjoy" (location already in context) → {{"keywords": ["food preferences", "restaurants", "cuisine", "dining", "favorites"], "questions": ["what cuisine does the user like?"]}}
-"suggest a movie for me" → {{"keywords": ["movies", "films", "entertainment", "preferences", "genres"], "questions": ["what film genres does the user enjoy?", "what movies has the user watched recently?"]}}
-"what time is it?" → {{"keywords": []}}
+"what did we discuss about the warhammer project?" → {"keywords": ["warhammer", "project", "figures", "gaming", "tabletop"]}
+"what did I eat yesterday?" → {"keywords": ["eat", "food", "cooking", "nutrition"], "from": "2025-08-21T00:00:00Z", "to": "2025-08-21T23:59:59Z"}
+"remember that password I mentioned today?" → {"keywords": ["password", "accounts", "security", "credentials"], "from": "2025-08-22T00:00:00Z", "to": "2025-08-22T23:59:59Z"}
+"what news might interest me?" → {"keywords": ["interests", "hobbies", "preferences", "likes", "passionate"], "questions": ["what topics interest the user?", "what are the user's hobbies?"]}
+"news of interest to me" / "news that would interest me" / "news interesting for me" / "recall my interests and search for news on them" → {"keywords": ["interests", "hobbies", "preferences", "likes", "passionate"], "questions": ["what topics interest the user?", "what are the user's hobbies?"]}
+"recommend a restaurant I'd enjoy" (no location in context) → {"keywords": ["food preferences", "restaurants", "cuisine", "dining", "favorites"], "questions": ["what cuisine does the user like?", "where is the user located?"]}
+"recommend a restaurant I'd enjoy" (location already in context) → {"keywords": ["food preferences", "restaurants", "cuisine", "dining", "favorites"], "questions": ["what cuisine does the user like?"]}
+"suggest a movie for me" → {"keywords": ["movies", "films", "entertainment", "preferences", "genres"], "questions": ["what film genres does the user enjoy?", "what movies has the user watched recently?"]}
+"what time is it?" → {"keywords": []}
 """
 
-        formatted_prompt = system_prompt.format(hint_block=hint_block)
+        # Per-call data (the hint or the UTC anchor) rides in the user message
+        # so the system prompt above stays byte-static across calls: the
+        # server's KV/prefix cache can then reuse it for every extractor call.
+        user_content = f"Extract search parameters from: {query}\n\n{hint_block}"
 
         # Try up to 2 attempts
         attempts = 0
@@ -103,8 +104,8 @@ Examples:
             response = call_llm_direct(
                 cfg=cfg,
                 chat_model=chat_model,
-                system_prompt=formatted_prompt,
-                user_content=f"Extract search parameters from: {query}",
+                system_prompt=system_prompt,
+                user_content=user_content,
                 timeout_sec=timeout_sec,
                 thinking=thinking,
             )

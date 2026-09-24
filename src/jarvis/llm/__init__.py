@@ -28,7 +28,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import requests  # noqa: F401  — re-exported for test patching, see module docstring
 
-from .backend import LLMBackend, ToolsNotSupportedError
+from .backend import LLMBackend, ToolsNotSupportedError, strip_nonstandard_message_fields
 from .ollama import OllamaBackend, extract_text_from_response
 from .openai_compatible import OpenAICompatibleBackend
 from .factory import (
@@ -46,6 +46,7 @@ __all__ = [
     "OllamaBackend",
     "OpenAICompatibleBackend",
     "ToolsNotSupportedError",
+    "strip_nonstandard_message_fields",
     "get_llm_backend",
     "get_embedding_backend",
     "clear_backend_cache",

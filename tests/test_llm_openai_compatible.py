@@ -238,6 +238,31 @@ class TestOpenAICompatibleChat:
         assert result["message"]["content"] == "hello"
 
     @patch("requests.Session.post")
+    def test_chat_strips_internal_fields_before_post(self, mock_post):
+        """Strict OpenAI-compatible endpoints reject internal fields like
+        _is_context_injected or tool_name. chat() must strip them."""
+        from jarvis.llm import OpenAICompatibleBackend
+
+        mock_post.return_value = _make_response(
+            json_data={"choices": [{"message": {"content": "ok"}}]}
+        )
+        backend = OpenAICompatibleBackend("http://localhost:1234/v1")
+
+        backend.chat(
+            "any",
+            [
+                {"role": "system", "content": "sys", "_is_context_injected": True},
+                {"role": "user", "content": "result", "tool_name": "webSearch", "tool_failed": False},
+            ],
+        )
+
+        sent = mock_post.call_args.kwargs["json"]
+        assert sent["messages"] == [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "result"},
+        ]
+
+    @patch("requests.Session.post")
     def test_decodes_tool_call_arguments_string_to_dict(self, mock_post):
         """OpenAI returns ``tool_calls[*].function.arguments`` as a JSON
         string; Ollama returns it as a dict, and the reply engine

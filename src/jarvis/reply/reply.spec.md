@@ -199,10 +199,9 @@ sequenceDiagram
     Engine->>Store: search conversation memory (diary + graph)
     Store-->>Engine: memory_context (optional)
   end
+  Engine->>Engine: inject memoised context (time/location)
   
   loop Agentic Loop (max agentic_max_turns)
-    Engine->>Engine: cleanup stale context (if turn > 1)
-    Engine->>Engine: inject fresh context (time/location)
     Engine->>LLM: chat(messages)
     LLM-->>Engine: assistant content
     
@@ -239,14 +238,16 @@ The system injects fresh contextual information before each LLM call in the agen
 
 **Context Format:**
 ```
-[Context: Monday, September 15, 2025 at 17:53 UTC, Location: San Francisco, CA, United States (America/Los_Angeles)]
-
 {original system prompt content}
+
+[Context: Monday, September 15, 2025 at 17:53 UTC, Location: San Francisco, CA, United States (America/Los_Angeles)]
 ```
 
 **Implementation Details:**
-- Context is prepended to the FIRST system message before every turn of the 8-turn agentic loop
+- Context is appended to the END of the dynamic region of the FIRST system message before every turn of the 8-turn agentic loop (in text-tools mode, immediately before the tool-call syntax guidance so the instruction block stays final for small models)
 - Note: Separate context messages are NOT used because adding system messages after the conversation starts breaks native tool calling in models like Llama 3.2
+- KV-cache discipline: the context string is computed **once per reply** (memoised) and the block sits at the tail of the system message, never the head. Every in-loop LLM call of one reply therefore sends a byte-identical system message, and the persona / model-components / warm-profile head stays identical across replies: the server's KV / prefix cache can reuse the whole prompt head instead of recomputing it
+- The `_is_context_injected` marker (stripped before the wire) makes the injection idempotent; a rebuilt system message (native to text-tool fallback, toolSearchTool allow-list widening) loses the marker and gets the block re-appended
 - Time is provided in UTC format with day name for clarity
 - Location is derived from configured IP address or auto-detection (if enabled)
 - Falls back gracefully to "Location: Unknown" if location services unavailable
@@ -255,7 +256,7 @@ The system injects fresh contextual information before each LLM call in the agen
 **Benefits:**
 - Time-aware scheduling and deadline suggestions
 - Location-relevant recommendations and services
-- Fresh context updates throughout multi-turn conversations
+- Fresh context updates throughout multi-turn conversations (refreshed per reply, not per loop call: a reply is short-lived while KV reuse is worth thousands of tokens of recompute per loop iteration)
 - No accumulation of stale temporal information
 
 #### Agentic Flow Examples

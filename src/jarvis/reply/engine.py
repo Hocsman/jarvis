@@ -431,6 +431,9 @@ def resolve_tool_router_model(cfg) -> str:
     return ""
 
 
+_TEXT_TOOL_SYNTAX_MARKER: str = "\nExact tool-call syntax"
+
+
 def _text_tool_call_guidance(allowed_names: list[str]) -> str:
     """Build the text-based tool-call guidance block for gemma-class models.
 
@@ -446,7 +449,7 @@ def _text_tool_call_guidance(allowed_names: list[str]) -> str:
     """
     allowed_name_list = ", ".join(sorted(allowed_names)) if allowed_names else ""
     return (
-        "\nExact tool-call syntax (copy this shape — emit nothing else on a "
+        f"{_TEXT_TOOL_SYNTAX_MARKER} (copy this shape — emit nothing else on a "
         "tool-calling turn):\n"
         'tool_calls: [{"id": "call_1", "type": "function", "function": '
         '{"name": "webSearch", "arguments": "{\\"search_query\\": '
@@ -2408,9 +2411,22 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
             pass
         return None, None, None
 
+    # Per-reply memo for the time/location context line (see _get_context_string).
+    _context_cache: Optional[str] = None
+
     def _get_context_string() -> str:
-        """Get current time and location context as a string."""
-        return _live_time_location_string(cfg)
+        """Get current time and location context as a string.
+
+        Computed once per reply and memoised: the agentic loop calls this
+        before every LLM call, and a byte-stable context line is what lets
+        the server's KV/prefix cache reuse the whole prompt head across
+        in-loop calls. Refreshing per call would change the system-message
+        tail mid-reply and invalidate the cache on every iteration.
+        """
+        nonlocal _context_cache
+        if _context_cache is None:
+            _context_cache = _live_time_location_string(cfg)
+        return _context_cache
 
     def _update_system_message_with_context(messages_list):
         """Update the first system message with fresh time/location context.
@@ -2418,24 +2434,44 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         Note: Adding a separate system message AFTER the user message
         breaks native tool calling in models like Llama 3.2. Instead, we
         mutate the first system message.
+
+        KV-cache discipline: the block is placed at the END of the
+        system message's dynamic region (never the head) so the
+        persona/guidance head stays byte-identical across calls, and it
+        is injected at most once per reply (the ``_is_context_injected``
+        flag marks it; a rebuilt system message loses the flag and gets
+        the block re-injected). In text-tools mode the block is inserted
+        just BEFORE the tool-call syntax guidance so the instruction
+        block remains the final system tokens for small models: the
+        guidance is per-reply dynamic, so the stable head is unaffected.
         """
         context_str = _get_context_string()
 
-        # Find and update the first system message (skip tool guidance messages)
+        # Find and update the first system message
         for msg in messages_list:
-            if (msg.get("role") == "system" and
-                not msg.get("_is_tool_guidance")):
+            if msg.get("role") == "system":
+                if msg.get("_is_context_injected"):
+                    break
                 content = msg.get("content", "")
-                # Strip any previous context line.
-                if content.startswith("[Context:"):
-                    lines = content.split("\n", 1)
-                    content = lines[1] if len(lines) > 1 else ""
-                    if content.startswith("\n"):
-                        content = content.lstrip("\n")
-
-                new_content = content
-                if context_str:
-                    new_content = f"[Context: {context_str}]\n\n{new_content}"
+                if content and context_str:
+                    # In text-tools mode the tool-call syntax guidance is the
+                    # final instruction block; small models weight the last
+                    # system tokens most, and the context line is data, not
+                    # instruction: insert it just before the guidance instead
+                    # of after it. The guidance is per-reply dynamic anyway,
+                    # so this keeps the byte-stable head intact either way.
+                    head, marker, tail = content.rpartition(_TEXT_TOOL_SYNTAX_MARKER)
+                    if marker:
+                        new_content = (
+                            f"{head.rstrip()}\n\n[Context: {context_str}]\n\n"
+                            f"{marker.lstrip(chr(10))}{tail}"
+                        )
+                    else:
+                        new_content = f"{content}\n\n[Context: {context_str}]"
+                elif context_str:
+                    new_content = f"[Context: {context_str}]"
+                else:
+                    new_content = content
                 msg["content"] = new_content
                 msg["_is_context_injected"] = True
                 break
@@ -2707,7 +2743,10 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 if _plan_exec_handled:
                     continue
 
-        # Update the system message with fresh context (time/location) before each LLM call
+        # Update the system message with fresh context (time/location) before each LLM call.
+        # The block sits at the END of the system message's dynamic region (computed once per
+        # reply), so every in-loop call sends a byte-identical system message and the
+        # server's KV/prefix cache can reuse the whole prompt head.
         # Note: We update the first system message rather than appending a new one because
         # adding a system message AFTER the user message breaks native tool calling
         _update_system_message_with_context(messages)
@@ -3025,7 +3064,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                             if sep in raw:
                                 raw = raw.split(sep, 1)[0]
                                 break
-                        name_part = raw.strip()
+                        name_part = raw.lstrip("-* \t").strip()
                         if not name_part or name_part in allowed_tools:
                             continue
                         if name_part not in _valid_names:
@@ -3049,7 +3088,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                         if use_text_tools:
                             # Rebuild the first system message so the fresh
                             # tools_desc replaces the stale one. _update_system_
-                            # message_with_context re-prepends the time/location
+                            # message_with_context re-appends the time/location
                             # line on the next turn.
                             messages[0] = {
                                 "role": "system",
