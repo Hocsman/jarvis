@@ -5,7 +5,7 @@ from unittest.mock import Mock, patch
 import requests
 
 from src.jarvis.tools.base import ToolContext
-from src.jarvis.tools.builtin.time_tool import TimeTool
+from src.jarvis.tools.builtin.time_tool import TimeTool, clear_geocode_cache
 from src.jarvis.tools.policy import RISK_READ
 from src.jarvis.tools.registry import BUILTIN_TOOLS
 from src.jarvis.tools.types import ToolExecutionResult
@@ -15,11 +15,13 @@ class TestTimeTool:
     """Test the getTime tool behaviour."""
 
     def setup_method(self):
+        clear_geocode_cache()
         self.tool = TimeTool()
         self.context = Mock(spec=ToolContext)
         self.context.user_print = Mock()
         self.context.cfg = Mock()
         self.context.cfg.llm_tools_timeout_sec = 8.0
+        self.context.cfg.location_enabled = True
         self.context.redacted_text = ""
 
     def test_tool_properties(self):
@@ -80,6 +82,28 @@ class TestTimeTool:
         mock_fmt.assert_called_once_with("Europe/Athens")
         mock_get.assert_not_called()
 
+    @patch("src.jarvis.tools.builtin.time_tool.format_time_context",
+           return_value="Tuesday, July 01, 2025 at 10:00 UTC")
+    @patch("requests.get")
+    def test_run_with_root_timezones_direct(self, mock_get, mock_fmt):
+        """Root timezones like UTC and GMT resolve offline without network requests."""
+        for zone in ("UTC", "GMT", "zulu"):
+            result = self.tool.run({"location": zone}, self.context)
+            assert result.success is True
+            mock_get.assert_not_called()
+
+    @patch("src.jarvis.tools.builtin.time_tool.format_time_context",
+           return_value="Tuesday, July 01, 2025 at 15:00")
+    @patch("requests.get")
+    def test_run_with_posix_zone_containing_digits(self, mock_get, mock_fmt):
+        """POSIX/IANA zones with digits resolve directly without geocoding."""
+        result = self.tool.run({"location": "Etc/GMT+5"}, self.context)
+
+        assert result.success is True
+        assert "Etc/GMT+5" in result.reply_text
+        mock_fmt.assert_called_once_with("Etc/GMT+5")
+        mock_get.assert_not_called()
+
     @patch("requests.get")
     def test_run_unknown_zone_shape_geocodes(self, mock_get):
         """A slash-y string that is NOT a valid zone must geocode, not error."""
@@ -132,6 +156,48 @@ class TestTimeTool:
         assert result.success is False
         assert "timezone" in result.reply_text.lower()
 
+    @patch("requests.get")
+    def test_run_geocode_result_with_unresolvable_timezone_fails_cleanly(self, mock_get):
+        """A geocode hit with an unrecognised timezone fails rather than confabulating local time."""
+        geo_response = Mock()
+        geo_response.status_code = 200
+        geo_response.json.return_value = {
+            "results": [{
+                "name": "Faketown",
+                "country": "Nowhere",
+                "timezone": "Invalid/Unsupported_Zone",
+            }]
+        }
+        geo_response.raise_for_status = Mock()
+        mock_get.return_value = geo_response
+
+        result = self.tool.run({"location": "Faketown"}, self.context)
+
+        assert result.success is False
+        assert "could not determine the timezone" in result.reply_text.lower()
+
+    @patch("requests.get")
+    def test_geocode_caching_avoids_repeated_requests(self, mock_get):
+        """Multiple lookups for the same city use the cache and skip the network."""
+        geo_response = Mock()
+        geo_response.status_code = 200
+        geo_response.json.return_value = {
+            "results": [{
+                "name": "Paris",
+                "country": "France",
+                "timezone": "Europe/Paris",
+            }]
+        }
+        geo_response.raise_for_status = Mock()
+        mock_get.return_value = geo_response
+
+        res1 = self.tool.run({"location": "Paris"}, self.context)
+        res2 = self.tool.run({"location": "paris"}, self.context)
+
+        assert res1.success is True
+        assert res2.success is True
+        mock_get.assert_called_once()
+
     @patch("src.jarvis.tools.builtin.time_tool.format_time_context",
            return_value="Tuesday, July 01, 2025 at 13:00 EEST")
     @patch("src.jarvis.tools.builtin.time_tool.get_location_context_with_timezone",
@@ -145,13 +211,14 @@ class TestTimeTool:
 
     @patch("src.jarvis.tools.builtin.time_tool.format_time_context",
            return_value="Tuesday, July 01, 2025 at 13:00 EEST")
-    @patch("src.jarvis.tools.builtin.time_tool.get_location_context_with_timezone",
-           return_value=("some location context", None))
-    def test_run_no_location_without_zone_falls_back_to_os(self, mock_loc, mock_fmt):
-        """No location and no GeoIP zone: the OS local zone handles it."""
+    @patch("src.jarvis.tools.builtin.time_tool.get_location_context_with_timezone")
+    def test_run_no_location_with_location_disabled_skips_geoip(self, mock_loc, mock_fmt):
+        """When location is disabled in settings, skip GeoIP and use OS timezone directly."""
+        self.context.cfg.location_enabled = False
         result = self.tool.run({}, self.context)
 
         assert result.success is True
+        mock_loc.assert_not_called()
         mock_fmt.assert_called_once_with(None)
 
     @patch("requests.get")

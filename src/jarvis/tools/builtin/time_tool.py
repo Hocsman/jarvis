@@ -27,33 +27,44 @@ from ..types import ToolExecutionResult
 _GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
 
 # Cache of lowercased location string -> (iana_zone, display_name).
-# Repeated questions about the same city must not re-hit the network.
-_geocode_cache: Dict[str, Tuple[Optional[str], str]] = {}
+# Only successful lookups are cached to avoid poisoning on transient outages.
+_geocode_cache: Dict[str, Tuple[str, str]] = {}
+_MAX_GEOCODE_CACHE_SIZE = 256
 
-# A bare IANA zone path ("Europe/Athens", "Asia/Tokyo", "America/New_York").
-# The "/" never appears in a plain city name, so it disambiguates zone
-# arguments from places without needing a lookup.
-_IANA_ZONE_RE = re.compile(r"^[A-Za-z_+-]+(?:/[A-Za-z_+-]+)+$")
+# Bare universal zero-offset zones: UTC, GMT, Zulu, Universal, Z.
+_ROOT_TIMEZONES = frozenset({"UTC", "GMT", "ZULU", "UNIVERSAL", "Z"})
+
+# A zone path with slashes ("Europe/Athens", "America/New_York", "Etc/GMT+5").
+# The slash disambiguates zone paths from named places without a network lookup.
+_IANA_ZONE_RE = re.compile(r"^[A-Za-z0-9_+-]+(?:/[A-Za-z0-9_+-]+)+$")
+
+
+def clear_geocode_cache() -> None:
+    """Clear the in-memory geocoding cache."""
+    _geocode_cache.clear()
 
 
 def _is_valid_iana_zone(value: str) -> bool:
-    """Return True when ``value`` is a zone path zoneinfo actually knows."""
-    if ZoneInfo is None or not _IANA_ZONE_RE.match(value.strip()):
+    """Return True when ``value`` is a timezone name zoneinfo can load."""
+    if ZoneInfo is None:
         return False
-    try:
-        ZoneInfo(value.strip())
-        return True
-    except (ZoneInfoNotFoundError, ValueError):
-        return False
+    clean = value.strip()
+    if clean.upper() in _ROOT_TIMEZONES or _IANA_ZONE_RE.match(clean):
+        target = "UTC" if clean.upper() in {"ZULU", "Z"} else clean
+        try:
+            ZoneInfo(target)
+            return True
+        except (ZoneInfoNotFoundError, ValueError):
+            return False
+    return False
 
 
-def _geocode_timezone(location: str, timeout_sec: float) -> Tuple[Optional[str], str]:
-    """Resolve a place name to its IANA timezone.
+def _geocode_timezone(location: str, timeout_sec: float) -> Tuple[Optional[str], Optional[str]]:
+    """Resolve a place name to its IANA timezone via Open-Meteo.
 
-    Returns ``(iana_zone, display_name)``. ``iana_zone`` is None when the
-    place could not be geocoded or carries no timezone; ``display_name`` is
-    the geocoded place name ("Thessaloniki, Central Macedonia, Greece") for
-    the reply, or the raw input when the lookup failed.
+    Returns ``(iana_zone, display_name)``. When no place matches, returns
+    ``(None, None)``. When a place matches but lacks a timezone, returns
+    ``(None, display_name)``.
     """
     key = location.strip().lower()
     cached = _geocode_cache.get(key)
@@ -66,26 +77,36 @@ def _geocode_timezone(location: str, timeout_sec: float) -> Tuple[Optional[str],
         "language": "en",
         "format": "json",
     }
-    geo_response = requests.get(_GEOCODING_URL, params=params, timeout=timeout_sec)
+    geo_response = requests.get(
+        _GEOCODING_URL,
+        params=params,
+        timeout=timeout_sec,
+        allow_redirects=False,
+    )
     geo_response.raise_for_status()
     geo_data = geo_response.json()
     results = geo_data.get("results") or []
     if not results:
-        result = (None, location.strip())
-        _geocode_cache[key] = result
-        return result
+        return None, None
 
     place = results[0]
-    display = place.get("name", location.strip())
-    admin1 = place.get("admin1", "")
-    country = place.get("country", "")
-    if admin1 and admin1 != display:
-        display += f", {admin1}"
-    if country:
-        display += f", {country}"
-    result = (place.get("timezone"), display)
-    _geocode_cache[key] = result
-    return result
+    name = place.get("name") or location.strip()
+    admin1 = place.get("admin1") or ""
+    country = place.get("country") or ""
+
+    parts = [name]
+    if admin1 and admin1 != name:
+        parts.append(admin1)
+    if country and country != name and country != admin1:
+        parts.append(country)
+    display = ", ".join(parts)
+
+    tz = place.get("timezone")
+    if tz:
+        if len(_geocode_cache) >= _MAX_GEOCODE_CACHE_SIZE:
+            _geocode_cache.pop(next(iter(_geocode_cache)))
+        _geocode_cache[key] = (tz, display)
+    return tz, display
 
 
 class TimeTool(Tool):
@@ -120,7 +141,7 @@ class TimeTool(Tool):
                     "type": "string",
                     "description": (
                         "OPTIONAL. City name, country, or IANA timezone "
-                        "(e.g. 'Thessaloniki', 'Japan', 'Europe/Athens'). "
+                        "(e.g. 'Thessaloniki', 'Japan', 'Europe/Athens', 'UTC'). "
                         "Set it when the user names a place. If omitted, "
                         "returns the user's local time: which is already in "
                         "the assistant's context."
@@ -143,22 +164,29 @@ class TimeTool(Tool):
             raw_location = args.get("location")
             location_str = str(raw_location).strip() if raw_location else ""
 
+        debug_log(f"getTime: checking '{location_str or 'local'}'", "tools")
+
         try:
             if location_str:
                 if _is_valid_iana_zone(location_str):
-                    tz_name = location_str.strip()
-                    display = tz_name
+                    upper = location_str.strip().upper()
+                    if upper in _ROOT_TIMEZONES:
+                        tz_name = "UTC" if upper in {"ZULU", "Z"} else upper
+                        display = tz_name
+                    else:
+                        tz_name = location_str.strip()
+                        display = tz_name
                 else:
                     tz_name, display = _geocode_timezone(location_str, timeout_sec)
-                    if tz_name is None:
-                        if not display or display.lower() == location_str.lower():
-                            return ToolExecutionResult(
-                                success=False,
-                                reply_text=(
-                                    f"Could not find location '{location_str}'. "
-                                    "Try a different city name or spelling."
-                                ),
-                            )
+                    if display is None:
+                        return ToolExecutionResult(
+                            success=False,
+                            reply_text=(
+                                f"Could not find location '{location_str}'. "
+                                "Try a different city name or spelling."
+                            ),
+                        )
+                    if not tz_name or not _is_valid_iana_zone(tz_name):
                         return ToolExecutionResult(
                             success=False,
                             reply_text=(
@@ -166,6 +194,7 @@ class TimeTool(Tool):
                                 f"'{display}'."
                             ),
                         )
+
                 time_str = format_time_context(tz_name)
                 short_name = display.split(",")[0].strip()
                 context.user_print(f"✅ Current time in {short_name}: {time_str}")
@@ -175,9 +204,13 @@ class TimeTool(Tool):
                 )
 
             # No location: the user's own local time. Prefer the GeoIP zone
-            # when available; format_time_context falls back to the OS zone.
+            # when available and enabled; format_time_context falls back to OS zone.
             tz_name: Optional[str] = None
-            if context.cfg is not None:
+            location_enabled = (
+                getattr(context.cfg, "location_enabled", True)
+                if context.cfg is not None else True
+            )
+            if context.cfg is not None and location_enabled:
                 try:
                     _, tz_name = get_location_context_with_timezone(
                         config_ip=getattr(context.cfg, "location_ip_address", None),
@@ -192,6 +225,7 @@ class TimeTool(Tool):
                 except Exception as e:
                     debug_log(f"getTime: local tz lookup failed: {e}", "tools")
                     tz_name = None
+
             time_str = format_time_context(tz_name)
             context.user_print(f"✅ Current time: {time_str}")
             return ToolExecutionResult(
@@ -200,21 +234,21 @@ class TimeTool(Tool):
             )
 
         except requests.exceptions.Timeout:
-            debug_log("time request timed out", "tools")
+            debug_log("getTime: time request timed out", "tools")
             context.user_print("⚠️ Time service timeout.")
             return ToolExecutionResult(
                 success=False,
                 reply_text="Time service is taking too long to respond. Please try again.",
             )
         except requests.exceptions.RequestException as e:
-            debug_log(f"time request failed: {e}", "tools")
+            debug_log(f"getTime: time request failed: {e}", "tools")
             context.user_print("⚠️ Time service unavailable.")
             return ToolExecutionResult(
                 success=False,
                 reply_text="Time service is temporarily unavailable. Please try again later.",
             )
         except Exception as e:
-            debug_log(f"time error: {e}", "tools")
+            debug_log(f"getTime: time error: {e}", "tools")
             context.user_print("⚠️ Error getting time.")
             return ToolExecutionResult(
                 success=False,
