@@ -10,7 +10,7 @@ The asymmetry behind every default here: refusing a harmless tool costs a turn, 
 
 | Risk | Meaning | Examples |
 |------|---------|----------|
-| `lecture` | Looks, changes nothing outside Yuba's own store | `webSearch`, `getWeather`, `screenshot`, `remember`, `forget` |
+| `lecture` | Looks, changes nothing outside Yuba's own store | `webSearch`, `getWeather`, `getTime`, `screenshot`, `remember`, `forget` |
 | `action` | Changes something recoverable | `refreshMCPTools`, an MCP tool with neither hint |
 | `destructif` | Changes something that may not come back | `localFiles` writing or deleting, `deleteMeal`, anything unclassified |
 

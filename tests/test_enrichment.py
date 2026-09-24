@@ -863,6 +863,26 @@ class TestMaybeDigestToolResult:
             mock_llm.assert_not_called()
             mock_digest.assert_not_called()
 
+    def test_time_tool_output_is_never_digested(self):
+        """getTime output is already a single concise line and should never trigger an LLM digest."""
+        cfg = self._cfg(
+            ollama_chat_model="gemma4:e2b",
+            tool_result_digest_enabled=True,
+        )
+        raw = "Current time in Tokyo: Tuesday, July 01, 2025 at 13:00 JST " * 50
+        with patch(
+            "jarvis.reply.enrichment.call_llm_direct"
+        ) as mock_llm, patch(
+            "jarvis.reply.enrichment.digest_tool_result_for_query"
+        ) as mock_digest:
+            out = _maybe_digest_tool_result(
+                cfg=cfg, query="what time is it in Tokyo",
+                tool_name="getTime", raw_tool_result=raw,
+            )
+            mock_llm.assert_not_called()
+            mock_digest.assert_not_called()
+        assert out == raw
+
 
 class TestDigestLoopForMaxTurns:
     """The max-turn digest turns a half-finished loop into a caveated reply."""
