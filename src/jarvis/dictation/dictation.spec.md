@@ -75,6 +75,17 @@ After transcription, text passes through these stages in order:
   modifying the complex listener code.
 - **Pause flag** on the main listener to prevent dictation speech being
   interpreted as commands.
+- **No PortAudio work on the pynput hook thread.** The hotkey callbacks only
+  flip state; stream open/start runs on a worker thread (`_begin_recording`).
+  Windows silently unhooks slow hook callbacks, and opening streams on hook
+  threads risks race conditions with other audio threads. If recording is
+  stopped before the worker finishes opening the stream, the worker closes it
+  rather than leaking a live capture.
+- **All PortAudio stream lifecycle calls** (open/start/stop/close, and
+  `sd.play` for beeps) run under the process-wide
+  `jarvis.utils.audio_lock.portaudio_lock`: PortAudio documents stream
+  open/close as not thread safe, and unserialised calls abort the whole app
+  on Windows.
 
 ### Audio Device Handling
 

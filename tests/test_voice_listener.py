@@ -921,6 +921,7 @@ class TestCrossPlatformAudioHealthWarning:
                                 return mock_stream
 
                             mock_stream.__enter__ = MagicMock(side_effect=enter_stream)
+                            mock_stream.start = MagicMock(side_effect=enter_stream)
                             mock_stream.__exit__ = MagicMock(return_value=False)
                             mock_sd.InputStream.return_value = mock_stream
 

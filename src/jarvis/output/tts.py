@@ -17,6 +17,7 @@ from typing import Optional, Callable
 from urllib.parse import urlparse
 
 from ..debug import debug_log
+from ..utils.audio_lock import portaudio_lock
 
 
 # ============================================================================
@@ -919,7 +920,8 @@ class PiperTTS:
         with self._audio_lock:
             if self._audio_stream is not None:
                 try:
-                    self._audio_stream.abort()
+                    with portaudio_lock:
+                        self._audio_stream.abort()
                 except Exception:
                     pass
 
@@ -1046,35 +1048,42 @@ class PiperTTS:
 
                 play_position[0] = end
 
-            with self._audio_lock:
-                self._audio_stream = sd.OutputStream(
-                    samplerate=self._sample_rate,
-                    channels=1,
-                    dtype='int16',
-                    blocksize=blocksize,
-                    callback=audio_callback,
-                )
-                self._audio_stream.start()
-
-            # Wait for playback to complete
             try:
+                with self._audio_lock:
+                    with portaudio_lock:
+                        self._audio_stream = sd.OutputStream(
+                            samplerate=self._sample_rate,
+                            channels=1,
+                            dtype='int16',
+                            blocksize=blocksize,
+                            callback=audio_callback,
+                        )
+                        self._audio_stream.start()
+
+                # Wait for playback to complete
                 while self._audio_stream is not None and self._audio_stream.active:
                     if self._should_interrupt.is_set():
                         interrupted = True
                         with self._audio_lock:
                             if self._audio_stream is not None:
-                                self._audio_stream.abort()
+                                try:
+                                    with portaudio_lock:
+                                        self._audio_stream.abort()
+                                except Exception:
+                                    pass
                         break
                     time.sleep(0.05)
             finally:
                 with self._audio_lock:
                     if self._audio_stream is not None:
                         try:
-                            self._audio_stream.close()
+                            with portaudio_lock:
+                                self._audio_stream.close()
                         except Exception:
                             pass
                         self._audio_stream = None
 
+            interrupted = interrupted or self._should_interrupt.is_set()
             spoken = not interrupted
             actual_duration = time.time() - start_time
             debug_log(f"Piper TTS complete: actual={actual_duration:.2f}s (audio={exact_duration:.2f}s)", "tts")
@@ -1298,7 +1307,8 @@ class KokoroTTS:
         with self._audio_lock:
             if self._audio_stream is not None:
                 try:
-                    self._audio_stream.abort()
+                    with portaudio_lock:
+                        self._audio_stream.abort()
                 except Exception:
                     pass
 
@@ -1404,34 +1414,41 @@ class KokoroTTS:
                     outdata[:, 0] = chunk
                 play_position[0] = end
 
-            with self._audio_lock:
-                self._audio_stream = sd.OutputStream(
-                    samplerate=self._sample_rate,
-                    channels=1,
-                    dtype='float32',
-                    blocksize=blocksize,
-                    callback=audio_callback,
-                )
-                self._audio_stream.start()
-
             try:
+                with self._audio_lock:
+                    with portaudio_lock:
+                        self._audio_stream = sd.OutputStream(
+                            samplerate=self._sample_rate,
+                            channels=1,
+                            dtype='float32',
+                            blocksize=blocksize,
+                            callback=audio_callback,
+                        )
+                        self._audio_stream.start()
+
                 while self._audio_stream is not None and self._audio_stream.active:
                     if self._should_interrupt.is_set():
                         interrupted = True
                         with self._audio_lock:
                             if self._audio_stream is not None:
-                                self._audio_stream.abort()
+                                try:
+                                    with portaudio_lock:
+                                        self._audio_stream.abort()
+                                except Exception:
+                                    pass
                         break
                     time.sleep(0.05)
             finally:
                 with self._audio_lock:
                     if self._audio_stream is not None:
                         try:
-                            self._audio_stream.close()
+                            with portaudio_lock:
+                                self._audio_stream.close()
                         except Exception:
                             pass
                         self._audio_stream = None
 
+            interrupted = interrupted or self._should_interrupt.is_set()
             spoken = not interrupted
             actual_duration = time.time() - start_time
             debug_log(f"Kokoro TTS complete: actual={actual_duration:.2f}s (audio={exact_duration:.2f}s)", "tts")
