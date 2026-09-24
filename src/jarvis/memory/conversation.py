@@ -999,6 +999,7 @@ class DialogueMemory:
             self._last_activity_time = self._last_ts
             self._tool_turns = []
             self._hot_cache = OrderedDict()
+            self._pending = None
 
     def clear(self) -> None:
         """Drop the entire conversation and its caches (new session)."""
@@ -1006,6 +1007,7 @@ class DialogueMemory:
             self._messages = []
             self._tool_turns = []
             self._hot_cache = OrderedDict()
+            self._pending = None
             self._last_activity_time = time.time()
 
     def rewind_before_user_message(self, user_index: int) -> bool:
@@ -1034,6 +1036,7 @@ class DialogueMemory:
             self._messages = self._messages[:keep_until]
             self._tool_turns = []
             self._hot_cache = OrderedDict()
+            self._pending = None
             return True
 
     def record_tool_turn(self, tool_msgs: List[dict]) -> None:

@@ -207,7 +207,7 @@ def test_an_expired_question_says_so_rather_than_vanishing(win):
 
     win.process_ipc_line(_settled_line(outcome="expiré"))
 
-    assert "expir" in win.transcript_widget.toPlainText().lower()
+    assert "expir" in win.transcript_text().lower()
 
 
 # ── A click that did not take ─────────────────────────────────────────

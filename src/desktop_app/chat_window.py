@@ -481,9 +481,15 @@ class ChatWindow(QMainWindow):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         # A portrait, phone-like window reads as a message thread. The tray
         # re-shows the same instance, so the size persists for the session.
-        self.setMinimumSize(380, 560)
-        available = self.screen().availableGeometry()
-        self.resize(min(480, available.width()), min(800, available.height()))
+        screen = self.screen()
+        if screen is None:
+            from PyQt6.QtWidgets import QApplication
+            screen = QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            self.resize(min(480, available.width()), min(800, available.height()))
+        else:
+            self.resize(480, 800)
         self.setStyleSheet(JARVIS_THEME_STYLESHEET + CHAT_THEME_STYLESHEET)
         self._submit_fn = submit_fn
         # Subprocess mode routes cancellation to the daemon the same way it
@@ -611,8 +617,6 @@ class ChatWindow(QMainWindow):
         self._transcript_layout.setSpacing(16)
         self._transcript_layout.addStretch(1)
         self.transcript_widget.setWidget(self._transcript_container)
-        # Backwards-compatible accessor method on transcript_widget
-        self.transcript_widget.toPlainText = self.transcript_text  # type: ignore[attr-defined]
         root.addWidget(self.transcript_widget, stretch=1)
         self.transcript_widget.hide()
 
@@ -716,6 +720,7 @@ class ChatWindow(QMainWindow):
         # and whitespace-collapsed, so it cannot serve here.
         self.confirmation_detail = QLabel("")
         self.confirmation_detail.setStyleSheet(_CONFIRM_DETAIL_STYLE)
+        self.confirmation_detail.setTextFormat(Qt.TextFormat.PlainText)
         self.confirmation_detail.setWordWrap(True)
         self.confirmation_detail.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
@@ -724,6 +729,7 @@ class ChatWindow(QMainWindow):
 
         self.confirmation_hazards = QLabel("")
         self.confirmation_hazards.setStyleSheet(_CONFIRM_HAZARD_STYLE)
+        self.confirmation_hazards.setTextFormat(Qt.TextFormat.PlainText)
         self.confirmation_hazards.setWordWrap(True)
         self.confirmation_hazards.setVisible(False)
         inner.addWidget(self.confirmation_hazards)
@@ -840,8 +846,9 @@ class ChatWindow(QMainWindow):
         text = self.input_widget.toPlainText().strip()
         if not text:
             return
-        if not self._daemon_available:
-            self._append_system("Start Listening to use chat.")
+        if self._query_in_flight or not self._daemon_available:
+            if not self._daemon_available:
+                self._append_system("Start Listening to use chat.")
             return
 
         # Echo the user message into the transcript immediately.
@@ -873,6 +880,9 @@ class ChatWindow(QMainWindow):
         # request already inside the engine, so the answer arrives either
         # way and this is what keeps it out of the transcript.
         self._query_cancelled = True
+        if self._pending_request_id:
+            self._pending_request_id = None
+            self.confirmation_card.setVisible(False)
 
         if self._cancel_fn is not None:
             # Subprocess mode: the query lives in the daemon process.
@@ -897,6 +907,9 @@ class ChatWindow(QMainWindow):
         """
         if self._query_in_flight or not self._daemon_available:
             return
+        if self._pending_request_id:
+            self._pending_request_id = None
+            self.confirmation_card.setVisible(False)
         messages = self._messages
         keep_until = None
         for i, m in enumerate(messages):
@@ -935,6 +948,17 @@ class ChatWindow(QMainWindow):
                 on_complete=self.signals.completed.emit,
                 on_busy=self.signals.busy.emit,
             )
+
+    def set_daemon_hooks(
+        self,
+        submit_fn=None,
+        cancel_fn=None,
+        control_fn=None,
+    ) -> None:
+        """Update backend submission, cancellation, and control callables."""
+        self._submit_fn = submit_fn
+        self._cancel_fn = cancel_fn
+        self._control_fn = control_fn
 
     def set_daemon_available(self, available: bool) -> None:
         """Enable or disable chat submission based on daemon availability."""
@@ -1003,6 +1027,9 @@ class ChatWindow(QMainWindow):
         except Exception:
             debug_log(f"malformed {CHAT_IPC_PREFIX} line ignored", "chat")
             return True
+        if not isinstance(payload, dict):
+            debug_log(f"non-dict {CHAT_IPC_PREFIX} line ignored", "chat")
+            return True
         kind = payload.get("type")
         data = payload.get("data")
         if kind == "start":
@@ -1035,7 +1062,10 @@ class ChatWindow(QMainWindow):
 
     def _append_message(self, kind: str, text: str, user_index: Optional[int] = None) -> None:
         """Add one message row to the transcript."""
-        self.empty_state.hide()
+        if self.empty_state.isVisible():
+            self.empty_state.hide()
+            if self._orb is not None:
+                self._orb.pause_rendering()
         self.transcript_widget.show()
         self._messages.append(
             {
@@ -1064,7 +1094,13 @@ class ChatWindow(QMainWindow):
         layout = QVBoxLayout(container)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(16)
-        self.empty_state.setVisible(not messages)
+        is_empty = not messages
+        self.empty_state.setVisible(is_empty)
+        if self._orb is not None:
+            if is_empty and self.isVisible():
+                self._orb.resume_rendering()
+            else:
+                self._orb.pause_rendering()
         self.transcript_widget.setVisible(bool(messages))
         for m in messages:
             layout.addWidget(self._make_message_row(m))
@@ -1296,7 +1332,7 @@ class ChatWindow(QMainWindow):
     # --- Lifecycle ------------------------------------------------------
 
     def showEvent(self, event: QShowEvent) -> None:
-        if self._orb is not None:
+        if self._orb is not None and self.empty_state.isVisible():
             self._orb.resume_rendering()
         # On first show we seed the transcript from the daemon's hot window,
         # so a user who has been talking by voice sees their recent turns
@@ -1304,7 +1340,7 @@ class ChatWindow(QMainWindow):
         # re-showing (from the tray or after a hide) must never duplicate
         # turns. Fails silently when the daemon accessor is unavailable
         # (e.g. subprocess mode), the window just opens blank.
-        if not self._hot_window_seeded:
+        if not self._hot_window_seeded and self._daemon_available:
             self._hot_window_seeded = True
             try:
                 for msg in get_hot_window_messages():

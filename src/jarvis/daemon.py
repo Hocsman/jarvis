@@ -193,9 +193,7 @@ def get_hot_window_messages() -> list:
 def new_chat_session() -> bool:
     """Start a fresh conversation: clear the shared dialogue memory.
 
-    Voice and text share this memory, so a new session resets both. The
-    previous conversation is not lost anywhere else, the chat window
-    keeps an in-memory archive of its transcript for the session list.
+    Voice and text share this memory, so a new session resets both.
     Nothing is written to disk. Returns False when a query is currently
     running (the engine appends its turns after we clear, resurrecting
     the conversation); the caller should retry after the query finishes.
@@ -236,13 +234,11 @@ def rewind_chat_to_user(user_index: int) -> bool:
 
 
 def set_chat_messages(messages: list) -> bool:
-    """Restore an archived session into the shared dialogue memory.
+    """Restore a sequence of messages into the shared dialogue memory.
 
-    Used when the chat window switches back to a session from its
-    in-memory list. Redaction is applied here, on the daemon side, so the
-    diary (written at session end from this memory) never sees raw user
-    text even if the window's archive holds it. Returns False when a
-    query is currently running (see ``rewind_chat_to_user``).
+    Redaction is applied here, on the daemon side, so the diary (written
+    at session end from this memory) never sees raw user text. Returns
+    False when a query is currently running (see ``rewind_chat_to_user``).
     """
     global _global_dialogue_memory
     if _global_dialogue_memory is None:
@@ -829,7 +825,7 @@ def _resume_after_confirmation(action) -> None:
             granted_action=action,
         )
         _notify_chat("complete", reply, callbacks={}, use_ipc=True)
-        if reply:
+        if reply and getattr(action, "origin", None) != "chat":
             _speak_from_worker(reply)
     except Exception as e:
         debug_log(f"confirmation resume failed: {e}", "tools")
