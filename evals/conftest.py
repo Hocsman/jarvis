@@ -677,6 +677,63 @@ def pytest_sessionfinish(session, exitstatus):
 # Fixtures
 # =============================================================================
 
+# The suites keep separate conftest files: the evals import their helpers as
+# ``from conftest import ...``, so a conftest at the repository root would take
+# that name from them. The guard below therefore mirrors the one in
+# ``tests/conftest.py``, for the eval ``MockConfig`` and its ``:memory:``
+# database.
+
+
+@pytest.fixture(scope="session")
+def _bac_a_sable(tmp_path_factory):
+    """One directory for the whole run.
+
+    ``mktemp`` scans the session's temp root on every call to find the next
+    free suffix, so calling it once per test makes the cost quadratic in the
+    number of tests. The isolation these fixtures need is a distinct *file*
+    per test, which a name inside one directory gives just as well.
+    """
+    return tmp_path_factory.mktemp("jarvis_sandbox")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_memory_core(_bac_a_sable, request, monkeypatch):
+    """Keep the core of a database with no absolute path out of the working directory.
+
+    ``MemoryCore.for_config`` places the core beside the database. The test
+    configurations use ``:memory:``, whose parent is ``.``, so the core would
+    resolve against whichever directory a run starts from, the repository root
+    included, where ``git add -A`` would publish it. A database with no
+    absolute path gets its core in the sandbox, one per test. An absolute path
+    keeps the real resolution, so the tests that exercise it exercise the real
+    code.
+    """
+    coeur = _bac_a_sable / f"core-{abs(hash(request.node.nodeid)):x}"
+
+    # The suite imports modules both as ``jarvis.x`` and as ``src.jarvis.x``,
+    # which are two distinct module objects. Patching one leaves the other
+    # writing into the working directory.
+    import importlib
+
+    patched = 0
+    for path in ("jarvis.memory.core", "src.jarvis.memory.core"):
+        try:
+            module = importlib.import_module(path)
+        except ImportError:
+            continue
+        original = module.MemoryCore.__dict__["for_config"].__func__
+
+        def for_config(klass, cfg, _original=original, _dirname=module.CORE_DIRNAME):
+            db_path = str(getattr(cfg, "db_path", "") or "")
+            if db_path == ":memory:" or not Path(db_path).expanduser().is_absolute():
+                return klass(coeur / _dirname)
+            return _original(klass, cfg)
+
+        monkeypatch.setattr(module.MemoryCore, "for_config", classmethod(for_config))
+        patched += 1
+    assert patched, "neither memory core module could be imported"
+
+
 @pytest.fixture
 def mock_config():
     """Provide a mock configuration for eval tests."""
