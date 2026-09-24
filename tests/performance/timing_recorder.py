@@ -53,8 +53,10 @@ _CALLER_TO_CONTEXT: dict[str, str] = {
     # Context 7 — max-turn loop digest
     "digest_loop_for_max_turns": "max_turn_digest",
     # Context 8 — tool router
-    # (Context 9 — tool searcher — reuses select_tools_with_llm so it falls
+    # (Context 9 — tool searcher — reuses _select_llm so it falls
     # under the same bucket; that's intentional per docs/llm_contexts.md.)
+    "_select_llm": "tool_router",
+    "select_tools": "tool_router",
     "select_tools_with_llm": "tool_router",
     # Context 10 — conversation summariser
     "generate_conversation_summary": "summariser",

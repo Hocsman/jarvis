@@ -29,7 +29,11 @@ import json
 import requests
 
 from ..debug import debug_log
-from .backend import LLMBackend, ToolsNotSupportedError
+from .backend import (
+    LLMBackend,
+    ToolsNotSupportedError,
+    strip_nonstandard_message_fields,
+)
 
 
 def _normalise_response(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -346,9 +350,10 @@ class OpenAICompatibleBackend(LLMBackend):
         # Streaming is opt-in per call: it exists so a UI can render the reply
         # while it generates. The return value is identical either way.
         streaming = on_token is not None
+        sanitised = strip_nonstandard_message_fields(messages)
         payload: Dict[str, Any] = {
             "model": chat_model,
-            "messages": messages,
+            "messages": sanitised,
             "stream": streaming,
         }
         if extra_options and isinstance(extra_options, dict):

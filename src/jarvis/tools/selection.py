@@ -290,15 +290,20 @@ def _select_llm(
     the hint should return 'none'. This avoids enumerating specific cases
     ("time is known", "location is known") in the prompt: the router sees the
     actual data and judges for itself. Gracefully degrades when the hint is
-    missing or partial (e.g. location failed to resolve) — the router simply
+    missing or partial (e.g. location failed to resolve): the router simply
     has less context and falls back to tool-selection on content.
     """
+    if not (llm_model or "").strip():
+        debug_log("LLM tool selection skipped: no model configured, falling back to keyword strategy", "planning")
+        return _select_keyword(query, builtin_tools, mcp_tools)
+
     catalogue_lines: List[str] = []
     for name, tool in builtin_tools.items():
         if name in _ALWAYS_INCLUDED:
             continue
         catalogue_lines.append(f"- {name}: {_router_summary(tool.description)}")
-    for name, spec in mcp_tools.items():
+    for name in sorted(mcp_tools.keys()):
+        spec = mcp_tools[name]
         # Filtered here as well as at discovery, so no future source of
         # tools can route round it. A name that cannot be written on a
         # line writes a second one instead, offering the model a tool
@@ -316,8 +321,8 @@ def _select_llm(
         "query is clearly about one thing; never return more than 5. "
         "Return 'none' ONLY for pure greetings/small talk OR when the exact "
         "fact needed is already visible in the KNOWN FACTS block below. If "
-        "the query depends on data NOT in KNOWN FACTS — the user's logs, "
-        "current conditions, web info, files, screen — pick a tool, even "
+        "the query depends on data NOT in KNOWN FACTS (the user's logs, "
+        "current conditions, web info, files, screen), pick a tool, even "
         "when the phrasing is indirect ('should I order pizza?' → needs the "
         "meal log; 'do I need a jacket?' → needs the weather). Do NOT pick a "
         "tool merely because its domain is loosely adjacent. "
@@ -329,7 +334,7 @@ def _select_llm(
         "place, confirming an option, answering a clarifying question the "
         "assistant just asked) should route to the tool that answers the "
         "COMBINED intent across turns, not to 'none'. "
-        "Output nothing else — no explanations, no prose, no code fences."
+        "Output nothing else: no explanations, no prose, no code fences."
     )
     hint_section = ""
     if context_hint and context_hint.strip():
@@ -352,7 +357,7 @@ def _select_llm(
                 )
             if dialogue_part:
                 blocks.append(
-                    "RECENT DIALOGUE (most recent last — interpret the current "
+                    "RECENT DIALOGUE (most recent last, interpret the current "
                     "query as a continuation of this exchange):\n"
                     f"{dialogue_part}"
                 )
@@ -363,9 +368,14 @@ def _select_llm(
                 "reply time, so no tool is needed to surface them):\n"
                 f"{raw_hint}\n\n"
             )
+    # KV-cache discipline: the mostly-static tool catalogue opens the user
+    # prompt (it changes only on an MCP refresh), the dynamic hint (time +
+    # dialogue) rides after it, and the query stays the final token. The
+    # dynamic hint first would push the divergence to token 1 of the user
+    # message and defeat prefix reuse across consecutive router calls.
     user_prompt = (
-        f"{hint_section}"
         f"Available tools:\n{catalogue}\n\n"
+        f"{hint_section}"
         f"User query: {query}\n\n"
         "Top tools (comma-separated, max 5, or 'none'):"
     )

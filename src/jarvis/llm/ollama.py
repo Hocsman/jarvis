@@ -20,7 +20,11 @@ import json
 import requests
 
 from ..debug import debug_log
-from .backend import LLMBackend, ToolsNotSupportedError
+from .backend import (
+    LLMBackend,
+    ToolsNotSupportedError,
+    strip_nonstandard_message_fields,
+)
 
 
 def extract_text_from_response(data: Dict[str, Any]) -> Optional[str]:
@@ -110,6 +114,7 @@ class OllamaBackend(LLMBackend):
             "model": chat_model,
             "messages": messages,
             "stream": False,
+            "cache_prompt": True,
             "options": options,
             "think": thinking,
         }
@@ -167,6 +172,7 @@ class OllamaBackend(LLMBackend):
             "model": chat_model,
             "messages": messages,
             "stream": True,
+            "cache_prompt": True,
             "options": {"num_ctx": 4096},
             "think": thinking,
         }
@@ -230,10 +236,12 @@ class OllamaBackend(LLMBackend):
         models like ``gemma4:e2b`` then fall back to pre-trained
         ``tool_code`` scaffolding instead of producing valid tool calls.
         """
+        sanitised = strip_nonstandard_message_fields(messages)
         payload: Dict[str, Any] = {
             "model": chat_model,
-            "messages": messages,
+            "messages": sanitised,
             "stream": False,
+            "cache_prompt": True,
             "options": {"num_ctx": 8192},
         }
         # A request carrying tools never says ``think: false``. Ollama reads
@@ -251,12 +259,12 @@ class OllamaBackend(LLMBackend):
         if thinking or not tools:
             payload["think"] = thinking
         # ``extra_options`` keys land at the Ollama wire root for known
-        # request-level fields (``keep_alive``, ``format``, ``think``); the
-        # rest fold into the sampling-options dict. The split lets callers
+        # request-level fields (``keep_alive``, ``format``, ``think``, ``cache_prompt``);
+        # the rest fold into the sampling-options dict. The split lets callers
         # pin per-request keep-alive without learning Ollama's wire shape.
         if extra_options and isinstance(extra_options, dict):
             for key, value in extra_options.items():
-                if key in {"keep_alive", "format", "think"}:
+                if key in {"keep_alive", "format", "think", "cache_prompt"}:
                     payload[key] = value
                 elif key == "options" and isinstance(value, dict):
                     payload["options"].update(value)

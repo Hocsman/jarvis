@@ -562,7 +562,7 @@ class TestLLMStrategy:
             "Current local time: Sunday, 2026-04-20 17:42 (Europe/London).\n\n"
             "Recent dialogue (short-term memory):\n"
             "- user: what's the weather like?\n"
-            "- assistant: Sure — where should I check?"
+            "- assistant: Sure, where should I check?"
         )
         select_tools(
             "I'm in London",
@@ -582,7 +582,7 @@ class TestLLMStrategy:
     @pytest.mark.unit
     def test_context_hint_without_dialogue_uses_known_facts_only(self):
         """When the hint carries no dialogue subsection (first turn, no
-        recent messages), the router must still work — the facts flow
+        recent messages), the router must still work: the facts flow
         through under the KNOWN FACTS label with no dialogue block."""
         captured = {}
 
@@ -604,3 +604,65 @@ class TestLLMStrategy:
 
         assert "KNOWN FACTS" in captured["user"]
         assert "RECENT DIALOGUE" not in captured["user"]
+
+    @pytest.mark.unit
+    def test_catalogue_precedes_dynamic_hint_in_user_prompt(self):
+        """KV-cache discipline: the mostly-static tool catalogue must open
+        the user prompt so consecutive router calls share a long prefix even
+        as the time/dialogue hint drifts. The hint rides after the catalogue,
+        and the query stays the final token."""
+        captured = {}
+
+        def _direct(model, sys, user, timeout_sec=8.0, **kwargs):
+            captured["user"] = user
+            return "getWeather"
+
+        backend = _llm_backend(direct_fn=_direct)
+
+        hint = (
+            "Current local time: Sunday, 2026-04-20 17:42 (Europe/London).\n\n"
+            "Recent dialogue (short-term memory):\n"
+            "- user: what's the weather like?\n"
+            "- assistant: Sure, where should I check?"
+        )
+        select_tools(
+            "I'm in London",
+            _builtin(), {},
+            strategy=ToolSelectionStrategy.LLM,
+            llm_backend=backend,
+            llm_model="test",
+            context_hint=hint,
+        )
+
+        user = captured["user"]
+        assert user.index("Available tools:") < user.index("KNOWN FACTS"), (
+            "catalogue must precede the dynamic hint block"
+        )
+        assert user.index("KNOWN FACTS") < user.index("User query:"), (
+            "hint must precede the query so the query stays the final token"
+        )
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("empty_model", ["", "   ", None])
+    def test_empty_or_whitespace_model_short_circuits_to_keyword(self, empty_model):
+        """When llm_model is empty, None, or whitespace, the router must
+        short-circuit to keyword selection without invoking the backend."""
+        called = False
+
+        def _direct(model, sys, user, timeout_sec=8.0, **kwargs):
+            nonlocal called
+            called = True
+            return "getWeather"
+
+        backend = _llm_backend(direct_fn=_direct)
+        tools = select_tools(
+            "search the web for weather",
+            _builtin(), {},
+            strategy=ToolSelectionStrategy.LLM,
+            llm_backend=backend,
+            llm_model=empty_model,
+        )
+
+        assert not called, "backend.direct() should not be called when model is empty"
+        assert "webSearch" in tools
+
