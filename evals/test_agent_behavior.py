@@ -200,7 +200,7 @@ class TestContextUtilization:
         mock_tool_run = create_mock_tool_run(capture, {"webSearch": MOCK_WEATHER_SEARCH})
 
         call_count = 0
-        def mock_chat(base_url, chat_model, messages, timeout_sec, extra_options=None, tools=None, **kwargs):
+        def mock_chat(cfg, messages, **kwargs):
             nonlocal call_count
             call_count += 1
 
@@ -254,7 +254,7 @@ class TestToolUsage:
         })
 
         call_count = 0
-        def mock_chat(base_url, chat_model, messages, timeout_sec, extra_options=None, tools=None, **kwargs):
+        def mock_chat(cfg, messages, **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -291,7 +291,7 @@ class TestToolUsage:
         })
 
         call_count = 0
-        def mock_chat(base_url, chat_model, messages, timeout_sec, extra_options=None, tools=None, **kwargs):
+        def mock_chat(cfg, messages, **kwargs):
             nonlocal call_count
             call_count += 1
 
@@ -355,7 +355,7 @@ class TestMultiStepReasoning:
         })
 
         call_count = 0
-        def mock_chat(base_url, chat_model, messages, timeout_sec, extra_options=None, tools=None, **kwargs):
+        def mock_chat(cfg, messages, **kwargs):
             nonlocal call_count
             call_count += 1
 
@@ -432,9 +432,9 @@ class TestMemoryEnrichment:
         mock_config.ollama_chat_model = JUDGE_MODEL
 
         result = extract_search_params_for_memory(
-            query=query,
-            ollama_base_url=mock_config.ollama_base_url,
-            ollama_chat_model=mock_config.ollama_chat_model,
+            query,
+            mock_config,
+            mock_config.ollama_chat_model,
             timeout_sec=15.0
         )
 
@@ -478,9 +478,9 @@ class TestMemoryEnrichment:
         )
 
         result = extract_search_params_for_memory(
-            query="recommend a restaurant I'd enjoy",
-            ollama_base_url=mock_config.ollama_base_url,
-            ollama_chat_model=mock_config.ollama_chat_model,
+            "recommend a restaurant I'd enjoy",
+            mock_config,
+            mock_config.ollama_chat_model,
             timeout_sec=15.0,
             context_hint=context_hint,
         )
@@ -519,7 +519,7 @@ class TestMemoryEnrichment:
 
         captured_messages = []
 
-        def mock_chat(base_url, chat_model, messages, timeout_sec, extra_options=None, tools=None, **kwargs):
+        def mock_chat(cfg, messages, **kwargs):
             captured_messages.extend(messages)
             return create_mock_llm_response(
                 "Based on your love for Italian food and goal to eat more veggies, "
@@ -567,7 +567,7 @@ class TestMemoryEnrichment:
         })
 
         call_count = 0
-        def mock_chat(base_url, chat_model, messages, timeout_sec, extra_options=None, tools=None, **kwargs):
+        def mock_chat(cfg, messages, **kwargs):
             nonlocal call_count
             call_count += 1
 
@@ -633,7 +633,16 @@ class TestLiveEndToEnd:
         def mock_get_location(**kwargs):
             return (f"Location: {test_location}", None)
 
-        with patch('jarvis.reply.engine.get_location_context_with_timezone', side_effect=mock_get_location):
+        # The weather tool resolves the user's location itself, through its
+        # own module-level binding of get_location_info (weather.py:7), so
+        # patching the location module does not reach it. Without the
+        # GeoLite2 database on this machine the tool would ask for a city
+        # and the eval would fail for an environmental reason.
+        with patch('jarvis.reply.engine.get_location_context_with_timezone', side_effect=mock_get_location), \
+             patch('jarvis.tools.builtin.weather.get_location_info',
+                   return_value={"city": "London", "region": "England",
+                                 "country": "United Kingdom",
+                                 "latitude": 51.5074, "longitude": -0.1278}):
             response = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
                 text=query, dialogue_memory=eval_dialogue_memory
@@ -1364,7 +1373,18 @@ class TestHelpfulness:
 
         query = "say something"
 
-        with patch("jarvis.reply.engine.extract_search_params_for_memory", return_value=fake_extract), \
+        # A bare open-ended prompt is small-talk to the planner, so its
+        # contract emits no `searchMemory` directive and the engine's
+        # planner gate then skips the memory pass entirely. Force a plan
+        # that demands memory so the behaviour under test (grounding the
+        # reply in graph context) is actually exercised.
+        forced_plan = [
+            "searchMemory topic='user hobbies, interests and food preferences'",
+            "Reply to the user with the combined findings.",
+        ]
+
+        with patch("jarvis.reply.engine.plan_query", return_value=forced_plan), \
+             patch("jarvis.reply.engine.extract_search_params_for_memory", return_value=fake_extract), \
              patch("jarvis.memory.graph.GraphMemoryStore", _FakeStore), \
              patch("jarvis.memory.conversation.search_conversation_memory_by_keywords", return_value=[]), \
              patch("jarvis.reply.engine.get_location_context_with_timezone",
@@ -1448,7 +1468,7 @@ class TestMalformedResponseAfterTools:
 
         call_count = 0
 
-        def mock_chat(base_url, chat_model, messages, timeout_sec, extra_options=None, tools=None, **kwargs):
+        def mock_chat(cfg, messages, **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count == 1:

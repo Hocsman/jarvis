@@ -17,40 +17,49 @@ from helpers import JUDGE_MODEL
 # Test Data
 # =============================================================================
 
-# Queries paired with the tools they MUST include and a maximum tool count.
-# The max count ensures the strategy actually filters rather than passing everything.
+# Queries paired with the tools they MUST include and a cap on how many
+# content tools the strategy may pick. The cap covers content picks only:
+# the strategy adds its own always-included set on top, so the assertion
+# derives the total from the product constant rather than pinning a count
+# that goes stale whenever a tool becomes mandatory.
 TOOL_SELECTION_CASES = [
     pytest.param(
         "what's the weather like tomorrow",
         ["getWeather"],
-        5,
+        4,
         id="weather query selects getWeather and few others",
     ),
     pytest.param(
         "what's the weather in London this weekend",
         ["getWeather"],
-        5,
+        4,
         id="location weather query selects getWeather and few others",
     ),
     pytest.param(
         "log that I had a chicken salad for lunch",
         ["logMeal"],
-        5,
+        4,
         id="meal logging selects logMeal and few others",
     ),
     pytest.param(
         "what did I eat yesterday",
         ["fetchMeals"],
-        5,
+        4,
         id="meal recall selects fetchMeals and few others",
     ),
     pytest.param(
         "search the web for Python tutorials",
         ["webSearch"],
-        5,
+        4,
         id="web search query selects webSearch and few others",
     ),
 ]
+
+
+def _max_total_selected(max_content_tools: int) -> int:
+    """Total selection cap: content picks plus the always-included set."""
+    from jarvis.tools.selection import _ALWAYS_INCLUDED
+    return max_content_tools + len(_ALWAYS_INCLUDED)
 
 
 @pytest.mark.eval
@@ -77,13 +86,14 @@ class TestToolSelectionFiltering:
 
         from jarvis.tools.selection import select_tools, ToolSelectionStrategy
         from jarvis.tools.registry import BUILTIN_TOOLS
+        from jarvis.llm import get_embedding_backend
 
         selected = select_tools(
             query=query,
             builtin_tools=BUILTIN_TOOLS,
             mcp_tools={},
             strategy=ToolSelectionStrategy.EMBEDDING,
-            llm_base_url=mock_config.ollama_base_url,
+            embedding_backend=get_embedding_backend(mock_config),
             embed_model=mock_config.ollama_embed_model,
             embed_timeout_sec=10.0,
         )
@@ -100,8 +110,8 @@ class TestToolSelectionFiltering:
         assert "stop" in selected, f"'stop' should always be included, got: {selected}"
 
         # Must NOT include everything — that means filtering isn't working
-        assert len(selected) <= max_tools, (
-            f"Expected at most {max_tools} tools but got {len(selected)}/{total_builtin}: {selected}"
+        assert len(selected) <= _max_total_selected(max_tools), (
+            f"Expected at most {_max_total_selected(max_tools)} tools but got {len(selected)}/{total_builtin}: {selected}"
         )
 
         print(f"  ✅ Selected {len(selected)}/{total_builtin} tools: {selected}")
@@ -127,13 +137,14 @@ class TestToolSelectionFilteringLLM:
     ):
         from jarvis.tools.selection import select_tools, ToolSelectionStrategy
         from jarvis.tools.registry import BUILTIN_TOOLS
+        from jarvis.llm import get_llm_backend
 
         selected = select_tools(
             query=query,
             builtin_tools=BUILTIN_TOOLS,
             mcp_tools={},
             strategy=ToolSelectionStrategy.LLM,
-            llm_base_url=mock_config.ollama_base_url,
+            llm_backend=get_llm_backend(mock_config),
             llm_model=JUDGE_MODEL,
             llm_timeout_sec=15.0,
         )
@@ -147,8 +158,8 @@ class TestToolSelectionFilteringLLM:
 
         assert "stop" in selected, f"'stop' should always be included, got: {selected}"
 
-        assert len(selected) <= max_tools, (
-            f"Expected at most {max_tools} tools but got {len(selected)}/{total_builtin}: {selected}"
+        assert len(selected) <= _max_total_selected(max_tools), (
+            f"Expected at most {_max_total_selected(max_tools)} tools but got {len(selected)}/{total_builtin}: {selected}"
         )
 
         print(f"  ✅ [{JUDGE_MODEL}] Selected {len(selected)}/{total_builtin} tools: {selected}")
