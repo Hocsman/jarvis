@@ -19,6 +19,7 @@ from .builtin.nutrition.fetch_meals import FetchMealsTool
 from .builtin.nutrition.delete_meal import DeleteMealTool
 from .builtin.refresh_mcp_tools import RefreshMCPToolsTool
 from .builtin.weather import WeatherTool
+from .builtin.time_tool import TimeTool
 from .builtin.remember import RememberTool
 from .builtin.forget import ForgetTool
 from .builtin.set_reminder import SetReminderTool
@@ -51,6 +52,7 @@ BUILTIN_TOOLS = {
     "deleteMeal": DeleteMealTool(),
     "refreshMCPTools": RefreshMCPToolsTool(),
     "getWeather": WeatherTool(),
+    "getTime": TimeTool(),
     "remember": RememberTool(),
     "forget": ForgetTool(),
     "setReminder": SetReminderTool(),
