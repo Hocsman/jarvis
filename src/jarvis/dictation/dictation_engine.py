@@ -19,6 +19,7 @@ import time
 from typing import Any, Callable, Optional
 
 from ..debug import debug_log
+from ..utils.audio_lock import portaudio_lock
 from .history import DictationHistory
 
 # Optional imports — graceful degradation when dependencies are missing.
@@ -122,8 +123,11 @@ def _play_beep_sd(wav_data: bytes) -> None:
     data_start = idx + 8  # skip 'data' + size u32
     pcm = wav_data[data_start:]
     samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
-    with _suppress_stderr():
-        sd.play(samples, samplerate=44100, blocking=True)
+    # sd.play opens and closes a stream internally: lifecycle work that
+    # must be serialised with every other PortAudio user (see audio_lock).
+    with portaudio_lock:
+        with _suppress_stderr():
+            sd.play(samples, samplerate=44100, blocking=True)
 
 
 # ---------------------------------------------------------------------------
@@ -559,14 +563,15 @@ def _close_stream(stream: Any) -> None:
     """Stop and close a sounddevice InputStream, swallowing errors."""
     if stream is None:
         return
-    try:
-        stream.stop()
-    except Exception as exc:
-        debug_log(f"stream.stop() failed: {exc}", "dictation")
-    try:
-        stream.close()
-    except Exception as exc:
-        debug_log(f"stream.close() failed: {exc}", "dictation")
+    with portaudio_lock:
+        try:
+            stream.stop()
+        except Exception as exc:
+            debug_log(f"stream.stop() failed: {exc}", "dictation")
+        try:
+            stream.close()
+        except Exception as exc:
+            debug_log(f"stream.close() failed: {exc}", "dictation")
 
 
 # ---------------------------------------------------------------------------
@@ -661,6 +666,11 @@ class DictationEngine:
         self._max_frames = MAX_RECORD_SECONDS * sample_rate
         self._lock = threading.Lock()
         self._started = False
+        # Monotonic recording-session token. Each press increments it; the
+        # _begin_recording worker only mutates engine state while its token
+        # is still current, so a stale worker from a superseded press can
+        # never clobber a newer session or leak a live stream.
+        self._session = 0
 
         # Double-tap detection for hands-free mode
         self._last_hotkey_release_time: float = 0.0
@@ -846,18 +856,50 @@ class DictationEngine:
     # ------------------------------------------------------------------
 
     def _start_recording(self) -> None:
+        # Flip state only, then hand the heavy work (device query, stream
+        # open/start, beep) to a worker thread. This runs on the pynput
+        # hook thread: Windows silently unhooks callbacks that take too
+        # long, and opening PortAudio streams there raced other audio
+        # threads into native aborts.
         with self._lock:
             if self._recording:
                 return
             self._recording = True
+            self._session += 1
+            token = self._session
 
+        threading.Thread(
+            target=self._begin_recording, args=(token,), daemon=True
+        ).start()
+
+    def _abandon_session(self, token: int) -> bool:
+        """Roll back a failed session if *token* is still current.
+
+        Returns True when this worker owned the active session (so the
+        caller should fire the end callback); False when a newer press has
+        superseded it and no state may be touched.
+        """
+        with self._lock:
+            if self._session != token or not self._recording:
+                return False
+            self._recording = False
+            return True
+
+    def _begin_recording(self, token: int) -> None:
+        """Worker: open the audio stream and start capturing."""
         # Check Whisper readiness
         model = self._whisper_model_ref()
         backend = self._whisper_backend_ref()
         if model is None and backend != "mlx":
-            debug_log("whisper model not loaded — dictation skipped", "dictation")
-            self._recording = False
+            debug_log("whisper model not loaded, dictation skipped", "dictation")
+            self._abandon_session(token)
             return
+
+        # Bail early if the press was already released/superseded while the
+        # worker was starting up, avoids firing callbacks for a dead press.
+        with self._lock:
+            if self._session != token or not self._recording:
+                return
 
         debug_log("dictation recording started", "dictation")
         self._audio_frames = []
@@ -894,33 +936,58 @@ class DictationEngine:
         except Exception:
             native_rate = self._target_sample_rate
 
+        # Check whether session was cancelled while beep was playing or device queried
+        with self._lock:
+            if self._session != token or not self._recording:
+                return
+
         try:
-            with _suppress_stderr():
-                self._stream = sd.InputStream(
-                    samplerate=native_rate,
-                    channels=1,
-                    dtype="float32",
-                    blocksize=int(native_rate * 0.1),
-                    callback=self._audio_callback,
-                    **stream_kwargs,
-                )
+            with portaudio_lock:
+                with _suppress_stderr():
+                    stream = sd.InputStream(
+                        samplerate=native_rate,
+                        channels=1,
+                        dtype="float32",
+                        blocksize=int(native_rate * 0.1),
+                        callback=self._audio_callback,
+                        **stream_kwargs,
+                    )
             self._stream_sample_rate = native_rate
             if native_rate != self._target_sample_rate:
                 debug_log(f"dictation stream at native {native_rate} Hz (will resample to {self._target_sample_rate})", "dictation")
         except Exception as exc:
             debug_log(f"failed to open dictation audio stream: {exc}", "dictation")
-            self._recording = False
-            if self._on_dictation_end:
-                self._on_dictation_end()
+            if self._abandon_session(token) and self._on_dictation_end:
+                try:
+                    self._on_dictation_end()
+                except Exception as cb_exc:
+                    debug_log(f"on_dictation_end callback error: {cb_exc}", "dictation")
             return
 
         try:
-            self._stream.start()
+            with portaudio_lock:
+                stream.start()
         except Exception as exc:
             debug_log(f"failed to start dictation audio stream: {exc}", "dictation")
-            self._recording = False
-            if self._on_dictation_end:
-                self._on_dictation_end()
+            _close_stream(stream)
+            if self._abandon_session(token) and self._on_dictation_end:
+                try:
+                    self._on_dictation_end()
+                except Exception as cb_exc:
+                    debug_log(f"on_dictation_end callback error: {cb_exc}", "dictation")
+            return
+
+        # The hotkey may have been released (or pressed again, starting a
+        # newer session) while the stream was opening on this worker. Only
+        # the still-current session may store its stream; anything else is
+        # torn down instead of leaking a live microphone capture.
+        with self._lock:
+            if self._session == token and self._recording:
+                self._stream = stream
+                stream = None
+        if stream is not None:
+            debug_log("dictation session superseded before stream opened, closing", "dictation")
+            _close_stream(stream)
 
     def _audio_callback(self, indata, frames, time_info, status) -> None:
         """sounddevice callback — accumulate audio frames."""
@@ -959,12 +1026,15 @@ class DictationEngine:
             audio_frames = self._audio_frames
             self._audio_frames = []
             start_time = self._record_start_time
+            token = self._session
 
         if discard:
             # Shutdown path — tear down synchronously so the caller knows
             # everything is finished before the engine is gone.
             _close_stream(stream)
-            if self._on_dictation_end:
+            with self._lock:
+                should_fire_end = (self._session == token and not self._recording)
+            if should_fire_end and self._on_dictation_end:
                 try:
                     self._on_dictation_end()
                 except Exception:
@@ -973,7 +1043,7 @@ class DictationEngine:
 
         threading.Thread(
             target=self._finalise_and_transcribe,
-            args=(stream, audio_frames, start_time),
+            args=(stream, audio_frames, start_time, token),
             daemon=True,
         ).start()
 
@@ -982,6 +1052,7 @@ class DictationEngine:
         stream: Any,
         audio_frames: list,
         start_time: float,
+        token: Optional[int] = None,
     ) -> None:
         """Worker: close stream, play beep, transcribe, paste.
 
@@ -1011,10 +1082,12 @@ class DictationEngine:
             # _transcribe_and_paste has its own finally that fires
             # _on_dictation_end, so we defer to it on the happy path.
             end_fired = True
-            self._transcribe_and_paste(audio_frames)
+            self._transcribe_and_paste(audio_frames, token)
         except Exception as exc:
             debug_log(f"dictation finalise error: {exc}", "dictation")
-            if not end_fired and self._on_dictation_end:
+            with self._lock:
+                should_fire_end = (self._session == token if token is not None else True) and not self._recording
+            if not end_fired and should_fire_end and self._on_dictation_end:
                 try:
                     self._on_dictation_end()
                 except Exception:
@@ -1024,7 +1097,7 @@ class DictationEngine:
     # Transcription & paste
     # ------------------------------------------------------------------
 
-    def _transcribe_and_paste(self, frames: list) -> None:
+    def _transcribe_and_paste(self, frames: list, token: Optional[int] = None) -> None:
         try:
             if not frames:
                 debug_log("no audio frames captured", "dictation")
@@ -1067,7 +1140,9 @@ class DictationEngine:
         except Exception as exc:
             debug_log(f"dictation transcribe/paste error: {exc}", "dictation")
         finally:
-            if self._on_dictation_end:
+            with self._lock:
+                should_fire_end = (self._session == token if token is not None else True) and not self._recording
+            if should_fire_end and self._on_dictation_end:
                 try:
                     self._on_dictation_end()
                 except Exception:

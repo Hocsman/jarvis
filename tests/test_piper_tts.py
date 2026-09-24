@@ -254,6 +254,39 @@ class TestPiperTTSWithMocking:
         tts.interrupt()
         assert tts._should_interrupt.is_set()
 
+    def test_interrupt_marks_interrupted_when_stream_active_drops_first(self):
+        """When interrupt() is called and stream.active drops before the sleep loop evaluates,
+        the utterance must still be marked interrupted, and completion callback must not be called."""
+        from src.jarvis.output.tts import PiperTTS
+
+        tts = PiperTTS(enabled=True)
+        callback_called = [False]
+
+        def on_complete():
+            callback_called[0] = True
+
+        mock_stream = MagicMock()
+        mock_stream.active = True
+
+        with patch("sounddevice.OutputStream", return_value=mock_stream):
+            tts._voice = MagicMock()
+            tts._voice.synthesize = MagicMock(return_value=[b"\x00\x00" * 1000])
+            tts._voice.config = MagicMock()
+            tts._voice.config.sample_rate = 16000
+
+            def do_interrupt():
+                tts.interrupt()
+                mock_stream.active = False
+
+            timer = threading.Timer(0.01, do_interrupt)
+            timer.start()
+
+            tts._completion_callback = on_complete
+            tts._speak_once("Hello test")
+            timer.join()
+
+        assert callback_called[0] is False
+
     def test_is_speaking_returns_event_state(self):
         """PiperTTS.is_speaking should return the speaking event state."""
         from src.jarvis.output.tts import PiperTTS
