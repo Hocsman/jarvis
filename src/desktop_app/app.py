@@ -121,6 +121,21 @@ def _daemon_subprocess_env() -> dict:
     return env
 
 
+def _should_emit_as_log(line: str) -> bool:
+    """Whether a daemon output line belongs in the general log viewer.
+
+    Chat IPC is carved out. Its ``complete`` event carries the whole
+    assistant reply, which can echo back whatever the user typed, and the
+    log window is not covered by the redaction invariant the chat path
+    maintains. Diary IPC stays: it carries progress and token deltas the
+    log window exists to show.
+    """
+    from jarvis.daemon import CHAT_IPC_PREFIX
+
+    return not line.startswith(CHAT_IPC_PREFIX)
+
+
+
 def _collect_runtime_status_snapshot(
     *,
     is_listening: bool,
@@ -1581,6 +1596,8 @@ class JarvisSystemTray:
         # starts so the window can route queries in subprocess mode.
         self.chat_window = None
         self._chat_submit_fn = None
+        self._chat_cancel_fn = None
+        self._chat_control_fn = None
         # The HUD dashboard (unified web UI). Created lazily on first open;
         # shares the same daemon chat submission + IPC event stream as the
         # chat window.
@@ -1738,7 +1755,7 @@ class JarvisSystemTray:
             self.menu.addAction(self.dashboard_action)
 
         # Chat window action
-        self.chat_action = QAction("💬 Chat…")
+        self.chat_action = QAction("💬 Chat")
         self.chat_action.triggered.connect(self.show_chat)
         self.menu.addAction(self.chat_action)
 
@@ -2193,9 +2210,13 @@ class JarvisSystemTray:
             self.chat_window = ChatWindow(
                 submit_fn=self._chat_submit_fn,
                 daemon_available=self.is_listening,
+                cancel_fn=getattr(self, "_chat_cancel_fn", None),
+                control_fn=getattr(self, "_chat_control_fn", None),
             )
         else:
             self.chat_window._submit_fn = self._chat_submit_fn
+            self.chat_window._cancel_fn = getattr(self, "_chat_cancel_fn", None)
+            self.chat_window._control_fn = getattr(self, "_chat_control_fn", None)
             self.chat_window.set_daemon_status(
                 "running" if self.is_listening else "stopped"
             )
@@ -2236,6 +2257,8 @@ class JarvisSystemTray:
         if self.chat_window is None:
             return
         self.chat_window._submit_fn = self._chat_submit_fn
+        self.chat_window._cancel_fn = getattr(self, "_chat_cancel_fn", None)
+        self.chat_window._control_fn = getattr(self, "_chat_control_fn", None)
         self.chat_window.set_daemon_status(status)
 
     def _connect_dictation_history(self, retries_left: int = 3) -> None:
@@ -2559,7 +2582,12 @@ class JarvisSystemTray:
                 # directly, so it writes a __CHAT_QUERY__: line to stdin.
                 # The reply comes back as __CHAT__: events on stdout, parsed
                 # in _read_daemon_logs and routed to the chat window's signals.
-                from jarvis.daemon import CHAT_QUERY_IPC_PREFIX
+                from jarvis.daemon import (
+                    CHAT_CANCEL_IPC_PREFIX,
+                    CHAT_DECISION_IPC_PREFIX,
+                    CHAT_QUERY_IPC_PREFIX,
+                    CHAT_REWIND_IPC_PREFIX,
+                )
                 _proc = self.daemon_process
 
                 def _submit_chat_subprocess(text: str) -> None:
@@ -2577,12 +2605,30 @@ class JarvisSystemTray:
                             self.chat_window.set_daemon_status("crashed")
                             self.chat_window.signals.completed.emit(None)
 
+                def _cancel_chat_subprocess() -> None:
+                    try:
+                        _proc.stdin.write(f"{CHAT_CANCEL_IPC_PREFIX}\n")
+                        _proc.stdin.flush()
+                    except Exception as exc:
+                        debug_log(f"chat stdin cancel failed: {exc}", "desktop")
+
+                def _control_chat_subprocess(kind: str, payload: Optional[dict] = None) -> None:
+                    if kind != "rewind":
+                        debug_log(f"unknown chat control command: {kind}", "desktop")
+                        return
+                    import json as _json
+                    try:
+                        _proc.stdin.write(
+                            f"{CHAT_REWIND_IPC_PREFIX}{_json.dumps(payload)}\n"
+                        )
+                        _proc.stdin.flush()
+                    except Exception as exc:
+                        debug_log(f"chat stdin control failed: {exc}", "desktop")
+
                 # Decisions on a waiting confirmation travel the same way.
                 # This is the one line on the bus that authorises an
                 # irreversible action; the daemon validates it on arrival
                 # rather than trusting this side.
-                from jarvis.daemon import CHAT_DECISION_IPC_PREFIX
-
                 def _send_decision_subprocess(request_id: str, approved: bool) -> None:
                     import json as _json
                     payload = {"request_id": request_id, "approved": bool(approved)}
@@ -2596,11 +2642,15 @@ class JarvisSystemTray:
                 set_decision_writer(_send_decision_subprocess)
 
                 self._chat_submit_fn = _submit_chat_subprocess
+                self._chat_cancel_fn = _cancel_chat_subprocess
+                self._chat_control_fn = _control_chat_subprocess
                 # If the chat window already exists (daemon restarted while
-                # the window was open), refresh its submit fn so it doesn't
+                # the window was open), refresh its hooks so it doesn't
                 # keep writing to the old (dead) subprocess stdin.
                 if self.chat_window is not None:
                     self.chat_window._submit_fn = self._chat_submit_fn
+                    self.chat_window._cancel_fn = self._chat_cancel_fn
+                    self.chat_window._control_fn = self._chat_control_fn
                     self.chat_window.set_daemon_status("running")
 
                 # Start log reader thread
@@ -2641,6 +2691,8 @@ class JarvisSystemTray:
         except Exception as e:
             debug_log(f"failed to start daemon: {e}", "desktop")
             self._chat_submit_fn = None
+            self._chat_cancel_fn = None
+            self._chat_control_fn = None
             self._set_chat_daemon_status("crashed")
             self.log_signals.new_log.emit(f"❌ Failed to start: {str(e)}\n{traceback.format_exc()}\n")
             self.tray_icon.showMessage(
@@ -2656,6 +2708,8 @@ class JarvisSystemTray:
             status = "stopped" if self._daemon_stop_expected else "crashed"
             self.is_listening = False
             self._chat_submit_fn = None
+            self._chat_cancel_fn = None
+            self._chat_control_fn = None
             self.toggle_action.setText("▶️ Start Listening")
             if hasattr(self, "quick_stop_action"):
                 self.quick_stop_action.setEnabled(False)
@@ -2694,7 +2748,8 @@ class JarvisSystemTray:
                 # (Qt widgets must be created on the GUI thread).
                 if line.startswith(CHAT_IPC_PREFIX):
                     self._chat_ipc_signals.line_received.emit(line)
-                self.log_signals.new_log.emit(line)
+                if _should_emit_as_log(line):
+                    self.log_signals.new_log.emit(line)
         except Exception as e:
             debug_log(f"log reader error: {e}", "desktop")
             self.log_signals.new_log.emit(f"⚠️ Log reader error: {e}\n")
@@ -2710,6 +2765,8 @@ class JarvisSystemTray:
             self.chat_window = ChatWindow(
                 submit_fn=self._chat_submit_fn,
                 daemon_available=self.is_listening,
+                cancel_fn=getattr(self, "_chat_cancel_fn", None),
+                control_fn=getattr(self, "_chat_control_fn", None),
             )
         self.chat_window.process_ipc_line(line)
         # The tray needs the same events: it is the only surface always
@@ -2975,6 +3032,8 @@ class JarvisSystemTray:
 
                 self.daemon_process = None
                 self._chat_submit_fn = None
+                self._chat_cancel_fn = None
+                self._chat_control_fn = None
 
             self._daemon_stop_expected = False
             self.is_listening = False
@@ -3025,6 +3084,8 @@ class JarvisSystemTray:
                 # Process has terminated
                 self.daemon_process = None
                 self._chat_submit_fn = None
+                self._chat_cancel_fn = None
+                self._chat_control_fn = None
                 if self.is_listening:
                     self.is_listening = False
                     self.toggle_action.setText("▶️ Start Listening")

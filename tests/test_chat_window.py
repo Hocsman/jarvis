@@ -20,6 +20,78 @@ import pytest
 
 
 @pytest.mark.unit
+class TestPhoneShell:
+    def test_window_controls_and_rounded_frame(self, qapp, monkeypatch):
+        from desktop_app.chat_window import ChatWindow
+        from PyQt6.QtCore import Qt, QPoint
+        from PyQt6.QtTest import QTest
+        from PyQt6.QtWidgets import QSizeGrip
+        monkeypatch.setattr('desktop_app.chat_window.get_hot_window_messages', lambda: [])
+        win = ChatWindow()
+        win.show()
+        QTest.qWait(30)
+        rendered = win.grab().toImage()
+        assert rendered.pixelColor(0, 0).alpha() == 0
+        centre = rendered.rect().center()
+        assert rendered.pixelColor(centre).alpha() == 255
+        assert win.findChild(QSizeGrip).isVisible()
+        QTest.mouseDClick(win.title_bar, Qt.MouseButton.LeftButton, pos=QPoint(50, 10))
+        assert win.isMaximized()
+        QTest.mouseDClick(win.title_bar, Qt.MouseButton.LeftButton, pos=QPoint(50, 10))
+        assert not win.isMaximized()
+        win.minimise_button.click()
+        assert win.isMinimized()
+        win.showNormal()
+        win.close()
+
+    def test_custom_frame_close_preserves_conversation(self, qapp, monkeypatch):
+        from desktop_app.chat_window import ChatWindow
+        from PyQt6.QtCore import Qt
+        monkeypatch.setattr('desktop_app.chat_window.get_hot_window_messages', lambda: [])
+        win = ChatWindow()
+        win.show()
+        win._append_assistant('Still here')
+        assert win.windowFlags() & Qt.WindowType.FramelessWindowHint
+        win.close_button.click()
+        assert not win.isVisible()
+        win.show()
+        assert win.transcript_text() == 'Still here'
+        win.close()
+
+    def test_empty_state_disappears_without_becoming_a_message(self, qapp, monkeypatch):
+        from desktop_app.chat_window import ChatWindow
+        monkeypatch.setattr('desktop_app.chat_window.get_hot_window_messages', lambda: [])
+        win = ChatWindow()
+        win.show()
+        assert win.empty_state.isVisible()
+        assert win.transcript_text() == ''
+        win._append_user('Hello')
+        assert not win.empty_state.isVisible()
+        win.close()
+
+    @pytest.mark.parametrize('size', [(380, 560), (480, 780), (800, 650)])
+    def test_controls_fit_and_messages_are_literal_at_all_sizes(self, qapp, monkeypatch, size):
+        from desktop_app.chat_window import ChatWindow
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import QLabel
+        from PyQt6.QtTest import QTest
+        monkeypatch.setattr('desktop_app.chat_window.get_hot_window_messages', lambda: [])
+        win = ChatWindow()
+        win.resize(*size)
+        win.show()
+        win._append_assistant('<b>literal message</b> ' * 20)
+        win._set_thinking(True)
+        QTest.qWait(50)
+        for widget in (win.input_widget, win.send_button, win.stop_button, win.close_button):
+            assert win.rect().contains(widget.mapTo(win, widget.rect().bottomRight()))
+            assert widget.width() >= 36
+        bubble = next(w for w in win.findChildren(QLabel) if w.objectName() == 'bubble')
+        assert bubble.textFormat() == Qt.TextFormat.PlainText
+        assert bubble.width() < win.transcript_widget.viewport().width()
+        win.close()
+
+
+@pytest.mark.unit
 class TestChatWindowStructure:
     """The window exposes the UI elements the spec requires."""
 
@@ -73,7 +145,7 @@ class TestChatWindowSend:
         win = ChatWindow()
         win.input_widget.setPlainText("hello there")
         win._send()
-        text = win.transcript_widget.toPlainText()
+        text = win.transcript_text()
         assert "hello there" in text
 
     def test_send_clears_input(self, qapp, monkeypatch):
@@ -113,7 +185,7 @@ class TestChatWindowSend:
         win._send()
 
         assert calls == []
-        text = win.transcript_widget.toPlainText().lower()
+        text = win.transcript_text().lower()
         assert "start listening" in text
         assert win.input_widget.toPlainText() == "are you there"
 
@@ -133,7 +205,7 @@ class TestChatWindowCallbacks:
         win._send()
         # Simulate the daemon completing with a reply.
         win._on_complete("It is sunny today.")
-        text = win.transcript_widget.toPlainText()
+        text = win.transcript_text()
         assert "It is sunny today." in text
 
     def test_on_complete_hides_stop_button(self, qapp, monkeypatch):
@@ -165,7 +237,7 @@ class TestChatWindowCallbacks:
         win._send()
         # Simulate the daemon rejecting because a query is already running.
         win._on_busy()
-        text = win.transcript_widget.toPlainText()
+        text = win.transcript_text()
         # The notice is language-neutral in shape but must mention the query
         # was not accepted.
         assert "second query" in text  # user echo stays
@@ -301,7 +373,7 @@ class TestDesktopAppChatDispatch:
         tray._on_chat_ipc_line(f'{CHAT_IPC_PREFIX}{{"type":"complete","data":"hello back"}}')
         tray.chat_window.show()
         qapp.processEvents()
-        assert "hello back" in tray.chat_window.transcript_widget.toPlainText()
+        assert "hello back" in tray.chat_window.transcript_text()
 
     def test_dispatch_start_sets_thinking(self, qapp):
         from jarvis.daemon import CHAT_IPC_PREFIX
@@ -317,7 +389,7 @@ class TestDesktopAppChatDispatch:
         tray._on_chat_ipc_line(f'{CHAT_IPC_PREFIX}{{"type":"busy","data":null}}')
         tray.chat_window.show()
         qapp.processEvents()
-        text = tray.chat_window.transcript_widget.toPlainText().lower()
+        text = tray.chat_window.transcript_text().lower()
         assert "busy" in text
 
     def test_dispatch_malformed_line_is_swallowed(self, qapp):
@@ -374,6 +446,34 @@ class TestDesktopAppChatDispatch:
         assert written.startswith(CHAT_QUERY_IPC_PREFIX)
         payload = json.loads(written[len(CHAT_QUERY_IPC_PREFIX):].strip())
         assert payload["text"] == "hello over stdin"
+
+    def test_subprocess_control_fn_writes_rewind_line(self, qapp, monkeypatch):
+        """The rewind control closure writes the ``__CHAT_REWIND__:`` IPC
+        line (prefix + JSON payload)."""
+        import io
+        import json
+        from jarvis.daemon import CHAT_REWIND_IPC_PREFIX
+        import desktop_app.app as app_mod
+
+        tray = app_mod.JarvisSystemTray.__new__(app_mod.JarvisSystemTray)
+        sink = io.StringIO()
+        fake_proc = type("P", (), {"stdin": sink})()
+        tray.daemon_process = fake_proc
+
+        def _control(kind: str, payload=None) -> None:
+            import json as _json
+            assert kind == "rewind"
+            tray.daemon_process.stdin.write(
+                f"{CHAT_REWIND_IPC_PREFIX}{_json.dumps(payload)}\n"
+            )
+            tray.daemon_process.stdin.flush()
+
+        _control("rewind", {"user_index": 2})
+        lines = sink.getvalue().splitlines()
+
+        assert json.loads(lines[0][len(CHAT_REWIND_IPC_PREFIX):]) == {
+            "user_index": 2
+        }
 
     def test_show_chat_marks_window_unavailable_when_daemon_stopped(self, qapp):
         import desktop_app.app as app_mod
@@ -528,6 +628,27 @@ class TestChatWindowInputKeys:
         assert calls == ["hi"]
         assert win.input_widget.toPlainText() == ""
 
+    def test_numpad_enter_sends(self, qapp, monkeypatch):
+        """Numpad Enter (Key_Enter) sends just like the main Return key."""
+        from desktop_app.chat_window import ChatWindow
+        from PyQt6.QtCore import Qt as _Qt, QEvent
+        from PyQt6.QtGui import QKeyEvent
+
+        calls = []
+        monkeypatch.setattr(
+            "jarvis.daemon.submit_text_query",
+            lambda text, **kw: calls.append(text),
+        )
+        win = ChatWindow()
+        win.input_widget.setPlainText("hi")
+        event = QKeyEvent(
+            QEvent.Type.KeyPress,
+            _Qt.Key.Key_Enter,
+            _Qt.KeyboardModifier.NoModifier,
+        )
+        win._input_key_press(event)
+        assert calls == ["hi"]
+
     def test_shift_enter_does_not_send(self, qapp, monkeypatch):
         from desktop_app.chat_window import ChatWindow
         from PyQt6.QtCore import Qt as _Qt, QEvent
@@ -548,3 +669,383 @@ class TestChatWindowInputKeys:
         win._input_key_press(event)
         # Default QPlainTextEdit handling inserts a newline; no send.
         assert calls == []
+
+
+@pytest.mark.unit
+class TestChatWindowTranscriptScroll:
+    """New messages keep the latest content visible (auto-scroll to bottom)."""
+
+    def test_append_scrolls_to_bottom_after_many_lines(self, qapp, monkeypatch):
+        from desktop_app.chat_window import ChatWindow
+        from PyQt6.QtTest import QTest
+
+        monkeypatch.setattr(
+            "desktop_app.chat_window.get_hot_window_messages", lambda: []
+        )
+        win = ChatWindow()
+        win.show()
+        qapp.processEvents()
+        # Force a tall transcript so the viewport is scrolled past the first
+        # lines. Each append must bring the cursor (the view) back to the end.
+        for _ in range(80):
+            win._append_assistant("line of transcript content " * 4)
+        QTest.qWait(100)
+
+        scroll_bar = win.transcript_widget.verticalScrollBar()
+        assert scroll_bar.maximum() > 0
+        assert scroll_bar.value() == scroll_bar.maximum()
+
+    @pytest.mark.parametrize("kind", ["user", "assistant", "system"])
+    def test_new_message_scrolls_to_bottom_from_scrolled_up_position(self, qapp, monkeypatch, kind):
+        from desktop_app.chat_window import ChatWindow
+        from PyQt6.QtTest import QTest
+
+        monkeypatch.setattr("desktop_app.chat_window.get_hot_window_messages", lambda: [])
+
+        win = ChatWindow()
+        win.show()
+        for index in range(80):
+            win._append_assistant(f"older message {index} " * 4)
+        QTest.qWait(100)
+
+        scroll_bar = win.transcript_widget.verticalScrollBar()
+        scroll_bar.setValue(scroll_bar.minimum())
+        assert scroll_bar.value() < scroll_bar.maximum()
+
+        getattr(win, f"_append_{kind}")("newest message")
+        QTest.qWait(100)
+
+        assert scroll_bar.value() == scroll_bar.maximum()
+
+
+@pytest.mark.unit
+class TestChatWindowCloseHidesNotDestroys:
+    """Closing the window hides it; the tray re-shows the same instance."""
+
+    def test_close_event_hides_window_without_destroying(self, qapp, monkeypatch):
+        from desktop_app.chat_window import ChatWindow
+        from PyQt6.QtGui import QCloseEvent
+
+        monkeypatch.setattr(
+            "jarvis.daemon.submit_text_query", lambda text, **kw: None
+        )
+        win = ChatWindow()
+        win.show()
+        qapp.processEvents()
+        assert win.isVisible()
+
+        win.closeEvent(QCloseEvent())
+        qapp.processEvents()
+
+        # Hidden, but the same instance is still usable (not destroyed).
+        assert not win.isVisible()
+        # The transcript and inputs remain intact: closing never resets state.
+        assert win.transcript_widget is not None
+        assert win.input_widget is not None
+
+
+@pytest.mark.unit
+class TestChatWindowHotWindowReplay:
+    """Opening the window for the first time replays the daemon's current hot
+    window so the user sees recent voice/text turns instead of a blank
+    transcript. Seeded once; re-showing never duplicates."""
+
+    def test_first_show_seeds_transcript_from_hot_window(self, qapp, monkeypatch):
+        from desktop_app.chat_window import ChatWindow
+
+        monkeypatch.setattr(
+            "jarvis.daemon.submit_text_query", lambda text, **kw: None
+        )
+        hot_window = [
+            {"role": "user", "content": "what is the weather"},
+            {"role": "assistant", "content": "It is sunny."},
+        ]
+        monkeypatch.setattr(
+            "desktop_app.chat_window.get_hot_window_messages",
+            lambda: hot_window,
+        )
+        win = ChatWindow()
+        win.show()
+        qapp.processEvents()
+
+        text = win.transcript_text()
+        assert "what is the weather" in text
+        assert "It is sunny." in text
+
+    def test_re_show_does_not_duplicate_seeded_turns(self, qapp, monkeypatch):
+        from desktop_app.chat_window import ChatWindow
+
+        monkeypatch.setattr(
+            "jarvis.daemon.submit_text_query", lambda text, **kw: None
+        )
+        monkeypatch.setattr(
+            "desktop_app.chat_window.get_hot_window_messages",
+            lambda: [{"role": "user", "content": "hi"}],
+        )
+        win = ChatWindow()
+        win.show()
+        qapp.processEvents()
+        win.hide()
+        qapp.processEvents()
+        win.show()
+        qapp.processEvents()
+
+        text = win.transcript_text()
+        assert text.count("hi") == 1
+
+    def test_empty_hot_window_leaves_transcript_blank(self, qapp, monkeypatch):
+        from desktop_app.chat_window import ChatWindow
+
+        monkeypatch.setattr(
+            "jarvis.daemon.submit_text_query", lambda text, **kw: None
+        )
+        monkeypatch.setattr(
+            "desktop_app.chat_window.get_hot_window_messages", lambda: []
+        )
+        win = ChatWindow()
+        win.show()
+        qapp.processEvents()
+
+        assert win.transcript_text() == ""
+
+
+@pytest.mark.unit
+class TestChatWindowSmsLook:
+    """The window reads as an SMS thread with a single contact: no session
+    sidebar, one continuous conversation, speech bubbles aligned by sender,
+    and a contact header."""
+
+    def _window(self, qapp, **kwargs):
+        from desktop_app.chat_window import ChatWindow
+        return ChatWindow(**kwargs)
+
+    def test_no_session_sidebar(self, qapp):
+        """There is no session list and no new-session button: the window is
+        a single conversation, like an SMS thread with one contact."""
+        win = self._window(qapp)
+        assert not hasattr(win, "session_list")
+        assert not hasattr(win, "new_session_button")
+        assert win._messages == []
+
+    def test_header_shows_contact_and_presence(self, qapp):
+        from PyQt6.QtWidgets import QLabel
+        win = self._window(qapp)
+        win.show()
+        qapp.processEvents()
+        texts = [label.text() for label in win.findChildren(QLabel)]
+        assert "Jarvis" in texts
+        assert "Online" in texts
+
+    def test_header_shows_typing_while_query_in_flight(self, qapp, monkeypatch):
+        monkeypatch.setattr(
+            "jarvis.daemon.submit_text_query", lambda text, **kw: None
+        )
+        win = self._window(qapp)
+        win.show()
+        qapp.processEvents()
+        win.input_widget.setPlainText("hi")
+        win._send()
+        qapp.processEvents()
+        assert win._header_status.text() == "Typing…"
+
+    def test_single_conversation_accumulates_all_turns(self, qapp, monkeypatch):
+        """Voice-seeded turns and typed turns live in one transcript; there
+        is no way to split the conversation into separate sessions."""
+        monkeypatch.setattr(
+            "desktop_app.chat_window.get_hot_window_messages",
+            lambda: [
+                {"role": "user", "content": "voice question"},
+                {"role": "assistant", "content": "voice answer"},
+            ],
+        )
+        monkeypatch.setattr(
+            "jarvis.daemon.submit_text_query", lambda text, **kw: None
+        )
+        win = self._window(qapp)
+        win.show()
+        qapp.processEvents()
+        win.input_widget.setPlainText("typed question")
+        win._send()
+        win._on_complete("typed answer")
+
+        text = win.transcript_text()
+        assert "voice question" in text
+        assert "voice answer" in text
+        assert "typed question" in text
+        assert "typed answer" in text
+
+    def test_user_bubble_right_assistant_left(self, qapp, monkeypatch):
+        """SMS layout: the user's bubble sits on the right half of the
+        window, Jarvis's reply on the left half."""
+        from PyQt6.QtWidgets import QLabel
+        monkeypatch.setattr(
+            "jarvis.daemon.submit_text_query", lambda text, **kw: None
+        )
+        win = self._window(qapp)
+        win.show()
+        qapp.processEvents()
+        win.input_widget.setPlainText("hi there")
+        win._send()
+        win._on_complete("hello back")
+        qapp.processEvents()
+
+        bubbles = [
+            label
+            for label in win.transcript_widget.findChildren(QLabel)
+            if label.objectName() == "bubble"
+        ]
+        assert len(bubbles) == 2
+        user_bubble, assistant_bubble = bubbles
+        mid = win.width() // 2
+        assert user_bubble.mapTo(win, user_bubble.rect().topLeft()).x() > mid
+        assert assistant_bubble.mapTo(win, assistant_bubble.rect().topLeft()).x() < mid
+
+    def test_bubbles_show_plain_text_without_role_prefixes(self, qapp, monkeypatch):
+        """The bubbles carry the message bodies only; position and colour
+        convey the sender, so there is no 'You:' / 'Jarvis:' prefix."""
+        from PyQt6.QtWidgets import QLabel
+        monkeypatch.setattr(
+            "jarvis.daemon.submit_text_query", lambda text, **kw: None
+        )
+        win = self._window(qapp)
+        win.input_widget.setPlainText("no prefix")
+        win._send()
+        win._on_complete("plain reply")
+
+        texts = [
+            label.text()
+            for label in win.transcript_widget.findChildren(QLabel)
+            if label.objectName() == "bubble"
+        ]
+        assert texts == ["no prefix", "plain reply"]
+        assert all("You:" not in t and "Jarvis:" not in t for t in texts)
+
+    def test_bubbles_carry_timestamps(self, qapp, monkeypatch):
+        from PyQt6.QtWidgets import QLabel
+        monkeypatch.setattr(
+            "jarvis.daemon.submit_text_query", lambda text, **kw: None
+        )
+        win = self._window(qapp)
+        win.input_widget.setPlainText("timed")
+        win._send()
+
+        time_labels = [
+            label
+            for label in win.transcript_widget.findChildren(QLabel)
+            if label.styleSheet() and "font-size: 11px" in label.styleSheet()
+        ]
+        assert time_labels, "each bubble should show a muted timestamp"
+        assert all(":" in label.text() for label in time_labels)
+
+
+@pytest.mark.unit
+class TestChatRewind:
+    """The rewind button under a sent message rolls the conversation back
+    to that message and regenerates a fresh reply."""
+
+    def _window(self, qapp, **kwargs):
+        from desktop_app.chat_window import ChatWindow
+        return ChatWindow(**kwargs)
+
+    def _send(self, win, text):
+        win.input_widget.setPlainText(text)
+        win._send()
+
+    def test_every_sent_message_carries_a_rewind_button(self, qapp):
+        from PyQt6.QtWidgets import QPushButton
+
+        win = self._window(qapp)
+        self._send(win, "one")
+        self._send(win, "two")
+
+        buttons = [
+            b.objectName() for b in win.transcript_widget.findChildren(QPushButton)
+            if b.objectName().startswith("rewind_")
+        ]
+        assert buttons == ["rewind_1", "rewind_2"]
+
+    def test_rewind_truncates_transcript_and_regenerates(self, qapp, monkeypatch):
+        rewinds = []
+        submits = []
+        monkeypatch.setattr(
+            "jarvis.daemon.rewind_chat_to_user",
+            lambda idx: rewinds.append(idx) or True,
+        )
+        monkeypatch.setattr(
+            "jarvis.daemon.submit_text_query",
+            lambda text, **kw: submits.append(text),
+        )
+        win = self._window(qapp)
+        self._send(win, "first")
+        win._on_complete("first reply")
+        self._send(win, "second")
+        win._on_complete("second reply")
+
+        win._rewind_to_user(1, "first")
+
+        assert rewinds == [1], "the daemon memory must be rewound to message 1"
+        assert submits[-1] == "first", "the rewound message must be re-submitted"
+        assert "first" in win.transcript_text()
+        assert "second" not in win.transcript_text()
+        assert "first reply" not in win.transcript_text()
+
+        # The fresh reply lands through the normal complete path.
+        win._on_complete("fresh reply")
+        assert "fresh reply" in win.transcript_text()
+
+    def test_rewind_keeps_later_user_messages_after_regenerate(self, qapp, monkeypatch):
+        """After a rewind + regenerate, the message ordinal stays stable so
+        a subsequent send continues the conversation correctly."""
+        monkeypatch.setattr(
+            "jarvis.daemon.rewind_chat_to_user", lambda idx: True
+        )
+        monkeypatch.setattr(
+            "jarvis.daemon.submit_text_query", lambda text, **kw: None
+        )
+        win = self._window(qapp)
+        self._send(win, "one")
+        win._on_complete(None)
+        self._send(win, "two")
+        win._on_complete(None)
+        win._rewind_to_user(2, "two")
+        win._on_complete(None)
+        self._send(win, "three")
+
+        buttons = [
+            b.objectName() for b in win.transcript_widget.findChildren(
+                __import__("PyQt6.QtWidgets", fromlist=["QPushButton"]).QPushButton
+            )
+            if b.objectName().startswith("rewind_")
+        ]
+        assert buttons == ["rewind_1", "rewind_2", "rewind_3"]
+
+    def test_rewind_sends_ipc_line_in_subprocess_mode(self, qapp):
+        commands = []
+        submits = []
+        win = self._window(
+            qapp,
+            submit_fn=lambda t: submits.append(t),
+            control_fn=lambda kind, payload: commands.append((kind, payload)),
+        )
+        self._send(win, "question")
+        win._on_complete(None)  # query finished; rewind is now allowed
+        win._rewind_to_user(1, "question")
+
+        assert ("rewind", {"user_index": 1}) in commands
+        assert submits == ["question", "question"]
+
+    def test_rewind_noops_while_query_in_flight(self, qapp, monkeypatch):
+        rewinds = []
+        monkeypatch.setattr(
+            "jarvis.daemon.rewind_chat_to_user",
+            lambda idx: rewinds.append(idx) or True,
+        )
+        monkeypatch.setattr(
+            "jarvis.daemon.submit_text_query", lambda text, **kw: None
+        )
+        win = self._window(qapp)
+        self._send(win, "question")  # leaves _query_in_flight True
+
+        win._rewind_to_user(1, "question")
+
+        assert rewinds == [], "rewind must be disabled while a query is in flight"
