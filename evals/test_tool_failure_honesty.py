@@ -14,8 +14,9 @@ plausible-looking one is easy to produce. So the contract this file pins is:
 These run against the **real** chat model (only the tool layer is faked):
 mocking the model would test the mock, not the behaviour the system prompt is
 supposed to produce. They take ``real_model_config``: the user's settings with
-the database moved into the sandbox, so the model starts from an empty memory
-and the user's own profile never leaves the machine for a measurement.
+the database moved into the sandbox and location off, so the model starts from
+an empty memory and neither the user's own profile nor their whereabouts leave
+the machine for a measurement.
 
 Run: ./scripts/run_evals.sh -k tool_failure
 """

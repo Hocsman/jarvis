@@ -764,20 +764,34 @@ def mock_config():
 
 @pytest.fixture
 def real_model_config(_bac_a_sable, request):
-    """The user's settings with the database moved into the sandbox.
+    """The user's settings, minus what describes the user.
 
     For the evals that must run the real chat model: mocking the model would
-    test the mock. The engine reads the memory core beside the database into
-    its system prompt, so the real ``db_path`` would send the user's own
-    ``profil.md`` and ``regles.md`` to whichever provider the settings name.
-    The model is the thing under test; the user's life is not part of it,
-    and the model starts from an empty memory.
+    test the mock. The provider, the models and the keys stay. Two things
+    do not:
+
+    - The database moves into the sandbox. The engine reads the memory core
+      beside the database into its system prompt, so the real ``db_path``
+      would send the user's own ``profil.md`` and ``regles.md`` to whichever
+      provider the settings name. The model starts from an empty memory.
+    - Location is off. With it on, the engine resolves the user's city from
+      caches and a GeoIP database kept under the data home, may probe the
+      network for the public address, and puts the city in the prompt.
+
+    What still reaches the provider is the query the eval types and the
+    prompt the engine builds around an empty memory and no location.
     """
     import dataclasses
     from jarvis.config import load_settings
 
     sandbox = _bac_a_sable / f"real-{abs(hash(request.node.nodeid)):x}"
-    return dataclasses.replace(load_settings(), db_path=str(sandbox / "jarvis.db"))
+    return dataclasses.replace(
+        load_settings(),
+        db_path=str(sandbox / "jarvis.db"),
+        location_enabled=False,
+        location_auto_detect=False,
+        location_ip_address=None,
+    )
 
 
 @pytest.fixture

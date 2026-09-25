@@ -59,6 +59,24 @@ def _settings_from_an_empty_config(monkeypatch, tmp_path):
     monkeypatch.setenv("JARVIS_CONFIG_PATH", str(vide))
 
 
+# Values no default carries, so a fixture that dropped them would show.
+_MARKER_CONFIG = {
+    "ollama_chat_model": "guard-chat-model",
+    "ollama_base_url": "http://127.0.0.1:1",
+    "intent_judge_model": "guard-judge-model",
+}
+
+
+@pytest.fixture
+def _settings_from_a_marker_config(monkeypatch, tmp_path):
+    """Load the settings from a config file whose values match no default."""
+    import json
+
+    marque = tmp_path / "config.json"
+    marque.write_text(json.dumps(_MARKER_CONFIG), encoding="utf-8")
+    monkeypatch.setenv("JARVIS_CONFIG_PATH", str(marque))
+
+
 @pytest.mark.unit
 def test_what_an_eval_remembers_is_written_outside_the_repository(mock_config):
     from jarvis.memory.core import MemoryCore, SECTION_PROFILE
@@ -90,16 +108,31 @@ def test_the_real_model_config_reads_no_core_of_the_users_own(
 
 
 @pytest.mark.unit
-def test_the_real_model_config_keeps_the_real_model(
+def test_the_real_model_config_keeps_the_user_out_of_the_prompt(
     _settings_from_an_empty_config, real_model_config
 ):
-    """Only the database moves: the provider and the models are the point."""
-    from jarvis.config import load_settings
+    """The engine's live line names no place when location is off, and
+    reaches for no cache to say so."""
+    from jarvis.reply.engine import _live_time_location_string
 
-    reference = load_settings()
-    assert real_model_config.llm_provider == reference.llm_provider
-    assert real_model_config.llm_chat_model == reference.llm_chat_model
-    assert real_model_config.ollama_chat_model == reference.ollama_chat_model
+    assert real_model_config.location_enabled is False
+    assert real_model_config.location_auto_detect is False
+    assert real_model_config.location_ip_address is None
+    assert "Location: Disabled" in _live_time_location_string(real_model_config)
+
+
+@pytest.mark.unit
+def test_the_real_model_config_keeps_the_real_model(
+    _settings_from_a_marker_config, real_model_config
+):
+    """Only the database and the location move: the models are the point.
+
+    Measured against values no default carries, so a fixture that rebuilt
+    the settings from scratch would fail here."""
+    assert real_model_config.ollama_chat_model == _MARKER_CONFIG["ollama_chat_model"]
+    assert real_model_config.llm_chat_model == _MARKER_CONFIG["ollama_chat_model"]
+    assert real_model_config.ollama_base_url == _MARKER_CONFIG["ollama_base_url"]
+    assert real_model_config.intent_judge_model == _MARKER_CONFIG["intent_judge_model"]
 
 
 @pytest.mark.unit
@@ -136,32 +169,72 @@ _FILE_EVENTS = {
     "open", "os.listdir", "os.scandir", "os.mkdir", "os.rename", "os.remove",
     "os.rmdir", "shutil.rmtree", "shutil.copyfile", "shutil.move",
 }
+_NETWORK_EVENTS = {"socket.getaddrinfo", "socket.gethostbyname", "socket.connect"}
+_LOOPBACK = {None, "", b"", "localhost", b"localhost", "::1", b"::1"}
 _armed: list = []
 _hook_installed = False
 
 
+def _is_loopback(host) -> bool:
+    if host in _LOOPBACK:
+        return True
+    if isinstance(host, bytes):
+        host = host.decode("ascii", "replace")
+    return isinstance(host, str) and host.startswith("127.")
+
+
 def _audit(event, args):
-    if not _armed or event not in _FILE_EVENTS:
+    if not _armed:
         return
     wire = _armed[0]
+    if event in _NETWORK_EVENTS:
+        # The network is closed to the guard, so nothing leaves and the turn
+        # is the same on every machine. Only a host beyond this machine is
+        # a leak: the engine's small chain looking for a local model is not.
+        host = args[1] if event == "socket.connect" else args[0]
+        if isinstance(host, tuple):
+            host = host[0] if host else None
+        if not _is_loopback(host):
+            wire.network.append((event, host))
+        raise ConnectionRefusedError("the network is closed to this guard")
+    if event not in _FILE_EVENTS:
+        return
     for arg in args:
         if isinstance(arg, (str, bytes, os.PathLike)):
             # No file-system call in here: the hook would hear itself.
             path = os.path.normcase(os.path.abspath(os.fsdecode(arg)))
-            if path == wire.foyer or path.startswith(wire.foyer + os.sep):
+            if any(path == f or path.startswith(f + os.sep) for f in wire.foyers):
                 wire.touched.append((event, path))
 
 
-@pytest.fixture
-def data_home_tripwire():
+def _wire(*foyers):
+    """A tripwire around the given directories, by every spelling given."""
+    return SimpleNamespace(
+        foyers=[os.path.normcase(os.path.abspath(str(f))) for f in foyers],
+        touched=[],
+        network=[],
+    )
+
+
+def _arm(wire):
     global _hook_installed
     if not _hook_installed:
         # An audit hook cannot be removed, so it is installed once and stays
         # inert while nothing is armed.
         sys.addaudithook(_audit)
         _hook_installed = True
-    wire = SimpleNamespace(foyer=os.path.normcase(str(_foyer())), touched=[])
     _armed.append(wire)
+
+
+@pytest.fixture
+def data_home_tripwire():
+    """Watches the user's data home, spelled both as the default path says
+    it and as the file system resolves it: a home moved behind a link is
+    opened through the link."""
+    from jarvis.config import _default_db_path
+
+    wire = _wire(_foyer(), Path(_default_db_path()).expanduser().parent)
+    _arm(wire)
     try:
         yield wire
     finally:
@@ -169,15 +242,75 @@ def data_home_tripwire():
 
 
 @pytest.mark.unit
-def test_the_engines_read_of_the_core_touches_nothing_of_the_users_own(
+def test_the_tripwire_hears_a_file_opened_where_it_watches(tmp_path):
+    """The positive control: an empty ``touched`` means something only if
+    the hook reports what it is pointed at."""
+    wire = _wire(tmp_path)
+    _arm(wire)
+    try:
+        (tmp_path / "profil.md").write_text("témoin", encoding="utf-8")
+        (tmp_path / "profil.md").read_text(encoding="utf-8")
+    finally:
+        _armed.clear()
+
+    assert [event for event, _ in wire.touched].count("open") >= 2, wire.touched
+    assert all(p.endswith("profil.md") for _, p in wire.touched), wire.touched
+
+
+@pytest.mark.unit
+def test_the_core_the_engine_reads_is_empty_and_elsewhere(
     _settings_from_an_empty_config, real_model_config, data_home_tripwire
 ):
-    """``run_reply_engine`` reads the core with ``MemoryCore.for_config`` and
-    ``build_core_profile`` before every reply; run with the real-model
-    settings, that read lands in the sandbox and finds it empty."""
+    """The two calls the engine makes for the core, ``MemoryCore.for_config``
+    then ``build_core_profile``, land in the sandbox and find it empty."""
     from jarvis.memory.core import MemoryCore, build_core_profile
 
     profile = build_core_profile(MemoryCore.for_config(real_model_config))
 
     assert profile == {"user": "", "directives": ""}, profile
     assert data_home_tripwire.touched == [], data_home_tripwire.touched
+
+
+@pytest.mark.unit
+def test_a_real_model_turn_touches_nothing_of_the_users_own(
+    _settings_from_an_empty_config, real_model_config, eval_dialogue_memory,
+    data_home_tripwire,
+):
+    """The turn the honesty eval performs, with the model faked and the
+    network closed, opens nothing under the user's data home: whatever the
+    engine reads on the way to the prompt, it is not the user's."""
+    import dataclasses
+    from unittest.mock import patch
+
+    from helpers import ToolCallCapture, create_mock_llm_response
+    from jarvis.memory.db import Database
+    from jarvis.reply.engine import run_reply_engine
+    from jarvis.tools.types import ToolExecutionResult
+
+    cfg = dataclasses.replace(real_model_config, tool_selection_strategy="all")
+    capture = ToolCallCapture()
+
+    def failing_tool(db, cfg, tool_name, tool_args, **kwargs):
+        capture.record(tool_name, tool_args or {})
+        return ToolExecutionResult(success=False, reply_text="I couldn't auto-detect your location.")
+
+    def faked_model(cfg, messages, **kwargs):
+        return create_mock_llm_response("Je n'ai pas pu obtenir la météo.")
+
+    db = Database(":memory:", sqlite_vss_path=None)
+    try:
+        with patch("jarvis.reply.engine.run_tool_with_retries", side_effect=failing_tool), \
+             patch("jarvis.reply.engine.chat_with_messages", side_effect=faked_model), \
+             patch("jarvis.reply.engine.extract_search_params_for_memory", return_value={"keywords": []}):
+            reply = run_reply_engine(
+                db=db, cfg=cfg, tts=None,
+                text="quelle est la météo ?", dialogue_memory=eval_dialogue_memory,
+            )
+    finally:
+        db.close()
+
+    assert reply, "the faked model's reply must come back"
+    assert data_home_tripwire.touched == [], data_home_tripwire.touched
+    assert data_home_tripwire.network == [], (
+        f"the guard reached beyond this machine: {data_home_tripwire.network}"
+    )
