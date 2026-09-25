@@ -20,6 +20,7 @@ src/desktop_app/
 ├── setup_wizard.py      # First-run setup wizard
 ├── settings_window.py   # Auto-generated settings UI from config metadata
 ├── face_widget.py       # Animated face visualization
+├── orb/                 # State-driven orb window and widget (see Orb below)
 ├── themes.py            # Qt stylesheets and color palette
 ├── diary_dialog.py      # End-of-session diary update dialog
 ├── chat_window.py       # Text chat interface (see chat_window.spec.md)
@@ -96,6 +97,15 @@ The central controller that manages:
 | **SetupWizard** | First-run configuration (Ollama, models, profile) |
 | **DictationHistoryWindow** | Scrollable list of past dictations with copy/delete/clear actions |
 | **ChatWindow** | Text chat interface alongside voice; shares one conversation with the voice path and is enabled only while the daemon is running (see `chat_window.spec.md`) |
+| **OrbWindow** | Frameless, translucent, always-on-top orb driven by the assistant's state; toggled with `Ctrl+Shift+J` (`Cmd+Shift+J` on macOS) |
+
+### Orb
+
+`src/desktop_app/orb/` renders an icosphere whose colour, intensity and surface motion follow the assistant's state (`OrbState`: IDLE, LISTENING, THINKING, SPEAKING, plus a transient ERROR overlay), eased through `StateController` with a 250 ms minimum transition. It draws with QPainter at 60 FPS: a stack of four halos, the shaded body, the wireframe displaced by two octaves of deterministic pseudo-noise so the surface breathes, a red and a blue rim in the active states, particles orbiting on the clock (`ui.orb_particles_enabled`), and a key-light highlight.
+
+The orb listens to nothing. It has no audio input, takes no audio source as an argument, and the package exposes no audio API: a frame is a function of state and time only, so the orb renders the same whether the daemon runs in the same process, in a subprocess, or not at all. Rendering pauses while the host window is hidden (`pause_rendering` / `resume_rendering`).
+
+`OrbWindow` hosts the widget frameless and translucent, always on top and draggable, toggled by a global pynput hotkey (disabled on macOS 26+, where pynput crashes the process; a window-scoped Qt shortcut remains). `ChatWindow` embeds an `OrbWidget` in its hero band.
 
 ### Tray Menu: GPU Library Recovery (Windows)
 

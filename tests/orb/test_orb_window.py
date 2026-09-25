@@ -15,9 +15,9 @@ import os
 import pytest
 
 
-# QOpenGLWidget requires an OpenGL context; the offscreen Qt platform
-# plugin works for instantiation + show/hide on macOS as long as
-# QT_QPA_PLATFORM is set before QApplication.__init__.
+# The offscreen Qt platform plugin is enough for instantiation and
+# show/hide as long as QT_QPA_PLATFORM is set before
+# QApplication.__init__.
 @pytest.fixture(scope="module")
 def qt_app():
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -66,36 +66,6 @@ class TestToggleVisibility:
             win.hide_orb()
             qt_app.processEvents()
             assert win.isVisible() is False
-        finally:
-            win.close()
-            qt_app.processEvents()
-
-
-class TestDevBadge:
-    """The DEV badge surfaces when the dev-mode env var is set."""
-
-    @pytest.mark.unit
-    def test_dev_badge_present_when_forced(self, qt_app, monkeypatch):
-        monkeypatch.setenv("JARVIS_ORB_FORCE_DEV", "1")
-        from desktop_app.orb.orb_window import OrbWindow
-
-        win = OrbWindow()
-        try:
-            assert win._dev_badge is not None
-            assert win._dev_badge.text() == "DEV"
-        finally:
-            win.close()
-            qt_app.processEvents()
-
-    @pytest.mark.unit
-    def test_dev_badge_absent_in_prod(self, qt_app, monkeypatch):
-        monkeypatch.setenv("JARVIS_ORB_FORCE_PROD", "1")
-        monkeypatch.delenv("JARVIS_ORB_FORCE_DEV", raising=False)
-        from desktop_app.orb.orb_window import OrbWindow
-
-        win = OrbWindow()
-        try:
-            assert win._dev_badge is None
         finally:
             win.close()
             qt_app.processEvents()

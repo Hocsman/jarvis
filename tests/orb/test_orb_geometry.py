@@ -1,25 +1,22 @@
-"""Geometry properties for the Phase 2D orb refinement.
+"""Geometry properties of the orb.
 
-Phase 1 shipped a subdiv=2 icosphere (162 vertices, 320 triangles).
-Phase 2D bumps the default to subdiv=3 (642 verts, 1280 tris) and
-composes the per-vertex displacement from three octaves of
-pseudo-noise so the surface reads as live even at idle.
+The default icosphere is subdiv=3 (642 vertices, 1280 triangles) and
+the per-vertex displacement is composed of two octaves of pseudo-noise
+so the surface breathes at rest.
 
 These tests pin:
 
-1. The default vertex count is 642 — i.e. the OrbWidget constructor
-   really uses subdiv=3, not the Phase 1 subdiv=2 default. Catches
-   accidental regressions in the constructor default.
+1. The default vertex count is 642, i.e. the OrbWidget constructor
+   really uses subdiv=3. Catches accidental regressions in the
+   constructor default.
 
 2. The icosphere builder returns the documented counts at each
    subdivision level. This is a structural invariant of the geometry
    module; useful sanity check if a future optimisation rewrites it.
 
-3. Three per-vertex phase arrays (a, b, c) exist on the widget — one
-   per octave. A regression that drops back to two octaves would
-   wash the surface motion out at silent states (no audio input
-   means the only octave with non-trivial amplitude is the slow one),
-   and we want to notice.
+3. Two per-vertex phase arrays (a, b) exist on the widget, one per
+   octave. A regression to a single octave would leave only the slow
+   breath, and we want to notice.
 
 We don't go further into "the visual is correct" because that's
 inherently subjective. The capture script in scripts/orb_capture_states.py
@@ -70,7 +67,7 @@ class TestIcosphereCounts:
     @pytest.mark.unit
     def test_positions_are_unit_sphere(self) -> None:
         """Every vertex must lie on the unit sphere (radius == 1 within
-        a small float tolerance). The shader treats positions as unit
+        a small float tolerance). The renderer treats positions as unit
         normals; a bad radius here would skew the displacement maths
         and make the orb look misshapen."""
         import numpy as np
@@ -85,8 +82,7 @@ class TestIcosphereCounts:
 
 
 class TestOrbWidgetDefaultGeometry:
-    """Constructor defaults: Phase 2D widget has subdiv=3 + three
-    phase arrays. A regression that flipped the default back to
+    """Constructor defaults: subdiv=3 and two phase arrays. A regression that flipped the default back to
     subdiv=2 would still pass the icosphere counts test above but
     would fail here — which is the failure mode we care about."""
 
@@ -118,20 +114,18 @@ class TestOrbWidgetDefaultGeometry:
             widget.deleteLater()
 
     @pytest.mark.unit
-    def test_three_phase_arrays_exist(self, _qapp) -> None:
-        """Three octaves means three phase arrays. A regression that
-        dropped to two octaves would still let the orb breathe at
-        idle (slow octave alone) but would wash out the audio-driven
-        detail layer. Test name names the attributes explicitly so
-        a future renamer notices."""
+    def test_two_phase_arrays_exist(self, _qapp) -> None:
+        """Two octaves means two phase arrays. A regression to one
+        octave would leave only the slow breath. The test names the
+        attributes explicitly so a future renamer notices."""
         from desktop_app.orb.orb_widget import OrbWidget
 
         widget = OrbWidget()
         try:
-            for attr in ("_vertex_phase_a", "_vertex_phase_b", "_vertex_phase_c"):
+            for attr in ("_vertex_phase_a", "_vertex_phase_b"):
                 assert hasattr(widget, attr), (
                     f"Missing phase array {attr!r}; orb octave composition "
-                    f"is incomplete. Re-add the third phase or drop the "
+                    f"is incomplete. Re-add the second phase or drop the "
                     f"multi-octave promise from the docs."
                 )
                 # Each phase array must be sized to the mesh.

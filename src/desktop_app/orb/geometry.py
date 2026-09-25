@@ -1,22 +1,22 @@
 """Static geometry for the orb: icosphere mesh + particle halo.
 
-Pure-numpy. No GL imports here so the module is testable headlessly.
-The orb_widget consumes the returned arrays and uploads them as VBOs.
+Pure-numpy, no Qt, so the module is testable headlessly. The orb
+widget projects the returned arrays to 2D every frame.
 
 Two builders
 ------------
 - ``build_icosphere(subdivisions: int) -> Mesh``: a unit sphere from
-  icosahedron midpoint subdivision. Three subdivisions is the spec
-  default (~320 triangles, ~162 vertices). One additional subdivision
+  icosahedron midpoint subdivision. Three subdivisions is the widget's
+  default (1280 triangles, 642 vertices). One additional subdivision
   ~quadruples the triangle count.
 - ``build_particles(count: int, seed: int = 0) -> Particles``: a halo
   of points distributed across orbits with random radius/inclination/
-  phase. Positions are *parametric* (rendered per-frame by the vertex
-  shader from the orbit parameters); the buffer contains the orbit
-  spec, not the live position.
+  phase. Positions are *parametric* (the widget computes each
+  particle's position per frame from the orbit parameters and the
+  clock); the buffer contains the orbit spec, not the live position.
 
 Both builders return frozen dataclasses with the numpy buffers in the
-exact dtype / layout the shaders expect (float32, contiguous, packed).
+exact dtype / layout the renderer expects (float32, contiguous, packed).
 """
 
 from __future__ import annotations
@@ -37,9 +37,8 @@ class Mesh:
 
     ``positions`` and ``normals`` are identical for the unit sphere
     (the position vector from the centre *is* the normal). They are
-    kept as two separate buffers so the vertex shader does not need
-    to renormalise per-vertex; the displacement step in the vertex
-    shader mutates positions while normals stay as authored.
+    kept as two separate buffers so a displacement that moves the
+    positions along the normals leaves the normals as authored.
     """
     positions: np.ndarray  # (V, 3) float32, unit length
     normals: np.ndarray    # (V, 3) float32, == positions on the unit sphere
@@ -149,10 +148,9 @@ class Particles:
 
     Each row of ``orbits`` describes one particle as
     ``(radius, inclination, longitude_phase, angular_speed, size)``.
-    The vertex shader expands these into a live position per frame
-    from a single time uniform, so the CPU only uploads the spec
-    once at startup. Animation is GPU-side and reacts to high-band
-    audio energy via a uniform.
+    The widget expands these into a live position per frame from the
+    clock, so the spec is built once at construction and the animation
+    is a function of time alone.
     """
     orbits: np.ndarray  # (N, 5) float32: r, inclination, phase, speed, size
 
@@ -171,7 +169,7 @@ def build_particles(count: int = 256, seed: int = 0) -> Particles:
     - radius: uniform in [1.25, 1.75] so the halo lives just outside
       the orb's unit-sphere surface (mesh + displacement room).
     - inclination: uniform in [-pi/2, pi/2] (full latitude range,
-      slight pole bias falls out of uniform-cos in shader).
+      slight pole bias falls out of uniform-cos in the projection).
     - longitude phase: uniform in [0, 2*pi].
     - angular speed: uniform in [0.15, 0.45] rad/s (slow drift).
     - size: uniform in [0.005, 0.020] (NDC-ish at 320x320).

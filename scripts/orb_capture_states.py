@@ -1,8 +1,8 @@
 """Capture one screenshot per orb state for visual A/B review.
 
-Phase 2D adds several visual upgrades (bloom stack, chromatic
-aberration, denser geometry, particle audio coupling). The eye is
-the only reasonable judge for these — automated assertions can pin
+The orb's visual layers (bloom stack, chromatic rim, dense geometry,
+particles) have the eye as their only reasonable judge: automated
+assertions can pin
 that we DREW the right number of ellipses but not that the result
 looks good. This script generates one PNG per orb state so you can
 compare side-by-side before / after a change.
@@ -61,7 +61,7 @@ def _capture_state(orb_window, state_name: str, out_path: Path) -> None:
 
     # ERROR needs the dedicated trigger; set_state() forwards to it.
     controller.set_state(state)
-    # Let the cubic-ease + a couple of FFT frames settle.
+    # Let the cubic-ease transition settle.
     _settle(orb_window, render_seconds=0.6)
 
     # Grab the orb widget (not the whole window — the window has

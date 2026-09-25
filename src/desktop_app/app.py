@@ -1653,11 +1653,10 @@ class JarvisSystemTray:
 
         # The unified HUD dashboard is the primary window: open it at
         # startup so the orb (its centrepiece), conversation, and system
-        # stats are all there from launch. The standalone floating orb
-        # is now redundant (the dashboard embeds the same orb), so it is
-        # no longer auto-shown — it stays available on demand via the
-        # "🟠 Toggle Orb" tray action. Falls back to the floating orb only
-        # when WebEngine isn't available.
+        # stats are all there from launch. The dashboard embeds the same
+        # orb, so the standalone floating orb is not auto-shown; it stays
+        # available on demand via the "🟠 Toggle Orb" tray action. Falls
+        # back to the floating orb only when WebEngine isn't available.
         if HAS_WEBENGINE:
             self.show_dashboard()
         else:

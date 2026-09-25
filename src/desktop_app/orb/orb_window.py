@@ -1,18 +1,7 @@
 """Frameless, translucent always-on-top window hosting the orb.
 
-The window is intentionally minimal: it owns the GL widget, a drag
-handler, a global hotkey for toggle visibility, and an optional DEV
-badge that surfaces when the orb is running in subprocess dev mode
-(no in-process daemon audio tap).
-
-Cross-process detection
------------------------
-Phase 1 ships the bundled-mode reactive path only. When the orb is
-launched standalone (``scripts/run_orb.sh``) it shares the daemon's
-process and has direct memory access to the audio queue. When the
-desktop_app is launched while a daemon subprocess runs the listener,
-the orb cannot tap audio in real time and falls back to a synthetic
-envelope. The badge tells the user which path is live.
+The window is intentionally minimal: it owns the orb widget, a drag
+handler and a global hotkey for toggling visibility.
 
 Hotkey
 ------
@@ -25,7 +14,6 @@ the window is hidden.
 
 from __future__ import annotations
 
-import os
 import platform
 import sys
 import threading
@@ -35,8 +23,8 @@ from typing import Any, Optional
 # expose; tests for this module run in offscreen Qt mode and need the
 # imports to land before fixtures execute.
 from PyQt6.QtCore import QPoint, Qt, pyqtSignal
-from PyQt6.QtGui import QFont, QKeySequence, QShortcut
-from PyQt6.QtWidgets import QApplication, QLabel, QMainWindow, QVBoxLayout, QWidget
+from PyQt6.QtGui import QKeySequence, QShortcut
+from PyQt6.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget
 
 from .orb_widget import OrbWidget
 
@@ -68,32 +56,13 @@ def _pynput_is_safe_on_this_platform() -> bool:
     return major < 26
 
 
-def _is_dev_mode() -> bool:
-    """Return True if we're running in subprocess dev mode.
-
-    Best-effort heuristic. We can't ask the daemon "are we the same
-    process" so we sniff for the env var the desktop_app sets when it
-    spawns the daemon. Override via ``JARVIS_ORB_FORCE_DEV=1`` /
-    ``JARVIS_ORB_FORCE_PROD=1`` for testing.
-    """
-    if os.environ.get("JARVIS_ORB_FORCE_DEV") == "1":
-        return True
-    if os.environ.get("JARVIS_ORB_FORCE_PROD") == "1":
-        return False
-    # If the daemon was spawned by this same desktop_app process tree,
-    # JARVIS_DAEMON_SUBPROCESS will be set on its env. We are the desktop
-    # side, so we look for our own marker.
-    return os.environ.get("JARVIS_DESKTOP_HAS_DAEMON_SUBPROCESS") == "1"
-
-
 class OrbWindow(QMainWindow):
     """Top-level orb window.
 
     Public API:
     - ``show_orb()`` / ``hide_orb()`` / ``toggle_visibility()`` for
       programmatic control (also wired to the global hotkey).
-    - ``trigger_error()`` proxies to the controller for Phase 1 manual
-      ERROR demos.
+    - ``trigger_error()`` proxies a manual ERROR pulse to the controller.
 
     Lifecycle: register the global hotkey on first ``show()``,
     unregister on ``closeEvent``. The hotkey listener runs in its own
@@ -110,7 +79,6 @@ class OrbWindow(QMainWindow):
 
     def __init__(
         self,
-        audio_bus: Optional[Any] = None,
         state_controller: Optional[Any] = None,
         particles_enabled: bool = True,
         parent: Optional[QWidget] = None,
@@ -118,9 +86,7 @@ class OrbWindow(QMainWindow):
         super().__init__(parent)
 
         # Frameless, translucent, always-on-top, hidden from dock on
-        # macOS via the Tool flag. Translucent composition on QWidget
-        # (with QPainter) is well-supported on macOS 26 — unlike the
-        # QOpenGLWidget path that motivated the QPainter pivot.
+        # macOS via the Tool flag.
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
@@ -130,9 +96,8 @@ class OrbWindow(QMainWindow):
         self.setWindowTitle("Jarvis Orb")
         self.resize(self.DEFAULT_SIZE, self.DEFAULT_SIZE)
 
-        # Central widget hierarchy: GL widget + optional DEV badge.
         central = QWidget(self)
-        # Transparent stylesheet so the GL widget shows the desktop
+        # Transparent stylesheet so the orb widget shows the desktop
         # behind it where the orb has zero alpha.
         central.setStyleSheet("background: transparent;")
         layout = QVBoxLayout(central)
@@ -140,20 +105,11 @@ class OrbWindow(QMainWindow):
         layout.setSpacing(0)
 
         self._orb = OrbWidget(
-            audio_bus=audio_bus,
             state_controller=state_controller,
             particles_enabled=particles_enabled,
             parent=central,
         )
         layout.addWidget(self._orb)
-
-        # DEV badge surfaces when the orb is running on synthetic or
-        # absent audio, which in subprocess mode it always is: nothing
-        # publishes band readings across the process boundary, so the
-        # bus the orb reads answers zero.
-        self._dev_badge: Optional[QLabel] = None
-        if _is_dev_mode():
-            self._dev_badge = self._build_dev_badge(central)
 
         self.setCentralWidget(central)
         self._position_default()
@@ -197,9 +153,8 @@ class OrbWindow(QMainWindow):
             self.show_orb()
 
     def trigger_error(self) -> None:
-        """Proxy: route a manual ERROR pulse through the orb widget's
-        state controller. Phase 2 will wire this from the daemon's
-        exception handlers; Phase 1 keeps it as a public test entry."""
+        """Route a manual ERROR pulse through the orb widget's state
+        controller; nothing in the daemon calls it."""
         self._orb.trigger_error()
 
     # ── Qt overrides ───────────────────────────────────────────────────
@@ -237,20 +192,6 @@ class OrbWindow(QMainWindow):
             super().mouseReleaseEvent(event)
 
     # ── Internals ──────────────────────────────────────────────────────
-
-    def _build_dev_badge(self, parent: QWidget) -> QLabel:
-        """Bottom-right small label that flags subprocess dev mode."""
-        badge = QLabel("DEV", parent)
-        font = QFont("Menlo", 9)
-        font.setBold(True)
-        badge.setFont(font)
-        badge.setStyleSheet(
-            "QLabel { color: rgba(180, 180, 180, 180); background: transparent; }"
-        )
-        badge.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom)
-        # Position the badge inside the window via showEvent re-layout.
-        badge.move(self.DEFAULT_SIZE - 34, self.DEFAULT_SIZE - 18)
-        return badge
 
     def _position_default(self) -> None:
         """Centre the window on the primary screen."""

@@ -1,7 +1,7 @@
-"""Phase 2D fake-bloom + color depth tests.
+"""Fake-bloom and colour depth tests.
 
-The Phase 2D upgrade stacks 4 concentric halos behind the orb body
-instead of a single radial gradient. We can't unit-test "the visual
+The bloom stacks 4 concentric halos behind the orb body rather than
+a single radial gradient. We can't unit-test "the visual
 looks good" so we pin the structural contract instead:
 
 1. The halo stack has 4 entries (regression guard: a future
@@ -15,7 +15,7 @@ looks good" so we pin the structural contract instead:
    halo must be the dimmest).
 
 4. Each halo contributes 4 color stops to its radial gradient
-   (inner, mid, tint, outer) — the "color depth" Phase 2D goal.
+   (inner, mid, tint, outer): the "colour depth".
    We verify this by mocking the painter and counting setColorAt
    calls per drawn ellipse.
 
@@ -59,13 +59,12 @@ class TestBloomStackStructure:
 
     @pytest.mark.unit
     def test_halo_count_is_four(self, _qapp) -> None:
-        """Spec: 4-5 halos. We ship with 4; this test catches a
-        regression to 1 (the Phase 1 design)."""
+        """Four halos ship; this test catches a regression to one."""
         from desktop_app.orb.orb_widget import OrbWidget
 
         assert len(OrbWidget._BLOOM_HALOS) >= 4, (
             f"Bloom stack has {len(OrbWidget._BLOOM_HALOS)} halos, "
-            f"expected >= 4 (Phase 2D spec calls for 4-5)."
+            f"expected >= 4."
         )
 
     @pytest.mark.unit
@@ -121,7 +120,7 @@ class TestBloomDrawingCalls:
             color = QColor(120, 200, 255)
             widget._draw_glow_halo(
                 painter, cx=160.0, cy=160.0, r=80.0,
-                color=color, intensity=0.8, rms=0.3,
+                color=color, intensity=0.8,
             )
             assert painter.drawEllipse.call_count == len(OrbWidget._BLOOM_HALOS), (
                 f"Expected {len(OrbWidget._BLOOM_HALOS)} ellipses (one per halo); "
@@ -157,7 +156,7 @@ class TestBloomDrawingCalls:
             with patch.object(QRadialGradient, "setColorAt", counting_set_color_at):
                 widget._draw_glow_halo(
                     painter, cx=160.0, cy=160.0, r=80.0,
-                    color=color, intensity=0.8, rms=0.3,
+                    color=color, intensity=0.8,
                 )
 
             # We should have at least one gradient per halo; each
@@ -171,7 +170,7 @@ class TestBloomDrawingCalls:
             for n_stops in stops_per_gradient:
                 assert n_stops >= 3, (
                     f"A halo gradient has only {n_stops} colour stops; "
-                    f"Phase 2D color depth requires >= 3 (inner / mid / outer "
+                    f"colour depth requires >= 3 (inner / mid / outer "
                     f"at minimum)."
                 )
         finally:

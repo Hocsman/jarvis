@@ -6,17 +6,15 @@ five* visual modes plus ERROR. The shared ``JarvisState`` from
 DICTATION_PROCESSING / ASLEEP) than the orb cares to express
 visually, so we collapse those onto the closest orb-state.
 
-This module is the seam between the daemon-owned bus and the
-visual pipeline. It also owns:
+This module is the seam between the shared state and the visual
+pipeline. It also owns:
 
 - Cubic-eased transitions on colour, intensity, displacement amplitude
   (250 ms minimum per spec).
 - The ERROR overlay: a transient state with a fixed 800 ms fade that
   automatically returns to whatever state was active just before the
-  error fired. Phase 1 only exposes the trigger via
-  ``trigger_error()`` (Phase 2 will plumb the daemon's exception path
-  through it).
-- A monotonic ``time_seconds`` accessor for shaders that need a clock.
+  error fired, exposed through ``trigger_error()``.
+- A monotonic ``time_seconds`` accessor for the renderer's clock.
 
 All purely numeric / numpy: no Qt, no GL. Headlessly testable.
 """
@@ -74,13 +72,13 @@ def map_jarvis_to_orb(jarvis_value: str) -> OrbState:
 
 @dataclass(frozen=True)
 class StateStyle:
-    """The shader-bound parameters for one state.
+    """The visual parameters for one state.
 
     ``color`` is RGB in 0..1. ``intensity`` is a multiplier on the
-    fragment shader's final colour. ``displacement_scale`` gates the
-    vertex shader's audio-driven bumps. ``pulse_period_s`` is how
-    long one cycle of the breathing pulse lasts (0 means no pulse,
-    just a steady amplitude).
+    rendered colour. ``displacement_scale`` scales the wireframe's
+    breathing displacement. ``pulse_period_s`` is how long one cycle
+    of the breathing pulse lasts (0 means no pulse, just a steady
+    amplitude).
     """
     color: Tuple[float, float, float]
     intensity: float
@@ -138,7 +136,7 @@ STATE_STYLES: dict[OrbState, StateStyle] = {
 }
 
 # Minimum transition duration on colour/intensity/displacement between
-# any two non-error states. Phase 1 spec.
+# any two non-error states.
 TRANSITION_DURATION_S = 0.250
 
 # ERROR overlay fade duration. The auto-recovery to the previous state
@@ -155,7 +153,7 @@ class StateSnapshot:
     """What the orb widget reads from the controller each render frame.
 
     ``time_seconds`` is monotonic since controller construction; the
-    shader uses it for breathing motion that is independent of audio.
+    renderer uses it for the breathing motion.
     """
     state: OrbState                              # the *target* state at this instant
     color: Tuple[float, float, float]            # interpolated RGB
@@ -163,7 +161,7 @@ class StateSnapshot:
     displacement_scale: float                    # interpolated
     pulse_period_s: float                        # current style's pulse period
     transitioning: bool                          # True while interpolation is in progress
-    time_seconds: float                          # monotonic clock for shaders
+    time_seconds: float                          # monotonic clock for the renderer
 
 
 # ── Controller ──────────────────────────────────────────────────────────
