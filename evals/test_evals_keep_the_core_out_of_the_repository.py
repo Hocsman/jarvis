@@ -22,6 +22,7 @@ do, which is exactly where the guards have to hold.
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -319,23 +320,39 @@ def test_a_real_model_turn_touches_nothing_of_the_users_own(
 # ── The report ────────────────────────────────────────────────────────
 
 
+def _git(*args):
+    """Run git at the repository root; skip the test where there is no git
+    or no checkout to ask."""
+    try:
+        result = subprocess.run(["git", *args], cwd=DEPOT, capture_output=True, text=True)
+    except FileNotFoundError:
+        pytest.skip("git is not on PATH here")
+    if result.returncode == 128:
+        pytest.skip(f"not a git checkout: {result.stderr.strip()}")
+    return result
+
+
 @pytest.mark.unit
 def test_the_eval_report_never_enters_the_repository():
     """The report plugin writes its markdown at the repository root by
     default, quoting the model's replies. Git must ignore that path, so a
-    ``git add -A`` after an eval run cannot publish what the model said."""
-    import subprocess
+    ``git add -A`` after an eval run cannot publish what the model said.
 
+    Asked of the repository's own ``.gitignore``, not of whatever a
+    developer ignores machine-wide, and told apart from a tracked file,
+    which git never ignores whatever the pattern says."""
     from conftest import EVAL_REPORT_DEFAULT
 
     assert EVAL_REPORT_DEFAULT.parent == DEPOT, EVAL_REPORT_DEFAULT
-    try:
-        result = subprocess.run(
-            ["git", "check-ignore", "-q", str(EVAL_REPORT_DEFAULT)],
-            cwd=DEPOT, capture_output=True,
-        )
-    except FileNotFoundError:
-        pytest.skip("git is not on PATH here")
-    assert result.returncode == 0, (
-        f"{EVAL_REPORT_DEFAULT.name} is not ignored by git: {result.stderr.decode(errors='replace')}"
+
+    tracked = _git("ls-files", "--error-unmatch", str(EVAL_REPORT_DEFAULT))
+    assert tracked.returncode != 0, (
+        f"{EVAL_REPORT_DEFAULT.name} is tracked; git rm --cached it, the ignore rule cannot cover it"
+    )
+
+    ignored = _git("check-ignore", "-v", str(EVAL_REPORT_DEFAULT))
+    assert ignored.returncode == 0, f"{EVAL_REPORT_DEFAULT.name} is not ignored by git"
+    source = ignored.stdout.split(":", 1)[0]
+    assert (DEPOT / source).resolve() == (DEPOT / ".gitignore").resolve(), (
+        f"{EVAL_REPORT_DEFAULT.name} is ignored by {source!r}, not by the repository's .gitignore"
     )
