@@ -16,7 +16,25 @@ These verify the contract in ``src/desktop_app/chat_window.spec.md``:
 
 from __future__ import annotations
 
+import time
+
 import pytest
+
+
+def _settled(qapp, condition, timeout_ms=2000) -> bool:
+    """Pump the event loop until ``condition()`` holds or the deadline
+    passes. Qt lays widgets out on deferred events, and a loaded machine
+    takes its time; a test that waits a fixed delay measures the machine."""
+    from PyQt6.QtTest import QTest
+
+    deadline = time.monotonic() + timeout_ms / 1000
+    while True:
+        qapp.processEvents()
+        if condition():
+            return True
+        if time.monotonic() >= deadline:
+            return condition()
+        QTest.qWait(10)
 
 
 @pytest.mark.unit
@@ -657,7 +675,6 @@ class TestChatWindowTranscriptScroll:
 
     def test_append_scrolls_to_bottom_after_many_lines(self, qapp, monkeypatch):
         from desktop_app.chat_window import ChatWindow
-        from PyQt6.QtTest import QTest
 
         monkeypatch.setattr(
             "desktop_app.chat_window.get_hot_window_messages", lambda: []
@@ -669,16 +686,14 @@ class TestChatWindowTranscriptScroll:
         # lines. Each append must bring the cursor (the view) back to the end.
         for _ in range(80):
             win._append_assistant("line of transcript content " * 4)
-        QTest.qWait(100)
 
         scroll_bar = win.transcript_widget.verticalScrollBar()
-        assert scroll_bar.maximum() > 0
-        assert scroll_bar.value() == scroll_bar.maximum()
+        assert _settled(qapp, lambda: scroll_bar.maximum() > 0), "the rows were laid out"
+        assert _settled(qapp, lambda: scroll_bar.value() == scroll_bar.maximum())
 
     @pytest.mark.parametrize("kind", ["user", "assistant", "system"])
     def test_new_message_scrolls_to_bottom_from_scrolled_up_position(self, qapp, monkeypatch, kind):
         from desktop_app.chat_window import ChatWindow
-        from PyQt6.QtTest import QTest
 
         monkeypatch.setattr("desktop_app.chat_window.get_hot_window_messages", lambda: [])
 
@@ -686,16 +701,15 @@ class TestChatWindowTranscriptScroll:
         win.show()
         for index in range(80):
             win._append_assistant(f"older message {index} " * 4)
-        QTest.qWait(100)
 
         scroll_bar = win.transcript_widget.verticalScrollBar()
+        assert _settled(qapp, lambda: scroll_bar.maximum() > 0), "the rows were laid out"
         scroll_bar.setValue(scroll_bar.minimum())
         assert scroll_bar.value() < scroll_bar.maximum()
 
         getattr(win, f"_append_{kind}")("newest message")
-        QTest.qWait(100)
 
-        assert scroll_bar.value() == scroll_bar.maximum()
+        assert _settled(qapp, lambda: scroll_bar.value() == scroll_bar.maximum())
 
 
 @pytest.mark.unit
@@ -1262,42 +1276,46 @@ class TestChatWindowScrollKeepsPlace:
 
     def _tall_window(self, qapp, monkeypatch):
         from desktop_app.chat_window import ChatWindow
-        from PyQt6.QtTest import QTest
 
         monkeypatch.setattr("desktop_app.chat_window.get_hot_window_messages", lambda: [])
         win = ChatWindow()
         win.show()
         for index in range(80):
             win._append_assistant(f"older message {index} " * 4)
-        QTest.qWait(100)
+        bar = win.transcript_widget.verticalScrollBar()
+        assert _settled(qapp, lambda: bar.maximum() > 0), "the rows were laid out"
         return win
 
-    def test_a_resize_keeps_a_reader_who_scrolled_up_in_place(self, qapp, monkeypatch):
-        from PyQt6.QtTest import QTest
+    def _after_the_range_moved(self, qapp, bar, before):
+        """Give the layout the chance to react to a resize; a resize that
+        leaves the range as it was is a pass, not a failure."""
+        _settled(qapp, lambda: bar.maximum() != before, timeout_ms=500)
 
+    def test_a_resize_keeps_a_reader_who_scrolled_up_in_place(self, qapp, monkeypatch):
         win = self._tall_window(qapp, monkeypatch)
         bar = win.transcript_widget.verticalScrollBar()
         bar.setValue(bar.minimum())
         assert bar.value() == bar.minimum() < bar.maximum()
 
+        before = bar.maximum()
         win.resize(win.width(), win.height() - 40)
-        QTest.qWait(100)
+        self._after_the_range_moved(qapp, bar, before)
         assert bar.value() == bar.minimum()
 
+        before = bar.maximum()
         win.resize(win.width() + 60, win.height())
-        QTest.qWait(100)
+        self._after_the_range_moved(qapp, bar, before)
         assert bar.value() == bar.minimum()
 
     def test_a_resize_keeps_a_reader_at_the_end_at_the_end(self, qapp, monkeypatch):
-        from PyQt6.QtTest import QTest
-
         win = self._tall_window(qapp, monkeypatch)
         bar = win.transcript_widget.verticalScrollBar()
         assert bar.value() == bar.maximum()
 
+        before = bar.maximum()
         win.resize(win.width(), win.height() - 40)
-        QTest.qWait(100)
-        assert bar.value() == bar.maximum()
+        self._after_the_range_moved(qapp, bar, before)
+        assert _settled(qapp, lambda: bar.value() == bar.maximum())
 
 
 @pytest.mark.unit
