@@ -227,12 +227,101 @@ def _isolate_memory_core(_bac_a_sable, request, monkeypatch):
     assert patched, "neither memory core module could be imported"
 
 
+# ---------------------------------------------------------------------------
+# The suite talks to nobody.
+#
+# A unit test that reaches for the network measures the network. Ollama's
+# port answers on IPv4 while ``localhost`` resolves to ``::1`` first, so an
+# unmocked call waits two seconds on Windows and a suite of them takes twenty
+# minutes; a location probe or a geocoding request carries the developer's
+# address, or a Mock's repr, to a third party. Every connection to a host
+# beyond this machine, and every connection to Ollama's port on this one, is
+# refused before it is made. The refusal is an ``OSError``, what a host that
+# is down produces, so the code under test takes the path it takes when the
+# network is absent. A server a test runs itself, on another loopback port,
+# is left alone.
+# ---------------------------------------------------------------------------
+_NETWORK_EVENTS = {"socket.connect", "socket.getaddrinfo", "socket.gethostbyname"}
+_LOOPBACK_HOSTS = {None, "", "localhost", "127.0.0.1", "::1", "0.0.0.0"}
+_OLLAMA_PORT = 11434
+_network_guard_installed = False
+
+
+def _is_loopback(host) -> bool:
+    if isinstance(host, bytes):
+        host = host.decode("ascii", "replace")
+    return host in _LOOPBACK_HOSTS or (isinstance(host, str) and host.startswith("127."))
+
+
+def _address(event, args):
+    """The (host, port) an audit event names; a non-tuple address is a
+    local socket path and counts as this machine."""
+    if event == "socket.connect":
+        address = args[1] if len(args) > 1 else None
+    else:
+        address = (args[0], args[1] if len(args) > 1 else None)
+    if not isinstance(address, tuple):
+        return None, None
+    host = address[0] if address else None
+    port = address[1] if len(address) > 1 else None
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        pass
+    return host, port
+
+
+def _refuse_the_network(event, args):
+    if event not in _NETWORK_EVENTS:
+        return
+    host, port = _address(event, args)
+    if not _is_loopback(host) or port == _OLLAMA_PORT:
+        raise ConnectionRefusedError(
+            f"the test suite talks to nobody: {event} to {host!r}:{port!r} refused"
+        )
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",
         "real_download_helper: runs the real download_snapshot_with_progress; "
         "the test fakes the Hugging Face Hub it talks to",
     )
+    global _network_guard_installed
+    if not _network_guard_installed:
+        # An audit hook cannot be removed; it is installed once, before
+        # collection, so a module that probes a server at import is covered.
+        sys.addaudithook(_refuse_the_network)
+        _network_guard_installed = True
+
+
+@pytest.fixture
+def public_dns(monkeypatch):
+    """Every hostname beyond this machine resolves to one public address,
+    without asking a resolver.
+
+    The SSRF guard resolves a URL's host before fetching it. A test that
+    hands a tool ``https://example.com`` is testing the fetch, not the
+    Internet's answer for that name. Loopback names keep their real,
+    offline resolution, so a test that expects ``localhost`` to be refused
+    still sees it refused.
+    """
+    import socket
+
+    real = socket.getaddrinfo
+    address = "93.184.216.34"
+
+    def resolve(host, port, *args, **kwargs):
+        if _is_loopback(host):
+            return real(host, port, *args, **kwargs)
+        try:
+            port = int(port)
+        except (TypeError, ValueError):
+            port = 0
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, port))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    return address
 
 
 @pytest.fixture(autouse=True)

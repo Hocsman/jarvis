@@ -684,6 +684,7 @@ class TestWebSearchTool:
         assert "wasn't able to find" in result.reply_text.lower()
 
 
+@pytest.mark.usefixtures("public_dns")
 class TestBraveSearchHelper:
     """Isolated tests for the `_brave_search` helper."""
 

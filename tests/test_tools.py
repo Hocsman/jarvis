@@ -181,7 +181,7 @@ def test_local_files_write_append_delete(tmp_path, tools_unrestricted):
 
 
 @pytest.mark.unit
-def test_fetch_web_page_success(monkeypatch):
+def test_fetch_web_page_success(monkeypatch, public_dns):
     """Test fetchWebPage tool with a mocked successful response."""
     import jarvis.tools.registry as tools_mod
     

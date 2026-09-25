@@ -30,6 +30,7 @@ def _make_response_mock(**attrs) -> Mock:
     return resp
 
 
+@pytest.mark.usefixtures("public_dns")
 class TestFetchWebPageTool:
     """Test fetch web page tool functionality."""
 

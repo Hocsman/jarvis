@@ -28,6 +28,9 @@ class TestWeatherTool:
         self.context.redacted_text = ""
         self.context.cfg.ollama_base_url = ""
         self.context.cfg.ollama_chat_model = ""
+        # No home city either: a Mock attribute is truthy, and the tool would
+        # geocode its repr rather than ask the user for a city.
+        self.context.cfg.weather_city = ""
         self.context.cfg.llm_chat_model = ""
         self.context.cfg.tool_router_model = ""
         self.context.cfg.intent_judge_model = ""
