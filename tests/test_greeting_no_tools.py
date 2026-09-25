@@ -139,7 +139,8 @@ class TestGreetingNoTools:
 
         with patch('jarvis.reply.engine.run_tool_with_retries', side_effect=mock_tool_run), \
              patch('jarvis.reply.engine.chat_with_messages', side_effect=mock_chat), \
-             patch('jarvis.reply.engine.extract_search_params_for_memory', return_value={"keywords": []}):
+             patch('jarvis.reply.engine.extract_search_params_for_memory', return_value={"keywords": []}), \
+             patch('jarvis.reply.engine.select_tools', return_value=["getWeather", "webSearch", "stop"]):
 
             run_reply_engine(
                 db=db, cfg=mock_config, tts=None,
@@ -221,7 +222,8 @@ class TestGreetingNoTools:
             return _mock_llm_response("The answer is 42.")
 
         with patch('jarvis.reply.engine.chat_with_messages', side_effect=mock_chat), \
-             patch('jarvis.reply.engine.extract_search_params_for_memory', return_value={"keywords": []}):
+             patch('jarvis.reply.engine.extract_search_params_for_memory', return_value={"keywords": []}), \
+             patch('jarvis.reply.engine.select_tools', return_value=["webSearch", "stop"]):
 
             response = run_reply_engine(
                 db=db, cfg=mock_config, tts=None,
@@ -260,10 +262,12 @@ class TestGreetingNoTools:
                 return _mock_llm_response("", [_tool_call("logMeal", {"description": "pizza"})])
             return _mock_llm_response("Logged your meal!")
 
-        # logMeal was previously restricted to "life" profile only — now all tools are always available
+        # Every builtin tool is available whatever the profile; the router
+        # is told so here rather than asked, this test is about the profile.
         with patch('jarvis.reply.engine.run_tool_with_retries', side_effect=mock_tool_run), \
              patch('jarvis.reply.engine.chat_with_messages', side_effect=mock_chat), \
-             patch('jarvis.reply.engine.extract_search_params_for_memory', return_value={"keywords": []}):
+             patch('jarvis.reply.engine.extract_search_params_for_memory', return_value={"keywords": []}), \
+             patch('jarvis.reply.engine.select_tools', return_value=["logMeal", "stop"]):
 
             run_reply_engine(
                 db=db, cfg=mock_config, tts=None,

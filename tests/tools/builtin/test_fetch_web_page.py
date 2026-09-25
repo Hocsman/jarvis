@@ -30,7 +30,6 @@ def _make_response_mock(**attrs) -> Mock:
     return resp
 
 
-@pytest.mark.usefixtures("public_dns")
 class TestFetchWebPageTool:
     """Test fetch web page tool functionality."""
 
@@ -64,6 +63,7 @@ class TestFetchWebPageTool:
         assert result.success is False
         assert "url" in result.reply_text.lower()
 
+    @pytest.mark.usefixtures("public_dns")
     @patch('requests.get')
     def test_run_success(self, mock_get):
         """Test successful web page fetch."""
@@ -84,6 +84,7 @@ class TestFetchWebPageTool:
         assert "example.com" in result.reply_text
         self.context.user_print.assert_called()
 
+    @pytest.mark.usefixtures("public_dns")
     @patch('requests.get')
     def test_run_success_without_beautifulsoup(self, mock_get):
         """Test successful web page fetch without BeautifulSoup."""
@@ -104,6 +105,7 @@ class TestFetchWebPageTool:
         assert result.success is True
         assert "Raw Content" in result.reply_text
 
+    @pytest.mark.usefixtures("public_dns")
     @patch('requests.get')
     def test_run_http_error(self, mock_get):
         """Test fetch web page with HTTP error."""
@@ -118,6 +120,7 @@ class TestFetchWebPageTool:
         assert result.success is False
         assert "Failed to fetch page" in result.reply_text
 
+    @pytest.mark.usefixtures("public_dns")
     @patch('requests.get')
     def test_run_request_error(self, mock_get):
         """Test fetch web page with network error."""
@@ -144,6 +147,7 @@ class TestFetchWebPageTool:
         assert ("failed" in texte or "error" in texte
                 or "not on the public web" in texte)
 
+    @pytest.mark.usefixtures("public_dns")
     @patch('requests.get')
     def test_run_with_links_extraction(self, mock_get):
         """Test fetch web page including link extraction when include_links=True."""
