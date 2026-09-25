@@ -72,7 +72,8 @@ def test_only_the_performance_suite_may_want_the_model_server():
     from conftest import _the_model_server_is_wanted
 
     assert _the_model_server_is_wanted(["tests/performance/"])
-    assert _the_model_server_is_wanted(["tests\\performance\\test_pipeline_timings.py"])
+    # As the shell of this platform spells it.
+    assert _the_model_server_is_wanted([os.path.join("tests", "performance", "test_pipeline_timings.py")])
     assert not _the_model_server_is_wanted(["tests"])
     assert not _the_model_server_is_wanted([])
     assert not _the_model_server_is_wanted(["tests/test_performance_of_something.py"])
