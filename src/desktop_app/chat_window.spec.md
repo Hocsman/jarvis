@@ -193,6 +193,12 @@ A `QMainWindow` styled as a futuristic phone with a single contact:
 - An empty conversation shows an introductory panel, never a fabricated message.
   It disappears as soon as a typed, seeded, assistant or local notice arrives,
   whether the window is on screen at that moment or not.
+- The panel hosts an `OrbWidget` (see the Orb section of `desktop_app.spec.md`):
+  the window drives it through `set_state`, THINKING while a query is in flight
+  and IDLE once the reply lands or the daemon stops. It renders only while the
+  panel is on screen: paused the moment a message lands or the window hides,
+  resumed when the window shows with an empty transcript. If the orb package
+  fails to load, the panel shows the static emblem and the chat carries on.
 - A contact header (avatar, "Jarvis", and a presence line such as "Online" or
   "Typing..." while a query is in flight).
 - A read-only transcript area: a scrollable stack of speech bubbles (theme

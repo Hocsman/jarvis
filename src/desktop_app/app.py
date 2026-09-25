@@ -1588,12 +1588,12 @@ class JarvisSystemTray:
         # in the main thread, which is important for cross-thread signal delivery
         self.face_window = FaceWindow()
 
-        # Floating reactive orb, always-on-top, shown at startup. It reads
-        # the shared cross-process JarvisState (idle/listening/thinking/
-        # speaking) and pulses accordingly, so it's the live visual of the
-        # assistant during voice — visible without opening the chat window.
-        # The same orb visual is also embedded in the chat window; this is
-        # the standalone floating instance for voice-first use.
+        # Floating orb, always on top, built at startup and shown on
+        # demand (at launch only when WebEngine is unavailable). It reads
+        # the shared JarvisState (idle/listening/thinking/speaking) and
+        # follows it, so it is the live visual of the assistant during
+        # voice without opening the chat window. The chat window embeds
+        # its own instance; this is the standalone one.
         self.orb_window = self._build_floating_orb()
 
         # Create dictation history window (hidden by default)
@@ -1652,11 +1652,12 @@ class JarvisSystemTray:
         self.tray_icon.show()
 
         # The unified HUD dashboard is the primary window: open it at
-        # startup so the orb (its centrepiece), conversation, and system
-        # stats are all there from launch. The dashboard embeds the same
-        # orb, so the standalone floating orb is not auto-shown; it stays
-        # available on demand via the "🟠 Toggle Orb" tray action. Falls
-        # back to the floating orb only when WebEngine isn't available.
+        # startup so its orb (a canvas animation driven by the same
+        # JarvisState), the conversation and the system stats are all
+        # there from launch. The standalone QPainter orb is therefore not
+        # auto-shown; it stays available on demand via the "🟠 Toggle Orb"
+        # tray action. Falls back to the floating orb only when WebEngine
+        # isn't available.
         if HAS_WEBENGINE:
             self.show_dashboard()
         else:
@@ -2722,10 +2723,10 @@ class JarvisSystemTray:
                 2000
             )
 
-            # The reactive orb is the assistant's visual now (floating +
-            # chat hero), so we no longer auto-show the low-poly face on
-            # start. It stays available on demand via the tray "👤 Show
-            # Face" action for anyone who prefers it.
+            # The orb (floating window and chat panel) is the assistant's
+            # visual; the low-poly face is not auto-shown on start and
+            # stays available on demand via the tray "👤 Show Face" action
+            # for anyone who prefers it.
 
             debug_log("daemon started from desktop app", "desktop")
 

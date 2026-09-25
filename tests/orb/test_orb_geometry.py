@@ -82,9 +82,8 @@ class TestIcosphereCounts:
 
 
 class TestOrbWidgetDefaultGeometry:
-    """Constructor defaults: subdiv=3 and two phase arrays. A regression that flipped the default back to
-    subdiv=2 would still pass the icosphere counts test above but
-    would fail here — which is the failure mode we care about."""
+    """Constructor defaults, pinned separately from the builder's counts:
+    the widget asks for subdiv=3 and its surface moves on the clock."""
 
     @pytest.fixture
     def _qapp(self):
@@ -108,39 +107,44 @@ class TestOrbWidgetDefaultGeometry:
         try:
             assert widget._mesh.vertex_count == 642, (
                 f"Default OrbWidget vertex count is {widget._mesh.vertex_count}, "
-                f"expected 642 (subdiv=3). Did the default subdiv flip back to 2?"
+                f"expected 642 (subdiv=3)."
             )
         finally:
             widget.deleteLater()
 
     @pytest.mark.unit
-    def test_two_phase_arrays_exist(self, _qapp) -> None:
-        """Two octaves means two phase arrays. A regression to one
-        octave would leave only the slow breath. The test names the
-        attributes explicitly so a future renamer notices."""
+    def test_the_surface_breathes(self, _qapp) -> None:
+        """The wireframe's vertices sit at different places at two
+        instants: the surface moves on the clock, with nothing else
+        driving it."""
+        from unittest.mock import MagicMock
         from desktop_app.orb.orb_widget import OrbWidget
+        from desktop_app.orb.state_controller import OrbState, StateSnapshot
+
+        def _snapshot_at(t: float) -> StateSnapshot:
+            return StateSnapshot(
+                state=OrbState.IDLE, color=(0.5, 0.7, 1.0), intensity=0.8,
+                displacement_scale=1.0, pulse_period_s=3.0, transitioning=False,
+                time_seconds=t,
+            )
+
+        def _dots(painter):
+            return [(args[0].x(), args[0].y()) for args, _kw in painter.drawEllipse.call_args_list]
 
         widget = OrbWidget()
         try:
-            for attr in ("_vertex_phase_a", "_vertex_phase_b"):
-                assert hasattr(widget, attr), (
-                    f"Missing phase array {attr!r}; orb octave composition "
-                    f"is incomplete. Re-add the second phase or drop the "
-                    f"multi-octave promise from the docs."
-                )
-                # Each phase array must be sized to the mesh.
-                arr = getattr(widget, attr)
-                assert arr.shape[0] == widget._mesh.vertex_count, (
-                    f"{attr} has {arr.shape[0]} entries but mesh has "
-                    f"{widget._mesh.vertex_count} vertices."
-                )
+            then, later = MagicMock(), MagicMock()
+            widget._draw_wireframe(then, cx=160.0, cy=160.0, r=100.0, snap=_snapshot_at(0.0))
+            widget._draw_wireframe(later, cx=160.0, cy=160.0, r=100.0, snap=_snapshot_at(0.5))
+            moved = sum(1 for a, b in zip(_dots(then), _dots(later))
+                        if abs(a[0] - b[0]) > 0.01 or abs(a[1] - b[1]) > 0.01)
+            assert moved > 0, "the surface did not move between two instants"
         finally:
             widget.deleteLater()
 
     @pytest.mark.unit
     def test_explicit_subdiv_override_honoured(self, _qapp) -> None:
-        """Tests / future debug modes can still pass subdiv=2 or 4 via
-        kwarg. The default-flip didn't make the parameter read-only."""
+        """``icosphere_subdivisions`` is honoured when passed explicitly."""
         from desktop_app.orb.orb_widget import OrbWidget
 
         widget = OrbWidget(icosphere_subdivisions=2)

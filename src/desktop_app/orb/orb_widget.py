@@ -14,9 +14,9 @@ icosphere geometry projected onto the widget:
 - particles orbiting between the body and the glow,
 - a highlight near the top-left to suggest a key light.
 
-Vertex displacement uses a cheap deterministic hash-based pseudo noise
-on the CPU; at 642 vertices and 60 FPS this stays well under the frame
-budget.
+Vertex displacement is two octaves of sine waves with fixed random
+per-vertex phases, computed on the CPU; at 642 vertices and 60 FPS this
+stays well under the frame budget.
 """
 
 from __future__ import annotations
@@ -30,7 +30,6 @@ from PyQt6.QtCore import QPointF, QTimer, Qt
 from PyQt6.QtGui import (
     QBrush,
     QColor,
-    QLinearGradient,
     QPainter,
     QPen,
     QRadialGradient,
@@ -45,7 +44,6 @@ from .state_controller import OrbState, StateController, StateSnapshot
 # roughly 65% of the shorter side).
 ORB_BASE_RADIUS_RATIO = 0.32
 GLOW_RADIUS_RATIO = 0.48
-WIREFRAME_DISPLACEMENT_RATIO = 0.06
 
 
 def _state_color_qcolor(rgb01: tuple[float, float, float], alpha: int = 255) -> QColor:
@@ -80,8 +78,8 @@ class OrbWidget(QWidget):
         # Default subdiv=3: 642 vertices, 1280 triangles, so the
         # wireframe reads as a proper sphere even at large window
         # sizes. The CPU projection costs under 5 ms a frame on Apple
-        # Silicon; a slower machine can ask for fewer subdivisions
-        # through ``icosphere_subdivisions``.
+        # Silicon. ``icosphere_subdivisions`` is a constructor argument
+        # for tests and scripts; the app always uses the default.
         self._mesh: Mesh = build_icosphere(icosphere_subdivisions)
         self._particles: Optional[Particles] = (
             build_particles(particle_count, seed=0) if particles_enabled else None
@@ -97,15 +95,14 @@ class OrbWidget(QWidget):
         self._vertex_phase_b = rng.uniform(0.0, 2.0 * math.pi, self._mesh.vertex_count).astype(np.float32)
 
         # Frame clock.
-        self._t0_monotonic = time.monotonic()
-        self._last_tick_t = self._t0_monotonic
+        self._last_tick_t = time.monotonic()
 
         # Render loop.
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.update)
         self._timer.start(self.FRAME_INTERVAL_MS)
 
-    # ── Public helpers (preserved API) ────────────────────────────────
+    # ── Public helpers ────────────────────────────────────────────────
 
     def state_controller(self) -> StateController:
         return self._state_controller
@@ -162,7 +159,6 @@ class OrbWidget(QWidget):
             glow_r = short_side * GLOW_RADIUS_RATIO
 
             color = _state_color_qcolor(snap.color)
-            rim_color = _state_color_qcolor(snap.color, alpha=160)
 
             self._draw_glow_halo(painter, cx, cy, glow_r, color, snap.intensity)
             self._draw_orb_body(painter, cx, cy, orb_r, color, snap.intensity)
@@ -180,8 +176,8 @@ class OrbWidget(QWidget):
     # inner_alpha_base, outer_alpha_base). The innermost halo is the
     # brightest and tightest; subsequent halos grow in radius and
     # fall in opacity. Stacking 4 halos with these ratios produces a
-    # convincing "soft bloom" effect in pure QPainter — no shader,
-    # no offscreen blur, but the eye reads it as light scatter.
+    # convincing "soft bloom" effect: four stacked radial gradients
+    # that the eye reads as light scatter.
     _BLOOM_HALOS = (
         # (radius_x, inner_alpha_mult, mid_alpha_mult)
         (1.0, 0.60, 0.30),  # core halo, follows the orb closely
@@ -218,7 +214,7 @@ class OrbWidget(QWidget):
             inner.setAlphaF(min(1.0, inner_mult * alpha_boost))
             mid_color = QColor(color)
             mid_color.setAlphaF(min(1.0, mid_mult * alpha_boost))
-            # Third color stop: very desaturated cousin of the state
+            # Third colour stop: very desaturated cousin of the state
             # colour, sitting at ~75 % radius to give the gradient a
             # softer roll-off than a straight inner->transparent.
             tint = QColor(
@@ -243,7 +239,7 @@ class OrbWidget(QWidget):
         r: float, color: QColor, intensity: float,
     ) -> None:
         """Filled disc with a centre-bright, edge-dim radial gradient
-        (fake sphere shading without GL)."""
+        that reads as sphere shading."""
         grad = QRadialGradient(cx - r * 0.25, cy - r * 0.30, r * 1.4)
         # Brightest near top-left to suggest a key light.
         bright = QColor(color)

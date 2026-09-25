@@ -127,9 +127,11 @@ class OrbWindow(QMainWindow):
         # Window-scoped Qt fallback: works only while the orb has focus
         # (so it can't *show* a hidden window) but lets the user close
         # the orb with the same key combo on platforms where the global
-        # pynput hotkey is disabled (macOS 26+).
-        qt_combo = "Meta+Shift+J" if sys.platform == "darwin" else "Ctrl+Shift+J"
-        self._qt_shortcut = QShortcut(QKeySequence(qt_combo), self)
+        # pynput hotkey is disabled (macOS 26+). Ctrl in a QKeySequence
+        # is the Command key on macOS, so the one sequence reads
+        # Cmd+Shift+J there and Ctrl+Shift+J elsewhere, the same keys
+        # as the global hotkey.
+        self._qt_shortcut = QShortcut(QKeySequence("Ctrl+Shift+J"), self)
         self._qt_shortcut.activated.connect(self.toggle_visibility)
 
         # Drag-to-move bookkeeping.
@@ -160,9 +162,16 @@ class OrbWindow(QMainWindow):
     # ── Qt overrides ───────────────────────────────────────────────────
 
     def showEvent(self, event) -> None:  # noqa: N802 (Qt API)
-        # Register hotkey on first show.
+        # Register hotkey on first show; the orb renders only while it
+        # is on screen, and its clock restarts so a transition in
+        # flight when it was hidden does not jump.
         self._ensure_hotkey_registered()
+        self._orb.resume_rendering()
         super().showEvent(event)
+
+    def hideEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        self._orb.pause_rendering()
+        super().hideEvent(event)
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt API)
         self._teardown_hotkey()

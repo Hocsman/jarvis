@@ -42,7 +42,7 @@ class Mesh:
     """
     positions: np.ndarray  # (V, 3) float32, unit length
     normals: np.ndarray    # (V, 3) float32, == positions on the unit sphere
-    indices: np.ndarray    # (T*3,) uint32, GL_TRIANGLES order
+    indices: np.ndarray    # (T*3,) uint32, three consecutive indices per triangle
 
     @property
     def vertex_count(self) -> int:
@@ -86,18 +86,17 @@ def _icosahedron_seed() -> Tuple[np.ndarray, np.ndarray]:
 
 def build_icosphere(subdivisions: int = 2) -> Mesh:
     """Subdivide an icosahedron ``subdivisions`` times and return a
-    unit-sphere mesh ready for GL upload.
+    unit-sphere mesh.
 
     Each step splits every triangle into 4 via midpoints projected
     back onto the sphere. Cost: O(20 * 4^n) triangles:
-    - n=2: 320 triangles, 162 vertices  (spec default, matches the
-      "~320 tris" target in the orb spec)
-    - n=3: 1280 triangles, 642 vertices (smoother at the cost of GPU
-      bandwidth; visually marginal at 320x320 px)
+    - n=2: 320 triangles, 162 vertices (the builder's default)
+    - n=3: 1280 triangles, 642 vertices (the widget's default: reads as
+      a proper sphere even at large window sizes)
     - n=4: 5120 triangles, 2562 vertices
 
-    The widget may bump this to 3 for displacement-heavy states; the
-    default keeps the silhouette honest to the spec.
+    The widget projects the mesh to 2D on the CPU every frame, so the
+    count is a per-frame cost, not a one-off upload.
     """
     if subdivisions < 0:
         raise ValueError(f"subdivisions must be >= 0, got {subdivisions}")

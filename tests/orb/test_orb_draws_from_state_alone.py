@@ -28,34 +28,68 @@ def _qapp():
     yield app
 
 
-def _centre_alpha(widget) -> int:
-    """Render one frame to an image and read the alpha at its centre."""
+def _body_patch(widget, half: int = 3):
+    """Render one frame to an image and average a small patch inside the
+    body, off the pole dot and the key light: (r, g, b, alpha)."""
     from PyQt6.QtGui import QImage
 
     image = QImage(widget.width(), widget.height(), QImage.Format.Format_ARGB32)
     image.fill(0)
     widget.render(image)
-    return image.pixelColor(widget.width() // 2, widget.height() // 2).alpha()
+    x0 = widget.width() // 2 + widget.width() // 6
+    y0 = widget.height() // 2 + widget.height() // 6
+    total = [0, 0, 0, 0]
+    count = 0
+    for x in range(x0 - half, x0 + half + 1):
+        for y in range(y0 - half, y0 + half + 1):
+            c = image.pixelColor(x, y)
+            for i, v in enumerate((c.red(), c.green(), c.blue(), c.alpha())):
+                total[i] += v
+            count += 1
+    return tuple(v / count for v in total)
+
+
+def _distance(a, b) -> float:
+    return sum((x - y) ** 2 for x, y in zip(a[:3], b[:3])) ** 0.5
 
 
 class TestTheOrbDrawsFromStateAlone:
 
     @pytest.mark.unit
-    def test_every_state_renders_a_frame_with_nothing_attached(self, _qapp) -> None:
+    def test_every_state_renders_its_own_frame_with_nothing_attached(self, _qapp) -> None:
+        """Each state, once its transition has run, paints the body in a
+        colour of its own: the frame follows the state and the clock, and
+        nothing else is attached."""
         from desktop_app.orb.orb_widget import OrbWidget
-        from desktop_app.orb.state_controller import OrbState
+        from desktop_app.orb.state_controller import (
+            ERROR_FADE_DURATION_S, TRANSITION_DURATION_S, OrbState,
+        )
 
-        for state in OrbState:
-            widget = OrbWidget()
+        def _rendered(state):
+            widget = OrbWidget(particles_enabled=False)
             try:
                 widget.resize(320, 320)
+                controller = widget.state_controller()
                 if state is OrbState.ERROR:
-                    widget.trigger_error()
-                else:
-                    widget.state_controller().set_state(state)
-                assert _centre_alpha(widget) > 0, f"{state.name}: nothing was drawn"
+                    controller.trigger_error()
+                    controller.tick(ERROR_FADE_DURATION_S / 2)
+                elif state is not OrbState.IDLE:
+                    controller.set_state(state)
+                    controller.tick(TRANSITION_DURATION_S)
+                return _body_patch(widget)
             finally:
                 widget.deleteLater()
+
+        idle = _rendered(OrbState.IDLE)
+        assert idle[3] > 0, "IDLE: nothing was drawn"
+        for state in OrbState:
+            if state is OrbState.IDLE:
+                continue
+            patch = _rendered(state)
+            assert patch[3] > 0, f"{state.name}: nothing was drawn"
+            assert _distance(patch, idle) > 10, (
+                f"{state.name}: the body still wears IDLE's colour {idle[:3]} -> {patch[:3]}"
+            )
 
     @pytest.mark.unit
     def test_the_orb_takes_no_audio_source(self, _qapp) -> None:

@@ -1,7 +1,7 @@
 """Orb state controller: maps Jarvis state to orb visuals.
 
-The orb has its own enum (``OrbState``) that is a *strict subset of
-five* visual modes plus ERROR. The shared ``JarvisState`` from
+The orb has its own enum (``OrbState``): four visual modes plus a
+transient ERROR overlay. The shared ``JarvisState`` from
 ``desktop_app.face_widget`` has more granularity (DICTATING /
 DICTATION_PROCESSING / ASLEEP) than the orb cares to express
 visually, so we collapse those onto the closest orb-state.
@@ -10,19 +10,19 @@ This module is the seam between the shared state and the visual
 pipeline. It also owns:
 
 - Cubic-eased transitions on colour, intensity, displacement amplitude
-  (250 ms minimum per spec).
+  (250 ms minimum).
 - The ERROR overlay: a transient state with a fixed 800 ms fade that
   automatically returns to whatever state was active just before the
   error fired, exposed through ``trigger_error()``.
 - A monotonic ``time_seconds`` accessor for the renderer's clock.
 
-All purely numeric / numpy: no Qt, no GL. Headlessly testable.
+Pure Python, no Qt: headlessly testable.
 """
 
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Optional, Tuple
 
@@ -31,11 +31,7 @@ from typing import Any, Optional, Tuple
 
 
 class OrbState(str, Enum):
-    """Five visual modes the orb can render.
-
-    String values are stable so they can be persisted (state file,
-    telemetry) without breaking on enum reordering.
-    """
+    """The states the orb can render: four modes and the ERROR overlay."""
     IDLE = "idle"
     LISTENING = "listening"
     THINKING = "thinking"
@@ -44,7 +40,7 @@ class OrbState(str, Enum):
 
 
 # Mapping from the shared ``JarvisState`` (face_widget) onto the orb's
-# five modes. Resolved by *value* (string) so the orb does not have to
+# states. Resolved by *value* (string) so the orb does not have to
 # import the JarvisState enum class at module load time, which would
 # pull face_widget and therefore the entire Qt stack.
 _JARVIS_TO_ORB: dict[str, OrbState] = {
@@ -86,14 +82,14 @@ class StateStyle:
     pulse_period_s: float
 
 
-# Canonical colours from the spec, converted to 0..1 RGB:
+# Canonical colours per state, converted to 0..1 RGB:
 # - IDLE      #1a3a5c (deep night blue)
 # - LISTENING #00d4ff (vivid cyan)
 # - THINKING  #ff9500 (amber)
 # - SPEAKING  #e8f4ff (warm white-blue)
 # - ERROR     #ff3838 (red)
 def _hex_to_rgb(h: str) -> Tuple[float, float, float]:
-    """Helper kept in-module so the colour table reads close to the spec."""
+    """Helper kept in-module so the colour table reads as hex."""
     h = h.lstrip("#")
     return (
         int(h[0:2], 16) / 255.0,
@@ -170,8 +166,8 @@ class StateSnapshot:
 def _cubic_ease(t: float) -> float:
     """Cubic ease-in-out on a normalised parameter ``t`` in [0, 1].
 
-    Matches the spec's "interpolation cubique 250ms min" and gives the
-    transitions a deliberate, settled feel rather than linear blending.
+    Gives the transitions a deliberate, settled feel rather than linear
+    blending.
     """
     if t <= 0.0:
         return 0.0
@@ -201,9 +197,10 @@ class StateController:
 
     Construction takes an optional ``jarvis_state_provider`` (any
     callable returning a ``JarvisState`` enum or a str-coercible
-    object). The default provider goes through ``face_widget``'s
-    singleton — kept indirect so this module imports cleanly in
-    headless test contexts (no Qt event loop needed).
+    object). With no provider the controller holds whatever
+    ``set_state`` last gave it: the desktop app hands the floating orb
+    ``lambda: get_jarvis_state().state``, and ``ChatWindow`` drives its
+    own orb through ``set_state``. Nothing here imports Qt.
 
     Typical lifecycle::
 
@@ -211,7 +208,7 @@ class StateController:
         ...
         # Per render frame at 60 Hz:
         snap = ctrl.tick(dt_seconds=1/60)
-        # snap.color, snap.intensity, snap.displacement_scale -> uniforms
+        # snap.color, snap.intensity, snap.displacement_scale feed the painter
     """
 
     def __init__(
@@ -278,7 +275,8 @@ class StateController:
         self._error_elapsed = 0.0
 
     def set_state(self, new_state: OrbState) -> None:
-        """Explicit setter used by the default provider and by tests.
+        """Explicit setter: ``ChatWindow`` drives its orb through it, and
+        so do tests.
 
         Triggers a fresh cubic transition unless ``new_state`` matches
         the current target (idempotent)."""

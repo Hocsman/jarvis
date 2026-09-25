@@ -2,8 +2,10 @@
 
 A frameless, translucent always-on-top window that renders an icosphere
 whose colour, intensity and surface motion follow the assistant's
-state. Lives in the desktop_app process and reads state from the
-shared ``JarvisStateManager`` (face_widget.py). It has no audio input.
+state. Lives in the desktop_app process. Its state comes from its host:
+the desktop app hands the floating orb a provider reading the shared
+``JarvisState``, and the chat window drives its own through
+``set_state``. It has no audio input.
 
 Public surface (lazy)
 ---------------------

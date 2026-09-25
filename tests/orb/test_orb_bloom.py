@@ -14,7 +14,7 @@ looks good" so we pin the structural contract instead:
 3. Halo opacity multipliers decrease monotonically (the outermost
    halo must be the dimmest).
 
-4. Each halo contributes 4 color stops to its radial gradient
+4. Each halo contributes 4 colour stops to its radial gradient
    (inner, mid, tint, outer): the "colour depth".
    We verify this by mocking the painter and counting setColorAt
    calls per drawn ellipse.
@@ -25,7 +25,7 @@ looks good" so we pin the structural contract instead:
 
 Strategy: substitute QPainter.drawEllipse + QRadialGradient.setColorAt
 with counting mocks during a single paintEvent call. This stays at
-the public-behaviour level (number of draws / color stops) rather
+the public-behaviour level (number of draws / colour stops) rather
 than asserting pixel values, which would be brittle.
 """
 
@@ -104,8 +104,8 @@ class TestBloomStackStructure:
 
 class TestBloomDrawingCalls:
     """Behavioural test: ``_draw_glow_halo`` issues one drawEllipse
-    per halo, and each gradient gets 4 color stops (the "color
-    depth" upgrade)."""
+    per halo, and each gradient gets 4 colour stops (the "colour
+    depth")."""
 
     @pytest.mark.unit
     def test_draw_glow_halo_issues_one_ellipse_per_halo(self, _qapp) -> None:
@@ -132,7 +132,7 @@ class TestBloomDrawingCalls:
 
     @pytest.mark.unit
     def test_each_halo_has_at_least_three_color_stops(self, _qapp) -> None:
-        """Color depth goal: 3+ stops per halo gradient. We intercept
+        """Colour depth: 3+ stops per halo gradient. We intercept
         QRadialGradient construction to verify how many setColorAt
         calls each receives."""
         from desktop_app.orb.orb_widget import OrbWidget
