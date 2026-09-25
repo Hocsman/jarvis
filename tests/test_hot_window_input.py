@@ -1571,3 +1571,41 @@ class TestIntentJudgeGating:
 
         assert mock_judge.judge.call_count == 1
         listener.state_manager.stop()
+
+
+# ---------------------------------------------------------------------------
+# Tests: The window's length does not depend on what activation tells the face
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+class TestHotWindowLengthIsMeasuredFromActivation:
+    """``hot_window_seconds`` runs from the moment the window opens.
+
+    Activation also tells the face and the console, and the first time that
+    happens in a process it imports the desktop face widget, which takes a
+    measurable fraction of a second. A window whose expiry clock only started
+    after that work lasted longer on a cold process than on a warm one, and
+    a follow-up spoken just after the announced window was sometimes taken,
+    sometimes not, depending on what had run before."""
+
+    @patch("builtins.print")
+    def test_a_slow_face_update_does_not_lengthen_the_window(self, _print):
+        from unittest.mock import MagicMock
+
+        listener, _ = _create_listener(echo_tolerance=0.02, hot_window_seconds=0.05)
+
+        def slow_face():
+            time.sleep(0.25)
+            return MagicMock()
+
+        with patch("desktop_app.face_widget.get_jarvis_state", side_effect=slow_face):
+            listener.echo_detector.track_tts_start("Short answer.")
+            _simulate_tts_finish(listener)
+            assert _wait_for_hot_window_active(listener)
+            opened_at = time.time()
+
+            time.sleep(0.15)
+            assert not listener.state_manager.is_hot_window_active(), (
+                f"still open {time.time() - opened_at:.2f}s after a 0.05s window"
+            )
+        listener.state_manager.stop()
