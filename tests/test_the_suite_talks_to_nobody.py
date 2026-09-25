@@ -47,14 +47,24 @@ def test_a_datagram_beyond_this_machine_is_refused_too():
 
 @pytest.mark.unit
 def test_a_name_beyond_this_machine_is_not_even_resolved():
-    with pytest.raises(ConnectionRefusedError, match=GUARD):
+    with pytest.raises(socket.gaierror, match=GUARD):
         socket.getaddrinfo("example.com", 443)
+    with pytest.raises(socket.gaierror, match=GUARD):
+        socket.gethostbyname("example.com")
+
+
+@pytest.mark.unit
+def test_an_address_beyond_this_machine_is_not_looked_up_backwards_either():
+    with pytest.raises(socket.gaierror, match=GUARD):
+        socket.gethostbyaddr("8.8.8.8")
+    with pytest.raises(socket.gaierror, match=GUARD):
+        socket.getnameinfo(("8.8.8.8", 53), 0)
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("host", ["localhost", "127.0.0.1", "::1"])
 def test_the_model_servers_port_is_refused_on_this_machine_too(host):
-    with pytest.raises(ConnectionRefusedError, match=GUARD):
+    with pytest.raises(socket.gaierror, match=GUARD):
         socket.getaddrinfo(host, 11434)
     try:
         sock = socket.socket(socket.AF_INET6 if host == "::1" else socket.AF_INET)
@@ -68,15 +78,21 @@ def test_the_model_servers_port_is_refused_on_this_machine_too(host):
 
 
 @pytest.mark.unit
-def test_only_the_performance_suite_may_want_the_model_server():
+def test_only_the_performance_suite_may_want_the_model_server(tmp_path):
     from conftest import _the_model_server_is_wanted
 
-    assert _the_model_server_is_wanted(["tests/performance/"])
-    # As the shell of this platform spells it.
-    assert _the_model_server_is_wanted([os.path.join("tests", "performance", "test_pipeline_timings.py")])
-    assert not _the_model_server_is_wanted(["tests"])
-    assert not _the_model_server_is_wanted([])
-    assert not _the_model_server_is_wanted(["tests/test_performance_of_something.py"])
+    # A checkout that itself lives under a directory of that name.
+    root = tmp_path / "performance" / "jarvis"
+    (root / "tests" / "performance").mkdir(parents=True)
+
+    assert _the_model_server_is_wanted(["tests/performance/"], root)
+    # As the shell of this platform spells it, and as an absolute path.
+    assert _the_model_server_is_wanted([os.path.join("tests", "performance", "test_pipeline_timings.py")], root)
+    assert _the_model_server_is_wanted([str(root / "tests" / "performance")], root)
+    assert not _the_model_server_is_wanted(["tests"], root)
+    assert not _the_model_server_is_wanted([], root)
+    assert not _the_model_server_is_wanted(["tests/test_performance_of_something.py"], root)
+    assert not _the_model_server_is_wanted([str(root / "tests")], root)
 
 
 @pytest.mark.unit

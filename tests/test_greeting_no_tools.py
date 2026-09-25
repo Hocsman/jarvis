@@ -236,13 +236,14 @@ class TestGreetingNoTools:
         assert "42" in response
 
     @pytest.mark.unit
-    def test_all_tools_available_regardless_of_profile(
+    def test_a_tool_the_router_names_is_executed(
         self,
         mock_config,
         db,
         dialogue_memory,
     ):
-        """All builtin tools should be available regardless of which profile is selected."""
+        """When the router names a tool and the model calls it, the engine
+        runs it: no other filter stands between the two."""
         from jarvis.reply.engine import run_reply_engine
 
         mock_config.ollama_chat_model = "gemma4:e2b"
@@ -262,8 +263,8 @@ class TestGreetingNoTools:
                 return _mock_llm_response("", [_tool_call("logMeal", {"description": "pizza"})])
             return _mock_llm_response("Logged your meal!")
 
-        # Every builtin tool is available whatever the profile; the router
-        # is told so here rather than asked, this test is about the profile.
+        # The router is told its answer rather than asked: this test is about
+        # what the engine does with a tool the router named.
         with patch('jarvis.reply.engine.run_tool_with_retries', side_effect=mock_tool_run), \
              patch('jarvis.reply.engine.chat_with_messages', side_effect=mock_chat), \
              patch('jarvis.reply.engine.extract_search_params_for_memory', return_value={"keywords": []}), \

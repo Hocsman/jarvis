@@ -1,5 +1,6 @@
 import ipaddress
 import os
+import socket
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -237,23 +238,27 @@ def _isolate_memory_core(_bac_a_sable, request, monkeypatch):
 # unmocked call through that name waits two seconds on Windows, and one
 # through ``127.0.0.1`` is answered by whatever model happens to be running;
 # a location probe or a geocoding request carries the developer's address,
-# or a Mock's repr, to a third party. Every connection, datagram and name
-# lookup towards a host beyond this machine, and every connection to
-# Ollama's port on this one, is refused before it is made. The refusal is an
-# ``OSError``, what a host that is down produces, so the code under test
+# or a Mock's repr, to a third party. Every Python-level connection,
+# datagram and name lookup (forward or reverse) towards a host beyond this
+# machine, and every connection to Ollama's port on this one, is refused
+# before it is made. The refusal is an ``OSError``, what a host that is
+# down or a name that does not resolve produces, so the code under test
 # takes the path it takes when the network is absent, and it is recorded
 # for a test that wants to see it (``network_refusals``). A server a test
 # runs itself, on another loopback port, is left alone. Proxy variables are
 # cleared, because a proxy on this machine would carry a request past the
 # guard. The performance suite, which measures a live model on purpose and
 # is run on its own by path, is the one collection allowed to reach the
-# model server.
+# model server. Outside the hook's sight: sockets opened from C, child
+# processes, and asyncio's Windows proactor; none is driven by the suite.
 # ---------------------------------------------------------------------------
 _NETWORK_EVENTS = {
     "socket.connect", "socket.sendto", "socket.sendmsg",
-    "socket.getaddrinfo", "socket.gethostbyname",
+    "socket.getaddrinfo", "socket.gethostbyname", "socket.gethostbyaddr",
+    "socket.getnameinfo",
 }
 _ADDRESSED_EVENTS = {"socket.connect", "socket.sendto", "socket.sendmsg"}
+_FORWARD_LOOKUPS = {"socket.getaddrinfo", "socket.gethostbyname"}
 _LOOPBACK_HOSTS = {None, "", "localhost", "127.0.0.1", "::1", "0.0.0.0"}
 _OLLAMA_PORT = 11434
 _PROXY_VARIABLES = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "FTP_PROXY")
@@ -283,6 +288,8 @@ def _address(event, args):
     counts as this machine."""
     if event in _ADDRESSED_EVENTS:
         address = args[1] if len(args) > 1 else None
+    elif event == "socket.getnameinfo":
+        address = args[0] if args else None
     else:
         address = (args[0], args[1] if len(args) > 1 else None)
     if not isinstance(address, tuple):
@@ -300,25 +307,36 @@ def _refuse_the_network(event, args):
     if event not in _NETWORK_EVENTS:
         return
     host, port = _address(event, args)
-    if event not in _ADDRESSED_EVENTS and _is_numeric(host) and port != _OLLAMA_PORT:
+    if event in _FORWARD_LOOKUPS and _is_numeric(host) and port != _OLLAMA_PORT:
         # Turning a literal into an address is arithmetic, not a lookup;
-        # the connection that would follow is judged on its own.
+        # the connection that would follow is judged on its own. Looking a
+        # literal up backwards does ask a resolver, and is not exempt.
         return
     if not _is_loopback(host) or (port == _OLLAMA_PORT and _model_server_off_limits):
         _network_refusals.append((event, host, port))
-        raise ConnectionRefusedError(
+        message = (
             f"the test suite talks to nobody: {event} to {host!r}:{port!r} refused; "
             "a test that needs a public name resolved takes the public_dns fixture, "
             "one that needs a model belongs in evals/"
         )
+        # The error a resolver gives for a name it cannot answer, and the
+        # one a host gives for a port nobody listens on.
+        raise (ConnectionRefusedError if event in _ADDRESSED_EVENTS else socket.gaierror)(message)
 
 
-def _the_model_server_is_wanted(args) -> bool:
+def _the_model_server_is_wanted(args, root) -> bool:
     """Only the performance suite may reach a live model server. It is run on
     its own, by path (``pytest tests/performance/ -m performance``), and that
-    path is what lifts the rule; a marker expression cannot, because the
-    default one already spells the word."""
-    return any("performance" in Path(str(a)).as_posix().split("/") for a in args)
+    path, under this repository, is what lifts the rule; a marker expression
+    cannot, because the default one already spells the word, and a directory
+    elsewhere that happens to share the name is not the suite."""
+    suite = (Path(root) / "tests" / "performance").resolve()
+    for arg in args:
+        given = Path(str(arg))
+        candidate = (given if given.is_absolute() else Path(root) / given).resolve()
+        if candidate == suite or suite in candidate.parents:
+            return True
+    return False
 
 
 def pytest_configure(config):
@@ -328,7 +346,7 @@ def pytest_configure(config):
         "the test fakes the Hugging Face Hub it talks to",
     )
     global _network_guard_installed, _model_server_off_limits
-    _model_server_off_limits = not _the_model_server_is_wanted(config.args)
+    _model_server_off_limits = not _the_model_server_is_wanted(config.args, config.rootpath)
     for name in _PROXY_VARIABLES:
         os.environ.pop(name, None)
         os.environ.pop(name.lower(), None)
@@ -344,7 +362,10 @@ def pytest_configure(config):
 @pytest.fixture
 def network_refusals():
     """The connections the guard refused during this test, as
-    ``(event, host, port)``, for a test that wants to see them."""
+    ``(event, host, port)``, for a test that wants to see them. Refusals
+    from any thread count, a thread left running by an earlier test
+    included: what reaches for the network during a test is that test's
+    to explain."""
     del _network_refusals[:]
     return _network_refusals
 
