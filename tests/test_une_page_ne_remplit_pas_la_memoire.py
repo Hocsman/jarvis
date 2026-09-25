@@ -60,12 +60,12 @@ class _ReponseSansFin:
         return False
 
 
-def _fetch(reponse):
+def _fetch(reponse, get_like_requests):
     from src.jarvis.tools.builtin.fetch_web_page import FetchWebPageTool
 
     outil = FetchWebPageTool()
     with patch("src.jarvis.tools.builtin.fetch_web_page.requests.get",
-               return_value=reponse), \
+               side_effect=get_like_requests(reponse)), \
          patch("src.jarvis.tools.builtin.fetch_web_page._is_public_url",
                return_value=True):
         contexte = MagicMock()
@@ -73,15 +73,18 @@ def _fetch(reponse):
         return outil.run({"url": "https://exemple.test/page"}, contexte)
 
 
-def test_an_endless_page_is_read_only_up_to_the_ceiling():
+def test_an_endless_page_is_read_only_up_to_the_ceiling(get_like_requests):
+    """Read as a stream: asked for whole, as `requests` reads a body it
+    was not asked to stream, the ceiling would bound what is kept, not
+    what is read."""
     reponse = _ReponseSansFin()
 
-    _fetch(reponse)
+    _fetch(reponse, get_like_requests)
 
     assert reponse.lus <= 2 * 1024 * 1024, f"{reponse.lus} octets lus"
 
 
-def test_an_ordinary_page_still_comes_back_whole():
+def test_an_ordinary_page_still_comes_back_whole(get_like_requests):
     """The control. A ceiling set at zero would pass the test above and
     make the tool useless."""
     from src.jarvis.tools.builtin.fetch_web_page import FetchWebPageTool
@@ -91,7 +94,7 @@ def test_an_ordinary_page_still_comes_back_whole():
         tours=1,
     )
 
-    resultat = _fetch(reponse)
+    resultat = _fetch(reponse, get_like_requests)
 
     assert resultat.success
     assert "Bonjour Lyon" in (resultat.reply_text or "")

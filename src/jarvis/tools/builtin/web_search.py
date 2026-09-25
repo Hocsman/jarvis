@@ -38,13 +38,21 @@ def _is_public_url(url: str) -> bool:
     point at 127.0.0.1, 169.254.169.254 (cloud metadata), 10.x/192.168.x, or
     file:///etc/passwd. We resolve the hostname and check every A/AAAA record
     against ipaddress.is_private / is_loopback / is_link_local / is_reserved
-    before issuing the request.
+    before issuing the request. An address carrying credentials is refused
+    outright, whatever it points at.
     """
     try:
         parsed = urlparse(url)
     except Exception:
         return False
     if parsed.scheme not in ("http", "https"):
+        return False
+    # `https://trusted.example@93.184.216.34/` reaches the address after
+    # the `@` while reading as the name before it, to a model as much as
+    # to a person. Nothing either tool reads needs credentials in the
+    # address, so any at all is refused.
+    if parsed.username is not None or parsed.password is not None:
+        debug_log(f"Rejecting an address for {parsed.hostname}: it carries credentials", "web")
         return False
     host = parsed.hostname
     if not host:

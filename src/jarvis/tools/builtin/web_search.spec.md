@@ -44,6 +44,9 @@ through `_is_public_url` before any request fires. Rejected:
 - Hostnames whose DNS resolution contains ANY non-public address. A hostile
   DNS could return `[1.1.1.1, 127.0.0.1]` — we reject on the first private
   hit, not the first public hit.
+- Addresses carrying credentials (`https://trusted.example@93.184.216.34/`):
+  the host is what follows the `@`, and the name before it is what a
+  reader, a model included, takes the page to be from.
 
 Redirects are walked manually (`allow_redirects=False`) up to
 `_MAX_REDIRECTS` (3). Each hop is re-validated. Responses are stream-read
@@ -223,8 +226,10 @@ Regression tests assert:
 2. **Links-only envelope**: when every fetch returns None, the envelope
    contains the anti-confabulation clauses above and does NOT advertise a
    Content block.
-3. **SSRF**: `_is_public_url` rejects file/ftp/javascript schemes and
-   private/loopback/link-local/metadata/multicast IPs.
+3. **SSRF**: `_is_public_url` rejects file/ftp/javascript schemes,
+   private/loopback/link-local/metadata/multicast IPs, and any address
+   carrying credentials: `https://trusted.example@93.184.216.34/` reaches
+   the address after the `@` while reading as the name before it.
 4. **Injection fence**: Content is wrapped in BEGIN/END UNTRUSTED WEB
    EXTRACT delimiters with the hostile payload strictly between them.
 5. **Rate-limit detection**: A DDG challenge response (HTTP 400 or
@@ -256,6 +261,6 @@ Regression tests assert:
 
 `_is_public_url` lives here and `fetchWebPage` imports it rather than carrying a copy: two copies drift, and the one that drifts is the one nobody is looking at. `fetchWebPage` had no copy at all until it was noticed, and reaching `http://127.0.0.1:11434/api/tags` on the developer's own machine returned his model list into the agentic loop with `success=True`.
 
-Both tools follow redirects by hand, one hop at a time, re-checking each: the first address can be public and the second not, which is the ordinary shape of the attack. The redirect test reads `is True` rather than truthiness, so a stub or a mock is treated as *not* a redirect instead of sending the request round again.
+Both tools follow redirects by hand, one hop at a time, re-checking each: the first address can be public and the second not, which is the ordinary shape of the attack. The redirect test reads `is True` rather than truthiness, so a stub or a mock is treated as *not* a redirect instead of sending the request round again. The hop cap (`_MAX_REDIRECTS`) and the byte ceiling (`_MAX_FETCH_BYTES`) are the same two numbers for both tools, imported from here, and both ask for the body as a stream so the ceiling bounds what is read rather than what is kept. A redirect that names no address is a failure, not a page. `fetchWebPage` also holds the whole fetch, walk and body, under one wall clock (`_FETCH_WALL_CLOCK_SEC`): `timeout` on a request bounds the connect and each read, never the fetch, so a server that sends a byte every few seconds never trips it; a hop that would start past the clock is not made, and a body still arriving when it passes is cut there, as the byte ceiling cuts it. It reports a page under the address it was finally read from and joins the page's root-relative links (those beginning with `/`) against that address, not the one it was asked for; other relative links are dropped.
 
 This matters more for `fetchWebPage` than for `webSearch`. It is `lecture`, so free by default — no card, no question — and the URL it is handed comes out of a model that has been reading the web all turn, so a page it fetched a moment ago can propose the next address.

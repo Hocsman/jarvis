@@ -378,6 +378,14 @@ class TestWebSearchTool:
         # Public literal
         assert _is_public_url("https://1.1.1.1/") is True
 
+    def test_is_public_url_refuses_an_address_carrying_credentials(self):
+        """The name before the `@` is what a reader takes for the host, and
+        a page reached through such an address is reported under it."""
+        from src.jarvis.tools.builtin.web_search import _is_public_url
+        assert _is_public_url("https://trusted.example@93.184.216.34/x") is False
+        assert _is_public_url("https://user:secret@1.1.1.1/") is False
+        assert _is_public_url("https://@1.1.1.1/") is False
+
     @patch('src.jarvis.tools.builtin.web_search._fetch_page_content')
     @patch('requests.get')
     def test_fetched_content_is_fenced_as_untrusted(self, mock_get, mock_fetch):

@@ -562,3 +562,74 @@ def tools_unrestricted(monkeypatch):
         monkeypatch.setattr(module, "load_tool_policy", lambda cfg: _AllowAll())
         patched += 1
     assert patched, "neither registry module could be imported"
+
+
+class _Hop:
+    """A response that is a redirect and nothing else. Its body is never
+    to be read, so reading it fails the test; closing it is recorded."""
+
+    is_redirect = True
+    is_permanent_redirect = False
+    status_code = 302
+    encoding = "utf-8"
+
+    def __init__(self, to: str):
+        self.headers = {"Location": to}
+        self.closed = False
+
+    @property
+    def content(self):
+        raise AssertionError("a hop's body was read")
+
+    @property
+    def text(self):
+        raise AssertionError("a hop's body was read")
+
+    def iter_content(self, chunk_size=8192):
+        raise AssertionError("a hop's body was read")
+
+    def raise_for_status(self):
+        pass
+
+    def close(self):
+        self.closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+@pytest.fixture
+def hop():
+    """``hop(to)``: a redirect response towards *to*, for either tool's
+    redirect walk. The files that walk redirects share this one double
+    rather than each keeping a copy, since two copies drift."""
+    return _Hop
+
+
+@pytest.fixture
+def get_like_requests():
+    """``get_like_requests(*responses)``: a stand-in for ``requests.get``
+    that serves the responses in order and behaves as the library does
+    about the body: unless asked for a stream, it reads the whole body
+    before handing the response back. A bare mock in that place cannot
+    tell a streamed request from an unstreamed one; this can. It also
+    refuses to make a request while a hop it served is still open."""
+    def make(*responses):
+        queue = iter(responses)
+        served = []
+
+        def get(url, **kwargs):
+            for earlier in served:
+                assert getattr(earlier, "closed", True), (
+                    "a hop was left open when the next request was made")
+            response = next(queue)
+            served.append(response)
+            if kwargs.get("stream") is not True:
+                response.content
+            return response
+
+        return get
+    return make
