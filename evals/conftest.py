@@ -34,6 +34,11 @@ if str(EVALS) not in sys.path:
 
 from helpers import MockConfig, JUDGE_MODEL, is_judge_llm_available
 
+# Where the eval report lands when nothing names another path. It quotes
+# the model's replies, so it belongs to the developer's machine, never to
+# the repository: git ignores it, and a guard holds git to that.
+EVAL_REPORT_DEFAULT = ROOT / "EVALS.md"
+
 
 # =============================================================================
 # Shared Markers
@@ -663,7 +668,7 @@ def pytest_sessionfinish(session, exitstatus):
     if report_path_str:
         report_path = Path(report_path_str)
     else:
-        report_path = ROOT / "EVALS.md"
+        report_path = EVAL_REPORT_DEFAULT
 
     markdown = _eval_report.generate_markdown()
     report_path.write_text(markdown, encoding="utf-8")
