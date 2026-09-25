@@ -956,87 +956,56 @@ class DialogueMemory:
             return [{"role": role, "content": content} for _, role, content in recent_messages]
 
     # ------------------------------------------------------------------
-    # Session and rewind support (text-chat sessions)
+    # Rewind (text chat)
     # ------------------------------------------------------------------
-    # These operate on the FULL in-memory conversation, not the recent
-    # window: the chat window archives and restores whole sessions, and a
-    # rewind rolls the conversation back to a chosen turn. Everything is
-    # in-memory only: nothing here touches the diary or the disk.
+    # Operates on the FULL in-memory conversation, not the recent window:
+    # a rewind rolls the conversation back to a chosen user turn. Nothing
+    # here touches the diary or the disk.
 
-    def all_messages(self) -> List[dict]:
-        """Return every stored turn as ``[{"role", "content"}, ...]``.
+    def rewind_before_user_message(self, user_index: int, content: str) -> bool:
+        """Drop every message from one user turn on, the turn included.
 
-        Unlike ``get_recent_messages`` this is not bounded by the hot
-        window: it is the full in-memory conversation, used to archive a
-        session before switching or starting a new one. Content is
-        already redacted (redaction runs before a turn is stored).
+        The turn is anchored on its ``content``, the redacted text this
+        memory stores. The chat window counts user turns over its own
+        transcript, which can hold fewer turns than this memory (a voice
+        exchange while the window is open, turns older than its seeding
+        window) or more (a message the daemon never accepted), so a bare
+        ordinal can name the wrong turn. ``user_index``, 1-based over this
+        memory's user turns, only settles which occurrence is meant when
+        the same text was sent more than once; when it points elsewhere
+        the rewind is refused rather than guessed.
+
+        The chosen turn itself is dropped so a regenerate can re-add it
+        without duplicating. Conversation-scoped caches and tool carryover
+        are cleared: they describe state after the rewind point. A held
+        confirmation is left in place: the daemon settles it, because
+        closing its ledger episode is not this memory's job.
+
+        Returns True when a rewind happened, False when no stored user turn
+        carries ``content`` or the text is ambiguous.
         """
         with self._lock:
-            return [
-                {"role": role, "content": content}
-                for _ts, role, content in self._messages
-            ]
-
-    def set_messages(self, messages: List[dict]) -> None:
-        """Replace the stored conversation with ``messages`` (session restore).
-
-        ``messages`` must be ``{"role", "content"}`` dicts as produced by
-        ``all_messages``. Caches and tool carryover are cleared: the
-        restored conversation starts fresh. Timestamps are regenerated
-        with a monotonic epsilon so the restored turns count as recent
-        and keep their order.
-        """
-        with self._lock:
-            now = time.time()
-            fresh: List[Tuple[float, str, str]] = []
-            for i, msg in enumerate(messages):
-                role = str(msg.get("role", "")).strip()
-                content = str(msg.get("content", "")).strip()
-                if role and content:
-                    fresh.append((now + i * 0.001, role, content))
-            self._messages = fresh
-            self._last_ts = now + len(fresh) * 0.001
-            self._last_activity_time = self._last_ts
-            self._tool_turns = []
-            self._hot_cache = OrderedDict()
-            self._pending = None
-
-    def clear(self) -> None:
-        """Drop the entire conversation and its caches (new session)."""
-        with self._lock:
-            self._messages = []
-            self._tool_turns = []
-            self._hot_cache = OrderedDict()
-            self._pending = None
-            self._last_activity_time = time.time()
-
-    def rewind_before_user_message(self, user_index: int) -> bool:
-        """Drop every message from the ``user_index``-th user message on.
-
-        ``user_index`` is 1-based: 1 rewinds to before the first user
-        message (dropping the whole conversation), 2 keeps everything up
-        to but excluding the second user message, and so on. The chosen
-        user message itself is dropped so a regenerate can re-add it
-        without duplicating. Conversation-scoped caches and tool
-        carryover are cleared: they describe state after the rewind
-        point. Returns True when a rewind happened, False when the given
-        user message is not in memory (nothing to rewind).
-        """
-        with self._lock:
+            wanted = content.strip()
+            matches: List[int] = []
+            at_ordinal: Optional[int] = None
             seen = 0
-            keep_until: Optional[int] = None
-            for i, (_ts, role, _content) in enumerate(self._messages):
-                if role == "user":
-                    seen += 1
-                    if seen == user_index:
-                        keep_until = i
-                        break
-            if keep_until is None:
+            for i, (_ts, role, stored) in enumerate(self._messages):
+                if role != "user":
+                    continue
+                seen += 1
+                if seen == user_index:
+                    at_ordinal = i
+                if stored == wanted:
+                    matches.append(i)
+            if len(matches) == 1:
+                keep_until = matches[0]
+            elif at_ordinal in matches:
+                keep_until = at_ordinal
+            else:
                 return False
             self._messages = self._messages[:keep_until]
             self._tool_turns = []
             self._hot_cache = OrderedDict()
-            self._pending = None
             return True
 
     def record_tool_turn(self, tool_msgs: List[dict]) -> None:

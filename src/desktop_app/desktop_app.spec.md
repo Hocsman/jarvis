@@ -177,11 +177,11 @@ In bundled mode, the daemon runs in the same process, so callbacks can be set di
 
 In subprocess mode, the daemon runs as a separate process. IPC is achieved via stdout:
 - **Diary updates**: Daemon emits JSON events prefixed with `__DIARY__:` (e.g., `__DIARY__:{"type":"token","data":"Hello"}`)
-- **Chat events**: Daemon emits `__CHAT__:` events (start/complete/busy); the desktop app sends queries in via `__CHAT_QUERY__:` lines on the daemon's stdin (see `chat_window.spec.md`)
+- **Chat events**: Daemon emits `__CHAT__:` events (start/token/stage/complete/busy, the confirmation events, the rewind verdicts); the desktop app writes queries, cancellations, rewinds and confirmation decisions to the daemon's stdin as `__CHAT_QUERY__:`, `__CHAT_CANCEL__`, `__CHAT_REWIND__:` and `__CHAT_DECISION__:` lines (see `chat_window.spec.md`). Chat lines never reach the log viewer, in either mode.
 - Desktop app intercepts these lines from the log stream
 - DiaryUpdateDialog's `process_log_line()` parses and emits signals
 - Chat IPC lines are marshalled onto the Qt main thread via `ChatIpcSignals`, then `_on_chat_ipc_line()` forwards them to `ChatWindow.process_ipc_line()`
-- When the daemon starts, stops, or a subprocess exits unexpectedly, the tray updates any open ChatWindow lifecycle banner and clears or refreshes its subprocess stdin submit function so the window never writes to a dead pipe.
+- When the daemon starts, stops, or a subprocess exits unexpectedly, the tray updates any open ChatWindow lifecycle banner and clears or refreshes its stdin hooks (submit, cancel, control) and the confirmation decision writer together, so the window never writes to a dead pipe.
 - Same UI experience as bundled mode
 
 ## Theme System

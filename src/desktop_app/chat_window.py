@@ -490,6 +490,9 @@ class ChatWindow(QMainWindow):
             self.resize(min(480, available.width()), min(800, available.height()))
         else:
             self.resize(480, 800)
+        # The floor below which the composer, the controls and a raised
+        # confirmation card stop being usable; the grip cannot go under it.
+        self.setMinimumSize(380, 560)
         self.setStyleSheet(JARVIS_THEME_STYLESHEET + CHAT_THEME_STYLESHEET)
         self._submit_fn = submit_fn
         # Subprocess mode routes cancellation to the daemon the same way it
@@ -503,6 +506,15 @@ class ChatWindow(QMainWindow):
         # after a cancel and its reply still arrives, so the window has to
         # decline the answer to an exchange the user walked away from.
         self._query_cancelled = False
+        # The user row echoed by the last send, until the daemon says
+        # whether it took the turn. A row it did not take keeps its bubble
+        # but loses its ordinal, so later turns keep counting in step with
+        # the memory.
+        self._sent_row: Optional[dict] = None
+        # A rewind asked of the daemon and not yet answered:
+        # (user_index, text, rows to keep). The transcript changes only on
+        # the answer, so it cannot part ways with the memory on a refusal.
+        self._rewind_pending: Optional[tuple] = None
         self._daemon_available = daemon_available
         self._daemon_status = "running" if daemon_available else "stopped"
 
@@ -510,6 +522,9 @@ class ChatWindow(QMainWindow):
         # written to disk, and a fresh app run starts blank (the daemon's
         # dialogue memory owns the durable record).
         self._messages: list[dict] = []
+        # The bubble labels on screen, in transcript order, so a resize
+        # re-caps them without walking the whole widget tree.
+        self._bubbles: list[QLabel] = []
 
         # Signal bridge: daemon worker -> Qt main thread.
         self.signals = ChatSignals()
@@ -608,9 +623,13 @@ class ChatWindow(QMainWindow):
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
         self.transcript_widget.setStyleSheet(_TRANSCRIPT_AREA_STYLE)
-        self.transcript_widget.verticalScrollBar().rangeChanged.connect(
-            self._finish_scroll_to_bottom
-        )
+        # The view follows the newest message only while the reader is at
+        # the end. A resize or a re-wrap changes the range too, and a reader
+        # who scrolled up to re-read something keeps their place through it.
+        scroll_bar = self.transcript_widget.verticalScrollBar()
+        self._follow_bottom = True
+        scroll_bar.rangeChanged.connect(self._on_transcript_range_changed)
+        scroll_bar.valueChanged.connect(self._on_transcript_value_changed)
         self._transcript_container = QWidget()
         self._transcript_layout = QVBoxLayout(self._transcript_container)
         self._transcript_layout.setContentsMargins(4, 4, 4, 4)
@@ -853,25 +872,12 @@ class ChatWindow(QMainWindow):
 
         # Echo the user message into the transcript immediately.
         self._append_user(text)
+        self._sent_row = self._messages[-1]
         self.input_widget.setPlainText("")
 
         self._query_cancelled = False
         self._set_thinking(True)
-
-        if self._submit_fn is not None:
-            # Subprocess mode: the desktop app routes the query to the daemon's
-            # stdin and feeds __CHAT__: events back via the signals.
-            self._submit_fn(text)
-        else:
-            # Bundled mode: call the daemon directly with our signal emitters.
-            from jarvis import daemon
-
-            daemon.submit_text_query(
-                text,
-                on_start=self.signals.started.emit,
-                on_complete=self.signals.completed.emit,
-                on_busy=self.signals.busy.emit,
-            )
+        self._submit(text)
 
     def _stop(self) -> None:
         """Abandon the in-flight query. Never request_stop, which would
@@ -897,49 +903,79 @@ class ChatWindow(QMainWindow):
         self._set_thinking(False)
 
     def _rewind_to_user(self, user_index: int, text: str) -> None:
-        """Roll the conversation back to before ``user_index``-th user
+        """Roll the conversation back to before the ``user_index``-th user
         message and regenerate a fresh reply to it.
 
-        The transcript is truncated to keep the message itself; the daemon
-        memory is rewound past it and the same text is re-submitted, so the
-        old reply (and everything after it) is replaced. Rewinding is
-        disabled while a query is in flight.
+        The daemon is asked first and answers with a verdict: the memory is
+        the conversation and the transcript only a view of it, so the view
+        changes once the memory has, never before. Bundled mode answers in
+        the call; subprocess mode answers with a ``rewound`` or
+        ``rewind_nack`` event. The daemon anchors on the message text and
+        uses the ordinal only to tell identical messages apart, so a turn
+        the memory no longer holds is refused rather than approximated.
+        Rewinding is disabled while a query or another rewind is in flight.
         """
-        if self._query_in_flight or not self._daemon_available:
+        if not self._rewind_allowed():
             return
-        if self._pending_request_id:
-            self._pending_request_id = None
-            self.confirmation_card.setVisible(False)
-        messages = self._messages
         keep_until = None
-        for i, m in enumerate(messages):
+        for i, m in enumerate(self._messages):
             if m.get("kind") == "user" and m.get("user_index") == user_index:
                 keep_until = i + 1
                 break
         if keep_until is None:
             return
-        # Ask the daemon first. Bundled mode: a refusal (query in flight)
-        # leaves both transcript and memory untouched. Subprocess mode is
-        # fire-and-forget; the daemon enforces its own lock guard.
-        if self._control_fn is not None:
-            self._control_fn("rewind", {"user_index": user_index})
-        else:
-            from jarvis import daemon
-            if not daemon.rewind_chat_to_user(user_index):
-                debug_log(
-                    f"chat rewind rejected for user message {user_index}", "chat"
-                )
-                return
-        self._messages = messages[:keep_until]
-        self._render_transcript(self._messages)
-
-        # Regenerate: re-submit the same message for a fresh reply. The
-        # message is already displayed, so no new echo is added.
+        self._rewind_pending = (user_index, text, keep_until)
         self._query_cancelled = False
         self._set_thinking(True)
+        if self._control_fn is not None:
+            # Subprocess mode: the memory lives in the daemon process.
+            self._control_fn("rewind", {"user_index": user_index, "content": text})
+            return
+        from jarvis import daemon
+
+        self._on_rewind_settled(user_index, daemon.rewind_chat_to_user(user_index, text))
+
+    def _on_rewind_settled(self, user_index: int, rewound: bool) -> None:
+        """The daemon's verdict on the rewind in flight."""
+        pending = self._rewind_pending
+        if pending is None or pending[0] != user_index:
+            return
+        self._rewind_pending = None
+        _, text, keep_until = pending
+        if not rewound:
+            debug_log(f"chat rewind refused for user message {user_index}", "chat")
+            self._set_thinking(False)
+            self._append_system("Could not rewind to that message.")
+            return
+        if self._pending_request_id:
+            # The daemon closed the question along with the turn that asked
+            # it; its settlement is on its way and needs no second notice.
+            self._pending_request_id = None
+            self.confirmation_card.setVisible(False)
+        self._messages = self._messages[:keep_until]
+        self._render_transcript(self._messages)
+        debug_log(
+            f"chat rewound to user message {user_index}, {keep_until} rows kept", "chat"
+        )
+        if self._query_cancelled:
+            # Stop was pressed while the daemon was answering: the memory
+            # is rewound and the transcript matches it, nothing is asked.
+            self._query_cancelled = False
+            self._set_thinking(False)
+            return
+        # Regenerate: re-submit the same message for a fresh reply. The
+        # message is already displayed, so no new echo is added.
+        self._sent_row = self._messages[-1]
+        self._set_thinking(True)
+        self._submit(text)
+
+    def _submit(self, text: str) -> None:
         if self._submit_fn is not None:
+            # Subprocess mode: the desktop app routes the query to the daemon's
+            # stdin and feeds __CHAT__: events back via the signals.
             self._submit_fn(text)
         else:
+            # Bundled mode: call the daemon directly with our signal emitters.
             from jarvis import daemon
 
             daemon.submit_text_query(
@@ -970,12 +1006,21 @@ class ChatWindow(QMainWindow):
             debug_log(f"unknown chat daemon status ignored: {status}", "chat")
             status = "stopped"
 
+        was_running = self._daemon_status == "running"
         self._daemon_status = status
         self._daemon_available = status == "running"
         if not self._daemon_available:
             self._query_in_flight = False
+            self._rewind_pending = None
             self.stop_button.setVisible(False)
             self._set_orb_state("IDLE")
+        elif not was_running:
+            # A daemon that comes back starts a fresh memory. The rows on
+            # screen stay as history, but their ordinals named turns of a
+            # memory that no longer exists, so they can no longer be rewound
+            # to, and the next show may seed what the new memory holds.
+            self._retire_rewind_anchors()
+            self._hot_window_seeded = False
         self.input_widget.setEnabled(self._daemon_available)
         self.input_widget.setPlaceholderText(
             _DAEMON_STATUS_PLACEHOLDERS.get(
@@ -995,17 +1040,47 @@ class ChatWindow(QMainWindow):
         self._set_thinking(True)
 
     def _on_complete(self, reply: Optional[str]) -> None:
+        sent_row = self._sent_row
+        self._sent_row = None
         self._set_thinking(False)
         if self._query_cancelled:
+            # The engine ran to the end and stored the turn; only the
+            # answer is declined, so the row keeps its ordinal.
             debug_log("chat reply dropped: the query was cancelled", "chat")
             self._query_cancelled = False
             return
         if reply:
             self._append_assistant(reply)
+        elif sent_row is not None:
+            # The engine gave up before storing the turn.
+            self._retract_ordinal(sent_row)
 
     def _on_busy(self) -> None:
+        sent_row = self._sent_row
+        self._sent_row = None
         self._set_thinking(False)
+        if sent_row is not None:
+            self._retract_ordinal(sent_row)
         self._append_system("Jarvis is busy with another query already.")
+
+    def _retract_ordinal(self, row: dict) -> None:
+        """The daemon never took this turn: the bubble stays, the rewind
+        button goes, and later turns keep counting in step with the memory."""
+        if row.get("user_index") is None:
+            return
+        row["user_index"] = None
+        self._render_transcript(self._messages)
+
+    def _retire_rewind_anchors(self) -> None:
+        """Rows that named turns of a memory that is gone keep their bubble
+        and lose their rewind button."""
+        changed = False
+        for m in self._messages:
+            if m.get("kind") == "user" and m.get("user_index") is not None:
+                m["user_index"] = None
+                changed = True
+        if changed:
+            self._render_transcript(self._messages)
 
     # --- Subprocess IPC entry point --------------------------------------
 
@@ -1044,13 +1119,20 @@ class ChatWindow(QMainWindow):
             self._settle_confirmation(data if isinstance(data, dict) else {})
         elif kind == "confirm_nack":
             self._confirmation_not_taken(data if isinstance(data, dict) else {})
+        elif kind in ("rewound", "rewind_nack"):
+            user_index = data.get("user_index") if isinstance(data, dict) else None
+            if isinstance(user_index, int):
+                self._on_rewind_settled(user_index, kind == "rewound")
         return True
 
     # --- Rendering helpers ----------------------------------------------
 
     def _append_user(self, text: str) -> None:
+        # Ordinal over the turns the memory holds: a row without one is a
+        # message the daemon never took, or a turn of a memory that is gone.
         user_index = 1 + sum(
-            1 for m in self._messages if m.get("kind") == "user"
+            1 for m in self._messages
+            if m.get("kind") == "user" and m.get("user_index") is not None
         )
         self._append_message("user", text, user_index=user_index)
 
@@ -1062,10 +1144,12 @@ class ChatWindow(QMainWindow):
 
     def _append_message(self, kind: str, text: str, user_index: Optional[int] = None) -> None:
         """Add one message row to the transcript."""
-        if self.empty_state.isVisible():
-            self.empty_state.hide()
-            if self._orb is not None:
-                self._orb.pause_rendering()
+        # Decided from state, not from what is on screen: a message can land
+        # while the window is hidden, and the panel must still be gone when
+        # the window is next shown.
+        self.empty_state.hide()
+        if self._orb is not None:
+            self._orb.pause_rendering()
         self.transcript_widget.show()
         self._messages.append(
             {
@@ -1102,6 +1186,7 @@ class ChatWindow(QMainWindow):
             else:
                 self._orb.pause_rendering()
         self.transcript_widget.setVisible(bool(messages))
+        self._bubbles = []
         for m in messages:
             layout.addWidget(self._make_message_row(m))
         layout.addStretch(1)
@@ -1133,10 +1218,12 @@ class ChatWindow(QMainWindow):
             )
             bubble.setStyleSheet(_BUBBLE_STYLES[kind])
             bubble.setMaximumWidth(self._bubble_width())
+            self._bubbles.append(bubble)
             column = QVBoxLayout()
             column.setSpacing(2)
             column.addWidget(bubble)
             time_label = QLabel(m.get("time") or "")
+            time_label.setObjectName("timestamp")
             time_label.setStyleSheet(_TIMESTAMP_STYLE)
             column.addWidget(
                 time_label,
@@ -1144,25 +1231,25 @@ class ChatWindow(QMainWindow):
             )
             if kind == "user":
                 # SMS puts the sender's messages on the right; the rewind
-                # affordance sits quietly to the left of the bubble.
-                rewind_btn = QPushButton("⟲")
-                rewind_btn.setObjectName(f"rewind_{m.get('user_index')}")
-                rewind_btn.setToolTip("Rewind to this message and regenerate")
-                rewind_btn.setStyleSheet(_REWIND_BTN_STYLE)
-                rewind_btn.setFixedSize(26, 26)
-                rewind_btn.setEnabled(
-                    self._daemon_available and not self._query_in_flight
-                )
+                # affordance sits quietly to the left of the bubble. A row
+                # with no ordinal names no turn in the memory, so it has
+                # nothing to rewind to.
+                row.addStretch(1)
                 user_index = m.get("user_index")
                 if user_index is not None:
+                    rewind_btn = QPushButton("⟲")
+                    rewind_btn.setObjectName(f"rewind_{user_index}")
+                    rewind_btn.setToolTip("Rewind to this message and regenerate")
+                    rewind_btn.setStyleSheet(_REWIND_BTN_STYLE)
+                    rewind_btn.setFixedSize(26, 26)
+                    rewind_btn.setEnabled(self._rewind_allowed())
                     rewind_btn.clicked.connect(
                         lambda _checked=False, idx=user_index, txt=text:
                         self._rewind_to_user(idx, txt)
                     )
-                row.addStretch(1)
-                row.addWidget(
-                    rewind_btn, alignment=Qt.AlignmentFlag.AlignVCenter
-                )
+                    row.addWidget(
+                        rewind_btn, alignment=Qt.AlignmentFlag.AlignVCenter
+                    )
                 row.addLayout(column)
             else:
                 row.addLayout(column)
@@ -1183,29 +1270,44 @@ class ChatWindow(QMainWindow):
     def resizeEvent(self, event) -> None:
         # Keep bubbles at a phone-like share of the window width, so the
         # thread reads as SMS whether the window is narrow or maximised.
+        # The cap depends on the width alone, so a height-only resize (a
+        # grip drag straight down, a card raising) re-caps nothing.
         super().resizeEvent(event)
-        if not hasattr(self, "transcript_widget"):
+        if not hasattr(self, "_bubbles"):
+            return
+        if event.oldSize().width() == event.size().width():
             return
         max_w = self._bubble_width()
-        for label in self.transcript_widget.findChildren(QLabel):
-            if label.objectName() == "bubble":
-                label.setMaximumWidth(max_w)
+        for bubble in self._bubbles:
+            bubble.setMaximumWidth(max_w)
 
     def _bubble_width(self) -> int:
         return max(120, int((self.width() - 64) * 0.82))
 
     def _scroll_to_bottom(self) -> None:
         """Keep the latest message visible after Qt settles the new row."""
+        self._follow_bottom = True
         bar = self.transcript_widget.verticalScrollBar()
         bar.setValue(bar.maximum())
         # Inserting a message schedules a layout pass. At this point the
         # scrollbar maximum can still describe the transcript before the new
-        # row, so repeat the scroll once Qt has recalculated its contents.
+        # row: the range change that follows pins the view to the new end
+        # (_on_transcript_range_changed), and this catches a row that changed
+        # nothing the bar could notice.
         QTimer.singleShot(0, self._finish_scroll_to_bottom)
 
     def _finish_scroll_to_bottom(self) -> None:
+        if self._follow_bottom:
+            bar = self.transcript_widget.verticalScrollBar()
+            bar.setValue(bar.maximum())
+
+    def _on_transcript_value_changed(self, value: int) -> None:
         bar = self.transcript_widget.verticalScrollBar()
-        bar.setValue(bar.maximum())
+        self._follow_bottom = value >= bar.maximum()
+
+    def _on_transcript_range_changed(self, _minimum: int, maximum: int) -> None:
+        if self._follow_bottom:
+            self.transcript_widget.verticalScrollBar().setValue(maximum)
 
     def transcript_text(self) -> str:
         """Plain-text rendering of the transcript (testing + copy).
@@ -1267,9 +1369,17 @@ class ChatWindow(QMainWindow):
         except Exception as exc:
             debug_log(f"orb state set failed ({state_name}): {exc}", "chat")
 
+    def _rewind_allowed(self) -> bool:
+        return (
+            self._daemon_available
+            and not self._query_in_flight
+            and self._rewind_pending is None
+        )
+
     def _refresh_rewind_buttons(self) -> None:
-        """Disable rewind while a query is in flight or the daemon is down."""
-        enabled = self._daemon_available and not self._query_in_flight
+        """Disable rewind while a query or a rewind is in flight or the
+        daemon is down."""
+        enabled = self._rewind_allowed()
         for btn in self.transcript_widget.findChildren(QPushButton):
             if btn.objectName().startswith("rewind_"):
                 btn.setEnabled(enabled)
@@ -1332,16 +1442,20 @@ class ChatWindow(QMainWindow):
     # --- Lifecycle ------------------------------------------------------
 
     def showEvent(self, event: QShowEvent) -> None:
-        if self._orb is not None and self.empty_state.isVisible():
+        # The orb lives in the introductory panel, which only an empty
+        # transcript shows; decided from the model, so a message that landed
+        # while the window was hidden counts.
+        if self._orb is not None and not self._messages:
             self._orb.resume_rendering()
-        # On first show we seed the transcript from the daemon's hot window,
-        # so a user who has been talking by voice sees their recent turns
-        # instead of a blank panel. Seeding runs only once per instance:
-        # re-showing (from the tray or after a hide) must never duplicate
-        # turns. Fails silently when the daemon accessor is unavailable
-        # (e.g. subprocess mode), the window just opens blank.
+        # The first show of a daemon's life seeds the transcript from its hot
+        # window, so a user who has been talking by voice sees their recent
+        # turns instead of a blank panel. It runs once per daemon life:
+        # re-showing (from the tray or after a hide) never duplicates turns.
+        # In subprocess mode the memory lives in the other process and the
+        # accessor returns nothing, so the window opens blank.
         if not self._hot_window_seeded and self._daemon_available:
             self._hot_window_seeded = True
+            seeded = 0
             try:
                 for msg in get_hot_window_messages():
                     role = msg.get("role")
@@ -1350,8 +1464,13 @@ class ChatWindow(QMainWindow):
                         self._append_user(content)
                     elif role == "assistant" and content:
                         self._append_assistant(content)
+                    else:
+                        continue
+                    seeded += 1
             except Exception as exc:
                 debug_log(f"hot window replay failed: {exc}", "chat")
+            if seeded:
+                debug_log(f"chat transcript seeded with {seeded} hot-window turns", "chat")
         super().showEvent(event)
 
     def hideEvent(self, event) -> None:  # noqa: N802 (Qt API)
@@ -1364,7 +1483,8 @@ class ChatWindow(QMainWindow):
         # We intentionally do NOT call request_stop here, closing the chat
         # window does not stop the daemon or end the conversation. The explicit
         # hide() guarantees the window disappears regardless of how the close
-        # is triggered (title bar button, ESC, tray toggle) and keeps the
-        # instance alive so a reply that lands while hidden still lands here.
+        # is triggered (title bar button, the platform close shortcut) and
+        # keeps the instance alive so a reply that lands while hidden still
+        # lands here.
         self.hide()
         event.accept()

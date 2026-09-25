@@ -647,10 +647,10 @@ class TestDialogueMemoryUnifiedDurations:
 
 
 @pytest.mark.unit
-class TestDialogueMemorySessions:
-    """Session archive / restore / rewind primitives backing the text-chat
-    sessions feature. Everything is in-memory only; these methods never
-    touch the diary or the disk."""
+class TestDialogueMemoryRewind:
+    """Rewind rolls the full in-memory conversation back to a chosen user
+    turn, anchored on the turn's text. In-memory only: it never touches the
+    diary or the disk."""
 
     def _conversation(self):
         dm = DialogueMemory()
@@ -660,69 +660,62 @@ class TestDialogueMemorySessions:
         dm.add_message("assistant", "Eggs too.")
         return dm
 
-    def test_all_messages_returns_every_turn_in_order(self):
-        dm = self._conversation()
-        assert dm.all_messages() == [
-            {"role": "user", "content": "remind me to buy oat milk"},
-            {"role": "assistant", "content": "Noted."},
-            {"role": "user", "content": "what about eggs?"},
-            {"role": "assistant", "content": "Eggs too."},
-        ]
-
-    def test_set_messages_restores_a_snapshot(self):
-        dm = self._conversation()
-        snapshot = dm.all_messages()
-
-        dm.clear()
-        dm.set_messages(snapshot[:2])
-
-        assert dm.all_messages() == snapshot[:2]
-        assert dm.has_recent_messages(), "restored turns must count as recent"
-
-    def test_set_messages_ignores_blank_entries(self):
+    def _repeated(self):
         dm = DialogueMemory()
-        dm.set_messages([
-            {"role": "user", "content": "hi"},
-            {"role": "assistant", "content": "   "},
-            {"role": "", "content": "hello"},
-        ])
-        assert dm.all_messages() == [{"role": "user", "content": "hi"}]
-
-    def test_clear_drops_conversation_and_caches(self):
-        dm = self._conversation()
-        dm.hot_cache_put("k", "v")
-        dm.record_tool_turn([{"role": "tool", "content": "x"}])
-
-        dm.clear()
-
-        assert dm.all_messages() == []
-        assert dm.hot_cache_get("k") is None
-        assert dm.get_recent_turns_with_tools() == []
+        for reply in ("one", "two", "three"):
+            dm.add_message("user", "again")
+            dm.add_message("assistant", reply)
+        return dm
 
     def test_rewind_before_first_user_message_drops_everything(self):
         dm = self._conversation()
-        assert dm.rewind_before_user_message(1) is True
-        assert dm.all_messages() == []
+        assert dm.rewind_before_user_message(1, "remind me to buy oat milk") is True
+        assert dm.get_recent_messages() == []
 
     def test_rewind_before_second_user_message_keeps_first_turn(self):
         dm = self._conversation()
-        assert dm.rewind_before_user_message(2) is True
-        assert dm.all_messages() == [
+        assert dm.rewind_before_user_message(2, "what about eggs?") is True
+        assert dm.get_recent_messages() == [
             {"role": "user", "content": "remind me to buy oat milk"},
             {"role": "assistant", "content": "Noted."},
         ]
 
-    def test_rewind_to_unknown_user_index_is_a_noop(self):
+    def test_the_text_names_the_turn_when_the_ordinal_is_off(self):
+        """The window can count fewer turns than the memory holds (a voice
+        exchange it never saw) or more (a message the daemon never took);
+        the text is what both sides agree on."""
         dm = self._conversation()
-        assert dm.rewind_before_user_message(5) is False
-        assert len(dm.all_messages()) == 4
+        assert dm.rewind_before_user_message(1, "what about eggs?") is True
+        assert [m["content"] for m in dm.get_recent_messages()] == [
+            "remind me to buy oat milk", "Noted.",
+        ]
+
+    def test_unknown_text_is_refused_and_nothing_moves(self):
+        dm = self._conversation()
+        assert dm.rewind_before_user_message(2, "never said") is False
+        assert len(dm.get_recent_messages()) == 4
+
+    def test_repeated_text_is_told_apart_by_the_ordinal(self):
+        dm = self._repeated()
+        assert dm.rewind_before_user_message(2, "again") is True
+        assert [m["content"] for m in dm.get_recent_messages()] == ["again", "one"]
+
+    def test_repeated_text_with_an_ordinal_pointing_elsewhere_is_refused(self):
+        dm = self._repeated()
+        assert dm.rewind_before_user_message(5, "again") is False
+        assert len(dm.get_recent_messages()) == 6
+
+    def test_surrounding_whitespace_does_not_matter(self):
+        dm = self._conversation()
+        assert dm.rewind_before_user_message(2, "  what about eggs?\n") is True
+        assert len(dm.get_recent_messages()) == 2
 
     def test_rewind_clears_tool_carryover_and_hot_cache(self):
         dm = self._conversation()
         dm.hot_cache_put("router", "cached")
         dm.record_tool_turn([{"role": "tool", "content": "x"}])
 
-        dm.rewind_before_user_message(2)
+        dm.rewind_before_user_message(2, "what about eggs?")
 
         assert dm.hot_cache_get("router") is None
         turns = dm.get_recent_turns_with_tools()
@@ -730,4 +723,21 @@ class TestDialogueMemorySessions:
             "tool carryover must be cleared by a rewind"
         )
 
+    def test_rewind_leaves_a_held_question_to_the_daemon(self):
+        """Closing the question's ledger episode is the daemon's job; the
+        memory must not make it vanish without a settling row."""
+        from jarvis.tools.confirmation import CHANNEL_GESTE, PendingAction
 
+        dm = self._conversation()
+        dm.begin_turn()
+        action = PendingAction.create(
+            tool="localFiles", args={"operation": "delete", "path": "/a"},
+            risk="destructif", channel=CHANNEL_GESTE, origin="chat",
+            query_redacted="supprime", raised_at_turn=dm.current_turn(),
+            ttl_sec=180.0,
+        )
+        dm.raise_pending(action)
+
+        assert dm.rewind_before_user_message(2, "what about eggs?") is True
+
+        assert dm.peek_pending() is action
