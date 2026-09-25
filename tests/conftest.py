@@ -1,3 +1,6 @@
+import ipaddress
+import os
+import socket
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -227,12 +230,190 @@ def _isolate_memory_core(_bac_a_sable, request, monkeypatch):
     assert patched, "neither memory core module could be imported"
 
 
+# ---------------------------------------------------------------------------
+# The suite talks to nobody.
+#
+# A unit test that reaches for the network measures the network. Ollama's
+# port answers on IPv4 while ``localhost`` resolves to ``::1`` first, so an
+# unmocked call through that name waits two seconds on Windows, and one
+# through ``127.0.0.1`` is answered by whatever model happens to be running;
+# a location probe or a geocoding request carries the developer's address,
+# or a Mock's repr, to a third party. Every Python-level connection,
+# datagram and name lookup (forward or reverse) towards a host beyond this
+# machine, and every connection to Ollama's port on this one, is refused
+# before it is made. The refusal is an ``OSError``, what a host that is
+# down or a name that does not resolve produces, so the code under test
+# takes the path it takes when the network is absent, and it is recorded
+# for a test that wants to see it (``network_refusals``). A server a test
+# runs itself, on another loopback port, is left alone. Proxy variables are
+# cleared, because a proxy on this machine would carry a request past the
+# guard. The performance suite, which measures a live model on purpose and
+# is run on its own by path, is the one collection allowed to reach the
+# model server. Outside the hook's sight: sockets opened from C, child
+# processes, and asyncio's Windows proactor; none is driven by the suite.
+# ---------------------------------------------------------------------------
+_NETWORK_EVENTS = {
+    "socket.connect", "socket.sendto", "socket.sendmsg",
+    "socket.getaddrinfo", "socket.gethostbyname", "socket.gethostbyaddr",
+    "socket.getnameinfo",
+}
+_ADDRESSED_EVENTS = {"socket.connect", "socket.sendto", "socket.sendmsg"}
+_FORWARD_LOOKUPS = {"socket.getaddrinfo", "socket.gethostbyname"}
+_LOOPBACK_HOSTS = {None, "", "localhost", "127.0.0.1", "::1", "0.0.0.0"}
+_OLLAMA_PORT = 11434
+_PROXY_VARIABLES = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "FTP_PROXY")
+_network_guard_installed = False
+_model_server_off_limits = True
+_network_refusals: list = []
+
+
+def _is_loopback(host) -> bool:
+    if isinstance(host, bytes):
+        host = host.decode("ascii", "replace")
+    return host in _LOOPBACK_HOSTS or (isinstance(host, str) and host.startswith("127."))
+
+
+def _is_numeric(host) -> bool:
+    """A literal address: resolving it asks no resolver and sends nothing."""
+    try:
+        ipaddress.ip_address(host.decode("ascii", "replace") if isinstance(host, bytes) else host)
+    except (ValueError, TypeError):
+        return False
+    return True
+
+
+def _address(event, args):
+    """The (host, port) an audit event names; a non-tuple address is a
+    local socket path, or a datagram on a socket already connected, and
+    counts as this machine."""
+    if event in _ADDRESSED_EVENTS:
+        address = args[1] if len(args) > 1 else None
+    elif event == "socket.getnameinfo":
+        address = args[0] if args else None
+    else:
+        address = (args[0], args[1] if len(args) > 1 else None)
+    if not isinstance(address, tuple):
+        return None, None
+    host = address[0] if address else None
+    port = address[1] if len(address) > 1 else None
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        pass
+    return host, port
+
+
+def _refuse_the_network(event, args):
+    if event not in _NETWORK_EVENTS:
+        return
+    host, port = _address(event, args)
+    if event in _FORWARD_LOOKUPS and _is_numeric(host) and port != _OLLAMA_PORT:
+        # Turning a literal into an address is arithmetic, not a lookup;
+        # the connection that would follow is judged on its own. Looking a
+        # literal up backwards does ask a resolver, and is not exempt.
+        return
+    if not _is_loopback(host) or (port == _OLLAMA_PORT and _model_server_off_limits):
+        _network_refusals.append((event, host, port))
+        message = (
+            f"the test suite talks to nobody: {event} to {host!r}:{port!r} refused; "
+            "a test that needs a public name resolved takes the public_dns fixture, "
+            "one that needs a model belongs in evals/"
+        )
+        # The error a resolver gives for a name it cannot answer, and the
+        # one a host gives for a port nobody listens on.
+        raise (ConnectionRefusedError if event in _ADDRESSED_EVENTS else socket.gaierror)(message)
+
+
+def _the_model_server_is_wanted(args, root) -> bool:
+    """Only the performance suite may reach a live model server. It is run on
+    its own, by path (``pytest tests/performance/ -m performance``), and that
+    path, under this repository, is what lifts the rule; a marker expression
+    cannot, because the default one already spells the word, and a directory
+    elsewhere that happens to share the name is not the suite."""
+    suite = (Path(root) / "tests" / "performance").resolve()
+    for arg in args:
+        given = Path(str(arg))
+        candidate = (given if given.is_absolute() else Path(root) / given).resolve()
+        if candidate == suite or suite in candidate.parents:
+            return True
+    return False
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",
         "real_download_helper: runs the real download_snapshot_with_progress; "
         "the test fakes the Hugging Face Hub it talks to",
     )
+    global _network_guard_installed, _model_server_off_limits
+    _model_server_off_limits = not _the_model_server_is_wanted(config.args, config.rootpath)
+    for name in _PROXY_VARIABLES:
+        os.environ.pop(name, None)
+        os.environ.pop(name.lower(), None)
+    os.environ["NO_PROXY"] = "*"
+    os.environ["no_proxy"] = "*"
+    if not _network_guard_installed:
+        # An audit hook cannot be removed; it is installed once, before
+        # collection, so a module that probes a server at import is covered.
+        sys.addaudithook(_refuse_the_network)
+        _network_guard_installed = True
+
+
+@pytest.fixture
+def network_refusals():
+    """The connections the guard refused during this test, as
+    ``(event, host, port)``, for a test that wants to see them. Refusals
+    from any thread count, a thread left running by an earlier test
+    included: what reaches for the network during a test is that test's
+    to explain."""
+    del _network_refusals[:]
+    return _network_refusals
+
+
+@pytest.fixture(autouse=True)
+def _no_router_discovery(monkeypatch):
+    """The location module asks the router for the public address over UPnP
+    first. miniupnpc does that from C, on sockets the audit hook never sees,
+    so the library is declared absent for the test's duration and the
+    module takes its no-UPnP path. Both module identities, as everywhere in
+    this file."""
+    import importlib
+
+    for path in ("jarvis.utils.location", "src.jarvis.utils.location"):
+        try:
+            module = importlib.import_module(path)
+        except ImportError:
+            continue
+        monkeypatch.setattr(module, "MINIUPNPC_AVAILABLE", False, raising=False)
+
+
+@pytest.fixture
+def public_dns(monkeypatch):
+    """Every hostname beyond this machine resolves to one public address,
+    without asking a resolver.
+
+    The SSRF guard resolves a URL's host before fetching it. A test that
+    hands a tool ``https://example.com`` is testing the fetch, not the
+    Internet's answer for that name. Loopback names and numeric addresses
+    keep their real, offline resolution, so a test that expects
+    ``localhost`` or ``10.0.0.1`` to be refused still sees it refused.
+    """
+    import socket
+
+    real = socket.getaddrinfo
+    address = "93.184.216.34"
+
+    def resolve(host, port, *args, **kwargs):
+        if _is_loopback(host) or _is_numeric(host):
+            return real(host, port, *args, **kwargs)
+        try:
+            port = int(port)
+        except (TypeError, ValueError):
+            port = 0
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, port))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    return address
 
 
 @pytest.fixture(autouse=True)

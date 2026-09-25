@@ -165,7 +165,7 @@ class TestImportDiaryEndpoint:
 
     @patch("src.desktop_app.memory_viewer._get_db_path")
     @patch("src.desktop_app.memory_viewer.load_settings")
-    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    @patch("jarvis.memory.graph_ops.call_llm_direct")
     def test_import_streams_progress(self, mock_llm, mock_settings, mock_db_path):
         """Should stream start, progress, and complete messages."""
         mock_db_path.return_value = self.db_path
@@ -178,12 +178,13 @@ class TestImportDiaryEndpoint:
         cfg.llm_thinking_enabled = False
         mock_settings.return_value = cfg
 
-        # LLM returns facts for extraction, NONE for placement (writes to root)
+        # One extraction per summary; placement on an empty root asks the
+        # model nothing, and any later picker question gets NONE (root).
         mock_llm.side_effect = [
             '["Likes dark roast coffee"]',  # extract facts from summary 1
-            "NONE",                          # traverse for fact 1 (no children, goes to root)
             '["Works at Acme Corp"]',        # extract facts from summary 2
-            "NONE",                          # traverse for fact 2
+            "NONE",
+            "NONE",
         ]
 
         resp = self.client.post("/api/graph/import-diary")
@@ -201,6 +202,10 @@ class TestImportDiaryEndpoint:
 
         complete_msg = next(m for m in messages if m["type"] == "complete")
         assert complete_msg["processed"] == 2
+        # The stubbed model is the one the endpoint resolves: both summaries
+        # went through it for extraction.
+        asked = " ".join(str(c.kwargs.get("user_content", "")) for c in mock_llm.call_args_list)
+        assert "coffee" in asked and "Acme" in asked, mock_llm.call_args_list
 
     @patch("src.desktop_app.memory_viewer._get_db_path")
     @patch("src.desktop_app.memory_viewer.load_settings")
@@ -224,7 +229,7 @@ class TestImportDiaryEndpoint:
 
     @patch("src.desktop_app.memory_viewer._get_db_path")
     @patch("src.desktop_app.memory_viewer.load_settings")
-    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    @patch("jarvis.memory.graph_ops.call_llm_direct")
     def test_import_continues_on_per_summary_error(self, mock_llm, mock_settings, mock_db_path):
         """If one summary fails, the import should continue with the rest."""
         mock_db_path.return_value = self.db_path
@@ -252,6 +257,8 @@ class TestImportDiaryEndpoint:
 
         complete_msg = next(m for m in messages if m["type"] == "complete")
         assert complete_msg["processed"] == 2
+        asked = " ".join(str(c.kwargs.get("user_content", "")) for c in mock_llm.call_args_list)
+        assert "Acme" in asked, mock_llm.call_args_list
 
 
 @pytest.mark.unit

@@ -693,6 +693,7 @@ class TestBraveSearchHelper:
         assert _brave_search("q", "") == []
         mock_get.assert_not_called()
 
+    @pytest.mark.usefixtures("public_dns")
     @patch("src.jarvis.tools.builtin.web_search.requests.get")
     def test_parses_results(self, mock_get):
         from src.jarvis.tools.builtin.web_search import _brave_search
@@ -719,6 +720,7 @@ class TestBraveSearchHelper:
         mock_get.return_value = resp
         assert _brave_search("q", "BSA-key") == []
 
+    @pytest.mark.usefixtures("public_dns")
     @patch("src.jarvis.tools.builtin.web_search.requests.get")
     def test_filters_unsafe_urls(self, mock_get):
         """Private IPs and non-http(s) schemes must be rejected via _is_public_url."""

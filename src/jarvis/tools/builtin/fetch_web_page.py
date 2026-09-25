@@ -173,7 +173,6 @@ class FetchWebPageTool(Tool):
                         link_text = link.get_text().strip()
                         if href and link_text and len(link_text) > 3:
                             if href.startswith('/'):
-                                from urllib.parse import urljoin
                                 href = urljoin(url, href)
                             elif not href.startswith(('http://', 'https://', 'mailto:', 'tel:')):
                                 continue
