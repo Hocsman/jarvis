@@ -26,3 +26,7 @@ src/jarvis/_version.py
 # The memory core belongs to the user's data directory, never to the
 # repository: a copy here can only have come from a leak, and must not ship.
 /yuba/
+
+# The eval report quotes the model's replies to the developer's own runs;
+# it is written here by scripts/run_evals.sh and belongs to that machine.
+/EVALS.md

@@ -314,3 +314,28 @@ def test_a_real_model_turn_touches_nothing_of_the_users_own(
     assert data_home_tripwire.network == [], (
         f"the guard reached beyond this machine: {data_home_tripwire.network}"
     )
+
+
+# ── The report ────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_the_eval_report_never_enters_the_repository():
+    """The report plugin writes its markdown at the repository root by
+    default, quoting the model's replies. Git must ignore that path, so a
+    ``git add -A`` after an eval run cannot publish what the model said."""
+    import subprocess
+
+    from conftest import EVAL_REPORT_DEFAULT
+
+    assert EVAL_REPORT_DEFAULT.parent == DEPOT, EVAL_REPORT_DEFAULT
+    try:
+        result = subprocess.run(
+            ["git", "check-ignore", "-q", str(EVAL_REPORT_DEFAULT)],
+            cwd=DEPOT, capture_output=True,
+        )
+    except FileNotFoundError:
+        pytest.skip("git is not on PATH here")
+    assert result.returncode == 0, (
+        f"{EVAL_REPORT_DEFAULT.name} is not ignored by git: {result.stderr.decode(errors='replace')}"
+    )
