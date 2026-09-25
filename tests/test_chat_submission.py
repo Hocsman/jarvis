@@ -447,3 +447,284 @@ class TestDaemonShutdownMode:
 
     def test_shutdown_skip_diary_command_is_not_a_chat_query(self):
         assert daemon.handle_chat_query_stdin_line(daemon.SHUTDOWN_SKIP_DIARY_COMMAND) is False
+
+
+@pytest.mark.unit
+class TestGetHotWindowMessages:
+    """``get_hot_window_messages`` backs the chat window's first-show replay."""
+
+    def setup_method(self, _method):
+        _reset_daemon_globals()
+
+    def teardown_method(self, _method):
+        _reset_daemon_globals()
+
+    def test_empty_when_daemon_not_booted(self):
+        assert daemon.get_hot_window_messages() == []
+
+    def test_returns_recent_turns_in_order(self):
+        dm = _install_dialogue_memory()
+        dm.add_message("user", "what is the weather")
+        dm.add_message("assistant", "It is sunny.")
+
+        messages = daemon.get_hot_window_messages()
+
+        assert [m["role"] for m in messages] == ["user", "assistant"]
+        assert messages[0]["content"] == "what is the weather"
+        assert messages[1]["content"] == "It is sunny."
+
+    def test_empty_when_hot_window_has_aged_out(self):
+        """Turns older than the recent window are not replayed."""
+        import time as _time
+        dm = _install_dialogue_memory()
+        # A 1-second recent window makes anything added now age out after sleep.
+        dm.RECENT_WINDOW_SEC = 1
+        dm.add_message("user", "old turn")
+        _time.sleep(1.2)
+
+        assert daemon.get_hot_window_messages() == []
+
+
+def _chat_events(capsys):
+    """The ``__CHAT__:`` events printed since the last read, as (type, data)."""
+    events = []
+    for ln in capsys.readouterr().out.splitlines():
+        if ln.startswith(daemon.CHAT_IPC_PREFIX):
+            payload = json.loads(ln[len(daemon.CHAT_IPC_PREFIX):])
+            events.append((payload.get("type"), payload.get("data")))
+    return events
+
+
+@pytest.mark.unit
+class TestChatRewindControl:
+    """Rewind on the daemon side: the memory anchors on the message text,
+    a held question is closed with the turn that asked it, and in
+    subprocess mode the verdict travels back on the chat bus."""
+
+    def setup_method(self, _method):
+        _reset_daemon_globals()
+
+    def teardown_method(self, _method):
+        _reset_daemon_globals()
+        daemon.set_confirmation_callbacks()
+
+    def _seeded_memory(self):
+        dm = _install_dialogue_memory(cfg=object(), db=object())
+        dm.add_message("user", "remind me to buy oat milk")
+        dm.add_message("assistant", "Noted.")
+        dm.add_message("user", "what about eggs?")
+        dm.add_message("assistant", "Eggs too.")
+        return dm
+
+    def _held_question(self, dm, origin="chat"):
+        from jarvis.tools.confirmation import CHANNEL_GESTE, PendingAction
+
+        dm.begin_turn()
+        action = PendingAction.create(
+            tool="localFiles", args={"operation": "delete", "path": "/a"},
+            risk="destructif", channel=CHANNEL_GESTE, origin=origin,
+            query_redacted="supprime", raised_at_turn=dm.current_turn(),
+            ttl_sec=180.0,
+        )
+        dm.raise_pending(action)
+        return action
+
+    # --- bundled-mode function ---
+
+    def test_rewind_truncates_shared_memory_from_the_named_turn(self):
+        dm = self._seeded_memory()
+        assert daemon.rewind_chat_to_user(2, "what about eggs?") is True
+        assert dm.get_recent_messages() == [
+            {"role": "user", "content": "remind me to buy oat milk"},
+            {"role": "assistant", "content": "Noted."},
+        ]
+
+    def test_rewind_is_anchored_on_the_text_not_the_ordinal(self):
+        """A voice exchange the window never saw shifts every ordinal the
+        window counts; the text still names the right turn."""
+        dm = self._seeded_memory()
+        # The window opened after the first exchange happened by voice, so
+        # it counts "what about eggs?" as its first message.
+        assert daemon.rewind_chat_to_user(1, "what about eggs?") is True
+        assert [m["content"] for m in dm.get_recent_messages()] == [
+            "remind me to buy oat milk", "Noted.",
+        ]
+
+    def test_rewind_refuses_a_turn_the_memory_no_longer_holds(self):
+        """A turn pruned by a diary pass, or one of a memory that was
+        rebuilt, is refused rather than approximated by position."""
+        dm = self._seeded_memory()
+        assert daemon.rewind_chat_to_user(1, "a message of a pruned memory") is False
+        assert len(dm.get_recent_messages()) == 4
+
+    def test_rewind_matches_the_redacted_form_of_what_was_typed(self):
+        from jarvis.utils.redact import redact
+
+        dm = _install_dialogue_memory(cfg=object(), db=object())
+        typed = "write to someone@example.com about it"
+        dm.add_message("user", redact(typed))
+        dm.add_message("assistant", "Done.")
+
+        assert daemon.rewind_chat_to_user(1, typed) is True
+        assert dm.get_recent_messages() == []
+
+    def test_rewind_closes_a_waiting_question_as_expired(self, capsys):
+        from unittest.mock import MagicMock
+
+        dm = self._seeded_memory()
+        daemon._global_db = MagicMock()
+        action = self._held_question(dm)
+        settled = []
+        daemon.set_confirmation_callbacks(
+            on_confirm_settled=lambda rid, outcome: settled.append((rid, outcome))
+        )
+        capsys.readouterr()
+
+        assert daemon.rewind_chat_to_user(2, "what about eggs?") is True
+
+        assert dm.peek_pending() is None
+        assert daemon._global_db.record_action.call_args.kwargs["outcome"] == "expiré"
+        assert daemon._global_db.record_action.call_args.kwargs["request_id"] == action.request_id
+        assert settled == [(action.request_id, "expiré")]
+        assert ("confirm_settled", {"request_id": action.request_id, "outcome": "expiré"}) in _chat_events(capsys)
+
+    def test_a_refused_rewind_leaves_a_waiting_question_open(self):
+        from unittest.mock import MagicMock
+
+        dm = self._seeded_memory()
+        daemon._global_db = MagicMock()
+        action = self._held_question(dm)
+
+        assert daemon.rewind_chat_to_user(1, "never said") is False
+
+        assert dm.peek_pending() is action
+        daemon._global_db.record_action.assert_not_called()
+
+    def test_rewind_noops_when_daemon_not_booted(self):
+        assert daemon.rewind_chat_to_user(1, "anything") is False
+
+    # --- subprocess stdin handlers ---
+
+    def test_cancel_stdin_line(self, monkeypatch):
+        cancelled = []
+        monkeypatch.setattr(
+            daemon, "cancel_active_chat_query", lambda: cancelled.append(True)
+        )
+        assert daemon.handle_chat_cancel_stdin_line(
+            daemon.CHAT_CANCEL_IPC_PREFIX
+        ) is True
+        assert cancelled == [True]
+        assert daemon.handle_chat_cancel_stdin_line("SHUTDOWN") is False
+        assert daemon.handle_chat_cancel_stdin_line("") is False
+
+    def test_rewind_stdin_line_answers_rewound(self, capsys):
+        dm = self._seeded_memory()
+        capsys.readouterr()
+        line = f'{daemon.CHAT_REWIND_IPC_PREFIX}{{"user_index": 2, "content": "what about eggs?"}}'
+
+        assert daemon.handle_chat_rewind_stdin_line(line) is True
+
+        assert len(dm.get_recent_messages()) == 2
+        assert _chat_events(capsys) == [("rewound", {"user_index": 2})]
+
+    def test_rewind_stdin_line_answers_nack_when_refused(self, capsys):
+        dm = self._seeded_memory()
+        capsys.readouterr()
+        line = f'{daemon.CHAT_REWIND_IPC_PREFIX}{{"user_index": 2, "content": "never said"}}'
+
+        assert daemon.handle_chat_rewind_stdin_line(line) is True
+
+        assert len(dm.get_recent_messages()) == 4
+        assert _chat_events(capsys) == [("rewind_nack", {"user_index": 2})]
+
+    def test_rewind_stdin_line_without_a_text_is_refused_not_guessed(self, capsys):
+        dm = self._seeded_memory()
+        capsys.readouterr()
+
+        assert daemon.handle_chat_rewind_stdin_line(
+            f'{daemon.CHAT_REWIND_IPC_PREFIX}{{"user_index": 2}}'
+        ) is True
+        assert _chat_events(capsys) == [("rewind_nack", {"user_index": 2})]
+
+        assert daemon.handle_chat_rewind_stdin_line(
+            f'{daemon.CHAT_REWIND_IPC_PREFIX}{{"user_index": 0, "content": "what about eggs?"}}'
+        ) is True
+        assert _chat_events(capsys) == [("rewind_nack", {"user_index": 0})]
+        assert len(dm.get_recent_messages()) == 4
+
+    def test_malformed_rewind_stdin_line_is_swallowed(self, capsys):
+        dm = self._seeded_memory()
+        capsys.readouterr()
+        assert daemon.handle_chat_rewind_stdin_line(
+            f"{daemon.CHAT_REWIND_IPC_PREFIX}not json"
+        ) is True
+        assert _chat_events(capsys) == []
+        assert len(dm.get_recent_messages()) == 4
+        assert daemon.handle_chat_rewind_stdin_line("SHUTDOWN") is False
+
+
+@pytest.mark.unit
+class TestChatRewindLockGuard:
+    """A rewind must not run while a query is in flight: the engine appends
+    its turns after the truncation, which would resurrect the conversation
+    the rewind just dropped."""
+
+    def setup_method(self, _method):
+        _reset_daemon_globals()
+
+    def teardown_method(self, _method):
+        _reset_daemon_globals()
+
+    def test_rewind_is_rejected_while_the_query_lock_is_held(self):
+        dm = _install_dialogue_memory(cfg=object(), db=object())
+        dm.add_message("user", "q1")
+        dm.add_message("assistant", "a1")
+        dm.add_message("user", "q2")
+        dm.add_message("assistant", "a2")
+
+        # Simulate an in-flight query (voice or text) holding the lock.
+        assert daemon._chat_query_lock.acquire(blocking=False)
+        try:
+            assert daemon.rewind_chat_to_user(2, "q2") is False
+            assert len(dm.get_recent_messages()) == 4, "memory must be untouched"
+        finally:
+            daemon._chat_query_lock.release()
+
+        # Once the lock is free the same call applies.
+        assert daemon.rewind_chat_to_user(2, "q2") is True
+        assert len(dm.get_recent_messages()) == 2
+
+
+@pytest.mark.unit
+class TestWaitForChatWorker:
+    """Shutdown waits, bounded, for a chat worker that still holds the
+    database the diary pass is about to use."""
+
+    def setup_method(self, _method):
+        _reset_daemon_globals()
+
+    def teardown_method(self, _method):
+        _reset_daemon_globals()
+
+    def test_returns_at_once_when_no_worker_runs(self):
+        started = time.monotonic()
+        assert daemon.wait_for_chat_worker(timeout_sec=2.0) is True
+        assert time.monotonic() - started < 1.0
+        assert not daemon._chat_query_lock.locked(), "the wait must not keep the lock"
+
+    def test_gives_up_after_the_timeout_while_a_worker_holds_the_lock(self):
+        assert daemon._chat_query_lock.acquire(blocking=False)
+        try:
+            started = time.monotonic()
+            assert daemon.wait_for_chat_worker(timeout_sec=0.05) is False
+            elapsed = time.monotonic() - started
+            assert 0.04 <= elapsed < 1.0
+        finally:
+            daemon._chat_query_lock.release()
+
+    def test_a_worker_finishing_in_time_releases_the_wait(self):
+        assert daemon._chat_query_lock.acquire(blocking=False)
+        threading.Timer(0.05, daemon._chat_query_lock.release).start()
+
+        assert daemon.wait_for_chat_worker(timeout_sec=2.0) is True
+        assert not daemon._chat_query_lock.locked()

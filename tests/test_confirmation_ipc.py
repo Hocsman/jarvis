@@ -309,3 +309,75 @@ def test_shutdown_revokes_a_waiting_question(waiting):
 
     assert dm.peek_pending() is None
     assert daemon._global_db.record_action.call_args.kwargs["outcome"] == "expiré"
+
+
+# ── The narration of a confirmed action ───────────────────────────────
+
+
+def _resume_with(monkeypatch, origin, reply="fait"):
+    """Run the resume path for a question of the given origin, with the
+    engine stubbed, and report what was spoken and what reached the bus."""
+    dm = DialogueMemory()
+    dm.begin_turn()
+    action = PendingAction.create(
+        tool="localFiles", args={"operation": "delete", "path": "/a"},
+        risk="destructif", channel=CHANNEL_GESTE, origin=origin,
+        query_redacted="supprime", raised_at_turn=dm.current_turn(),
+        ttl_sec=180.0,
+    )
+    daemon._global_dialogue_memory = dm
+    daemon._global_cfg = MagicMock()
+    daemon._global_db = MagicMock()
+    daemon._global_stop_requested = False
+    monkeypatch.setattr("src.jarvis.reply.engine.run_reply_engine", lambda **kw: reply)
+    spoken = []
+    monkeypatch.setattr(
+        daemon, "_speak_from_worker",
+        lambda text, on_spoken=None: spoken.append(text) or True,
+    )
+    # The resume expects to own the lock resolve_confirmation took.
+    assert daemon._chat_query_lock.acquire(blocking=False)
+    daemon._resume_after_confirmation(action)
+    return spoken
+
+
+def _complete_events(capsys):
+    return [
+        json.loads(l[len(daemon.CHAT_IPC_PREFIX):])
+        for l in capsys.readouterr().out.splitlines()
+        if l.startswith(daemon.CHAT_IPC_PREFIX)
+        and json.loads(l[len(daemon.CHAT_IPC_PREFIX):]).get("type") == "complete"
+    ]
+
+
+def test_a_confirmed_chat_action_is_narrated_without_speaking(monkeypatch, capsys):
+    """Text chat never speaks, not even for the action it just approved."""
+    capsys.readouterr()
+
+    spoken = _resume_with(monkeypatch, origin="chat")
+
+    assert spoken == []
+    assert [e["data"] for e in _complete_events(capsys)] == ["fait"]
+    assert not daemon._chat_query_lock.locked()
+
+
+def test_a_confirmed_voice_action_is_spoken_once(monkeypatch, capsys):
+    capsys.readouterr()
+
+    spoken = _resume_with(monkeypatch, origin="voix")
+
+    assert spoken == ["fait"]
+    assert [e["data"] for e in _complete_events(capsys)] == ["fait"]
+
+
+def test_in_bundled_mode_the_narration_reaches_the_wired_callback(monkeypatch):
+    """Bundled mode has no stdout bus; the desktop wires a callback so the
+    window learns what became of the action it approved."""
+    heard = []
+    daemon.set_confirmation_callbacks(on_confirm_reply=heard.append)
+    try:
+        _resume_with(monkeypatch, origin="chat")
+    finally:
+        daemon.set_confirmation_callbacks()
+
+    assert heard == ["fait"]
