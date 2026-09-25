@@ -371,8 +371,21 @@ class StateManager:
                 self._state = ListeningState.HOT_WINDOW
                 self._hot_window_start_time = time.time()
 
+            # The window is measured from this instant. Telling the face and
+            # the console comes after, and the first time in a process that
+            # imports the desktop widget: a clock started after that work
+            # would make the window longer on a cold process than on a warm
+            # one.
+            self._schedule_hot_window_expiry()
+
             activation_time_str = datetime.fromtimestamp(self._hot_window_start_time).strftime('%H:%M:%S.%f')[:-3]
             debug_log(f"hot window activated at {activation_time_str} for {self.hot_window_seconds}s (after {self.echo_tolerance}s echo delay)", "state")
+
+            # A window shorter than the announcement below can close before
+            # the announcement is made; the face and the console then keep
+            # what the expiry told them.
+            if self.get_state() != ListeningState.HOT_WINDOW:
+                return
 
             # Set face state to LISTENING
             try:
@@ -390,9 +403,6 @@ class StateManager:
                 print(f"👂 Listening for follow-up ({int(self.hot_window_seconds)}s)...", flush=True)
             except Exception as e:
                 debug_log(f"failed to print hot window message: {e}", "state")
-
-            # Schedule the expiry timer now that hot window is active
-            self._schedule_hot_window_expiry()
 
         # Use Timer for more reliable activation
         with self._timer_lock:

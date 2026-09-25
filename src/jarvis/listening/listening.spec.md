@@ -174,7 +174,7 @@ After TTS finishes, allow wake-word-free follow-up.
 
 **`could_be_hot_window` (intent judge context):** Derived from timestamp comparison — returns True if the hot window is active, activation is pending, the utterance started within the window span even after expiry, or the utterance overlaps with the span (started before, ended during).
 
-**Expiry:** Timer-based, guaranteed to fire even if no audio
+**Expiry:** Timer-based, guaranteed to fire even if no audio. The `hot_window_seconds` clock starts the instant the window opens, before the face and the console are told, so the window is the same length on a cold process (where telling the face imports the desktop widget) and on a warm one. An announcement the clock has already outrun is skipped.
 
 ### 3. During TTS
 

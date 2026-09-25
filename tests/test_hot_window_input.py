@@ -105,6 +105,23 @@ def _wait_for_hot_window_active(listener, timeout=0.5):
     return False
 
 
+def _wait_for_hot_window_expiry(listener, timeout=2.0):
+    """Wait until the expiry timer has closed the window.
+
+    The window's clock runs on a timer thread, and a busy machine can wake
+    that thread tens of milliseconds late; a fixed sleep sized to the window
+    then finds it still open. Waiting on the span's end observes the timer
+    itself, so the test measures the window and not the scheduler. A window
+    that never opened never closes either, and shows up as a timeout."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if (listener.state_manager._hot_window_span_end > 0
+                and not listener.state_manager.is_hot_window_active()):
+            return True
+        time.sleep(0.01)
+    return False
+
+
 def _accepted_query(listener) -> str:
     """Return the accepted query text, or empty string if input was rejected."""
     if listener.state_manager.get_pending_query():
@@ -226,14 +243,13 @@ class TestTranscriptArrivesAfterHotWindowExpiry:
 
         listener.echo_detector.track_tts_start("Short answer.")
         _simulate_tts_finish(listener)
-        _wait_for_hot_window_active(listener)
+        assert _wait_for_hot_window_active(listener)
 
         # Speech starts during active window
         speech_start = time.time()
 
-        # Wait for hot window to expire (simulates Whisper delay)
-        time.sleep(0.12)
-        assert not listener.state_manager.is_hot_window_active()
+        # The transcript arrives after expiry (Whisper was slow)
+        assert _wait_for_hot_window_expiry(listener)
 
         # Transcript arrives after expiry — but speech_start was during window
         _install_intent_judge(listener, _make_judgment(directed=True, query="tell me more"))
@@ -251,11 +267,10 @@ class TestTranscriptArrivesAfterHotWindowExpiry:
 
         listener.echo_detector.track_tts_start("Short answer.")
         _simulate_tts_finish(listener)
-        _wait_for_hot_window_active(listener)
+        assert _wait_for_hot_window_active(listener)
 
         # Wait for hot window to expire
-        time.sleep(0.1)
-        assert not listener.state_manager.is_hot_window_active()
+        assert _wait_for_hot_window_expiry(listener)
 
         # Speech starts AFTER expiry
         speech_start = time.time()
@@ -320,11 +335,10 @@ class TestTranscriptArrivesAfterHotWindowExpiry:
 
         listener.echo_detector.track_tts_start("Quick answer.")
         _simulate_tts_finish(listener)
-        _wait_for_hot_window_active(listener)
+        assert _wait_for_hot_window_active(listener)
 
         # Wait for window to expire
-        time.sleep(0.1)
-        assert not listener.state_manager.is_hot_window_active()
+        assert _wait_for_hot_window_expiry(listener)
 
         # Simulate speech "a minute later" (use a start time well after expiry)
         speech_start = time.time() + 0.5  # even 500ms later should be rejected
@@ -843,11 +857,10 @@ class TestEchoRejectionDoesNotExtendFollowUpWindow:
 
         listener.echo_detector.track_tts_start("Short reply.")
         _simulate_tts_finish(listener)
-        _wait_for_hot_window_active(listener)
+        assert _wait_for_hot_window_active(listener)
 
         # Let hot window expire
-        time.sleep(0.1)
-        assert not listener.state_manager.is_hot_window_active()
+        assert _wait_for_hot_window_expiry(listener)
 
         # Late echo arrives — window should stay expired
         listener._process_transcript("Short reply", utterance_energy=0.01)
@@ -1108,11 +1121,10 @@ class TestHotWindowBoundary:
 
         listener.echo_detector.track_tts_start("Short answer.")
         _simulate_tts_finish(listener)
-        _wait_for_hot_window_active(listener)
+        assert _wait_for_hot_window_active(listener)
 
         # Let hot window expire
-        time.sleep(0.1)
-        assert not listener.state_manager.is_hot_window_active()
+        assert _wait_for_hot_window_expiry(listener)
 
         # Speech without wake word — should be rejected
         _install_intent_judge(listener, _make_judgment(directed=True, query="tell me more"))
@@ -1128,11 +1140,10 @@ class TestHotWindowBoundary:
 
         listener.echo_detector.track_tts_start("Short answer.")
         _simulate_tts_finish(listener)
-        _wait_for_hot_window_active(listener)
+        assert _wait_for_hot_window_active(listener)
 
         # Let hot window expire
-        time.sleep(0.1)
-        assert not listener.state_manager.is_hot_window_active()
+        assert _wait_for_hot_window_expiry(listener)
 
         # Speech with wake word — accepted via wake word detection fallback
         _install_intent_judge(listener, _make_judgment(
@@ -1231,8 +1242,7 @@ class TestEchoCaughtBeforeBeepAndIntentJudge:
         assert listener.state_manager._hot_window_start_time == original_start
 
         # Wait for original window to expire
-        time.sleep(0.15)
-        assert not listener.state_manager.is_hot_window_active()
+        assert _wait_for_hot_window_expiry(listener)
         listener.state_manager.stop()
 
     @patch("builtins.print")
@@ -1283,8 +1293,7 @@ class TestEchoCaughtBeforeBeepAndIntentJudge:
         assert _accepted_query(listener) == ""
 
         # Window should still expire on original schedule
-        time.sleep(0.15)
-        assert not listener.state_manager.is_hot_window_active()
+        assert _wait_for_hot_window_expiry(listener)
 
         # Speech after expiry requires wake word
         _install_intent_judge(listener, _make_judgment(
@@ -1570,4 +1579,40 @@ class TestIntentJudgeGating:
         )
 
         assert mock_judge.judge.call_count == 1
+        listener.state_manager.stop()
+
+
+# ---------------------------------------------------------------------------
+# Tests: The window's length does not depend on what activation tells the face
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+class TestHotWindowLengthIsMeasuredFromActivation:
+    """``hot_window_seconds`` runs from the moment the window opens.
+
+    Activation also tells the face and the console, and the first time that
+    happens in a process it imports the desktop face widget, a measurable
+    fraction of a second. The clock is armed before that work, so the window
+    is the same length whatever the announcement costs."""
+
+    @patch("builtins.print")
+    def test_a_slow_face_update_does_not_lengthen_the_window(self, _print):
+        from unittest.mock import MagicMock
+
+        listener, _ = _create_listener(echo_tolerance=0.02, hot_window_seconds=0.05)
+
+        def slow_face():
+            time.sleep(0.6)
+            return MagicMock()
+
+        with patch("desktop_app.face_widget.get_jarvis_state", side_effect=slow_face):
+            listener.echo_detector.track_tts_start("Short answer.")
+            _simulate_tts_finish(listener)
+            assert _wait_for_hot_window_active(listener)
+            opened_at = time.time()
+
+            # Six times the window, a tenth of the announcement.
+            assert _wait_for_hot_window_expiry(listener, timeout=0.3), (
+                f"still open {time.time() - opened_at:.2f}s after a 0.05s window"
+            )
         listener.state_manager.stop()

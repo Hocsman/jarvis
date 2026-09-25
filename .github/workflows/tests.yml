@@ -25,4 +25,10 @@ jobs:
       - name: Run unit tests
         run: |
           python -m pytest -q -m unit
+      - name: Run the eval harness guards (no model)
+        env:
+          EVAL_LLM_PROVIDER: ollama
+          EVAL_LLM_BASE_URL: ""
+        run: |
+          python -m pytest -q evals/test_evals_keep_the_core_out_of_the_repository.py
 

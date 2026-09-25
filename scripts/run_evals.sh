@@ -10,6 +10,13 @@
 #   ./scripts/run_evals.sh --no-report  # Skip EVALS.md generation
 #   ./scripts/run_evals.sh --single     # Run with single model only (EVAL_JUDGE_MODEL)
 #
+# An eval that runs the real chat model takes the `real_model_config`
+# fixture (evals/conftest.py), never `load_settings()`: the fixture keeps the
+# provider and the models, moves the database into the sandbox and switches
+# location off, so the user's memory and whereabouts never reach a provider
+# from a measurement. The guards in
+# evals/test_evals_keep_the_core_out_of_the_repository.py hold it to that.
+#
 # Environment variables:
 #   EVAL_JUDGE_MODEL    - Model to use for LLM-as-judge (default: gemma4:e2b,
 #                         matching evals/helpers.py — the smallest supported
