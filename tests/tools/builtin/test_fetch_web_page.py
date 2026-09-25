@@ -175,3 +175,129 @@ class TestFetchWebPageTool:
         # relative link should be resolved to absolute
         assert "https://example.com/relative" in result.reply_text
         assert "absolute.test" in result.reply_text
+
+
+def _redirect(to: str) -> Mock:
+    """A response that is a redirect and nothing else."""
+    resp = Mock()
+    resp.is_redirect = True
+    resp.is_permanent_redirect = False
+    resp.headers = {"Location": to}
+    resp.__enter__ = Mock(return_value=resp)
+    resp.__exit__ = Mock(return_value=False)
+    return resp
+
+
+class _StreamOnly:
+    """A response whose body exists only as a stream: reading it whole is
+    the failure the byte ceiling exists to prevent."""
+
+    is_redirect = False
+    is_permanent_redirect = False
+    status_code = 200
+    encoding = "utf-8"
+    headers = {"content-type": "text/html"}
+
+    def __init__(self, body: bytes):
+        self._body = body
+
+    @property
+    def content(self):
+        raise AssertionError("the body was read whole")
+
+    @property
+    def text(self):
+        raise AssertionError("the body was read whole")
+
+    def iter_content(self, chunk_size=8192):
+        for start in range(0, len(self._body), chunk_size):
+            yield self._body[start:start + chunk_size]
+
+    def raise_for_status(self):
+        pass
+
+    def close(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+@pytest.mark.usefixtures("public_dns")
+class TestFetchWebPageReadsTheWebCarefully:
+    """The body arrives as a stream under the byte ceiling, a page is
+    reported under the address it was finally read from, and the redirect
+    walk stops where `webSearch` stops."""
+
+    def setup_method(self):
+        self.tool = FetchWebPageTool()
+        self.context = Mock(spec=ToolContext)
+        self.context.user_print = Mock()
+
+    @patch('requests.get')
+    def test_the_body_is_read_as_a_stream_never_whole(self, mock_get):
+        mock_get.return_value = _StreamOnly(
+            b"<html><head><title>Streamed</title></head><body><p>arrived in pieces</p></body></html>"
+        )
+
+        result = self.tool.run({"url": "https://example.com"}, self.context)
+
+        assert result.success is True, result.reply_text
+        assert "arrived in pieces" in result.reply_text
+        assert mock_get.call_args.kwargs.get("stream") is True, (
+            "without stream=True requests reads the whole body before iter_content sees a byte"
+        )
+
+    @patch('requests.get')
+    def test_a_page_is_reported_under_the_address_it_was_read_from(self, mock_get):
+        page = _make_response_mock(
+            status_code=200,
+            text='<html><head><title>Final</title></head><body><p>Content here</p>'
+                 '<a href="/about">About the site</a></body></html>',
+            headers={'content-type': 'text/html'},
+            raise_for_status=Mock(),
+        )
+        mock_get.side_effect = [_redirect("https://other.example/final"), page]
+
+        result = self.tool.run(
+            {"url": "https://example.com/go", "include_links": True}, self.context,
+        )
+
+        assert result.success is True, result.reply_text
+        assert "**URL:** https://other.example/final" in result.reply_text
+        assert "https://other.example/about" in result.reply_text
+        assert "https://example.com/about" not in result.reply_text
+
+    @patch('requests.get')
+    def test_a_chain_within_the_cap_is_followed(self, mock_get):
+        from src.jarvis.tools.builtin.web_search import _MAX_REDIRECTS
+
+        page = _make_response_mock(
+            status_code=200,
+            text='<html><body><p>The page at the end</p></body></html>',
+            headers={'content-type': 'text/html'},
+            raise_for_status=Mock(),
+        )
+        hops = [_redirect(f"https://example.com/hop{i}") for i in range(_MAX_REDIRECTS)]
+        mock_get.side_effect = hops + [page]
+
+        result = self.tool.run({"url": "https://example.com/start"}, self.context)
+
+        assert result.success is True, result.reply_text
+        assert "The page at the end" in result.reply_text
+        assert mock_get.call_count == _MAX_REDIRECTS + 1
+
+    @patch('requests.get')
+    def test_the_hop_cap_is_the_one_web_search_uses(self, mock_get):
+        from src.jarvis.tools.builtin.web_search import _MAX_REDIRECTS
+
+        mock_get.side_effect = [_redirect(f"https://example.com/hop{i}") for i in range(_MAX_REDIRECTS + 5)]
+
+        result = self.tool.run({"url": "https://example.com/start"}, self.context)
+
+        assert result.success is False
+        assert "too many" in result.reply_text
+        assert mock_get.call_count == _MAX_REDIRECTS + 1

@@ -11,7 +11,7 @@ from ..types import ToolExecutionResult
 # this one had none, and a copy would be the one that drifts.
 from urllib.parse import urljoin
 
-from .web_search import _MAX_FETCH_BYTES, _is_public_url
+from .web_search import _MAX_FETCH_BYTES, _MAX_REDIRECTS, _is_public_url
 
 
 class FetchWebPageTool(Tool):
@@ -82,10 +82,14 @@ class FetchWebPageTool(Tool):
             # Redirects are followed by hand so every hop is checked: the
             # first address can be public and the second not, which is the
             # ordinary shape of this attack.
+            # The same cap as `webSearch`, for the same reason: each hop
+            # costs a request, and a chain that long is a loop or a trap.
+            # Asked as a stream, so the body arrives as it is read below and
+            # a hop's body is never read at all.
             current, response = url, None
-            for _ in range(5):
+            for _ in range(_MAX_REDIRECTS + 1):
                 response = requests.get(current, headers=headers, timeout=15,
-                                        allow_redirects=False)
+                                        allow_redirects=False, stream=True)
                 # `is True` rather than truthiness: on a real response
                 # these are bools, and anything else — a stub, a mock, a
                 # library that grew a property — must read as "not a
@@ -173,7 +177,9 @@ class FetchWebPageTool(Tool):
                         link_text = link.get_text().strip()
                         if href and link_text and len(link_text) > 3:
                             if href.startswith('/'):
-                                href = urljoin(url, href)
+                                # Against the address the page was read
+                                # from: a redirect may have moved it.
+                                href = urljoin(current, href)
                             elif not href.startswith(('http://', 'https://', 'mailto:', 'tel:')):
                                 continue
                             links.append(f"• {link_text}: {href}")
@@ -182,7 +188,7 @@ class FetchWebPageTool(Tool):
                 reply_parts = []
                 if title:
                     reply_parts.append(f"**Title:** {title}")
-                reply_parts.append(f"**URL:** {url}")
+                reply_parts.append(f"**URL:** {current}")
                 reply_parts.append(f"**Content:**\n{content}")
                 if links_section:
                     reply_parts.append(links_section)
@@ -195,7 +201,7 @@ class FetchWebPageTool(Tool):
                 return ToolExecutionResult(success=True, reply_text=reply_text)
             except ImportError:
                 text = response_text[:10000]
-                reply_text = f"**URL:** {url}\n**Raw Content:**\n{text}"
+                reply_text = f"**URL:** {current}\n**Raw Content:**\n{text}"
                 debug_log("fetchWebPage: BeautifulSoup not available, returning raw text", "web")
                 context.user_print("✅ Page content fetched (raw).")
                 return ToolExecutionResult(success=True, reply_text=reply_text)
