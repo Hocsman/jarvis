@@ -1,17 +1,26 @@
 """Fetch web page tool implementation for extracting content from URLs."""
 
+import time
+
 import requests
 from typing import Dict, Any, Optional
+from urllib.parse import urljoin
 from ...debug import debug_log
 from ..base import Tool, ToolContext
 from ..types import ToolExecutionResult
 
-
-# One guard, not two. `webSearch` has carried it since the tool existed;
-# this one had none, and a copy would be the one that drifts.
-from urllib.parse import urljoin
-
+# One guard, one hop cap and one byte ceiling, not two of each: `webSearch`
+# holds them and this tool imports them, since a copy would be the one
+# that drifts.
 from .web_search import _MAX_FETCH_BYTES, _MAX_REDIRECTS, _is_public_url
+
+# The whole fetch, redirect walk and body together, under one wall clock.
+# `timeout` on a request bounds the connect and each read, never the
+# fetch: a server that sends a byte every few seconds never trips it. A
+# hop that would start past the clock is not made; a body still arriving
+# when it passes is cut there, as the byte ceiling cuts it.
+_FETCH_WALL_CLOCK_SEC = 30.0
+_REQUEST_TIMEOUT_SEC = 15.0
 
 
 class FetchWebPageTool(Tool):
@@ -81,14 +90,23 @@ class FetchWebPageTool(Tool):
             }
             # Redirects are followed by hand so every hop is checked: the
             # first address can be public and the second not, which is the
-            # ordinary shape of this attack.
-            # The same cap as `webSearch`, for the same reason: each hop
-            # costs a request, and a chain that long is a loop or a trap.
-            # Asked as a stream, so the body arrives as it is read below and
-            # a hop's body is never read at all.
+            # ordinary shape of this attack. The cap is `webSearch`'s, for
+            # the same reason: each hop costs a request, and a chain that
+            # long is a loop or a trap. Every request asks for a stream, so
+            # a hop's body is never read and the page's arrives as the loop
+            # below reads it.
+            deadline = time.monotonic() + _FETCH_WALL_CLOCK_SEC
             current, response = url, None
             for _ in range(_MAX_REDIRECTS + 1):
-                response = requests.get(current, headers=headers, timeout=15,
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    debug_log(f"fetchWebPage: out of time before {current}", "web")
+                    return ToolExecutionResult(
+                        success=False,
+                        reply_text="That page took too long to reach; nothing was read.",
+                    )
+                response = requests.get(current, headers=headers,
+                                        timeout=min(_REQUEST_TIMEOUT_SEC, remaining),
                                         allow_redirects=False, stream=True)
                 # `is True` rather than truthiness: on a real response
                 # these are bools, and anything else — a stub, a mock, a
@@ -101,7 +119,13 @@ class FetchWebPageTool(Tool):
                 suivant = response.headers.get("Location", "")
                 response.close()
                 if not suivant:
-                    break
+                    # A redirect to `requests` (the header is there), a
+                    # page to nobody: its body is boilerplate at best.
+                    debug_log(f"fetchWebPage: {current} redirected nowhere", "web")
+                    return ToolExecutionResult(
+                        success=False,
+                        reply_text="That page redirected nowhere; nothing was read.",
+                    )
                 suivant = urljoin(current, suivant)
                 if not _is_public_url(suivant):
                     debug_log(f"fetchWebPage refused redirect to {suivant}", "web")
@@ -112,27 +136,29 @@ class FetchWebPageTool(Tool):
                             "so nothing was read. Say so plainly."
                         ),
                     )
+                debug_log(f"fetchWebPage: redirected to {suivant}", "web")
                 current = suivant
             else:
+                debug_log(f"fetchWebPage: gave up after {_MAX_REDIRECTS} redirects, "
+                          f"last at {current}", "web")
                 return ToolExecutionResult(
                     success=False,
                     reply_text="That page redirected too many times; nothing was read.",
                 )
+            # The address the page was read from, which a redirect may have
+            # moved: the reply names it and relative links join against it.
+            final_url = current
 
             # ``with`` releases the connection back to the pool deterministically
             # even if BeautifulSoup or the link extraction raises midway.
             with response:
                 response.raise_for_status()
-                # Streamed under the same ceiling `webSearch` uses, and
-                # shared rather than copied for the reason `_is_public_url`
-                # was: the two tools fetch the same web with the same
-                # trust in it. `response.content` held the whole body,
-                # `response.text` held a second copy of it, and the
-                # truncation to `max_chars` only happened afterwards —
-                # measured, an endless page read 164 MB. What that costs
-                # is not this tool: the daemon holds the reminder thread
-                # and the routine runner, so an exhausted process takes
-                # promises down with it.
+                # Streamed under the ceiling `webSearch` uses, shared rather
+                # than copied for the reason `_is_public_url` is: the two
+                # tools fetch the same web with the same trust in it. What
+                # an unbounded read costs is not this tool: the daemon holds
+                # the reminder thread and the routine runner, so an
+                # exhausted process takes promises down with it.
                 morceaux: list[bytes] = []
                 lus = 0
                 for morceau in response.iter_content(chunk_size=8192):
@@ -143,6 +169,10 @@ class FetchWebPageTool(Tool):
                     if lus >= _MAX_FETCH_BYTES:
                         debug_log(
                             f"fetchWebPage: page truncated at {lus} bytes", "tools")
+                        break
+                    if time.monotonic() >= deadline:
+                        debug_log(
+                            f"fetchWebPage: page cut at {lus} bytes, out of time", "web")
                         break
                 response_content = b"".join(morceaux)
                 response_text = response_content.decode(
@@ -177,9 +207,7 @@ class FetchWebPageTool(Tool):
                         link_text = link.get_text().strip()
                         if href and link_text and len(link_text) > 3:
                             if href.startswith('/'):
-                                # Against the address the page was read
-                                # from: a redirect may have moved it.
-                                href = urljoin(current, href)
+                                href = urljoin(final_url, href)
                             elif not href.startswith(('http://', 'https://', 'mailto:', 'tel:')):
                                 continue
                             links.append(f"• {link_text}: {href}")
@@ -188,7 +216,7 @@ class FetchWebPageTool(Tool):
                 reply_parts = []
                 if title:
                     reply_parts.append(f"**Title:** {title}")
-                reply_parts.append(f"**URL:** {current}")
+                reply_parts.append(f"**URL:** {final_url}")
                 reply_parts.append(f"**Content:**\n{content}")
                 if links_section:
                     reply_parts.append(links_section)
@@ -201,7 +229,7 @@ class FetchWebPageTool(Tool):
                 return ToolExecutionResult(success=True, reply_text=reply_text)
             except ImportError:
                 text = response_text[:10000]
-                reply_text = f"**URL:** {current}\n**Raw Content:**\n{text}"
+                reply_text = f"**URL:** {final_url}\n**Raw Content:**\n{text}"
                 debug_log("fetchWebPage: BeautifulSoup not available, returning raw text", "web")
                 context.user_print("✅ Page content fetched (raw).")
                 return ToolExecutionResult(success=True, reply_text=reply_text)

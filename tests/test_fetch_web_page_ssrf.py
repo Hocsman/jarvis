@@ -75,17 +75,6 @@ def test_the_refusal_says_why_without_teaching_the_next_attempt():
     assert "127.0.0.1" not in texte or "refus" in texte or "not" in texte
 
 
-def _saut(vers: str) -> MagicMock:
-    """A response that is a redirect and nothing else."""
-    reponse = MagicMock()
-    reponse.is_redirect = True
-    reponse.is_permanent_redirect = False
-    reponse.headers = {"Location": vers}
-    reponse.__enter__ = lambda s: s
-    reponse.__exit__ = lambda s, *a: None
-    return reponse
-
-
 def _page(html: str) -> MagicMock:
     reponse = MagicMock()
     reponse.is_redirect = False
@@ -101,12 +90,12 @@ def _page(html: str) -> MagicMock:
     return reponse
 
 
-def test_a_redirect_into_the_machine_is_refused_too(public_dns):
+def test_a_redirect_into_the_machine_is_refused_too(public_dns, hop):
     """The first address can be public and the second not. `webSearch`
     re-checks every hop; so does this. The first hop is public here, so
     the refusal has to come from the second."""
     with patch("src.jarvis.tools.builtin.fetch_web_page.requests.get",
-               return_value=_saut("http://127.0.0.1:11434/api/tags")) as get:
+               return_value=hop("http://127.0.0.1:11434/api/tags")) as get:
         r = _tool().run({"url": "https://example.com/go"}, _ctx())
 
     assert not r.success
@@ -117,11 +106,11 @@ def test_a_redirect_into_the_machine_is_refused_too(public_dns):
         assert appel.kwargs.get("allow_redirects") is False
 
 
-def test_a_redirect_to_the_public_web_is_followed(public_dns):
+def test_a_redirect_to_the_public_web_is_followed(public_dns, hop):
     """One hop off the first address, still on the public web: the page
     behind it is read."""
     with patch("src.jarvis.tools.builtin.fetch_web_page.requests.get",
-               side_effect=[_saut("https://example.com/final"),
+               side_effect=[hop("https://example.com/final"),
                             _page("<html><body><p>bonjour</p></body></html>")]) as get:
         r = _tool().run({"url": "https://example.com/go"}, _ctx())
 
@@ -129,6 +118,20 @@ def test_a_redirect_to_the_public_web_is_followed(public_dns):
     assert get.call_count == 2
     assert get.call_args_list[1].args[0] == "https://example.com/final"
     assert "bonjour" in (r.reply_text or "")
+
+
+def test_a_redirect_carrying_credentials_is_refused(public_dns, hop):
+    """`https://trusted.example@93.184.216.34/x` reaches the address after
+    the `@` while reading as the name before it, to a model as much as to
+    a person, and the page behind it would be reported under that string.
+    So it is not fetched at all."""
+    with patch("src.jarvis.tools.builtin.fetch_web_page.requests.get",
+               return_value=hop("https://trusted.example@93.184.216.34/x")) as get:
+        r = _tool().run({"url": "https://example.com/go"}, _ctx())
+
+    assert not r.success
+    assert "redirected" in (r.reply_text or "").lower(), r.reply_text
+    assert get.call_count == 1, "the disguised address was requested"
 
 
 def test_an_ordinary_page_still_works():
