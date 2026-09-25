@@ -696,17 +696,37 @@ def _bac_a_sable(tmp_path_factory):
     return tmp_path_factory.mktemp("jarvis_sandbox")
 
 
+def _foyer_des_donnees() -> Path:
+    """The user's own data home: the parent of the database's default path."""
+    from jarvis.config import _default_db_path
+
+    return Path(_default_db_path()).expanduser().resolve().parent
+
+
+def _sous_le_foyer(db_path: str) -> bool:
+    """Whether a database path names the user's own data, where the core
+    beside it is the user's own ``profil.md``."""
+    cible = Path(db_path).expanduser().resolve()
+    foyer = _foyer_des_donnees()
+    return cible == foyer or foyer in cible.parents
+
+
 @pytest.fixture(autouse=True)
 def _isolate_memory_core(_bac_a_sable, request, monkeypatch):
-    """Keep the core of a database with no absolute path out of the working directory.
+    """Keep the core out of the working directory and out of the user's data.
 
     ``MemoryCore.for_config`` places the core beside the database. The test
     configurations use ``:memory:``, whose parent is ``.``, so the core would
     resolve against whichever directory a run starts from, the repository root
     included, where ``git add -A`` would publish it. A database with no
-    absolute path gets its core in the sandbox, one per test. An absolute path
-    keeps the real resolution, so the tests that exercise it exercise the real
-    code.
+    absolute path gets its core in the sandbox, one per test.
+
+    A database under the user's own data home gets the same: that core is
+    the user's ``profil.md`` and ``regles.md``, which the reply engine reads
+    into its system prompt and which a test could write into. A settings
+    object built from the user's configuration, or from the defaults, names
+    exactly that path. Any other absolute path keeps the real resolution, so
+    the tests that exercise it exercise the real code.
     """
     coeur = _bac_a_sable / f"core-{abs(hash(request.node.nodeid)):x}"
 
@@ -727,6 +747,8 @@ def _isolate_memory_core(_bac_a_sable, request, monkeypatch):
             db_path = str(getattr(cfg, "db_path", "") or "")
             if db_path == ":memory:" or not Path(db_path).expanduser().is_absolute():
                 return klass(coeur / _dirname)
+            if _sous_le_foyer(db_path):
+                return klass(coeur / _dirname)
             return _original(klass, cfg)
 
         monkeypatch.setattr(module.MemoryCore, "for_config", classmethod(for_config))
@@ -738,6 +760,24 @@ def _isolate_memory_core(_bac_a_sable, request, monkeypatch):
 def mock_config():
     """Provide a mock configuration for eval tests."""
     return MockConfig()
+
+
+@pytest.fixture
+def real_model_config(_bac_a_sable, request):
+    """The user's settings with the database moved into the sandbox.
+
+    For the evals that must run the real chat model: mocking the model would
+    test the mock. The engine reads the memory core beside the database into
+    its system prompt, so the real ``db_path`` would send the user's own
+    ``profil.md`` and ``regles.md`` to whichever provider the settings name.
+    The model is the thing under test; the user's life is not part of it,
+    and the model starts from an empty memory.
+    """
+    import dataclasses
+    from jarvis.config import load_settings
+
+    sandbox = _bac_a_sable / f"real-{abs(hash(request.node.nodeid)):x}"
+    return dataclasses.replace(load_settings(), db_path=str(sandbox / "jarvis.db"))
 
 
 @pytest.fixture
