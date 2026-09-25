@@ -381,6 +381,12 @@ class StateManager:
             activation_time_str = datetime.fromtimestamp(self._hot_window_start_time).strftime('%H:%M:%S.%f')[:-3]
             debug_log(f"hot window activated at {activation_time_str} for {self.hot_window_seconds}s (after {self.echo_tolerance}s echo delay)", "state")
 
+            # A window shorter than the announcement below can close before
+            # the announcement is made; the face and the console then keep
+            # what the expiry told them.
+            if self.get_state() != ListeningState.HOT_WINDOW:
+                return
+
             # Set face state to LISTENING
             try:
                 from desktop_app.face_widget import get_jarvis_state, JarvisState
