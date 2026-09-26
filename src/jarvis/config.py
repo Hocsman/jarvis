@@ -416,13 +416,23 @@ def _save_json(path: Path, data: Dict[str, Any]) -> bool:
         tmp_path = Path(f.name)
         with f:
             json.dump(data, f, indent=2)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
         try:
             tmp_path.chmod(0o600)
         except OSError:
             pass
         os.replace(tmp_path, path)
         return True
-    except Exception:
+    except Exception as exc:
+        try:
+            from .debug import debug_log
+            debug_log(f"Failed to atomically save config to {path}: {exc}", "config")
+        except Exception:
+            pass
         if tmp_path is not None and tmp_path.exists():
             try:
                 tmp_path.unlink()

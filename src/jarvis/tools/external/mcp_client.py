@@ -193,7 +193,14 @@ class _StdioConnection:
         self._errlog = errlog
 
     async def __aenter__(self):
-        return await self._cm.__aenter__()
+        try:
+            return await self._cm.__aenter__()
+        except BaseException:
+            try:
+                self._errlog.close()
+            except Exception:
+                pass
+            raise
 
     async def __aexit__(self, exc_type, exc, tb):
         try:
@@ -276,7 +283,7 @@ class MCPClient:
         # We must pass the full environment because StdioServerParameters
         # replaces (not merges) the parent env when env is not None.
         cmd_dir = os.path.dirname(command)
-        current_path = os.environ.get("PATH", "")
+        current_path = user_env.get("PATH", os.environ.get("PATH", ""))
         if cmd_dir and cmd_dir not in current_path.split(os.pathsep):
             env = {**os.environ, **user_env, "PATH": cmd_dir + os.pathsep + current_path}
         elif user_env:
@@ -456,12 +463,16 @@ def _flatten_content(content: Any) -> str:
             return str(content.get("text") or "")
         if content.get("type") == "text" and "data" in content:
             return str(content.get("data") or "")
+        if content.get("type") == "image":
+            return f"[Image: {content.get('mimeType', 'image')}]"
         try:
             return str(content)
         except Exception:
             return ""
     if getattr(content, "type", None) == "text" and getattr(content, "data", None) is not None:
         return str(getattr(content, "data"))
+    if getattr(content, "type", None) == "image":
+        return f"[Image: {getattr(content, 'mimeType', 'image')}]"
     dumped = getattr(content, "model_dump", None)
     if callable(dumped):
         try:

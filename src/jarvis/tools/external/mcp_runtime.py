@@ -154,6 +154,9 @@ class _PersistentMCPRuntime:
             self._drop_worker(server_name)
             worker = self._get_worker(server_name, server_cfg)
             return worker.invoke(tool_name, arguments, effective_timeout)
+        except concurrent.futures.TimeoutError:
+            self._drop_worker(server_name)
+            raise
 
     def list_tools(
         self,
@@ -191,6 +194,9 @@ class _PersistentMCPRuntime:
             self._drop_worker(server_name)
             worker = self._get_worker(server_name, server_cfg)
             return worker.list_tools(effective_timeout)
+        except concurrent.futures.TimeoutError:
+            self._drop_worker(server_name)
+            raise
 
     def _get_worker(
         self, server_name: str, server_cfg: Dict[str, Any]
@@ -470,13 +476,7 @@ class _ServerWorker:
         try:
             return fut.result(timeout=timeout)
         except concurrent.futures.TimeoutError:
-            # If the worker died between our enqueue and the wait, the
-            # drain in ``_run``'s finally would normally resolve the
-            # future with ``_WorkerDeadError`` — but if our cmd landed
-            # on the queue *after* the drain ran, no one will ever
-            # resolve it. Treat that as a worker death so the runtime
-            # can replace the worker instead of returning a misleading
-            # plain timeout to the caller.
+            self.shutdown()
             if not self.alive:
                 raise _WorkerDeadError(
                     f"MCP server '{self._server_name}' died while servicing call"

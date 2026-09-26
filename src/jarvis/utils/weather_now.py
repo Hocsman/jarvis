@@ -84,7 +84,7 @@ def _describe(code: Optional[int], language: str = "en") -> tuple[str, str]:
     table = _WMO_FR if (language or "").strip().lower().startswith("fr") else _WMO_EN
     if isinstance(code, (int, float)) and int(code) in table:
         return table[int(code)]
-    return ("—", "🌡️")
+    return ("", "🌡️")
 
 
 def fetch_weather_summary(

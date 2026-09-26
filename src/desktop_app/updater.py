@@ -641,6 +641,11 @@ def install_update_linux(download_path: Path) -> bool:
             if hasattr(tarfile, "data_filter"):
                 tf.extractall(temp_dir, filter="data")
             else:
+                dest = temp_dir.resolve()
+                for member in tf.getmembers():
+                    target = (temp_dir / member.name).resolve()
+                    if not target.is_relative_to(dest):
+                        raise RuntimeError(f"Path traversal detected in archive: {member.name}")
                 tf.extractall(temp_dir)
 
         new_app_dir = temp_dir / "Jarvis"

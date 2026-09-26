@@ -132,3 +132,22 @@ class TestDashboardWeatherPrivacyGuard:
             assert bridge._weather_timer.isActive()
             assert bridge._weather_city == "Berlin"
             assert bridge._language == "de"
+
+    @pytest.mark.unit
+    def test_weather_polls_when_city_auto_detected_from_geoip(self):
+        """When weather_city is empty but location is enabled and GeoIP finds a city, timer starts."""
+        fake_cfg = MagicMock()
+        fake_cfg.location_enabled = True
+        fake_cfg.weather_city = ""
+        fake_cfg.location_ip_address = None
+        fake_cfg.location_auto_detect = True
+        fake_cfg.location_cgnat_resolve_public_ip = True
+        fake_cfg.location_cache_minutes = 60
+        fake_cfg.response_language = "fr"
+
+        with patch("desktop_app.dashboard.bridge.get_location_info", return_value={"city": "Lyon"}):
+            with patch("desktop_app.dashboard.bridge.fetch_weather_summary") as mock_fetch:
+                bridge = DashboardBridge(submit_fn=None, cfg=fake_cfg)
+                assert bridge._weather_timer.isActive()
+                assert bridge._weather_city == "Lyon"
+                assert bridge._language == "fr"

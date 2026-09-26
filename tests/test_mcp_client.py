@@ -1,5 +1,6 @@
 import asyncio
 import os
+import sys
 import pytest
 
 
@@ -745,6 +746,60 @@ class TestMCPContentAndErrors:
         client.invoke_tool("weather", "get_forecast", {}, timeout_sec=15.0)
         assert captured_kwargs.get("timeout") == 15.0
 
+    def test_list_tools_forwards_timeout_sec_from_server_config(self, monkeypatch):
+        """Server config timeout_sec must be forwarded to runtime.list_tools."""
+        from jarvis.tools.external.mcp_client import MCPClient
+
+        captured_kwargs = {}
+
+        class FakeRuntime:
+            def list_tools(self, server_name, cfg, timeout=None):
+                captured_kwargs["timeout"] = timeout
+                return []
+
+        monkeypatch.setattr(
+            "jarvis.tools.external.mcp_runtime.get_runtime", lambda: FakeRuntime()
+        )
+
+        client = MCPClient({
+            "weather": {
+                "command": "npx",
+                "args": ["server"],
+                "timeout_sec": 42.5,
+            }
+        })
+        client.list_tools("weather")
+        assert captured_kwargs.get("timeout") == 42.5
+
+    def test_list_tools_forwards_explicit_timeout_sec_arg(self, monkeypatch):
+        """Explicit timeout_sec passed to list_tools overrides server config."""
+        from jarvis.tools.external.mcp_client import MCPClient
+
+        captured_kwargs = {}
+
+        class FakeRuntime:
+            def list_tools(self, server_name, cfg, timeout=None):
+                captured_kwargs["timeout"] = timeout
+                return []
+
+        monkeypatch.setattr(
+            "jarvis.tools.external.mcp_runtime.get_runtime", lambda: FakeRuntime()
+        )
+
+        client = MCPClient({
+            "weather": {
+                "command": "npx",
+                "args": ["server"],
+                "timeout_sec": 42.5,
+            }
+        })
+        client.list_tools("weather", timeout_sec=15.0)
+        assert captured_kwargs.get("timeout") == 15.0
+
+    @pytest.mark.skipif(
+        sys.platform != "win32",
+        reason="Windows-specific PATH and .cmd probing requires Windows runtime",
+    )
     def test_resolve_command_probes_windows_extra_dirs(self, monkeypatch, tmp_path):
         """On Windows, _resolve_command probes AppData/ProgramFiles extra dirs for .cmd files."""
         from jarvis.tools.external.mcp_client import (

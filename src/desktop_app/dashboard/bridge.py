@@ -142,7 +142,7 @@ class DashboardBridge(QObject):
                 cfg = None
 
         self._cfg = cfg
-        self._location_enabled = bool(getattr(cfg, "location_enabled", True)) if cfg else True
+        self._location_enabled = bool(getattr(cfg, "location_enabled", False)) if cfg is not None else False
         self._language = (getattr(cfg, "response_language", "") or "").strip().lower() or "en"
 
         city = (weather_city or "").strip()
@@ -151,7 +151,12 @@ class DashboardBridge(QObject):
 
         if self._location_enabled and not city and cfg is not None:
             try:
-                loc_info = get_location_info(cfg)
+                loc_info = get_location_info(
+                    config_ip=getattr(cfg, "location_ip_address", None),
+                    auto_detect=getattr(cfg, "location_auto_detect", True),
+                    resolve_cgnat_public_ip=getattr(cfg, "location_cgnat_resolve_public_ip", True),
+                    location_cache_minutes=getattr(cfg, "location_cache_minutes", 60),
+                )
                 if loc_info and loc_info.get("city"):
                     city = loc_info["city"].strip()
             except Exception:

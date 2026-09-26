@@ -33,13 +33,13 @@ class TestConfigAtomicSave:
         assert leftovers == []
 
     def test_save_json_cleans_up_temp_on_write_failure(self, tmp_path, monkeypatch):
-        """If writing or serializing fails, temporary file is cleaned up and False returned."""
+        """If writing or serialising fails, temporary file is cleaned up and False returned."""
         from jarvis.config import _save_json
 
         target = tmp_path / "config.json"
 
-        # Non-serializable object
-        bad_data = {"unserializable": object()}
+        # Non-serialisable object
+        bad_data = {"unserialisable": object()}
         success = _save_json(target, bad_data)
         assert success is False
         assert not target.exists()
