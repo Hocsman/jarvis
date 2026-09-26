@@ -529,6 +529,14 @@ def qapp():
     if app is None:
         app = QApplication([])
     yield app
+    app.processEvents()
+    for widget in list(app.topLevelWidgets()):
+        try:
+            widget.close()
+            widget.deleteLater()
+        except Exception:
+            pass
+    app.processEvents()
 
 @pytest.fixture
 def tools_unrestricted(monkeypatch):

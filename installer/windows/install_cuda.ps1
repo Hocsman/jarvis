@@ -150,7 +150,15 @@ function Test-FileSha256 {
         # loudly rather than silently skip the integrity check.
         throw "PyPI did not return a SHA256 digest for $Path"
     }
-    $actual = (Get-FileHash -Path $Path -Algorithm SHA256).Hash.ToLower()
+    $hasher = [System.Security.Cryptography.SHA256]::Create()
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        $hashBytes = $hasher.ComputeHash($stream)
+        $actual = [System.BitConverter]::ToString($hashBytes).Replace("-", "").ToLowerInvariant()
+    } finally {
+        $stream.Close()
+        $hasher.Dispose()
+    }
     if ($actual -ne $Expected.ToLower()) {
         throw "SHA256 mismatch for $Path (expected $Expected, got $actual)"
     }

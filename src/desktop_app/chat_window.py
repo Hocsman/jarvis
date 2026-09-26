@@ -1351,6 +1351,7 @@ class ChatWindow(QMainWindow):
             # band; it renders centred at min(width, height).
             orb.setMinimumSize(0, 0)
             orb.setFixedHeight(_ORB_HERO_HEIGHT)
+            orb.pause_rendering()
             return orb
         except Exception as exc:
             debug_log(f"chat orb unavailable, continuing without it: {exc}", "chat")
@@ -1486,5 +1487,7 @@ class ChatWindow(QMainWindow):
         # is triggered (title bar button, the platform close shortcut) and
         # keeps the instance alive so a reply that lands while hidden still
         # lands here.
+        if self._orb is not None:
+            self._orb.pause_rendering()
         self.hide()
         event.accept()

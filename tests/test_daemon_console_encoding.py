@@ -80,18 +80,20 @@ def test_tee_wrapper_delegates_reconfigure_and_force_utf8():
     assert hasattr(tee, 'reconfigure')
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="Windows console encoding test requires Windows native runtime",
+)
 @pytest.mark.integration
 def test_importing_the_daemon_under_both_module_paths_keeps_stdout_open():
     """The end-to-end shape of the bug, on the import paths the suite uses.
 
-    ``sys.platform`` is forced so the Windows-only branch is exercised on any
-    host: the defect is invisible elsewhere, and a test that only runs on
-    Windows would guard nothing in CI.
+    Exercised natively on Windows where the console encoding configuration
+    runs and the native Windows runtime (pywintypes, etc.) is available.
     """
     script = textwrap.dedent(
         f"""
         import gc, io, sys
-        sys.platform = 'win32'
         sys.path.insert(0, {str(ROOT)!r})
         sys.path.insert(0, {str(ROOT / 'src')!r})
 

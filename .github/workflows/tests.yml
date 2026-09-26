@@ -7,8 +7,11 @@ on:
 
 jobs:
   unit:
-    name: Unit tests (Linux, Python 3.11)
+    name: Tests (Linux, Python 3.11)
     runs-on: ubuntu-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONIOENCODING: utf-8
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -17,18 +20,44 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.txt
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y portaudio19-dev libegl1 libxkbcommon0
-      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y portaudio19-dev libegl1 libxkbcommon0 libgl1-mesa-dri xvfb
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
-      - name: Run unit tests
+      - name: Run tests
         run: |
-          python -m pytest -q -m unit
-      - name: Run the eval harness guards (no model)
+          xvfb-run -a python -m pytest -q tests/
+      - name: Run eval harness guards (no model)
         env:
           EVAL_LLM_PROVIDER: ollama
           EVAL_LLM_BASE_URL: ""
         run: |
           python -m pytest -q evals/test_evals_keep_the_core_out_of_the_repository.py
 
+  windows:
+    name: Tests (Windows, Python 3.11)
+    runs-on: windows-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+      - name: Run tests
+        run: |
+          python -m pytest -q tests/
+      - name: Run eval harness guards (no model)
+        env:
+          EVAL_LLM_PROVIDER: ollama
+          EVAL_LLM_BASE_URL: ""
+        run: |
+          python -m pytest -q evals/test_evals_keep_the_core_out_of_the_repository.py

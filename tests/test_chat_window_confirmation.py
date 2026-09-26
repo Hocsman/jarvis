@@ -52,6 +52,8 @@ def win(qapp):
     w = ChatWindow()
     yield w
     w.close()
+    w.deleteLater()
+    qapp.processEvents()
 
 
 # ── It appears ────────────────────────────────────────────────────────
