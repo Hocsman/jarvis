@@ -27,12 +27,44 @@ class MCPServerSessionError(RuntimeError):
 
 # Static directories to search when a command isn't on the daemon's PATH.
 # macOS GUI-launched processes often miss Homebrew, nvm, fnm, and Volta paths.
-_EXTRA_PATH_DIRS: List[str] = [
-    "/opt/homebrew/bin",           # Homebrew (Apple Silicon)
-    "/usr/local/bin",              # Homebrew (Intel) / manual installs
-    os.path.expanduser("~/.volta/bin"),             # Volta
-    os.path.expanduser("~/.local/bin"),             # pipx / uvx
-]
+def _default_extra_path_dirs() -> List[str]:
+    """Default extra directories to probe for binaries when not on standard PATH."""
+    if _sys.platform == "win32":
+        dirs = []
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            dirs.append(os.path.join(appdata, "npm"))
+            dirs.append(os.path.join(appdata, "fnm", "current"))
+            dirs.append(os.path.join(appdata, "nvm"))
+        localappdata = os.environ.get("LOCALAPPDATA")
+        if localappdata:
+            dirs.append(os.path.join(localappdata, "Programs", "nodejs"))
+            dirs.append(os.path.join(localappdata, "Volta", "bin"))
+            dirs.append(os.path.join(localappdata, "Microsoft", "WinGet", "Links"))
+        progfiles = os.environ.get("ProgramFiles", r"C:\Program Files")
+        dirs.append(os.path.join(progfiles, "nodejs"))
+        progfiles_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+        dirs.append(os.path.join(progfiles_x86, "nodejs"))
+        userprofile = os.environ.get("USERPROFILE")
+        if userprofile:
+            dirs.append(os.path.join(userprofile, ".local", "bin"))
+            dirs.append(os.path.join(userprofile, "scoop", "shims"))
+            dirs.append(os.path.join(userprofile, ".volta", "bin"))
+        progdata = os.environ.get("ProgramData", r"C:\ProgramData")
+        dirs.append(os.path.join(progdata, "chocolatey", "bin"))
+        return dirs
+    return [
+        "/opt/homebrew/bin",           # Homebrew (Apple Silicon)
+        "/usr/local/bin",              # Homebrew (Intel) / manual installs
+        os.path.expanduser("~/.volta/bin"),             # Volta
+        os.path.expanduser("~/.local/bin"),             # pipx / uvx
+    ]
+
+
+# Static directories to search when a command isn't on the daemon's PATH.
+# macOS GUI-launched processes often miss Homebrew, nvm, fnm, and Volta paths.
+# Windows processes often miss npm, node, fnm, and Volta directories.
+_EXTRA_PATH_DIRS: List[str] = _default_extra_path_dirs()
 
 # Glob patterns for version-managed directories (nvm, fnm).
 # Sorted in reverse so the highest version is preferred.
@@ -47,13 +79,39 @@ def _get_user_shell() -> str:
     return os.environ.get("SHELL", "/bin/bash")
 
 
+def _probe_dir(d: str, command: str) -> Optional[str]:
+    """Check if command exists in directory d."""
+    candidate = os.path.join(d, command)
+    try:
+        found = shutil.which(candidate)
+        if found:
+            return found
+    except Exception:
+        pass
+
+    if _sys.platform == "win32" and not any(command.lower().endswith(ext) for ext in (".cmd", ".bat", ".exe")):
+        candidate_cmd = f"{candidate}.cmd"
+        try:
+            found = shutil.which(candidate_cmd)
+            if found:
+                return found
+        except Exception:
+            pass
+        if os.path.isfile(candidate_cmd):
+            return candidate_cmd
+
+    if os.path.isfile(candidate) and (_sys.platform == "win32" or os.access(candidate, os.X_OK)):
+        return candidate
+    return None
+
+
 def _resolve_command(command: str) -> str:
     """Resolve a command name to an absolute path.
 
     First checks the current PATH via ``shutil.which``.  If that fails,
     probes a list of common directories that GUI-launched daemons on macOS
-    typically miss (Homebrew, nvm, fnm, Volta, etc.).  As a final fallback,
-    spawns the user's login shell to resolve the command.
+    or Windows typically miss (Homebrew, nvm, fnm, Volta, Node.js, npm, etc.).
+    As a final fallback on Unix, spawns the user's login shell to resolve the command.
 
     Returns the resolved absolute path, or raises ``FileNotFoundError``.
     """
@@ -61,26 +119,35 @@ def _resolve_command(command: str) -> str:
     if os.path.isabs(command):
         if os.path.isfile(command):
             return command
+        found = shutil.which(command)
+        if found:
+            return found
         raise FileNotFoundError(f"MCP server command does not exist: {command}")
 
-    # Try standard PATH first
+    # Try standard PATH first (shutil.which honours PATHEXT on Windows)
     found = shutil.which(command)
     if found:
         return found
 
+    # On Windows, probe with .cmd if command has no extension
+    if _sys.platform == "win32" and not any(command.lower().endswith(ext) for ext in (".cmd", ".bat", ".exe")):
+        found = shutil.which(f"{command}.cmd")
+        if found:
+            return found
+
     # Probe static extra directories
     for d in _EXTRA_PATH_DIRS:
-        candidate = os.path.join(d, command)
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
+        found = _probe_dir(d, command)
+        if found:
+            return found
 
     # Probe version-managed directories (nvm, fnm) — prefer highest version
     for pattern in _EXTRA_PATH_GLOBS:
         dirs = sorted(_glob.glob(pattern), reverse=True)
         for d in dirs:
-            candidate = os.path.join(d, command)
-            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-                return candidate
+            found = _probe_dir(d, command)
+            if found:
+                return found
 
     # Fallback: ask the user's login shell (catches all custom PATH additions)
     if _sys.platform != "win32":
@@ -104,6 +171,7 @@ def _resolve_command(command: str) -> str:
         f"MCP server command not found on PATH: {command}. "
         "Ensure Node.js and npx are installed and available."
     )
+
 
 
 class _StdioConnection:
@@ -264,7 +332,9 @@ class MCPClient:
             return _result_to_dict(res)
 
     # Convenience sync wrappers
-    def list_tools(self, server_name: str) -> List[Dict[str, Any]]:
+    def list_tools(
+        self, server_name: str, timeout_sec: Optional[float] = None
+    ) -> List[Dict[str, Any]]:
         """Discover tools from the named server.
 
         Routes through the persistent MCP runtime so the same stdio
@@ -274,16 +344,31 @@ class MCPClient:
         cfg = self._require_stdio_cfg(server_name)
         from .mcp_runtime import get_runtime, _WorkerDeadError
 
+        effective_timeout = timeout_sec
+        if effective_timeout is None:
+            raw_t = cfg.get("timeout_sec", cfg.get("timeout"))
+            if raw_t is not None:
+                try:
+                    effective_timeout = float(raw_t)
+                except (TypeError, ValueError):
+                    effective_timeout = None
+
         runtime = get_runtime()
         try:
-            res = runtime.list_tools(server_name, cfg)
+            res = runtime.list_tools(server_name, cfg, timeout=effective_timeout)
         except _WorkerDeadError as e:
             raise MCPServerSessionError(str(e)) from e
 
         tools_list = getattr(res, "tools", res) if hasattr(res, "tools") else res
         return [tool_to_dict(t) for t in tools_list]
 
-    def invoke_tool(self, server_name: str, tool_name: str, arguments: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def invoke_tool(
+        self,
+        server_name: str,
+        tool_name: str,
+        arguments: Optional[Dict[str, Any]] = None,
+        timeout_sec: Optional[float] = None,
+    ) -> Dict[str, Any]:
         """Invoke a tool against the named server.
 
         Routes through the persistent MCP runtime so the server's stdio
@@ -301,9 +386,20 @@ class MCPClient:
         cfg = self._require_stdio_cfg(server_name)
         from .mcp_runtime import get_runtime, _WorkerDeadError
 
+        effective_timeout = timeout_sec
+        if effective_timeout is None:
+            raw_t = cfg.get("timeout_sec", cfg.get("timeout"))
+            if raw_t is not None:
+                try:
+                    effective_timeout = float(raw_t)
+                except (TypeError, ValueError):
+                    effective_timeout = None
+
         runtime = get_runtime()
         try:
-            res = runtime.invoke(server_name, cfg, tool_name, arguments)
+            res = runtime.invoke(
+                server_name, cfg, tool_name, arguments, timeout=effective_timeout
+            )
         except _WorkerDeadError as e:
             raise MCPServerSessionError(str(e)) from e
         return _result_to_dict(res)
@@ -328,9 +424,18 @@ def _result_to_dict(res: Any) -> Dict[str, Any]:
     raw_content = getattr(res, "content", None)
     is_error = getattr(res, "isError", False)
     meta = getattr(res, "meta", None)
+    text = _flatten_content(raw_content)
+    if not text:
+        for attr in ("message", "error", "error_message"):
+            val = getattr(res, attr, None)
+            if val:
+                text = _flatten_content(val) if not isinstance(val, str) else val
+                break
+    if not text and is_error:
+        text = "MCP tool reported an error without details."
     return {
         "content": raw_content,
-        "text": _flatten_content(raw_content),
+        "text": text,
         "isError": is_error,
         "meta": meta,
     }
@@ -341,9 +446,11 @@ def _flatten_content(content: Any) -> str:
         return ""
     if isinstance(content, str):
         return content
-    if isinstance(content, list):
+    if isinstance(content, (list, tuple)):
         parts = [_flatten_content(item) for item in content]
         return "\n".join([p for p in parts if p])
+    if hasattr(content, "text") and getattr(content, "text") is not None:
+        return str(getattr(content, "text"))
     if isinstance(content, dict):
         if "text" in content:
             return str(content.get("text") or "")
@@ -353,9 +460,20 @@ def _flatten_content(content: Any) -> str:
             return str(content)
         except Exception:
             return ""
+    if getattr(content, "type", None) == "text" and getattr(content, "data", None) is not None:
+        return str(getattr(content, "data"))
+    dumped = getattr(content, "model_dump", None)
+    if callable(dumped):
+        try:
+            d = dumped()
+            if isinstance(d, dict):
+                return _flatten_content(d)
+        except Exception:
+            pass
     try:
         return str(content)
     except Exception:
         return ""
+
 
 

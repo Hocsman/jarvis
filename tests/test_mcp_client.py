@@ -660,3 +660,120 @@ class TestConnectStdioPathInjection:
 
         assert captured_params["env"] is None, "No env override needed when dir already on PATH"
 
+
+class TestMCPContentAndErrors:
+    def test_flatten_content_sdk_text_content(self):
+        """MCP SDK TextContent objects must be flattened to plain text string, not repr."""
+        from jarvis.tools.external.mcp_client import _flatten_content
+        from mcp.types import TextContent
+
+        sdk_content = TextContent(type="text", text="Hello from MCP tool!")
+        flattened = _flatten_content(sdk_content)
+        assert flattened == "Hello from MCP tool!"
+        assert "TextContent" not in flattened
+        assert "type=" not in flattened
+
+    def test_flatten_content_sdk_list_of_items(self):
+        """A list of SDK TextContent objects must be joined with newlines."""
+        from jarvis.tools.external.mcp_client import _flatten_content
+        from mcp.types import TextContent
+
+        items = [
+            TextContent(type="text", text="Line 1"),
+            TextContent(type="text", text="Line 2"),
+        ]
+        flattened = _flatten_content(items)
+        assert flattened == "Line 1\nLine 2"
+
+    def test_result_to_dict_empty_error_provides_message(self):
+        """When an MCP tool returns isError=True with empty content, a helpful error message is provided."""
+        from jarvis.tools.external.mcp_client import _result_to_dict
+
+        res = type("CallResult", (), {"content": [], "isError": True, "meta": None})()
+        d = _result_to_dict(res)
+        assert d["isError"] is True
+        assert d["text"], "Empty error response must provide non-empty error text"
+        assert "error" in d["text"].lower() or "failed" in d["text"].lower()
+
+    def test_invoke_tool_forwards_timeout_sec_from_server_config(self, monkeypatch):
+        """Server config timeout_sec must be forwarded to runtime.invoke."""
+        from jarvis.tools.external.mcp_client import MCPClient
+
+        captured_kwargs = {}
+
+        class FakeRuntime:
+            def invoke(self, server_name, cfg, tool_name, arguments, timeout=None):
+                captured_kwargs["timeout"] = timeout
+                return type("R", (), {"content": "ok", "isError": False, "meta": None})()
+
+        monkeypatch.setattr(
+            "jarvis.tools.external.mcp_runtime.get_runtime", lambda: FakeRuntime()
+        )
+
+        client = MCPClient({
+            "weather": {
+                "command": "npx",
+                "args": ["server"],
+                "timeout_sec": 42.5,
+            }
+        })
+        client.invoke_tool("weather", "get_forecast", {})
+        assert captured_kwargs.get("timeout") == 42.5
+
+    def test_invoke_tool_forwards_explicit_timeout_sec_arg(self, monkeypatch):
+        """Explicit timeout_sec passed to invoke_tool overrides server config."""
+        from jarvis.tools.external.mcp_client import MCPClient
+
+        captured_kwargs = {}
+
+        class FakeRuntime:
+            def invoke(self, server_name, cfg, tool_name, arguments, timeout=None):
+                captured_kwargs["timeout"] = timeout
+                return type("R", (), {"content": "ok", "isError": False, "meta": None})()
+
+        monkeypatch.setattr(
+            "jarvis.tools.external.mcp_runtime.get_runtime", lambda: FakeRuntime()
+        )
+
+        client = MCPClient({
+            "weather": {
+                "command": "npx",
+                "args": ["server"],
+                "timeout_sec": 42.5,
+            }
+        })
+        client.invoke_tool("weather", "get_forecast", {}, timeout_sec=15.0)
+        assert captured_kwargs.get("timeout") == 15.0
+
+    def test_resolve_command_probes_windows_extra_dirs(self, monkeypatch, tmp_path):
+        """On Windows, _resolve_command probes AppData/ProgramFiles extra dirs for .cmd files."""
+        from jarvis.tools.external.mcp_client import (
+            _resolve_command,
+            _default_extra_path_dirs,
+        )
+        import shutil
+
+        # Simulate npx not found on standard PATH
+        real_which = shutil.which
+        def fake_which(cmd, path=None):
+            if path is None:
+                return None
+            return real_which(cmd, path=path)
+
+        monkeypatch.setattr("shutil.which", fake_which)
+
+        fake_npm = tmp_path / "npm"
+        fake_npm.mkdir()
+        fake_cmd = fake_npm / "my_custom_mcp.cmd"
+        fake_cmd.write_text("@echo off", encoding="utf-8")
+
+        monkeypatch.setenv("APPDATA", str(tmp_path))
+        monkeypatch.setattr(
+            "jarvis.tools.external.mcp_client._EXTRA_PATH_DIRS",
+            _default_extra_path_dirs(),
+        )
+        resolved = _resolve_command("my_custom_mcp")
+        assert os.path.normcase(resolved) == os.path.normcase(str(fake_cmd))
+
+
+

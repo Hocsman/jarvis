@@ -51,16 +51,16 @@ resident for the daemon's lifetime.
 
 ## Public surface
 
-- `MCPClient.list_tools(server_name)` — returns a list of tool dicts.
+- `MCPClient.list_tools(server_name, timeout_sec=None)`: returns a list of tool dicts.
   Routes through the persistent runtime so discovery and the first
   invocation share a session.
-- `MCPClient.invoke_tool(server_name, tool_name, arguments)` — returns
+- `MCPClient.invoke_tool(server_name, tool_name, arguments=None, timeout_sec=None)`: returns
   the standard MCP response dict. Raises `MCPServerSessionError` if
   the runtime cannot keep a session alive after one retry.
-- `MCPServerSessionError` (in `mcp_client.py`) — public, stable type
+- `MCPServerSessionError` (in `mcp_client.py`): public, stable type
   signalling a session-level failure (distinct from a tool-level error
   carried in the response dict's `isError`).
-- `get_runtime()` / `shutdown_runtime()` — module-level helpers used
+- `get_runtime()` / `shutdown_runtime()`: module-level helpers used
   by the daemon's startup and shutdown paths.
 
 ## Configuration
@@ -71,6 +71,8 @@ Each server entry in `config.mcps` is a dict consumed by
 | Key | Type | Default | Effect |
 |-----|------|---------|--------|
 | `idle_timeout_sec` | float \| null | null | If set, the worker self-terminates after that many seconds with an empty queue. Stateful servers (browser automation) must leave this unset. |
+| `timeout_sec` | float \| null | 120.0 | If set, bounds tool invocation and discovery round trips on this server. Can be overridden per-call. |
+
 
 ## Test contract
 

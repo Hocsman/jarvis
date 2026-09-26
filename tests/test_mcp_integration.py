@@ -120,3 +120,40 @@ def test_mcp_error_handling_in_context(tools_unrestricted):
         
         assert result.success is False
         assert result.error_message == "Tool failed"
+
+
+@pytest.mark.integration
+def test_mcp_empty_error_handled_with_fallback_message(tools_unrestricted):
+    """When MCP tool fails with empty or None text, error_message must not be empty or None."""
+    from jarvis.tools.registry import run_tool_with_retries
+
+    class MockDB:
+        pass
+
+    class MockConfig:
+        def __init__(self):
+            self.mcps = {"test-server": {"command": "fake"}}
+            self.voice_debug = False
+
+    class EmptyErrorMCPClient:
+        def __init__(self, config):
+            pass
+
+        def invoke_tool(self, server_name, tool_name, arguments):
+            return {"text": "", "isError": True}
+
+    with patch('jarvis.tools.registry.MCPClient', EmptyErrorMCPClient):
+        result = run_tool_with_retries(
+            db=MockDB(),
+            cfg=MockConfig(),
+            tool_name="test-server__failing_tool",
+            tool_args={},
+            system_prompt="test",
+            original_prompt="test",
+            redacted_text="test",
+            max_retries=0,
+        )
+
+        assert result.success is False
+        assert result.error_message, "Error message must never be empty or None on error"
+
