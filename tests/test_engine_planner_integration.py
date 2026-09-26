@@ -171,6 +171,113 @@ def test_small_model_direct_execs_planned_tools_without_chat_llm(
     )
 
 
+def test_small_model_direct_execs_single_step_tool_plan(
+    mock_config, db, dialogue_memory
+):
+    """SMALL model + 1-step tool plan → engine direct-executes the tool call
+    on turn 1, then invokes the chat model once for synthesis."""
+    from jarvis.reply import engine as engine_mod
+    from jarvis.tools.types import ToolExecutionResult
+
+    mock_config.ollama_chat_model = "gemma4:e2b"
+    mock_config.llm_chat_model = "gemma4:e2b"
+    mock_config.evaluator_enabled = False
+
+    chat_call_count = [0]
+
+    def fake_chat(*args, **kwargs):
+        chat_call_count[0] += 1
+        return _assistant_content("It is 15 degrees and sunny in Paris.")
+
+    invoked_tools: list[tuple[str, dict]] = []
+
+    def fake_tool_runner(db, cfg, tool_name, tool_args, **kwargs):
+        invoked_tools.append((tool_name, dict(tool_args or {})))
+        return ToolExecutionResult(
+            success=True,
+            reply_text="Weather in Paris: 15C, sunny.",
+            error_message=None,
+        )
+
+    plan = ["getWeather location='Paris'"]
+
+    def fake_resolve(*args, **kwargs):
+        return ("getWeather", {"location": "Paris"})
+
+    with patch.object(engine_mod, "run_tool_with_retries", side_effect=fake_tool_runner), \
+         patch.object(engine_mod, "chat_with_messages", side_effect=fake_chat), \
+         patch.object(engine_mod, "select_tools", return_value=["getWeather", "stop"]), \
+         patch.object(
+             engine_mod,
+             "extract_search_params_for_memory",
+             return_value={"keywords": []},
+         ), \
+         patch.object(engine_mod, "plan_query", return_value=plan), \
+         patch.object(engine_mod, "_resolve_plan_step", side_effect=fake_resolve):
+        engine_mod.run_reply_engine(
+            db=db,
+            cfg=mock_config,
+            tts=None,
+            text="what's the weather in Paris?",
+            dialogue_memory=dialogue_memory,
+        )
+
+    tool_names = [n for n, _ in invoked_tools]
+    assert tool_names == ["getWeather"], (
+        f"The single plan tool step should be direct-executed; got {tool_names}"
+    )
+    assert invoked_tools[0][1] == {"location": "Paris"}
+    assert chat_call_count[0] == 1, (
+        f"Chat model should only be called once for synthesis; called {chat_call_count[0]}×"
+    )
+
+
+def test_small_model_skips_direct_exec_for_single_step_reply_plan(
+    mock_config, db, dialogue_memory
+):
+    """SMALL model + 1-step reply plan → direct-exec skipped, chat model called on turn 1."""
+    from jarvis.reply import engine as engine_mod
+    from jarvis.tools.types import ToolExecutionResult
+
+    mock_config.ollama_chat_model = "gemma4:e2b"
+    mock_config.llm_chat_model = "gemma4:e2b"
+    mock_config.evaluator_enabled = False
+
+    chat_call_count = [0]
+
+    def fake_chat(*args, **kwargs):
+        chat_call_count[0] += 1
+        return _assistant_content("Hello! How can I help?")
+
+    invoked_tools: list[tuple[str, dict]] = []
+
+    def fake_tool_runner(db, cfg, tool_name, tool_args, **kwargs):
+        invoked_tools.append((tool_name, dict(tool_args or {})))
+        return ToolExecutionResult(success=True, reply_text="ok", error_message=None)
+
+    plan = ["Reply to the user."]
+
+    with patch.object(engine_mod, "run_tool_with_retries", side_effect=fake_tool_runner), \
+         patch.object(engine_mod, "chat_with_messages", side_effect=fake_chat), \
+         patch.object(engine_mod, "select_tools", return_value=["getWeather", "stop"]), \
+         patch.object(
+             engine_mod,
+             "extract_search_params_for_memory",
+             return_value={"keywords": []},
+         ), \
+         patch.object(engine_mod, "plan_query", return_value=plan):
+        engine_mod.run_reply_engine(
+            db=db,
+            cfg=mock_config,
+            tts=None,
+            text="hello there",
+            dialogue_memory=dialogue_memory,
+        )
+
+    assert invoked_tools == [], "No tools should be direct-executed for a pure-reply plan"
+    assert chat_call_count[0] == 1, "Chat model should reply directly on turn 1"
+
+
 def test_empty_plan_falls_through_to_existing_behaviour(
     mock_config, db, dialogue_memory
 ):

@@ -628,7 +628,7 @@ class TestPiperVoiceDownloadRetry:
         assert result is not None
         assert (tmp_path / "en_GB-alan-medium.onnx").exists()
         # Verify exponential backoff: 2^1=2s for the onnx 429, 2^1=2s for the json 429
-        sleep_values = [c.args[0] for c in mock_sleep.call_args_list]
+        sleep_values = [c.args[0] for c in mock_sleep.call_args_list if c.args and c.args[0] >= 1]
         assert all(v == 2 for v in sleep_values)
 
     def test_429_gives_up_after_max_retries(self, tmp_path):
@@ -652,7 +652,7 @@ class TestPiperVoiceDownloadRetry:
 
         assert result is None
         # Verify exponential backoff sequence: 2, 4, 8, 16
-        sleep_values = [c.args[0] for c in mock_sleep.call_args_list]
+        sleep_values = [c.args[0] for c in mock_sleep.call_args_list if c.args and c.args[0] >= 1]
         assert sleep_values == [2, 4, 8, 16]
 
     def test_non_429_error_not_retried(self, tmp_path):

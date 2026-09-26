@@ -100,13 +100,15 @@ The planner prompt instructs the model to emit:
   and markdown fences are stripped.
 - Overlong steps (>200 chars) are truncated with an ellipsis.
 - The list is capped at `MAX_STEPS`.
-- The planner no longer filters out 1-step plans. A single
+- The planner does not filter out 1-step plans. A single
   `["Reply to the user."]` plan is the planner's *positive* decision
   that no memory or tools are needed — the engine uses that to skip
   the memory extractor, the tool router, and the direct-exec path
-  entirely. Only an **empty** list means "planner failed / disabled;
-  fall open to legacy safe defaults" (run memory enrichment + tool
-  router). The two states must stay distinguishable.
+  entirely. A single-step tool plan (e.g. `["webSearch query='...'"]`)
+  preserves its executable tool step so the direct-exec path dispatches
+  it directly on turn 1. Only an **empty** list means "planner failed / disabled;
+  fall open to safe defaults" (run memory enrichment + tool
+  router). These states stay distinguishable.
 
 ### Engine integration
 
@@ -151,7 +153,9 @@ The engine consumes the plan in two phases.
 - `format_plan_block(steps)` renders an `ACTION PLAN:` block that is
   appended to the initial system message. Empty plan renders nothing.
   Single-step reply-only plans are not rendered either — they are
-  noise to the chat model since the plan just says "reply".
+  noise to the chat model since the plan just says "reply". Single-step
+  tool plans are rendered so the chat model is aware of the committed
+  sub-task during final synthesis.
   The block tells the model a step may be skipped when a prior tool
   result **or the memory already in its system prompt** satisfies it.
   Scoped to prompt memory rather than "what you already know", so it
@@ -165,11 +169,11 @@ The engine consumes the plan in two phases.
   and reminding the model to substitute discovered entities and avoid
   duplicate arguments.
 - When `use_text_tools` is active and the plan still has unexecuted
-  tool steps, the engine runs `resolve_next_tool_call` to convert the
-  next step into a concrete `{name, arguments}` JSON and dispatches
-  the tool directly, bypassing the chat model for that turn. This
-  keeps small models on-rails without relying on their native
-  tool-call reliability.
+  tool steps (whether single-step or multi-step), the engine runs
+  `resolve_next_tool_call` to convert the next step into a concrete
+  `{name, arguments}` JSON and dispatches the tool directly, bypassing
+  the chat model for that turn. This keeps small models on-rails without
+  relying on their native tool-call reliability.
 - The chat model still runs the final synthesis turn so the reply is
   phrased in the daemon's voice using its own profile and persona.
 

@@ -2244,7 +2244,8 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 + memory_digest_text
             )
 
-        if len(action_plan) > 1:
+        _plan_tools = tool_steps_of(action_plan) if action_plan else []
+        if _plan_tools or len(action_plan) > 1:
             # A single "Reply to the user." plan is the planner's
             # positive no-op: memory/tools not needed. Injecting an
             # ACTION PLAN block for it would just add noise.
@@ -2576,13 +2577,12 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         # resolves the step after — the chat model is only invoked once
         # all plan tool steps are exhausted, at which point it synthesises
         # a final reply from the accumulated results.
-        # See planner.spec.md.
+        _plan_tool_steps = tool_steps_of(action_plan) if action_plan else []
         if (
             use_text_tools
-            and len(action_plan) > 1
+            and bool(_plan_tool_steps)
             and not _plan_under_specified
         ):
-            _plan_tool_steps = tool_steps_of(action_plan)
             _tool_results_so_far = (
                 sum(1 for m in messages if m.get("tool_name"))
                 - _plan_steps_baseline
