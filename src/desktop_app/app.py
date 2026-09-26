@@ -3299,7 +3299,6 @@ def main() -> int:
             print("  Setup wizard module loaded successfully", flush=True)
         except Exception as e:
             print(f"  ❌ Failed to load setup wizard: {e}", flush=True)
-            import traceback
             traceback.print_exc()
             raise
 
