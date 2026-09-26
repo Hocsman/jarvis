@@ -15,9 +15,9 @@ import os
 import pytest
 
 
-# QOpenGLWidget requires an OpenGL context; the offscreen Qt platform
-# plugin works for instantiation + show/hide on macOS as long as
-# QT_QPA_PLATFORM is set before QApplication.__init__.
+# The offscreen Qt platform plugin is enough for instantiation and
+# show/hide as long as QT_QPA_PLATFORM is set before
+# QApplication.__init__.
 @pytest.fixture(scope="module")
 def qt_app():
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -71,31 +71,47 @@ class TestToggleVisibility:
             qt_app.processEvents()
 
 
-class TestDevBadge:
-    """The DEV badge surfaces when the dev-mode env var is set."""
+class TestRenderingFollowsVisibility:
+    """The floating orb renders only while it is on screen: hidden, its
+    render loop stops; shown again, it restarts."""
 
     @pytest.mark.unit
-    def test_dev_badge_present_when_forced(self, qt_app, monkeypatch):
-        monkeypatch.setenv("JARVIS_ORB_FORCE_DEV", "1")
+    def test_hide_pauses_the_orb_and_show_resumes_it(self, qt_app):
         from desktop_app.orb.orb_window import OrbWindow
 
         win = OrbWindow()
         try:
-            assert win._dev_badge is not None
-            assert win._dev_badge.text() == "DEV"
+            win.show_orb()
+            qt_app.processEvents()
+            assert win._orb._timer.isActive(), "the orb renders while the window is visible"
+
+            win.hide_orb()
+            qt_app.processEvents()
+            assert not win._orb._timer.isActive(), "the orb keeps rendering while hidden"
+
+            win.show_orb()
+            qt_app.processEvents()
+            assert win._orb._timer.isActive(), "the orb does not resume when shown again"
         finally:
             win.close()
             qt_app.processEvents()
 
-    @pytest.mark.unit
-    def test_dev_badge_absent_in_prod(self, qt_app, monkeypatch):
-        monkeypatch.setenv("JARVIS_ORB_FORCE_PROD", "1")
-        monkeypatch.delenv("JARVIS_ORB_FORCE_DEV", raising=False)
-        from desktop_app.orb.orb_window import OrbWindow
 
-        win = OrbWindow()
+class TestWindowShortcut:
+    """The window-scoped shortcut is Ctrl+Shift+J on every platform. Qt
+    maps Ctrl to the Command key on macOS, so the same sequence reads
+    Cmd+Shift+J there, the keys the global hotkey and the hint name."""
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("platform_name", ["darwin", "win32", "linux"])
+    def test_shortcut_is_ctrl_shift_j_everywhere(self, qt_app, monkeypatch, platform_name):
+        from PyQt6.QtGui import QKeySequence
+        from desktop_app.orb import orb_window as ow
+
+        monkeypatch.setattr(ow.sys, "platform", platform_name)
+        win = ow.OrbWindow()
         try:
-            assert win._dev_badge is None
+            assert win._qt_shortcut.key() == QKeySequence("Ctrl+Shift+J")
         finally:
             win.close()
             qt_app.processEvents()

@@ -1,7 +1,7 @@
-"""Phase 2D fake-bloom + color depth tests.
+"""Fake-bloom and colour depth tests.
 
-The Phase 2D upgrade stacks 4 concentric halos behind the orb body
-instead of a single radial gradient. We can't unit-test "the visual
+The bloom stacks 4 concentric halos behind the orb body rather than
+a single radial gradient. We can't unit-test "the visual
 looks good" so we pin the structural contract instead:
 
 1. The halo stack has 4 entries (regression guard: a future
@@ -14,8 +14,8 @@ looks good" so we pin the structural contract instead:
 3. Halo opacity multipliers decrease monotonically (the outermost
    halo must be the dimmest).
 
-4. Each halo contributes 4 color stops to its radial gradient
-   (inner, mid, tint, outer) — the "color depth" Phase 2D goal.
+4. Each halo contributes 4 colour stops to its radial gradient
+   (inner, mid, tint, outer): the "colour depth".
    We verify this by mocking the painter and counting setColorAt
    calls per drawn ellipse.
 
@@ -25,7 +25,7 @@ looks good" so we pin the structural contract instead:
 
 Strategy: substitute QPainter.drawEllipse + QRadialGradient.setColorAt
 with counting mocks during a single paintEvent call. This stays at
-the public-behaviour level (number of draws / color stops) rather
+the public-behaviour level (number of draws / colour stops) rather
 than asserting pixel values, which would be brittle.
 """
 
@@ -59,13 +59,12 @@ class TestBloomStackStructure:
 
     @pytest.mark.unit
     def test_halo_count_is_four(self, _qapp) -> None:
-        """Spec: 4-5 halos. We ship with 4; this test catches a
-        regression to 1 (the Phase 1 design)."""
+        """Four halos ship; this test catches a regression to one."""
         from desktop_app.orb.orb_widget import OrbWidget
 
         assert len(OrbWidget._BLOOM_HALOS) >= 4, (
             f"Bloom stack has {len(OrbWidget._BLOOM_HALOS)} halos, "
-            f"expected >= 4 (Phase 2D spec calls for 4-5)."
+            f"expected >= 4."
         )
 
     @pytest.mark.unit
@@ -105,8 +104,8 @@ class TestBloomStackStructure:
 
 class TestBloomDrawingCalls:
     """Behavioural test: ``_draw_glow_halo`` issues one drawEllipse
-    per halo, and each gradient gets 4 color stops (the "color
-    depth" upgrade)."""
+    per halo, and each gradient gets 4 colour stops (the "colour
+    depth")."""
 
     @pytest.mark.unit
     def test_draw_glow_halo_issues_one_ellipse_per_halo(self, _qapp) -> None:
@@ -121,7 +120,7 @@ class TestBloomDrawingCalls:
             color = QColor(120, 200, 255)
             widget._draw_glow_halo(
                 painter, cx=160.0, cy=160.0, r=80.0,
-                color=color, intensity=0.8, rms=0.3,
+                color=color, intensity=0.8,
             )
             assert painter.drawEllipse.call_count == len(OrbWidget._BLOOM_HALOS), (
                 f"Expected {len(OrbWidget._BLOOM_HALOS)} ellipses (one per halo); "
@@ -133,7 +132,7 @@ class TestBloomDrawingCalls:
 
     @pytest.mark.unit
     def test_each_halo_has_at_least_three_color_stops(self, _qapp) -> None:
-        """Color depth goal: 3+ stops per halo gradient. We intercept
+        """Colour depth: 3+ stops per halo gradient. We intercept
         QRadialGradient construction to verify how many setColorAt
         calls each receives."""
         from desktop_app.orb.orb_widget import OrbWidget
@@ -157,7 +156,7 @@ class TestBloomDrawingCalls:
             with patch.object(QRadialGradient, "setColorAt", counting_set_color_at):
                 widget._draw_glow_halo(
                     painter, cx=160.0, cy=160.0, r=80.0,
-                    color=color, intensity=0.8, rms=0.3,
+                    color=color, intensity=0.8,
                 )
 
             # We should have at least one gradient per halo; each
@@ -171,7 +170,7 @@ class TestBloomDrawingCalls:
             for n_stops in stops_per_gradient:
                 assert n_stops >= 3, (
                     f"A halo gradient has only {n_stops} colour stops; "
-                    f"Phase 2D color depth requires >= 3 (inner / mid / outer "
+                    f"colour depth requires >= 3 (inner / mid / outer "
                     f"at minimum)."
                 )
         finally:

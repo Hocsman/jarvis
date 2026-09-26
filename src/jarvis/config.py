@@ -80,11 +80,10 @@ def _default_db_path() -> str:
 class UISettings:
     """Desktop-app UI choices.
 
-    Currently a single knob: whether the reactive orb renders its
-    ambient particle layer. Disabling particles cuts per-frame draw
-    work (relevant on lower-end hardware where the orb's animation
-    adds noticeable GPU load) and is also an aesthetic preference for
-    a calmer orb. Set ``"ui": {"orb_particles_enabled": false}`` in
+    A single knob: whether the orb renders its ambient particle
+    layer. Disabling particles cuts per-frame draw work (the orb is
+    painted on the CPU at 60 FPS, which lower-end hardware notices) and
+    is also an aesthetic preference for a calmer orb. Set ``"ui": {"orb_particles_enabled": false}`` in
     config.json to turn them off.
     """
 
@@ -905,9 +904,9 @@ def get_default_config() -> Dict[str, Any]:
         "weather_city": "",
 
         # Desktop UI. ``orb_particles_enabled`` controls whether the
-        # reactive orb renders its ambient particle layer (default
-        # True). Set false to skip the particle draw entirely (perf
-        # or aesthetic preference).
+        # orb renders its ambient particle layer (default True). Set
+        # false to skip the particle draw entirely (perf or aesthetic
+        # preference).
         "ui": {
             "orb_particles_enabled": True,
         },

@@ -5,9 +5,8 @@ Covers the three contracts the renderer depends on:
    between previous and current style.
 2. ERROR overlay returns to the prior state after 800 ms (no manual
    intervention required).
-3. ERROR can be triggered manually (Phase 1 entry point; Phase 2 will
-   wire the daemon's exception path through the same call) and shows
-   the canonical red colour before fading back.
+3. ERROR can be triggered manually through ``trigger_error()`` and
+   shows the canonical red colour before fading back.
 """
 
 from __future__ import annotations
@@ -177,9 +176,7 @@ class TestErrorRecovery:
     @pytest.mark.unit
     def test_manual_trigger_error_fades_red_800ms(self):
         """trigger_error() shows the canonical red colour mid-fade and
-        then returns to the prior state on its own. This is the test
-        that the orb's *infrastructure* supports the ERROR state even
-        though Phase 1 does not yet wire the daemon path."""
+        then returns to the prior state on its own."""
         clock = _FakeClock()
         ctrl = _make_controller(clock)
         ctrl.set_state(OrbState.THINKING)
