@@ -3,6 +3,7 @@ import os
 import socket
 import sys
 import json
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -362,7 +363,7 @@ class Settings:
     stop_command_fuzzy_ratio: float
 
     # City shown on the dashboard weather card (Open-Meteo geocoded).
-    # Empty falls back to "Paris".
+    # Empty auto-detects from local GeoIP when location is enabled.
     weather_city: str
 
     # Desktop UI choices (orb particle layer, etc.)
@@ -390,7 +391,11 @@ def _load_json(path: Path) -> Dict[str, Any]:
 
 
 def _save_json(path: Path, data: Dict[str, Any]) -> bool:
-    """Save config data to JSON file. Returns True on success.
+    """Save config data to JSON file atomically. Returns True on success.
+
+    Writes to a temporary file in the same directory before replacing the
+    target path atomically via ``os.replace``. This prevents corrupting or
+    truncating config.json if the process is terminated mid-write.
 
     Restricts the saved file to ``0o600`` on POSIX so credentials in
     config (``llm_api_key``, ``embedding_api_key``, ``brave_search_api_key``)
@@ -398,16 +403,41 @@ def _save_json(path: Path, data: Dict[str, Any]) -> bool:
     no-op on Windows but is wrapped in a try so platform quirks never
     fail the save.
     """
+    tmp_path: Optional[Path] = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8") as f:
+        f = tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=str(path.parent),
+            prefix=f".{path.name}.tmp.",
+            delete=False,
+        )
+        tmp_path = Path(f.name)
+        with f:
             json.dump(data, f, indent=2)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
         try:
-            path.chmod(0o600)
+            tmp_path.chmod(0o600)
         except OSError:
             pass
+        os.replace(tmp_path, path)
         return True
-    except Exception:
+    except Exception as exc:
+        try:
+            from .debug import debug_log
+            debug_log(f"Failed to atomically save config to {path}: {exc}", "config")
+        except Exception:
+            pass
+        if tmp_path is not None and tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
         return False
 
 
@@ -900,7 +930,7 @@ def get_default_config() -> Dict[str, Any]:
         # Force reply language (empty = mirror the user's language).
         "response_language": "",
 
-        # Dashboard weather card city (empty = "Paris").
+        # Dashboard weather card city (empty = auto-detect via local GeoIP).
         "weather_city": "",
 
         # Desktop UI. ``orb_particles_enabled`` controls whether the
@@ -951,8 +981,13 @@ def load_settings() -> Settings:
     voice_debug = os.environ.get("JARVIS_VOICE_DEBUG", "0") == "1"
 
     # Normalize/convert fields
-    db_path = str(merged.get("db_path") or _default_db_path())
-    sqlite_vss_path = merged.get("sqlite_vss_path")
+    db_path = str(Path(str(merged.get("db_path") or _default_db_path())).expanduser())
+    sqlite_vss_path_val = merged.get("sqlite_vss_path")
+    sqlite_vss_path = (
+        str(Path(str(sqlite_vss_path_val)).expanduser())
+        if sqlite_vss_path_val not in (None, "", "null")
+        else None
+    )
     allowlist_bundles = _ensure_list(merged.get("allowlist_bundles"))
 
     ollama_base_url = str(merged.get("ollama_base_url"))
@@ -1015,13 +1050,21 @@ def load_settings() -> Settings:
     if tts_chatterbox_device not in ("cuda", "auto", "cpu"):
         tts_chatterbox_device = "cuda"  # Default to cuda if invalid value
     tts_chatterbox_audio_prompt_val = merged.get("tts_chatterbox_audio_prompt")
-    tts_chatterbox_audio_prompt = None if tts_chatterbox_audio_prompt_val in (None, "", "null") else str(tts_chatterbox_audio_prompt_val)
+    tts_chatterbox_audio_prompt = (
+        str(Path(str(tts_chatterbox_audio_prompt_val)).expanduser())
+        if tts_chatterbox_audio_prompt_val not in (None, "", "null")
+        else None
+    )
     tts_chatterbox_exaggeration = float(merged.get("tts_chatterbox_exaggeration", 0.5))
     tts_chatterbox_cfg_weight = float(merged.get("tts_chatterbox_cfg_weight", 0.5))
 
     # Piper TTS settings
     tts_piper_model_path_val = merged.get("tts_piper_model_path")
-    tts_piper_model_path = None if tts_piper_model_path_val in (None, "", "null") else str(tts_piper_model_path_val)
+    tts_piper_model_path = (
+        str(Path(str(tts_piper_model_path_val)).expanduser())
+        if tts_piper_model_path_val not in (None, "", "null")
+        else None
+    )
     tts_piper_speaker_val = merged.get("tts_piper_speaker")
     try:
         tts_piper_speaker = None if tts_piper_speaker_val in (None, "", "null") else int(tts_piper_speaker_val)
@@ -1047,6 +1090,8 @@ def load_settings() -> Settings:
     wake_aliases = [a.strip().lower() for a in _ensure_list(merged.get("wake_aliases")) if a.strip()]
     wake_fuzzy_ratio = float(merged.get("wake_fuzzy_ratio", 0.78))
     whisper_model = str(merged.get("whisper_model", "medium"))
+    if whisper_model.startswith("~"):
+        whisper_model = str(Path(whisper_model).expanduser())
     whisper_backend = os.environ.get("JARVIS_WHISPER_BACKEND", "").lower() or str(merged.get("whisper_backend", "auto")).lower()
     if whisper_backend not in ("auto", "mlx", "faster-whisper"):
         whisper_backend = "auto"

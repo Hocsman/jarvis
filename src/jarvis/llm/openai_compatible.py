@@ -337,6 +337,41 @@ class OpenAICompatibleBackend(LLMBackend):
             message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
         return {"choices": [{"message": message}]}
 
+    @staticmethod
+    def _encode_tool_call_arguments(
+        messages: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """JSON-encode ``tool_calls[*].function.arguments`` in assistant messages.
+
+        The OpenAI API spec requires ``arguments`` to be a JSON string, but
+        ``normalise_openai_response`` decodes it to a dict for internal use.
+        When that assistant message is sent back to the server on the next
+        turn, we must re-encode it.
+        """
+        encoded_messages: List[Dict[str, Any]] = []
+        for msg in messages:
+            if msg.get("role") != "assistant" or not isinstance(msg.get("tool_calls"), list):
+                encoded_messages.append(msg)
+                continue
+            new_msg = dict(msg)
+            new_tc_list = []
+            for tc in msg["tool_calls"]:
+                if not isinstance(tc, dict):
+                    new_tc_list.append(tc)
+                    continue
+                new_tc = dict(tc)
+                func = new_tc.get("function")
+                if isinstance(func, dict):
+                    new_func = dict(func)
+                    args = new_func.get("arguments")
+                    if isinstance(args, dict):
+                        new_func["arguments"] = json.dumps(args)
+                    new_tc["function"] = new_func
+                new_tc_list.append(new_tc)
+            new_msg["tool_calls"] = new_tc_list
+            encoded_messages.append(new_msg)
+        return encoded_messages
+
     def chat(
         self,
         chat_model: str,
@@ -351,6 +386,7 @@ class OpenAICompatibleBackend(LLMBackend):
         # while it generates. The return value is identical either way.
         streaming = on_token is not None
         sanitised = strip_nonstandard_message_fields(messages)
+        sanitised = self._encode_tool_call_arguments(sanitised)
         payload: Dict[str, Any] = {
             "model": chat_model,
             "messages": sanitised,

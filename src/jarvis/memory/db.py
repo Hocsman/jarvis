@@ -229,18 +229,20 @@ def close_orphan_questions(db) -> int:
 
 class Database:
     def __init__(self, db_path: str, sqlite_vss_path: Optional[str] = None) -> None:
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self.db_path = db_path
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        expanded_db = str(Path(db_path).expanduser())
+        Path(expanded_db).parent.mkdir(parents=True, exist_ok=True)
+        self.db_path = expanded_db
+        self.conn = sqlite3.connect(expanded_db, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self._lock = threading.RLock()
         self.is_vss_enabled = False
         self._python_vector_store = None
         
         if sqlite_vss_path:
+            expanded_vss = str(Path(sqlite_vss_path).expanduser())
             try:
                 self.conn.enable_load_extension(True)
-                self.conn.load_extension(sqlite_vss_path)
+                self.conn.load_extension(expanded_vss)
                 self.is_vss_enabled = True
             except Exception:
                 self.is_vss_enabled = False
@@ -248,7 +250,7 @@ class Database:
         # If sqlite-vss is not available, use best available vector store (FAISS or Python fallback)
         if not self.is_vss_enabled:
             from ..utils.vector_store import get_best_vector_store
-            self._python_vector_store = get_best_vector_store(db_path, dimension=768)
+            self._python_vector_store = get_best_vector_store(expanded_db, dimension=768)
             
             # Log which vector store implementation is being used
             import sys

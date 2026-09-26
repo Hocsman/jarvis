@@ -23,6 +23,8 @@ from typing import Any, Callable, Optional
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal, pyqtSlot
 
 from jarvis.debug import debug_log
+from jarvis.utils.weather_now import fetch_weather_summary
+from jarvis.utils.location import get_location_info
 
 
 # JarvisState.value -> (orb accent RGB, status label FR)
@@ -120,18 +122,47 @@ class DashboardBridge(QObject):
     replyReceived = pyqtSignal(str)    # assistant reply text (authoritative)
     busy = pyqtSignal()                # daemon busy with another query
 
-    def __init__(self, submit_fn: Optional[Callable[[str], None]] = None,
-                 weather_city: str = "Paris",
-                 parent: Optional[QObject] = None) -> None:
+    def __init__(
+        self,
+        submit_fn: Optional[Callable[[str], None]] = None,
+        weather_city: Optional[str] = None,
+        cfg: Optional[Any] = None,
+        parent: Optional[QObject] = None,
+    ) -> None:
         super().__init__(parent)
         self._submit_fn = submit_fn
-        self._weather_city = (weather_city or "Paris").strip() or "Paris"
         self._last_state: Optional[str] = None
-        # Text-chat doesn't necessarily flip the cross-process JarvisState,
-        # so we track an in-flight chat query locally and force the orb to
-        # THINKING while one is pending — the orb pulses for text queries
-        # too, not only voice.
         self._chat_pending: bool = False
+
+        if cfg is None:
+            try:
+                from jarvis.config import load_settings
+                cfg = load_settings()
+            except Exception:
+                cfg = None
+
+        self._cfg = cfg
+        self._location_enabled = bool(getattr(cfg, "location_enabled", False)) if cfg is not None else False
+        self._language = (getattr(cfg, "response_language", "") or "").strip().lower() or "en"
+
+        city = (weather_city or "").strip()
+        if not city and cfg is not None:
+            city = (getattr(cfg, "weather_city", "") or "").strip()
+
+        if self._location_enabled and not city and cfg is not None:
+            try:
+                loc_info = get_location_info(
+                    config_ip=getattr(cfg, "location_ip_address", None),
+                    auto_detect=getattr(cfg, "location_auto_detect", True),
+                    resolve_cgnat_public_ip=getattr(cfg, "location_cgnat_resolve_public_ip", True),
+                    location_cache_minutes=getattr(cfg, "location_cache_minutes", 60),
+                )
+                if loc_info and loc_info.get("city"):
+                    city = loc_info["city"].strip()
+            except Exception:
+                pass
+
+        self._weather_city: Optional[str] = city if (self._location_enabled and city) else None
 
         # System stats: poll every 2 s.
         self._stats_timer = QTimer(self)
@@ -144,12 +175,11 @@ class DashboardBridge(QObject):
         self._state_timer.timeout.connect(self._emit_state_if_changed)
         self._state_timer.start(200)
 
-        # Weather: refresh every 10 min (the first fetch fires on ready()).
-        # The network call runs on a worker thread; the signal hop back to
-        # the main thread is handled by Qt's queued connection.
+        # Weather: refresh every 10 min only when location is enabled AND a city is known
         self._weather_timer = QTimer(self)
         self._weather_timer.timeout.connect(self._fetch_weather_async)
-        self._weather_timer.start(600_000)
+        if self._weather_city and self._location_enabled:
+            self._weather_timer.start(600_000)
 
     # ── setters used by the host (tray) ────────────────────────────────
     def set_submit_fn(self, fn: Optional[Callable[[str], None]]) -> None:
@@ -222,16 +252,18 @@ class DashboardBridge(QObject):
         blank until the first timer tick."""
         self._emit_stats()
         self._emit_state(force=True)
-        self._fetch_weather_async()
+        if self._weather_city and self._location_enabled:
+            self._fetch_weather_async()
 
     # ── weather ────────────────────────────────────────────────────────
     def _fetch_weather_async(self) -> None:
+        if not self._weather_city or not self._location_enabled:
+            return
         import threading
 
         def _work():
             try:
-                from jarvis.utils.weather_now import fetch_weather_summary
-                data = fetch_weather_summary(self._weather_city)
+                data = fetch_weather_summary(self._weather_city, language=self._language)
                 if data:
                     # Emitted from a worker thread; Qt queues it onto the
                     # main thread for the JS push.

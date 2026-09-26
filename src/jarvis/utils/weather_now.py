@@ -18,9 +18,39 @@ import requests
 from ..debug import debug_log
 
 
-# WMO weather interpretation codes -> (French description, emoji).
+# WMO weather interpretation codes -> (English description, emoji).
 # https://open-meteo.com/en/docs (weather_code)
-_WMO = {
+_WMO_EN = {
+    0:  ("Clear sky", "☀️"),
+    1:  ("Mainly clear", "🌤️"),
+    2:  ("Partly cloudy", "⛅"),
+    3:  ("Overcast", "☁️"),
+    45: ("Foggy", "🌫️"),
+    48: ("Depositing rime fog", "🌫️"),
+    51: ("Light drizzle", "🌦️"),
+    53: ("Drizzle", "🌦️"),
+    55: ("Dense drizzle", "🌧️"),
+    61: ("Slight rain", "🌦️"),
+    63: ("Rain", "🌧️"),
+    65: ("Heavy rain", "🌧️"),
+    66: ("Freezing rain", "🌧️"),
+    67: ("Heavy freezing rain", "🌧️"),
+    71: ("Slight snow", "🌨️"),
+    73: ("Snow", "🌨️"),
+    75: ("Heavy snow", "❄️"),
+    77: ("Snow grains", "🌨️"),
+    80: ("Light showers", "🌦️"),
+    81: ("Showers", "🌧️"),
+    82: ("Violent showers", "⛈️"),
+    85: ("Snow showers", "🌨️"),
+    86: ("Heavy snow showers", "❄️"),
+    95: ("Thunderstorm", "⛈️"),
+    96: ("Thunderstorm with hail", "⛈️"),
+    99: ("Violent thunderstorm with hail", "⛈️"),
+}
+
+# French descriptions for francophone locales
+_WMO_FR = {
     0:  ("ciel dégagé", "☀️"),
     1:  ("plutôt dégagé", "🌤️"),
     2:  ("partiellement nuageux", "⛅"),
@@ -50,23 +80,34 @@ _WMO = {
 }
 
 
-def _describe(code: Optional[int]) -> tuple[str, str]:
-    if isinstance(code, (int, float)) and int(code) in _WMO:
-        return _WMO[int(code)]
-    return ("—", "🌡️")
+def _describe(code: Optional[int], language: str = "en") -> tuple[str, str]:
+    table = _WMO_FR if (language or "").strip().lower().startswith("fr") else _WMO_EN
+    if isinstance(code, (int, float)) and int(code) in table:
+        return table[int(code)]
+    return ("", "🌡️")
 
 
-def fetch_weather_summary(city: str = "Paris", timeout: float = 8.0) -> Optional[Dict]:
+def fetch_weather_summary(
+    city: Optional[str] = None,
+    language: Optional[str] = None,
+    timeout: float = 8.0,
+) -> Optional[Dict]:
     """Return current weather for ``city`` as a flat dict, or ``None``.
 
     Keys: ``temp, loc, desc, icon, hum, wind, feels`` — exactly what the
     dashboard's ``weatherUpdated`` handler consumes.
     """
-    city = (city or "Paris").strip() or "Paris"
+    if not city or not str(city).strip():
+        return None
+    city = str(city).strip()
+
+    lang = (language or "en").strip().lower()
+    lang_code = lang[:2] if len(lang) >= 2 else "en"
+
     try:
         geo = requests.get(
             "https://geocoding-api.open-meteo.com/v1/search",
-            params={"name": city, "count": 1, "language": "fr", "format": "json"},
+            params={"name": city, "count": 1, "language": lang_code, "format": "json"},
             timeout=timeout,
         )
         geo.raise_for_status()
@@ -93,7 +134,7 @@ def fetch_weather_summary(city: str = "Paris", timeout: float = 8.0) -> Optional
         )
         wx.raise_for_status()
         cur = (wx.json() or {}).get("current") or {}
-        desc, icon = _describe(cur.get("weather_code"))
+        desc, icon = _describe(cur.get("weather_code"), language=lang)
         return {
             "temp": round(float(cur.get("temperature_2m", 0)), 1),
             "loc": loc_label,

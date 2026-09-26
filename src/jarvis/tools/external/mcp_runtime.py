@@ -120,7 +120,7 @@ class _PersistentMCPRuntime:
         server_cfg: Dict[str, Any],
         tool_name: str,
         arguments: Optional[Dict[str, Any]],
-        timeout: float = _DEFAULT_INVOKE_TIMEOUT_SEC,
+        timeout: Optional[float] = None,
     ) -> Any:
         """Call a tool on the named server, retrying once if the worker died.
 
@@ -130,9 +130,20 @@ class _PersistentMCPRuntime:
         is converted to ``_WorkerDeadError`` so this method's retry path
         can replace the worker transparently.
         """
+        if timeout is None:
+            raw_t = server_cfg.get("timeout_sec", server_cfg.get("timeout"))
+            try:
+                effective_timeout = (
+                    float(raw_t) if raw_t is not None else _DEFAULT_INVOKE_TIMEOUT_SEC
+                )
+            except (TypeError, ValueError):
+                effective_timeout = _DEFAULT_INVOKE_TIMEOUT_SEC
+        else:
+            effective_timeout = float(timeout)
+
         worker = self._get_worker(server_name, server_cfg)
         try:
-            return worker.invoke(tool_name, arguments, timeout)
+            return worker.invoke(tool_name, arguments, effective_timeout)
         except _WorkerDeadError:
             # Subprocess crashed mid-call: retry once with a fresh worker
             # so a transient server failure does not poison the cache.
@@ -142,10 +153,16 @@ class _PersistentMCPRuntime:
             )
             self._drop_worker(server_name)
             worker = self._get_worker(server_name, server_cfg)
-            return worker.invoke(tool_name, arguments, timeout)
+            return worker.invoke(tool_name, arguments, effective_timeout)
+        except concurrent.futures.TimeoutError:
+            self._drop_worker(server_name)
+            raise
 
     def list_tools(
-        self, server_name: str, server_cfg: Dict[str, Any]
+        self,
+        server_name: str,
+        server_cfg: Dict[str, Any],
+        timeout: Optional[float] = None,
     ) -> Any:
         """List tools on the named server, reusing the persistent session.
 
@@ -155,9 +172,20 @@ class _PersistentMCPRuntime:
         startup cost of spawning the server twice (once for discovery,
         once for the first invocation).
         """
+        if timeout is None:
+            raw_t = server_cfg.get("timeout_sec", server_cfg.get("timeout"))
+            try:
+                effective_timeout = (
+                    float(raw_t) if raw_t is not None else _DEFAULT_INVOKE_TIMEOUT_SEC
+                )
+            except (TypeError, ValueError):
+                effective_timeout = _DEFAULT_INVOKE_TIMEOUT_SEC
+        else:
+            effective_timeout = float(timeout)
+
         worker = self._get_worker(server_name, server_cfg)
         try:
-            return worker.list_tools(_DEFAULT_INVOKE_TIMEOUT_SEC)
+            return worker.list_tools(effective_timeout)
         except _WorkerDeadError:
             debug_log(
                 f"MCP worker '{server_name}' died during list_tools; restarting",
@@ -165,7 +193,10 @@ class _PersistentMCPRuntime:
             )
             self._drop_worker(server_name)
             worker = self._get_worker(server_name, server_cfg)
-            return worker.list_tools(_DEFAULT_INVOKE_TIMEOUT_SEC)
+            return worker.list_tools(effective_timeout)
+        except concurrent.futures.TimeoutError:
+            self._drop_worker(server_name)
+            raise
 
     def _get_worker(
         self, server_name: str, server_cfg: Dict[str, Any]
@@ -445,13 +476,7 @@ class _ServerWorker:
         try:
             return fut.result(timeout=timeout)
         except concurrent.futures.TimeoutError:
-            # If the worker died between our enqueue and the wait, the
-            # drain in ``_run``'s finally would normally resolve the
-            # future with ``_WorkerDeadError`` — but if our cmd landed
-            # on the queue *after* the drain ran, no one will ever
-            # resolve it. Treat that as a worker death so the runtime
-            # can replace the worker instead of returning a misleading
-            # plain timeout to the caller.
+            self.shutdown()
             if not self.alive:
                 raise _WorkerDeadError(
                     f"MCP server '{self._server_name}' died while servicing call"

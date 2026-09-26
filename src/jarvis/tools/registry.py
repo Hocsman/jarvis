@@ -849,9 +849,10 @@ def run_tool_with_retries(
                 result = client.invoke_tool(server_name=server_name, tool_name=mcp_tool_name, arguments=tool_args or {})
                 is_error = bool(result.get("isError", False))
                 text = result.get("text") or None
+                err_msg = (text or f"MCP tool '{raw_name}' failed.") if is_error else None
                 return _finish(ToolExecutionResult(
-                    success=(not is_error), reply_text=text,
-                    error_message=(text if is_error else None),
+                    success=(not is_error), reply_text=(None if is_error else text),
+                    error_message=err_msg,
                 ))
             except Exception as e:
                 return _finish(ToolExecutionResult(

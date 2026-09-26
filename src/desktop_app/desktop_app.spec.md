@@ -256,7 +256,7 @@ sequenceDiagram
 ### Important Notes
 
 - **Diary is saved before update installation**: The `pre_install_callback` mechanism ensures the diary is saved before the update process begins, so no data is lost
-- **Asset ID tracking**: For develop channel updates (where version stays "latest"), we track the GitHub asset ID to detect new builds
+- **Develop channel commit tracking**: Develop channel builds track updates by comparing commit hashes (extracted from the build version and release commit metadata or body), falling back to GitHub asset ID when commit metadata is unavailable
 - **Robust Windows update**: The batch script waits for the actual process to exit (by PID) rather than using a fixed timeout, ensuring the update doesn't fail due to slow shutdown
 - **Visible Windows install progress**: The Inno Setup installer runs with `/SILENT` (not `/VERYSILENT`) so its own progress window is visible while the install runs — bridging the gap between the download dialog closing and the new app launching, which would otherwise look like a hang
 - **Quarantine stripping (macOS)**: The shell script runs `xattr -dr com.apple.quarantine` on the newly-installed bundle. Builds are unsigned (ad-hoc signing breaks Qt WebEngine's symlinks — see `release.yml`), so without this step Gatekeeper may re-trigger the "unidentified developer" prompt on every update
