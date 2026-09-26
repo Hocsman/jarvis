@@ -236,7 +236,7 @@ def test_total_size_ignores_files_outside_allow_patterns(monkeypatch, fake_hub, 
 
     fake_hub.monkeypatch.setattr(
         fake_hub.hf, "snapshot_download",
-        _make_fake_snapshot(fake_hub, steps_mb=[1530], step_delay=0.3),
+        _make_fake_snapshot(fake_hub, steps_mb=[400, 1530], step_delay=0.2),
     )
     # model_info carries a 5 MB README.md which does not match the patterns
     import huggingface_hub

@@ -118,12 +118,11 @@ def download_snapshot_with_progress(
 
     worker = threading.Thread(target=_run, daemon=True, name="hf-snapshot-download")
     debug_log(f"Downloading {description} from {repo_id} into the HF cache", "voice")
-    worker.start()
-
     last_bytes = _blobs_size_bytes(repo_id)
     last_moved_at = time.monotonic()
     last_print_at = last_moved_at
     stall_announced = False
+    worker.start()
 
     while worker.is_alive():
         worker.join(timeout=poll_interval_sec)
