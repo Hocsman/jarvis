@@ -90,8 +90,10 @@ def test_importing_the_daemon_under_both_module_paths_keeps_stdout_open():
     """
     script = textwrap.dedent(
         f"""
-        import gc, io, sys
+        import gc, io, os, sys
         sys.platform = 'win32'
+        if not hasattr(os, 'add_dll_directory'):
+            os.add_dll_directory = lambda p: None
         sys.path.insert(0, {str(ROOT)!r})
         sys.path.insert(0, {str(ROOT / 'src')!r})
 
