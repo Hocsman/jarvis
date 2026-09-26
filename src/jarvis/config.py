@@ -362,7 +362,7 @@ class Settings:
     stop_command_fuzzy_ratio: float
 
     # City shown on the dashboard weather card (Open-Meteo geocoded).
-    # Empty falls back to "Paris".
+    # Empty auto-detects from local GeoIP when location is enabled.
     weather_city: str
 
     # Desktop UI choices (orb particle layer, etc.)
@@ -900,7 +900,7 @@ def get_default_config() -> Dict[str, Any]:
         # Force reply language (empty = mirror the user's language).
         "response_language": "",
 
-        # Dashboard weather card city (empty = "Paris").
+        # Dashboard weather card city (empty = auto-detect via local GeoIP).
         "weather_city": "",
 
         # Desktop UI. ``orb_particles_enabled`` controls whether the
