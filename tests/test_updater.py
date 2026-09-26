@@ -387,6 +387,114 @@ class TestCheckForUpdates:
                             status = check_for_updates()
                             assert status.update_available is False
 
+    @pytest.mark.unit
+    def test_github_repo_points_to_fork(self):
+        import desktop_app.updater as updater_mod
+        assert updater_mod.GITHUB_REPO == "Hocsman/jarvis"
+        assert "Hocsman/jarvis" in updater_mod.GITHUB_API_URL
+
+    @pytest.mark.unit
+    def test_develop_channel_up_to_date_when_commit_hash_matches_body(self):
+        mock_response = MagicMock()
+        mock_response.json.return_value = [
+            {
+                "id": 12345,
+                "tag_name": "latest",
+                "name": "Latest Development Build",
+                "draft": False,
+                "prerelease": True,
+                "html_url": "https://github.com/Hocsman/jarvis/releases/tag/latest",
+                "body": "Dev release notes\n\n**Commit**: abc12347890abcdef1234567890abcdef1234567\n**Date**: 2026-09-26",
+                "assets": [
+                    {
+                        "id": 200001,
+                        "name": "Jarvis-macOS-arm64.zip",
+                        "browser_download_url": "https://example.com/download",
+                        "size": 1000,
+                    }
+                ],
+            }
+        ]
+        mock_response.raise_for_status = MagicMock()
+
+        # Even with no last_installed_asset_id recorded (e.g. fresh manual download),
+        # matching commit hash means we are already up to date.
+        with patch("desktop_app.updater.get_version", return_value=("dev-abc1234", "develop")):
+            with patch("desktop_app.updater.get_last_installed_asset_id", return_value=None):
+                with patch("requests.get", return_value=mock_response):
+                    with patch("sys.platform", "darwin"):
+                        with patch("platform.machine", return_value="arm64"):
+                            status = check_for_updates()
+                            assert status.update_available is False
+                            assert status.latest_release.version == "dev-abc1234"
+
+    @pytest.mark.unit
+    def test_develop_channel_update_available_when_commit_hash_differs_in_body(self):
+        mock_response = MagicMock()
+        mock_response.json.return_value = [
+            {
+                "id": 12345,
+                "tag_name": "latest",
+                "name": "Latest Development Build",
+                "draft": False,
+                "prerelease": True,
+                "html_url": "https://github.com/Hocsman/jarvis/releases/tag/latest",
+                "body": "Dev release notes\n\n**Commit**: fedcba9876543210fedcba9876543210fedcba98\n**Date**: 2026-09-26",
+                "assets": [
+                    {
+                        "id": 200001,
+                        "name": "Jarvis-macOS-arm64.zip",
+                        "browser_download_url": "https://example.com/download",
+                        "size": 1000,
+                    }
+                ],
+            }
+        ]
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("desktop_app.updater.get_version", return_value=("dev-abc1234", "develop")):
+            with patch("desktop_app.updater.get_last_installed_asset_id", return_value=200001):
+                with patch("requests.get", return_value=mock_response):
+                    with patch("sys.platform", "darwin"):
+                        with patch("platform.machine", return_value="arm64"):
+                            status = check_for_updates()
+                            assert status.update_available is True
+                            assert status.latest_release.version == "dev-fedcba9"
+
+    @pytest.mark.unit
+    def test_develop_channel_commit_hash_from_target_commitish(self):
+        mock_response = MagicMock()
+        mock_response.json.return_value = [
+            {
+                "id": 12345,
+                "tag_name": "latest",
+                "target_commitish": "abc1234567890abcdef1234567890abcdef1234567",
+                "name": "Latest Development Build",
+                "draft": False,
+                "prerelease": True,
+                "html_url": "https://github.com/Hocsman/jarvis/releases/tag/latest",
+                "body": "Dev release notes",
+                "assets": [
+                    {
+                        "id": 200001,
+                        "name": "Jarvis-macOS-arm64.zip",
+                        "browser_download_url": "https://example.com/download",
+                        "size": 1000,
+                    }
+                ],
+            }
+        ]
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("desktop_app.updater.get_version", return_value=("dev-abc1234", "develop")):
+            with patch("desktop_app.updater.get_last_installed_asset_id", return_value=None):
+                with patch("requests.get", return_value=mock_response):
+                    with patch("sys.platform", "darwin"):
+                        with patch("platform.machine", return_value="arm64"):
+                            status = check_for_updates()
+                            assert status.update_available is False
+
+
 
 class TestUpdateStatus:
     """Tests for UpdateStatus dataclass."""
@@ -1252,6 +1360,39 @@ class TestInstallUpdateLinux:
                 backup_path = str(mock_app_dir) + ".backup"
                 assert backup_path in script_content
                 assert f"mv '{mock_app_dir}' '{backup_path}'" in script_content
+
+    @pytest.mark.unit
+    def test_extractall_uses_data_filter(self, tmp_path, monkeypatch):
+        """Linux archive extraction must pass filter='data' to tarfile.extractall."""
+        import tarfile
+        from desktop_app.updater import install_update_linux
+
+        tar_path = tmp_path / "update.tar.gz"
+        jarvis_dir = tmp_path / "jarvis_content" / "Jarvis"
+        jarvis_dir.mkdir(parents=True)
+        (jarvis_dir / "Jarvis").write_bytes(b"mock executable")
+
+        with tarfile.open(tar_path, "w:gz") as tf:
+            tf.add(jarvis_dir, arcname="Jarvis")
+
+        mock_app_dir = tmp_path / "installed" / "Jarvis"
+        mock_app_dir.mkdir(parents=True)
+        (mock_app_dir / "Jarvis").write_bytes(b"old executable")
+
+        filter_used = []
+        orig_extractall = tarfile.TarFile.extractall
+
+        def tracked_extractall(self, path=".", members=None, *, numeric_owner=False, filter=None):
+            filter_used.append(filter)
+            return orig_extractall(self, path=path, members=members, numeric_owner=numeric_owner, filter=filter)
+
+        monkeypatch.setattr(tarfile.TarFile, "extractall", tracked_extractall)
+        with patch("desktop_app.updater.get_app_path", return_value=mock_app_dir):
+            with patch("desktop_app.updater.subprocess.Popen", return_value=MagicMock()):
+                result = install_update_linux(tar_path)
+                assert result is True
+                assert filter_used == ["data"]
+
 
 
 class TestPathEscaping:

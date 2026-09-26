@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -26,7 +27,7 @@ from jarvis.debug import debug_log
 
 from .paths import get_log_dir
 
-GITHUB_REPO = "isair/jarvis"
+GITHUB_REPO = "Hocsman/jarvis"
 # Absolute path to macOS's ditto tool. Exposed as a module attribute so
 # tests (which run on non-macOS CI runners without /usr/bin/ditto) can
 # substitute a path that exists.
@@ -207,11 +208,41 @@ def parse_version(tag: str) -> tuple[int, ...]:
         return (0, 0, 0)
 
 
+def _extract_release_commit(release: dict) -> Optional[str]:
+    """Extract commit hash from a GitHub release object."""
+    target = release.get("target_commitish")
+    if target and isinstance(target, str):
+        target = target.strip()
+        if re.fullmatch(r"[0-9a-fA-F]{7,64}", target):
+            return target.lower()
+    body = release.get("body") or ""
+    match = re.search(r"\*\*Commit\*\*:\s*([0-9a-fA-F]{7,64})", body)
+    if match:
+        return match.group(1).lower()
+    return None
+
+
+def _extract_commit_from_version(version: str) -> Optional[str]:
+    """Extract commit hash from a version string (e.g. 'dev-479eca2' -> '479eca2')."""
+    if not version or not isinstance(version, str):
+        return None
+    cand = version.removeprefix("dev-").strip()
+    if re.fullmatch(r"[0-9a-fA-F]{7,64}", cand):
+        return cand.lower()
+    return None
+
+
 def _make_release_info(release: dict, asset: dict) -> ReleaseInfo:
+    tag = release["tag_name"]
+    version = tag.lstrip("v")
+    if tag == "latest":
+        commit = _extract_release_commit(release)
+        if commit:
+            version = f"dev-{commit[:7]}"
     return ReleaseInfo(
         asset_id=asset["id"],
-        tag_name=release["tag_name"],
-        version=release["tag_name"].lstrip("v"),
+        tag_name=tag,
+        version=version,
         name=release.get("name", release["tag_name"]),
         prerelease=release.get("prerelease", False),
         html_url=release["html_url"],
@@ -254,6 +285,7 @@ def check_for_updates(channel: Optional[UpdateChannel] = None) -> UpdateStatus:
 
         if channel == UpdateChannel.DEVELOP:
             target_release = None
+            raw_release = None
             for release in releases:
                 if release.get("draft", False):
                     continue
@@ -262,11 +294,12 @@ def check_for_updates(channel: Optional[UpdateChannel] = None) -> UpdateStatus:
                 for asset in release.get("assets", []):
                     if asset["name"] == platform_asset_name:
                         target_release = _make_release_info(release, asset)
+                        raw_release = release
                         break
                 if target_release:
                     break
 
-            if not target_release:
+            if not target_release or not raw_release:
                 return UpdateStatus(
                     update_available=False,
                     current_version=current_version,
@@ -274,11 +307,20 @@ def check_for_updates(channel: Optional[UpdateChannel] = None) -> UpdateStatus:
                     latest_release=None,
                 )
 
-            last_installed_id = get_last_installed_asset_id()
-            update_available = (
-                last_installed_id is None
-                or target_release.asset_id != last_installed_id
-            )
+            target_commit = _extract_release_commit(raw_release)
+            current_commit = _extract_commit_from_version(current_version)
+
+            if target_commit and current_commit:
+                update_available = not (
+                    target_commit.startswith(current_commit)
+                    or current_commit.startswith(target_commit)
+                )
+            else:
+                last_installed_id = get_last_installed_asset_id()
+                update_available = (
+                    last_installed_id is None
+                    or target_release.asset_id != last_installed_id
+                )
             return UpdateStatus(
                 update_available=update_available,
                 current_version=current_version,
@@ -596,7 +638,10 @@ def install_update_linux(download_path: Path) -> bool:
 
     try:
         with tarfile.open(download_path, "r:gz") as tf:
-            tf.extractall(temp_dir)
+            if hasattr(tarfile, "data_filter"):
+                tf.extractall(temp_dir, filter="data")
+            else:
+                tf.extractall(temp_dir)
 
         new_app_dir = temp_dir / "Jarvis"
 
