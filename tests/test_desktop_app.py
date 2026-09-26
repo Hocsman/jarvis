@@ -94,6 +94,90 @@ class TestOllamaRuntimeFlags:
         assert chat_on_ollama is True
 
 
+class TestOpenAICompatStartupCheck:
+    """At startup Jarvis can't launch a third-party LLM server, so it must
+    check reachability and warn the user early rather than failing silently
+    on the first request."""
+
+    @pytest.mark.parametrize("open_wizard", [False, True])
+    @pytest.mark.parametrize("wizard_accepted", [False, True])
+    def test_splash_hidden_during_warning_and_wizard(
+        self, qapp, monkeypatch, open_wizard, wizard_accepted
+    ):
+        from types import SimpleNamespace
+        from PyQt6.QtWidgets import QMessageBox, QWidget
+        from desktop_app import app as app_mod
+
+        splash = QWidget()
+        splash.show()
+        qapp.processEvents()
+        visited = []
+
+        def show_warning(dialog):
+            assert not splash.isVisible()
+            visited.append("warning")
+            return 0
+
+        def run_wizard():
+            assert not splash.isVisible()
+            visited.append("wizard")
+            return wizard_accepted
+
+        monkeypatch.setattr(QMessageBox, "exec", show_warning)
+        monkeypatch.setattr(QMessageBox, "clickedButton", lambda dialog: next(
+            button for button in dialog.buttons()
+            if (dialog.buttonRole(button) == QMessageBox.ButtonRole.ActionRole) == open_wizard
+        ))
+        monkeypatch.setattr(app_mod, "_run_setup_wizard", run_wizard)
+        try:
+            app_mod._show_openai_unreachable_dialog(
+                SimpleNamespace(llm_base_url="http://localhost:1234/v1"), splash
+            )
+            assert visited == (["warning", "wizard"] if open_wizard else ["warning"])
+            assert splash.isVisible()
+        finally:
+            splash.close()
+
+    def test_reachable_when_models_listed(self):
+        from types import SimpleNamespace
+        from desktop_app.app import _check_openai_compat_reachable
+        cfg = SimpleNamespace(
+            llm_provider="openai_compatible", llm_base_url="http://x/v1",
+            llm_api_key="", llm_chat_model="m", embedding_provider="")
+
+        class _Backend:
+            def list_models(self, timeout_sec=4.0):
+                return ["m-chat"]
+
+        with patch("jarvis.llm.get_llm_backend", return_value=_Backend()):
+            assert _check_openai_compat_reachable(cfg) is True
+
+    def test_unreachable_when_listing_empty_or_raises(self):
+        from types import SimpleNamespace
+        from desktop_app.app import _check_openai_compat_reachable
+        cfg = SimpleNamespace(llm_provider="openai_compatible", llm_base_url="http://x/v1")
+
+        class _Empty:
+            def list_models(self, timeout_sec=4.0):
+                return []
+
+        with patch("jarvis.llm.get_llm_backend", return_value=_Empty()):
+            assert _check_openai_compat_reachable(cfg) is False
+
+        with patch("jarvis.llm.get_llm_backend", side_effect=RuntimeError("boom")):
+            assert _check_openai_compat_reachable(cfg) is False
+
+    def test_unreachable_message_names_url_not_key(self):
+        """The unreachable dialog message mentions the URL but never the API key."""
+        from types import SimpleNamespace
+        from desktop_app.app import _build_unreachable_message
+        cfg = SimpleNamespace(llm_base_url="http://localhost:1234/v1", llm_api_key="sk-secret")
+        msg = _build_unreachable_message(cfg)
+        assert "http://localhost:1234/v1" in msg
+        assert "sk-secret" not in msg
+        assert "Setup Wizard" in msg
+
+
 class TestOllamaRuntimeOwnership:
     """Jarvis only stops Ollama when this desktop session launched it."""
 

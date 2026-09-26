@@ -2529,12 +2529,12 @@ class VoiceListener(threading.Thread):
                             except Exception as retry_e:
                                 debug_log(f"retry after cache clear also failed: {retry_e}", "voice")
                                 print(f"  ❌ Failed to load Whisper model after cache recovery: {retry_e}", flush=True)
-                                return
+                                continue
                         else:
                             debug_log("could not clear corrupted cache automatically", "voice")
                             print(f"  ❌ Failed to load Whisper model: {e}", flush=True)
                             print("  💡 Try manually deleting the Whisper model cache directory and restarting", flush=True)
-                            return
+                            continue
                     # Check for rate limiting (HTTP 429) — check string and response status code
                     # (HfHubHTTPError may carry the status on .response without "429" in str(e))
                     is_rate_limited = (
