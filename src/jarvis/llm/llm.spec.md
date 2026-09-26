@@ -128,7 +128,7 @@ The migration in `_migrate_config` runs once when `_config_version < 2`:
 
 - Endpoints: `POST /chat/completions`, `POST /embeddings`, `GET /models`.
 - Streaming: Server-Sent Events. Lines start with `data:` and an empty payload terminator is `data: [DONE]`. Comment lines (`: ping`) and malformed payloads are skipped.
-- Tool calls: native `tools` parameter; OpenAI returns `tool_calls[*].function.arguments` as a JSON-encoded string. The backend decodes them to a dict so the reply engine sees a single shape.
+- Tool calls: native `tools` parameter; OpenAI returns `tool_calls[*].function.arguments` as a JSON-encoded string. The backend decodes them to a dict so the reply engine sees a single shape, and re-encodes any assistant `tool_calls` arguments dicts back to JSON strings when serialising messages for subsequent turns.
 - Response normalisation: `_normalise_response` lifts `choices[0].message` to top-level `message` so callers do not branch on provider. Servers that already return Ollama-shaped responses pass through unchanged.
 - `extra_options` lifts sampling fields (`temperature`, `max_tokens`, `top_p`, `stop`, …) to the payload root and silently drops Ollama-only knobs (`keep_alive`, `num_ctx`, `num_predict`, `think`) that have no equivalent in the OpenAI shape.
 - `llm_extra_body` fields are merged into the chat payload root via `setdefault` (the backend-owned `model` / `messages` / `stream` keys always win). Embeddings are not affected.
