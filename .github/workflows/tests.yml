@@ -20,14 +20,14 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.txt
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y portaudio19-dev libegl1 libxkbcommon0 libgl1-mesa-dri
+        run: sudo apt-get update && sudo apt-get install -y portaudio19-dev libegl1 libxkbcommon0 libgl1-mesa-dri xvfb
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
       - name: Run tests
         run: |
-          python -m pytest -q tests/
+          xvfb-run -a python -m pytest -q tests/
       - name: Run eval harness guards (no model)
         env:
           EVAL_LLM_PROVIDER: ollama
