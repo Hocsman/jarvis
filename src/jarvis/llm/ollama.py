@@ -268,6 +268,9 @@ class OllamaBackend(LLMBackend):
                     payload[key] = value
                 elif key == "options" and isinstance(value, dict):
                     payload["options"].update(value)
+                elif key == "max_tokens":
+                    # Ollama spells the generation cap ``num_predict``.
+                    payload["options"]["num_predict"] = value
                 else:
                     payload["options"][key] = value
 

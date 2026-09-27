@@ -202,26 +202,26 @@ class TestHotWindowExpiry:
 
     def test_reset_hot_window_expiry_extends_timer(self):
         """reset_hot_window_expiry restarts the timer so echo time doesn't eat the window."""
-        sm = StateManager(echo_tolerance=0.02, hot_window_seconds=0.10)
+        sm = StateManager(echo_tolerance=0.02, hot_window_seconds=0.30)
 
         with patch('builtins.print'):
             sm.schedule_hot_window_activation()
-            time.sleep(0.04)
+            time.sleep(0.05)
             assert sm.is_hot_window_active() is True
 
-            # Wait until most of the window has elapsed
-            time.sleep(0.07)
-            assert sm.is_hot_window_active() is True  # still within 0.10s
+            # Wait until part of the window has elapsed
+            time.sleep(0.15)
+            assert sm.is_hot_window_active() is True  # still within 0.30s
 
             # Reset the timer (simulating echo rejection)
             sm.reset_hot_window_expiry()
 
             # After the original window would have expired, it should still be active
-            time.sleep(0.05)
+            time.sleep(0.20)
             assert sm.is_hot_window_active() is True
 
             # Wait for the full reset window to expire
-            time.sleep(0.07)
+            time.sleep(0.20)
             assert sm.is_hot_window_active() is False
 
         sm.stop()

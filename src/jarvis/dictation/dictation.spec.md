@@ -87,6 +87,15 @@ After transcription, text passes through these stages in order:
   open/close as not thread safe, and unserialised calls abort the whole app
   on Windows.
 
+### Optional Dependencies
+
+- `sounddevice`, `numpy`, and `pynput` are optional at import time: the
+  module must always import cleanly even when they are broken or missing
+  (e.g. `import sounddevice` raises **OSError**, not ImportError, when the
+  PortAudio shared library is absent; `pynput` can raise display errors on
+  headless Linux). Importers such as the setup wizard rely on this: a
+  missing audio backend must never crash the app.
+
 ### Audio Device Handling
 
 - The engine accepts an optional `voice_device` parameter, passed through from
@@ -102,7 +111,7 @@ After transcription, text passes through these stages in order:
 | Case                      | Behaviour                                         |
 |---------------------------|----------------------------------------------------|
 | Whisper not yet loaded    | Play "not ready" beep, skip                        |
-| Max recording duration    | 60 s cap to prevent memory exhaustion              |
+| Max recording duration    | No cap: the user controls when to stop by releasing the hotkey. A cap would paste prematurely mid-dictation and restart recording |
 | Empty transcription       | No paste occurs                                    |
 | Concurrent with assistant | Dictation works independently; pauses listener     |
 | macOS permissions         | `pynput` requires Accessibility permissions        |

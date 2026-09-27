@@ -20,20 +20,29 @@ from typing import Any, Callable, Optional
 
 from ..debug import debug_log
 from ..utils.audio_lock import portaudio_lock
+from ..utils.audio_stream import open_input_stream
 from .history import DictationHistory
 
+_MAX_RECORDING_SECONDS = 600.0  # 10 minutes max safety ceiling
+
 # Optional imports — graceful degradation when dependencies are missing.
+# sounddevice raises OSError (not ImportError) when the PortAudio shared
+# library itself is missing, so both must be treated as "no audio".
 try:
     import sounddevice as sd
     import numpy as np
-except ImportError:
+except (ImportError, OSError) as _audio_import_error:
     sd = None
     np = None
+    debug_log(f"audio backend unavailable, dictation disabled: {_audio_import_error!r}", "dictation")
 
+# pynput can fail with non-ImportError exceptions too (e.g. no X display
+# on headless Linux), and a broken hotkey backend must not crash the app.
 try:
     from pynput import keyboard as pynput_keyboard
-except ImportError:
+except Exception as _pynput_import_error:
     pynput_keyboard = None
+    debug_log(f"pynput unavailable, dictation hotkey disabled: {_pynput_import_error!r}", "dictation")
 
 
 # ---------------------------------------------------------------------------
@@ -402,7 +411,7 @@ def _resample(audio, from_rate: int, to_rate: int):
     if from_rate == to_rate or np is None:
         return audio
     duration = len(audio) / from_rate
-    target_len = int(duration * to_rate)
+    target_len = round(duration * to_rate)
     # Linear interpolation — good enough for speech fed to Whisper
     indices = np.linspace(0, len(audio) - 1, target_len)
     return np.interp(indices, np.arange(len(audio)), audio).astype(np.float32)
@@ -578,8 +587,6 @@ def _close_stream(stream: Any) -> None:
 # Main engine
 # ---------------------------------------------------------------------------
 
-MAX_RECORD_SECONDS = 60
-
 
 class DictationEngine:
     """Hold-to-dictate engine.
@@ -663,7 +670,6 @@ class DictationEngine:
         self._listener: Optional[Any] = None
         self._pressed_modifiers: set = set()
         self._record_start_time: float = 0.0
-        self._max_frames = MAX_RECORD_SECONDS * sample_rate
         self._lock = threading.Lock()
         self._started = False
         # Monotonic recording-session token. Each press increments it; the
@@ -675,6 +681,11 @@ class DictationEngine:
         # Double-tap detection for hands-free mode
         self._last_hotkey_release_time: float = 0.0
         self._double_tap_window: float = 0.4  # seconds
+
+        # Suppress recording activation during clipboard paste (the pynput
+        # Controller used for paste sends synthetic key events that the
+        # listener would otherwise interpret as a fresh hotkey press).
+        self._paste_in_progress = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -775,6 +786,9 @@ class DictationEngine:
         )
 
     def _on_key_press(self, key) -> None:
+        if self._paste_in_progress:
+            return
+
         nkey = self._normalise_key(key)
 
         # Escape always stops hands-free recording
@@ -802,7 +816,7 @@ class DictationEngine:
                 return
 
         # Check activation condition
-        if not self._recording:
+        if not self._recording and not self._paste_in_progress:
             mods_held = self._all_modifiers_held()
 
             if self._trigger is not None:
@@ -814,6 +828,9 @@ class DictationEngine:
                     self._start_recording()
 
     def _on_key_release(self, key) -> None:
+        if self._paste_in_progress:
+            return
+
         nkey = self._normalise_key(key)
 
         # Remove from pressed set
@@ -942,19 +959,18 @@ class DictationEngine:
                 return
 
         try:
-            with portaudio_lock:
-                with _suppress_stderr():
-                    stream = sd.InputStream(
-                        samplerate=native_rate,
-                        channels=1,
-                        dtype="float32",
-                        blocksize=int(native_rate * 0.1),
-                        callback=self._audio_callback,
-                        **stream_kwargs,
-                    )
-            self._stream_sample_rate = native_rate
-            if native_rate != self._target_sample_rate:
-                debug_log(f"dictation stream at native {native_rate} Hz (will resample to {self._target_sample_rate})", "dictation")
+            with _suppress_stderr():
+                stream, self._stream_sample_rate, _channels = open_input_stream(
+                    native_rate,
+                    100,
+                    stream_kwargs,
+                    callback=self._audio_callback,
+                    serialise=True,
+                    sd_backend=sd,
+                    lock=portaudio_lock,
+                )
+            if self._stream_sample_rate != self._target_sample_rate:
+                debug_log(f"dictation stream at native {self._stream_sample_rate} Hz (will resample to {self._target_sample_rate})", "dictation")
         except Exception as exc:
             debug_log(f"failed to open dictation audio stream: {exc}", "dictation")
             if self._abandon_session(token) and self._on_dictation_end:
@@ -998,12 +1014,10 @@ class DictationEngine:
         # or one missed frame just after start — both benign.
         if not self._recording:
             return
-        # Enforce max duration
-        total_samples = sum(len(f) for f in self._audio_frames)
-        if total_samples >= self._max_frames:
-            debug_log("max dictation duration reached (60s)", "dictation")
-            # Schedule stop on a separate thread to avoid deadlock in callback
-            threading.Thread(target=self._stop_recording, daemon=True).start()
+        # Safety ceiling prevents unbounded memory growth if left unattended (e.g. in hands-free mode)
+        if self._record_start_time > 0 and (time.time() - self._record_start_time) > _MAX_RECORDING_SECONDS:
+            debug_log("dictation reached maximum duration safety ceiling, stopping", "dictation")
+            self._stop_recording()
             return
         self._audio_frames.append(indata[:, 0].copy())
 
@@ -1127,7 +1141,11 @@ class DictationEngine:
             if text:
                 duration = len(audio) / self._target_sample_rate
                 debug_log(f"dictation result: {text!r}", "dictation")
-                _clipboard_paste(text)
+                self._paste_in_progress = True
+                try:
+                    _clipboard_paste(text)
+                finally:
+                    self._paste_in_progress = False
                 # Persist to history
                 entry = self.history.add(text, duration=duration)
                 if self._on_dictation_result:

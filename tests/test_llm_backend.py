@@ -231,6 +231,22 @@ class TestOllamaBackendChat:
         assert sent["options"]["num_ctx"] == 16384
 
     @patch("jarvis.llm.requests.post")
+    def test_chat_maps_max_tokens_to_num_predict_in_options(self, mock_post):
+        from jarvis.llm import OllamaBackend
+
+        mock_post.return_value = _make_response(json_data={"message": {"content": "ok"}})
+        backend = OllamaBackend("http://localhost:11434")
+
+        backend.chat(
+            "model",
+            [{"role": "user", "content": "hi"}],
+            extra_options={"max_tokens": 1500},
+        )
+
+        sent = mock_post.call_args.kwargs["json"]
+        assert sent["options"]["num_predict"] == 1500
+
+    @patch("jarvis.llm.requests.post")
     def test_extra_options_none_keeps_defaults(self, mock_post):
         from jarvis.llm import OllamaBackend
 

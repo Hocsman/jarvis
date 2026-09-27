@@ -3178,6 +3178,84 @@ def _ollama_runtime_flags(cfg) -> tuple[bool, bool]:
     return ollama_needed, chat_on_ollama
 
 
+def _check_openai_compat_reachable(cfg, timeout_sec: float = 4.0) -> bool:
+    """True when the configured OpenAI-compatible server answers its model
+    listing. Used at startup to warn the user early if their local server
+    isn't running, since (unlike Ollama) Jarvis cannot start it for them."""
+    try:
+        from jarvis.llm import get_llm_backend
+        return bool(get_llm_backend(cfg).list_models(timeout_sec=timeout_sec))
+    except Exception:
+        return False
+
+
+def _build_unreachable_message(cfg) -> str:
+    """Build the message text for the unreachable server dialog,
+    without Qt dependencies so tests can verify it directly."""
+    raw_base = (getattr(cfg, "llm_base_url", "") or "").strip()
+    if raw_base:
+        from urllib.parse import urlsplit, urlunsplit
+        try:
+            parts = urlsplit(raw_base)
+            if parts.username or parts.password:
+                host_port = parts.hostname or ""
+                if parts.port:
+                    host_port = f"{host_port}:{parts.port}"
+                base = urlunsplit((parts.scheme, host_port, parts.path, parts.query, parts.fragment))
+            else:
+                base = raw_base
+        except Exception:
+            base = raw_base
+    else:
+        base = "your configured server"
+    return (
+        f"⚠️ Jarvis couldn't reach a ready LLM server at {base}.\n\n"
+        "Make sure your local server (for example LM Studio, Ollama, llama.cpp, "
+        "vLLM) is running with a model loaded, and Jarvis will connect "
+        "automatically.\n\n"
+        "You can open the Setup Wizard to change your server, or close and "
+        "adjust Settings later via the tray menu → LLM Provider."
+    )
+
+
+def _show_openai_unreachable_dialog(cfg, splash: QWidget) -> bool:
+    """Suspend the startup splash while the warning or setup wizard is open.
+    Returns True if the setup wizard was opened and completed."""
+    from PyQt6.QtWidgets import QMessageBox
+
+    dialog = QMessageBox()
+    dialog.setWindowTitle("Jarvis")
+    dialog.setText(_build_unreachable_message(cfg))
+    dialog.setIcon(QMessageBox.Icon.Warning)
+    open_wizard_btn = dialog.addButton("🔧 Open Setup Wizard", QMessageBox.ButtonRole.ActionRole)
+    dialog.addButton("Close", QMessageBox.ButtonRole.RejectRole)
+    splash_was_visible = splash.isVisible()
+    splash.hide()
+    QApplication.processEvents()
+    debug_log("startup splash hidden for server recovery dialog", "startup")
+    try:
+        dialog.exec()
+        if dialog.clickedButton() == open_wizard_btn:
+            return _run_setup_wizard()
+        return False
+    finally:
+        splash.setVisible(splash_was_visible)
+
+
+def _run_setup_wizard() -> bool:
+    """Create and show the SetupWizard modally. Returns True if accepted."""
+    try:
+        from desktop_app.setup_wizard import SetupWizard
+        wizard = SetupWizard()
+        wizard.show()
+        wizard.raise_()
+        wizard.activateWindow()
+        return wizard.exec() == wizard.DialogCode.Accepted
+    except Exception as e:
+        print(f"  ❌ Failed to create setup wizard: {e}", flush=True)
+        return False
+
+
 def main() -> int:
     """Main entry point for the desktop app."""
     from jarvis.utils.console import force_utf8_console
@@ -3299,7 +3377,6 @@ def main() -> int:
             print("  Setup wizard module loaded successfully", flush=True)
         except Exception as e:
             print(f"  ❌ Failed to load setup wizard: {e}", flush=True)
-            import traceback
             traceback.print_exc()
             raise
 
@@ -3338,14 +3415,7 @@ def main() -> int:
             # Hide splash while wizard is shown
             splash.hide()
             print("🔧 Setup required - launching setup wizard...", flush=True)
-            wizard = SetupWizard()
-            # Ensure wizard is visible and has focus (prevents window manager issues)
-            wizard.show()
-            wizard.raise_()
-            wizard.activateWindow()
-            result = wizard.exec()
-
-            if result != wizard.DialogCode.Accepted:
+            if not _run_setup_wizard():
                 print("Setup wizard cancelled - exiting", flush=True)
                 return 0
 
@@ -3363,14 +3433,42 @@ def main() -> int:
         # embeddings run on Ollama we just make sure the server is up.
         try:
             from jarvis.config import load_settings as _load_provider_settings
+            _provider_cfg = _load_provider_settings()
             _ollama_needed, _chat_on_ollama = _ollama_runtime_flags(
-                _load_provider_settings()
+                _provider_cfg
             )
         except Exception:
+            _provider_cfg = None
             _ollama_needed, _chat_on_ollama = True, True
 
         if not _ollama_needed:
             print("🔌 OpenAI-compatible provider configured: skipping Ollama startup checks", flush=True)
+
+            # We can't start a third-party server the way we start Ollama, so
+            # check it is reachable and warn early if it isn't — otherwise the
+            # user only finds out when their first request silently fails.
+            splash.set_status("Checking your LLM server...")
+            app.processEvents()
+
+            class _LLMReachWorker(QThread):
+                finished = pyqtSignal(bool)
+
+                def run(self):
+                    self.finished.emit(_check_openai_compat_reachable(_provider_cfg))
+
+            _reach = [True]
+            _reach_worker = _LLMReachWorker()
+            _reach_worker.finished.connect(lambda ok: _reach.__setitem__(0, ok))
+            _reach_loop = QEventLoop()
+            _reach_worker.finished.connect(_reach_loop.quit)
+            _reach_worker.start()
+            _reach_loop.exec()
+
+            if not _reach[0]:
+                print("⚠️ LLM server not reachable at startup", flush=True)
+                if _show_openai_unreachable_dialog(_provider_cfg, splash):
+                    _provider_cfg = _load_provider_settings()
+                    _ollama_needed, _chat_on_ollama = _ollama_runtime_flags(_provider_cfg)
 
         ollama_runtime_ownership = OllamaRuntimeOwnership()
 
@@ -3549,15 +3647,10 @@ def main() -> int:
                 # Chat runs on Ollama: the setup wizard lets the user pick and
                 # install the chat model along with the embed + judge models.
                 splash.hide()
+                app.processEvents()
                 print(f"⚠️ Missing required models: {missing_models}", flush=True)
                 print("🔧 Opening setup wizard to install missing models...", flush=True)
-                wizard = SetupWizard()
-                wizard.show()
-                wizard.raise_()
-                wizard.activateWindow()
-                result = wizard.exec()
-
-                if result != wizard.DialogCode.Accepted:
+                if not _run_setup_wizard():
                     print("Setup wizard cancelled - exiting", flush=True)
                     return 0
 
@@ -3592,12 +3685,7 @@ def main() -> int:
                 if show_unsupported_model_dialog(unsupported_model):
                     # User wants to open setup wizard
                     print("🔧 Opening setup wizard to change model...", flush=True)
-                    wizard = SetupWizard()
-                    wizard.show()
-                    wizard.raise_()
-                    wizard.activateWindow()
-                    result = wizard.exec()
-                    if result != wizard.DialogCode.Accepted:
+                    if not _run_setup_wizard():
                         print("Setup wizard cancelled - exiting", flush=True)
                         return 0
                 splash.show()

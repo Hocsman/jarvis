@@ -26,6 +26,7 @@ def _create_mock_config(**kwargs):
     mock_cfg.voice_max_collect_seconds = kwargs.get("voice_max_collect_seconds", 60.0)
     mock_cfg.voice_device = kwargs.get("voice_device", None)
     mock_cfg.voice_debug = kwargs.get("voice_debug", False)
+    mock_cfg.vad_frame_ms = kwargs.get("vad_frame_ms", 20)
     mock_cfg.tune_enabled = kwargs.get("tune_enabled", False)
     return mock_cfg
 
@@ -960,13 +961,14 @@ class TestCrossPlatformAudioHealthWarning:
 
                             with patch("jarvis.listening.listener.time") as mock_time:
                                 mock_time.time.side_effect = advancing_time
+                                mock_time.monotonic.side_effect = [0, 6, 6, 6]
                                 mock_time.sleep = time.sleep
 
                                 listener.run()
 
                             captured = capsys.readouterr()
-                            assert "No audio received after 5 seconds" in captured.out
-                            assert "pactl" in captured.out
+                            assert "No microphone callbacks" in captured.out
+                            assert "PipeWire" in captured.out
 
 
 class TestResample:
@@ -1030,14 +1032,17 @@ class TestResample:
 
 
 class TestSampleRateFallback:
-    """Tests for InputStream sample rate fallback on Linux."""
+    """Input format fallback and native-rate transcription across platforms."""
 
-    def test_fallback_to_native_rate_on_invalid_sample_rate(self, capsys):
-        """Falls back to device native rate when 16 kHz is rejected."""
+    @pytest.mark.parametrize('platform_name', ['linux', 'win32'])
+    @pytest.mark.parametrize('input_channels', [1, 2])
+    def test_fallback_to_native_rate_on_invalid_sample_rate(self, capsys, platform_name, input_channels):
+        """Negotiated headset capture reaches Whisper at the correct duration."""
         mock_whisper_model = MagicMock()
+        mock_whisper_model.transcribe.return_value = ([], None)
 
         with patch("jarvis.listening.listener.sys") as mock_sys:
-            mock_sys.platform = "linux"
+            mock_sys.platform = platform_name
             with patch("jarvis.listening.listener.FASTER_WHISPER_AVAILABLE", True):
                 with patch("jarvis.listening.listener.MLX_WHISPER_AVAILABLE", False):
                     with patch("jarvis.listening.listener.WhisperModel", return_value=mock_whisper_model):
@@ -1046,25 +1051,28 @@ class TestSampleRateFallback:
 
                             # query_devices returns native rate info
                             device_info = {
-                                "name": "ALSA HDA Intel",
-                                "max_input_channels": 2,
+                                "name": "Test Headset",
+                                "max_input_channels": input_channels,
                                 "default_samplerate": 44100.0,
                             }
                             mock_sd.query_devices.side_effect = lambda *args, **kwargs: (
-                                device_info if args or kwargs else [device_info]
+                                device_info if args or kwargs else [
+                                    {'name': 'Test Headset', 'max_input_channels': 0}, device_info,
+                                ]
                             )
 
-                            # First InputStream call rejects 16 kHz, second succeeds
+                            # The headset accepts only its advertised input format.
                             mock_stream = MagicMock()
                             mock_stream.active = False
                             mock_stream.__enter__ = MagicMock(return_value=mock_stream)
                             mock_stream.__exit__ = MagicMock(return_value=False)
 
-                            call_count = [0]
                             def input_stream_side_effect(**kw):
-                                call_count[0] += 1
-                                if call_count[0] == 1:
-                                    raise Exception("Invalid sample rate [PaErrorCode -9987]")
+                                assert kw['device'] == 1
+                                if kw['channels'] != input_channels:
+                                    raise Exception('Invalid number of channels [PaErrorCode -9998]')
+                                if kw['samplerate'] != device_info['default_samplerate']:
+                                    raise Exception("Invalid sample rate [PaErrorCode -9997]")
                                 return mock_stream
 
                             mock_sd.InputStream.side_effect = input_stream_side_effect
@@ -1072,18 +1080,32 @@ class TestSampleRateFallback:
                             from jarvis.listening.listener import VoiceListener
 
                             mock_db = MagicMock()
-                            mock_cfg = _create_mock_config()
+                            mock_cfg = _create_mock_config(voice_device='Test Headset', whisper_device='cpu')
                             mock_tts = MagicMock()
                             mock_dialogue_memory = MagicMock()
 
                             listener = VoiceListener(mock_db, mock_cfg, mock_tts, mock_dialogue_memory)
 
-                            # Make the run loop exit immediately
+                            # Drive native-rate speech through framing, VAD and Whisper.
+                            import numpy as np
+                            class StrictVad:
+                                def is_speech(self, pcm, rate):
+                                    assert rate == 16000 and len(pcm) == 640
+                                    return bool(np.max(np.abs(np.frombuffer(pcm, dtype=np.int16))) > 0)
+                            listener._vad = StrictVad()
+                            mock_cfg.endpoint_silence_ms = 40
+                            mock_cfg.whisper_min_audio_duration = 0.3
+                            listener._check_query_timeout = MagicMock()
                             get_calls = [0]
                             def fake_get(timeout=0.2):
                                 get_calls[0] += 1
-                                if get_calls[0] >= 2:
-                                    listener._should_stop = True
+                                if get_calls[0] == 1:
+                                    audio = np.zeros((17640, input_channels), dtype=np.float32)
+                                    audio[:, -1] = .1 * input_channels
+                                    return audio
+                                if get_calls[0] == 2:
+                                    return np.zeros((4410, input_channels), dtype=np.float32)
+                                listener._should_stop = True
                                 raise q.Empty()
 
                             listener._audio_q = MagicMock()
@@ -1091,20 +1113,22 @@ class TestSampleRateFallback:
 
                             with patch("jarvis.listening.listener.time") as mock_time:
                                 mock_time.time.return_value = 0
+                                mock_time.monotonic.return_value = 0
                                 mock_time.sleep = time.sleep
                                 listener.run()
 
-                            # InputStream should have been called twice
-                            assert mock_sd.InputStream.call_count == 2
-                            # Second call should use native 44100 rate
-                            second_call_kwargs = mock_sd.InputStream.call_args_list[1][1]
-                            assert second_call_kwargs["samplerate"] == 44100
+                            capture_kwargs = mock_sd.InputStream.call_args_list[-1][1]
+                            assert capture_kwargs["samplerate"] == 44100
+                            assert capture_kwargs['channels'] == input_channels
                             # Listener should store the stream rate
                             assert listener._stream_samplerate == 44100
+                            assert listener._frame_samples == 44100 * mock_cfg.vad_frame_ms // 1000
+                            assert capture_kwargs['blocksize'] == listener._frame_samples
+                            assert len(mock_whisper_model.transcribe.call_args[0][0]) == 6400
+                            np.testing.assert_allclose(mock_whisper_model.transcribe.call_args[0][0], .1, atol=.001)
 
                             captured = capsys.readouterr()
                             assert "44100" in captured.out
-                            assert "resampling" in captured.out.lower()
 
     def test_no_fallback_for_permission_errors(self):
         """Permission errors do not trigger sample rate fallback."""
@@ -1184,7 +1208,7 @@ class TestCorruptedWhisperCacheRecovery:
                             assert not snapshot_dir.exists()
 
     def test_corrupted_cache_retry_also_fails(self, tmp_path):
-        """When retry after cache clear also fails, model remains None."""
+        """When retry after cache clear also fails, fallback configs are still tried."""
         # Create a fake cache directory
         snapshot_dir = tmp_path / "models--Systran--faster-whisper-medium" / "snapshots" / "abc123"
         snapshot_dir.mkdir(parents=True)
@@ -1212,8 +1236,8 @@ class TestCorruptedWhisperCacheRecovery:
                             listener = VoiceListener(mock_db, mock_cfg, mock_tts, mock_dialogue_memory)
                             listener.run()
 
-                            # First attempt + retry = 2 calls
-                            assert mock_class.call_count == 2
+                            # The loop tried fallback configs (not just config 1's retry)
+                            assert mock_class.call_count > 2, "Expected fallback configs to be tried"
                             assert listener.model is None
 
     def test_corrupted_cache_parent_model_dir_deleted(self, tmp_path):
@@ -1263,7 +1287,7 @@ class TestCorruptedWhisperCacheRecovery:
                             assert not model_dir.exists()
 
     def test_unparseable_cache_path_shows_manual_instructions(self, capsys):
-        """When error path can't be parsed, shows manual cleanup instructions."""
+        """When error path can't be parsed, fallback configs are still tried with manual hints."""
         error_msg = "Unable to open file 'model.bin' somehow"
 
         with patch("jarvis.listening.listener.sys") as mock_sys:
@@ -1286,8 +1310,8 @@ class TestCorruptedWhisperCacheRecovery:
                             listener = VoiceListener(mock_db, mock_cfg, mock_tts, mock_dialogue_memory)
                             listener.run()
 
-                            # Should NOT retry (can't parse path)
-                            mock_class.assert_called_once()
+                            # The loop tried fallback configs (not just the first one)
+                            assert mock_class.call_count > 2, "Expected fallback configs to be tried"
                             assert listener.model is None
 
                             # Should show manual cleanup hint
@@ -1295,7 +1319,7 @@ class TestCorruptedWhisperCacheRecovery:
                             assert "whisper model cache" in captured.out.lower()
 
     def test_rmtree_oserror_prevents_retry(self, tmp_path):
-        """When shutil.rmtree raises OSError, model stays None and no retry occurs."""
+        """When shutil.rmtree raises OSError, fallback configs are still tried."""
         snapshot_dir = tmp_path / "models--Systran--faster-whisper-medium" / "snapshots" / "abc123"
         snapshot_dir.mkdir(parents=True)
         (snapshot_dir / "model.bin").write_bytes(b"corrupted")
@@ -1324,12 +1348,12 @@ class TestCorruptedWhisperCacheRecovery:
                                 listener = VoiceListener(mock_db, mock_cfg, mock_tts, mock_dialogue_memory)
                                 listener.run()
 
-                                # Only the initial attempt — no retry since cache could not be cleared
-                                mock_class.assert_called_once()
+                                # The loop tried fallback configs (not just the first one)
+                                assert mock_class.call_count > 2, "Expected fallback configs to be tried"
                                 assert listener.model is None
 
     def test_no_models_ancestor_prevents_cache_clear(self, tmp_path):
-        """When error path has no models-- ancestor, cache is not cleared and model stays None."""
+        """When error path has no models-- ancestor, fallback configs are still tried."""
         # Create a path without a models-- segment
         plain_dir = tmp_path / "some" / "random" / "path"
         plain_dir.mkdir(parents=True)
@@ -1357,9 +1381,56 @@ class TestCorruptedWhisperCacheRecovery:
                             listener = VoiceListener(mock_db, mock_cfg, mock_tts, mock_dialogue_memory)
                             listener.run()
 
-                            # No retry — _clear_corrupted_whisper_cache returns False
-                            mock_class.assert_called_once()
+                            # The loop tried fallback configs (not just the first one)
+                            assert mock_class.call_count > 2, "Expected fallback configs to be tried"
                             assert listener.model is None
+
+    def test_corrupted_cache_retry_fails_then_fallback_succeeds(self, tmp_path):
+        """When cache recovery retry fails, fallback to next device/compute config succeeds."""
+        mock_whisper_model = MagicMock()
+
+        # Create a fake cache directory
+        snapshot_dir = tmp_path / "models--Systran--faster-whisper-medium" / "snapshots" / "abc123"
+        snapshot_dir.mkdir(parents=True)
+        (snapshot_dir / "model.bin").write_bytes(b"corrupted")
+
+        error_msg = f"Unable to open file 'model.bin' in model '{snapshot_dir}'"
+        call_count = 0
+
+        def whisper_model_side_effect(model_name, device, compute_type, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            # Config 1 ("auto", "int8"): first call fails, retry also fails
+            if call_count <= 2:
+                raise RuntimeError(error_msg)
+            # Config 2 ("auto", "float16"): third call succeeds
+            return mock_whisper_model
+
+        with patch("jarvis.listening.listener.sys") as mock_sys:
+            mock_sys.platform = "linux"
+            with patch("jarvis.listening.listener.FASTER_WHISPER_AVAILABLE", True):
+                with patch("jarvis.listening.listener.MLX_WHISPER_AVAILABLE", False):
+                    with patch("jarvis.listening.listener.WhisperModel", side_effect=whisper_model_side_effect) as mock_class:
+                        with patch("jarvis.listening.listener.sd") as mock_sd:
+                            mock_sd.query_devices.return_value = [{"name": "Test Mic", "max_input_channels": 1}]
+                            mock_sd.InputStream.side_effect = Exception("Stop test here")
+
+                            from jarvis.listening.listener import VoiceListener
+
+                            mock_db = MagicMock()
+                            mock_cfg = _create_mock_config(whisper_model="medium")
+                            mock_tts = MagicMock()
+                            mock_dialogue_memory = MagicMock()
+
+                            listener = VoiceListener(mock_db, mock_cfg, mock_tts, mock_dialogue_memory)
+                            listener.run()
+
+                            # Call 1 (config 1 initial), call 2 (config 1 retry), call 3 (config 2, succeeds)
+                            assert mock_class.call_count == 3
+                            assert listener.model == mock_whisper_model
+
+                            # The corrupted snapshot directory should have been deleted
+                            assert not snapshot_dir.exists()
 
 
 class TestWhisperRateLimitRetry:

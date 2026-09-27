@@ -13,7 +13,7 @@ import queue
 import sys
 import platform
 from collections import deque
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Optional, TYPE_CHECKING, Any
 from datetime import datetime
 
@@ -36,6 +36,30 @@ from ..utils.location import is_location_available
 if TYPE_CHECKING:
     from ..memory.db import Database
     from ..memory.conversation import DialogueMemory
+
+from ..utils.audio_stream import (
+    is_input_format_error,
+    open_input_stream,
+)
+
+def _open_input_stream(
+    sample_rate: int,
+    frame_ms: int,
+    device_kwargs: dict[str, Any],
+    *,
+    callback: Optional[Callable] = None,
+    serialise: bool = True,
+) -> tuple[Any, int, int]:
+    """Open mono first, then bounded native-rate/channel alternatives on the same input."""
+    return open_input_stream(
+        sample_rate,
+        frame_ms,
+        device_kwargs,
+        callback=callback,
+        serialise=serialise,
+        sd_backend=sd,
+        lock=portaudio_lock,
+    )
 
 
 def is_whisper_hallucination(no_speech_prob: float, threshold: float) -> bool:
@@ -103,7 +127,7 @@ def _resample(audio, src_rate: int, dst_rate: int):
     if src_rate == dst_rate or np is None:
         return audio
     ratio = dst_rate / src_rate
-    n_out = int(len(audio) * ratio)
+    n_out = round(len(audio) * ratio)
     indices = np.arange(n_out) / ratio
     return np.interp(indices, np.arange(len(audio)), audio).astype(np.float32)
 
@@ -533,13 +557,16 @@ class VoiceListener(threading.Thread):
         # Audio callback monitoring (for debugging)
         self._callback_count = 0
         self._last_callback_log_time = 0
+        self._pending_audio = None
+        self._vad_error_logged = False
+        self._reset_audio_health()
 
         # Voice activity detection
         self.is_speech_active = False
         self._silence_frames = 0
         self._utterance_frames: list = []
-        self._frame_samples = 0
         self._samplerate = int(getattr(self.cfg, "sample_rate", 16000))
+        self._frame_samples = max(1, int(self._samplerate * 20 / 1000))
         self._vad: Optional = None
 
         # Off unless he set the environment variable, and it says so when
@@ -1693,6 +1720,7 @@ class VoiceListener(threading.Thread):
         """
         self._utterance_frames = []
         self._pre_roll.clear()
+        self._pending_audio = None
         self.is_speech_active = False
         self._silence_frames = 0
 
@@ -1722,10 +1750,25 @@ class VoiceListener(threading.Thread):
 
         # Use WebRTC VAD
         try:
-            pcm16 = np.clip(frame.flatten() * 32768.0, -32768, 32767).astype(np.int16).tobytes()
-            return bool(self._vad.is_speech(pcm16, getattr(self, "_stream_samplerate", self._samplerate)))
-        except Exception:
-            return False
+            stream_rate = getattr(self, "_stream_samplerate", self._samplerate)
+            vad_rate = 16000
+            target_samples = int(vad_rate * getattr(self, "vad_frame_ms", 20) / 1000)
+            if stream_rate == vad_rate:
+                vad_audio = frame.flatten()
+            else:
+                vad_audio = _resample(frame.flatten(), stream_rate, vad_rate)
+            if len(vad_audio) < target_samples:
+                vad_audio = np.pad(vad_audio, (0, target_samples - len(vad_audio)))
+            elif len(vad_audio) > target_samples:
+                vad_audio = vad_audio[:target_samples]
+            pcm16 = np.clip(vad_audio * 32768.0, -32768, 32767).astype(np.int16).tobytes()
+            return bool(self._vad.is_speech(pcm16, vad_rate))
+        except Exception as exc:
+            if not self._vad_error_logged:
+                self._vad_error_logged = True
+                debug_log(f"VAD rejected audio frame: {exc}", "voice")
+                print("  ⚠️  Speech detection failed; using audio-level detection. Enable voice_debug for details.", flush=True)
+            return rms >= float(getattr(self.cfg, "voice_min_energy", 0.0045))
 
     def _filter_noisy_segments(self, segments):
         """Filter out low-confidence Whisper segments."""
@@ -1934,19 +1977,85 @@ class VoiceListener(threading.Thread):
         # even when there's no audio being processed
         self.state_manager.check_hot_window_expiry(self.cfg.voice_debug)
 
+    def _reset_audio_health(self, now=None):
+        now = time.monotonic() if now is None else now
+        self._audio_started = now
+        self._last_audio_callback = now
+        self._last_health_check = now
+        self._audio_peak = 0.0
+        self._audio_frames_seen = 0
+        self._speech_frames_seen = 0
+        self._audio_dropped = 0
+        self._callback_status = ''
+        self._audio_callback_error = ''
+        self._audio_health_warning = None
+
+    def _check_audio_health(self, now=None):
+        """Report capture failures outside the real-time callback, without recording audio."""
+        now = time.monotonic() if now is None else now
+        if self._dictation_active:
+            self._reset_audio_health(now)
+            return
+        if now - self._last_health_check < 5:
+            return
+        self._last_health_check = now
+        warning = None
+        if now - self._last_audio_callback >= 5:
+            warning = 'No microphone callbacks in the last 5 seconds'
+        elif self._audio_peak <= 1e-7 and now - self._audio_started >= 10:
+            warning = 'Microphone is delivering silent samples'
+        if warning and warning != self._audio_health_warning:
+            print(f"  ⚠️  {warning}. Check the selected input, mute and recording permissions.", flush=True)
+            if sys.platform.startswith('linux'):
+                print("     🎤 Check PipeWire/PulseAudio recording-source routing (pavucontrol or wpctl status); avoid monitor/output sources.", flush=True)
+        elif not warning and self._audio_health_warning:
+            print("  ✅ Microphone audio is arriving again.", flush=True)
+        self._audio_health_warning = warning
+        if self._callback_status or self._audio_callback_error or self._audio_dropped:
+            print(f"  ⚠️  Audio capture: {self._callback_status or self._audio_callback_error or 'queue full'}; {self._audio_dropped} blocks dropped.", flush=True)
+            self._callback_status = self._audio_callback_error = ''
+            self._audio_dropped = 0
+        if self.cfg.voice_debug:
+            debug_log(
+                f"Audio capture: callbacks={self._callback_count}, frames={self._audio_frames_seen}, "
+                f"speech_frames={self._speech_frames_seen}, peak={self._audio_peak:.6f}, "
+                f"rate={self._stream_samplerate} Hz", "voice",
+            )
+        self._audio_peak = 0.0
+
+    def _audio_frames(self, buf):
+        """Keep native-rate frame boundaries across arbitrary callback block sizes."""
+        if buf.ndim > 1:
+            mono = buf[:, 0] if buf.shape[1] == 1 else buf.mean(axis=1)
+        else:
+            mono = buf.flatten()
+        if mono.size:
+            self._audio_peak = max(self._audio_peak, float(np.max(np.abs(mono))))
+        if self._pending_audio is not None and self._pending_audio.size:
+            mono = np.concatenate((self._pending_audio, mono))
+        frame_samples = max(1, self._frame_samples)
+        count = len(mono) // frame_samples
+        end = count * frame_samples
+        self._pending_audio = mono[end:].copy() if end < len(mono) else None
+        self._audio_frames_seen += count
+        return [mono[start:start + frame_samples] for start in range(0, end, frame_samples)]
+
     def _on_audio(self, indata, frames, time_info, status):
         """Audio callback from sounddevice."""
         try:
+            self._last_audio_callback = time.monotonic()
+            self._callback_count += 1
+            if status:
+                self._callback_status = str(status)
             if self._should_stop or self._dictation_active:
                 return
-            self._callback_count += 1
             chunk = (indata.copy() if hasattr(indata, "copy") else indata)
             try:
                 self._audio_q.put_nowait(chunk)
-            except Exception:
-                pass
-        except Exception:
-            return
+            except queue.Full:
+                self._audio_dropped += 1
+        except Exception as exc:
+            self._audio_callback_error = str(exc)
 
     def _determine_whisper_backend(self) -> str:
         """Determine which Whisper backend to use based on config and availability."""
@@ -2124,6 +2233,22 @@ class VoiceListener(threading.Thread):
                 print("     On Linux, ensure PortAudio is installed: sudo apt install libportaudio2", flush=True)
             return
 
+        # Resolve the same input for the permission probe and continuous capture.
+        stream_kwargs = {}
+        device_env = (self.cfg.voice_device or '').strip().lower()
+        if device_env and device_env not in ('default', 'system'):
+            try:
+                stream_kwargs['device'] = int(self.cfg.voice_device)
+            except ValueError:
+                for idx, dev in enumerate(devices):
+                    if dev.get('max_input_channels', 0) > 0 and device_env in dev.get('name', '').lower():
+                        stream_kwargs['device'] = idx
+                        break
+                else:
+                    print("  ❌ Selected microphone not found. Choose an available input in Settings.", flush=True)
+                    debug_log("configured input device did not match an available microphone", "voice")
+                    return
+
         # Windows 11: Test microphone permission by attempting a brief recording
         # This catches privacy settings that silently block audio access.
         # A 5-second timeout prevents indefinite hangs when Windows blocks
@@ -2148,9 +2273,8 @@ class VoiceListener(threading.Thread):
                     # stop/close after a successful start stays guarded.
                     stream = None
                     try:
-                        stream = sd.InputStream(
-                            samplerate=self._samplerate, channels=1,
-                            dtype="float32", blocksize=int(self._samplerate * 0.1),
+                        stream, _, _ = _open_input_stream(
+                            self._samplerate, 100, stream_kwargs, serialise=False,
                         )
                         stream.start()
                         time.sleep(0.15)
@@ -2400,12 +2524,12 @@ class VoiceListener(threading.Thread):
                             except Exception as retry_e:
                                 debug_log(f"retry after cache clear also failed: {retry_e}", "voice")
                                 print(f"  ❌ Failed to load Whisper model after cache recovery: {retry_e}", flush=True)
-                                return
+                                continue
                         else:
                             debug_log("could not clear corrupted cache automatically", "voice")
                             print(f"  ❌ Failed to load Whisper model: {e}", flush=True)
                             print("  💡 Try manually deleting the Whisper model cache directory and restarting", flush=True)
-                            return
+                            continue
                     # Check for rate limiting (HTTP 429) — check string and response status code
                     # (HfHubHTTPError may carry the status on .response without "429" in str(e))
                     is_rate_limited = (
@@ -2521,6 +2645,9 @@ class VoiceListener(threading.Thread):
 
         # Audio parameters
         frame_ms = int(getattr(self.cfg, "vad_frame_ms", 20))
+        if frame_ms not in (10, 20, 30):
+            debug_log(f"Unsupported VAD frame duration {frame_ms}; using 20 ms", "voice")
+            frame_ms = 20
         self._frame_samples = max(1, int(self._samplerate * frame_ms / 1000))
         pre_roll_ms = int(getattr(self.cfg, "vad_pre_roll_ms", 240))
         endpoint_silence_ms = int(getattr(self.cfg, "endpoint_silence_ms", 800))
@@ -2537,9 +2664,6 @@ class VoiceListener(threading.Thread):
         debug_log(f"VAD: enabled={bool(self._vad is not None)}, aggressiveness={getattr(self.cfg, 'vad_aggressiveness', 2)}", "voice")
 
         # Audio device setup
-        stream_kwargs = {}
-        device_env = (self.cfg.voice_device or '').strip().lower()
-
         if self.cfg.voice_debug:
             debug_log("available input devices:", "voice")
             try:
@@ -2554,22 +2678,6 @@ class VoiceListener(threading.Thread):
                         debug_log(f"  [{idx}] {name} (channels={max_in}, default_sr={rate})", "voice")
             except Exception:
                 pass
-
-        # Configure audio device
-        if device_env and device_env not in ("default", "system"):
-            try:
-                device_index = int(self.cfg.voice_device)
-            except ValueError:
-                device_index = None
-                try:
-                    for idx, dev in enumerate(sd.query_devices()):
-                        if isinstance(dev.get("name"), str) and (self.cfg.voice_device or '').lower() in dev.get("name").lower():
-                            device_index = idx
-                            break
-                except Exception:
-                    device_index = None
-            if device_index is not None:
-                stream_kwargs["device"] = device_index
 
         # Log which device will be used
         try:
@@ -2590,51 +2698,18 @@ class VoiceListener(threading.Thread):
         except Exception:
             pass
 
-        # Open audio stream — try configured rate first, fall back to device
-        # native rate when the hardware rejects 16 kHz (common on Linux ALSA).
         self._stream_samplerate = self._samplerate
         open_error = None
         try:
-            with portaudio_lock:
-                stream = sd.InputStream(
-                    samplerate=self._samplerate,
-                    channels=1,
-                    dtype="float32",
-                    blocksize=self._frame_samples,
-                    callback=self._on_audio,
-                    **stream_kwargs,
-                )
+            stream, self._stream_samplerate, channels = _open_input_stream(
+                self._samplerate, frame_ms, stream_kwargs, callback=self._on_audio,
+            )
+            self._frame_samples = max(1, int(self._stream_samplerate * frame_ms / 1000))
+            if self._stream_samplerate != self._samplerate or channels != 1:
+                print(f"  🎤 Using {self._stream_samplerate} Hz, {channels} input channel(s); "
+                      "converting to mono and resampling for speech recognition", flush=True)
         except Exception as e:
-            error_msg = str(e).lower()
-            is_rate_error = "sample rate" in error_msg or "9987" in error_msg
-            if is_rate_error:
-                debug_log(f"device rejected {self._samplerate} Hz, querying native rate", "voice")
-                try:
-                    if "device" in stream_kwargs:
-                        dev_info = sd.query_devices(stream_kwargs["device"])
-                    else:
-                        dev_info = sd.query_devices(kind="input")
-                    native_rate = int(dev_info.get("default_samplerate", self._samplerate))
-                    if native_rate != self._samplerate:
-                        self._stream_samplerate = native_rate
-                        native_frame_samples = max(1, int(native_rate * 30 / 1000))
-                        print(f"  ⚠️  Device doesn't support {self._samplerate} Hz — using {native_rate} Hz with resampling", flush=True)
-                        debug_log(f"retrying stream at native {native_rate} Hz", "voice")
-                        with portaudio_lock:
-                            stream = sd.InputStream(
-                                samplerate=native_rate,
-                                channels=1,
-                                dtype="float32",
-                                blocksize=native_frame_samples,
-                                callback=self._on_audio,
-                                **stream_kwargs,
-                            )
-                    else:
-                        open_error = e
-                except Exception:
-                    open_error = e
-            else:
-                open_error = e
+            open_error = e
 
         if open_error is not None:
             error_msg = str(open_error).lower()
@@ -2653,6 +2728,7 @@ class VoiceListener(threading.Thread):
             return
 
         # Main audio processing loop
+        self._reset_audio_health()
         with _serialised_stream(stream):
             # Verify stream is actually recording (helps catch permission issues)
             if not stream.active:
@@ -2722,18 +2798,8 @@ class VoiceListener(threading.Thread):
             except Exception:
                 pass
 
-            # Track start time for audio health monitoring
-            _audio_start_time = time.time()
-            _audio_health_logged = False
-
             while not self._should_stop:
-                # One-time audio health check after 5 seconds
-                if not _audio_health_logged and time.time() - _audio_start_time > 5:
-                    _audio_health_logged = True
-                    if self._callback_count == 0:
-                        print("  ⚠️  No audio received after 5 seconds!", flush=True)
-                        print(f"     Check: {_get_mic_permission_hint()}", flush=True)
-                        print("     Also check that your microphone is not muted", flush=True)
+                self._check_audio_health()
 
                 # Say anything another thread handed over — a
                 # click-approved action's narration. Here rather than on
@@ -2757,29 +2823,17 @@ class VoiceListener(threading.Thread):
                     self._silence_frames = 0
                     self._utterance_frames = []
                     self._pre_roll.clear()
+                    self._pending_audio = None
                     continue
 
                 if np is None:
                     continue
 
-                # Process audio buffer
-                buf = item
-                try:
-                    mono = buf.reshape(-1, buf.shape[-1])[:, 0] if buf.ndim > 1 else buf.flatten()
-                except Exception:
-                    mono = buf.flatten()
-
-                # Process frames
-                offset = 0
-                total = mono.shape[0]
                 frame_timestamp = time.time()  # Timestamp for this batch of frames
 
-                while offset + self._frame_samples <= total:
-                    frame = mono[offset: offset + self._frame_samples]
-                    offset += self._frame_samples
-
-                    # VAD decision
+                for frame in self._audio_frames(item):
                     is_voice = self._is_speech_frame(frame)
+                    self._speech_frames_seen += int(is_voice)
 
                     if not self.is_speech_active:
                         if is_voice:
@@ -2820,17 +2874,6 @@ class VoiceListener(threading.Thread):
 
                     # Check for query timeouts
                     self._check_query_timeout()
-
-                # Handle remaining audio
-                if offset < total:
-                    tail = mono[offset:]
-                    if tail.size > 0:
-                        self._pre_roll.append(tail.copy())
-                        while len(self._pre_roll) > pre_roll_max_frames:
-                            try:
-                                self._pre_roll.popleft()
-                            except Exception:
-                                break
 
     def _finalize_utterance(self) -> None:
         """Process completed utterance through speech recognition."""
