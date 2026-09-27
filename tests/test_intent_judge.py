@@ -1113,7 +1113,42 @@ class TestReasoningModelHandling:
 
     def test_extract_json_object_last_flag(self):
         """_extract_json_object with last=True returns the final balanced object."""
-        from jarvis.listening.intent_judge import _extract_json_object
+        from jarvis.listening.intent_judge import _extract_json_object, _extract_json_objects
         text = 'Prefix {"first": 1} middle {"second": 2} suffix {"unbalanced": 3'
+        assert _extract_json_objects(text) == ['{"first": 1}', '{"second": 2}']
         assert _extract_json_object(text, last=False) == '{"first": 1}'
         assert _extract_json_object(text, last=True) == '{"second": 2}'
+
+    def test_recovery_skips_trailing_scratchpad_notes(self):
+        """When reasoning concludes with non-judgment notes or schema hints,
+        recovery walks backwards to locate the genuine judgment object."""
+        result = self._run_judge({
+            "message": {
+                "content": "",
+                "reasoning_content": (
+                    "Analyzing query... "
+                    '{"directed": true, "query": "what time is it", "stop": false, '
+                    '"confidence": "high", "reasoning": "valid verdict"} '
+                    "Now verifying schema format: {directed, query, stop, confidence}"
+                ),
+            }
+        })
+        assert result is not None
+        assert result.directed is True
+        assert result.query == "what time is it"
+
+    def test_parse_response_requires_directed_key(self):
+        """JSON lacking the 'directed' key must return None rather than defaulting to False."""
+        judge = IntentJudge()
+        assert judge._parse_response('{"status": "ok", "query": "hello"}') is None
+        assert judge._parse_response('[1, 2, 3]') is None
+
+    def test_parse_response_strictly_parses_boolean_strings(self):
+        """String booleans ('false', 'true') must not evaluate to Python's bool('false') == True."""
+        judge = IntentJudge()
+        judgment = judge._parse_response(
+            '{"directed": "false", "query": "", "stop": "false", "confidence": "high", "reasoning": "test"}'
+        )
+        assert judgment is not None
+        assert judgment.directed is False
+        assert judgment.stop is False

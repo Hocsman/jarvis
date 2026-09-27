@@ -1472,3 +1472,23 @@ class TestDaemonSubprocessEnv:
         head, _, tail = env["PYTHONPATH"].partition(os.pathsep)
         assert os.path.basename(os.path.normpath(head)) == "src"
         assert tail == "existing"
+
+
+class TestOpenAIUnreachableDialog:
+    """Startup reachability checks and server recovery dialog."""
+
+    def test_build_unreachable_message_scrubs_credentials(self):
+        from desktop_app.app import _build_unreachable_message
+
+        cfg = SimpleNamespace(llm_base_url="http://admin:secret_pass@127.0.0.1:8000/v1")
+        msg = _build_unreachable_message(cfg)
+        assert "secret_pass" not in msg
+        assert "admin@" not in msg
+        assert "http://127.0.0.1:8000/v1" in msg
+
+    def test_build_unreachable_message_fallback_when_empty(self):
+        from desktop_app.app import _build_unreachable_message
+
+        cfg = SimpleNamespace(llm_base_url="")
+        msg = _build_unreachable_message(cfg)
+        assert "your configured server" in msg

@@ -61,19 +61,12 @@ def warm_up_chat_model(cfg, model: str, timeout: float) -> bool:
     return ok
 
 
-def _extract_json_object(text: str, last: bool = False) -> str:
-    """Return a balanced `{...}` object in `text`, or "" if none.
+def _extract_json_objects(text: str) -> list[str]:
+    """Return all balanced `{...}` objects found in `text`.
 
     Walks character-by-character tracking brace depth while respecting string
     literals and escapes. Handles markdown code fences and values containing
-    braces — cases a simple regex cannot.
-
-    Returns the first balanced object by default, or the **last** when
-    ``last=True`` — used for reasoning-model recovery, where the answer sits
-    at the end of the thinking text and earlier balanced objects may be
-    echoes of the system prompt's JSON example rather than the verdict.
-    Unbalanced objects are skipped so a truncated draft cannot hide a later
-    complete answer.
+    braces — cases a simple regex cannot. Unbalanced objects are skipped.
     """
     candidates: list[str] = []
     search_from = 0
@@ -111,6 +104,15 @@ def _extract_json_object(text: str, last: bool = False) -> str:
             continue
         candidates.append(text[start:end])
         search_from = end
+    return candidates
+
+
+def _extract_json_object(text: str, last: bool = False) -> str:
+    """Return a balanced `{...}` object in `text`, or "" if none.
+
+    Returns the first balanced object by default, or the last when ``last=True``.
+    """
+    candidates = _extract_json_objects(text)
     if not candidates:
         return ""
     return candidates[-1] if last else candidates[0]
@@ -360,6 +362,19 @@ Examples:
 
         try:
             data = json.loads(json_text)
+            if not isinstance(data, dict) or "directed" not in data:
+                return None
+
+            def _parse_bool(val: Any, default: bool = False) -> bool:
+                if isinstance(val, bool):
+                    return val
+                if isinstance(val, str):
+                    v = val.strip().lower()
+                    if v in ("true", "1", "yes"):
+                        return True
+                    if v in ("false", "0", "no"):
+                        return False
+                return default
 
             # Alias normalisation also applies to the output query: the judge
             # occasionally echoes a misheard wake word back verbatim ("Chavis"
@@ -369,14 +384,14 @@ Examples:
             normalized_query = self._normalize_aliases(raw_query)
 
             return IntentJudgment(
-                directed=bool(data.get("directed", False)),
+                directed=_parse_bool(data.get("directed"), default=False),
                 query=normalized_query,
-                stop=bool(data.get("stop", False)),
+                stop=_parse_bool(data.get("stop"), default=False),
                 confidence=str(data.get("confidence", "low")).lower(),
                 reasoning=str(data.get("reasoning", "")),
                 raw_response=response_text,
             )
-        except (json.JSONDecodeError, KeyError) as e:
+        except (json.JSONDecodeError, KeyError, AttributeError) as e:
             debug_log(f"intent judge: failed to parse response: {e}", "voice")
             return None
 
@@ -451,15 +466,9 @@ Examples:
                     extra_options={
                         "temperature": 0.0,
                         # Reasoning models count thinking tokens against
-                        # this cap, so it must cover reasoning + the JSON
-                        # answer. Too tight a cap truncates ``content``
-                        # mid-JSON on complex transcripts and the whole
-                        # judgment is lost (500 cut this exact case off at
-                        # "I said tomorro"). 1500 gives ~4.5x headroom over
-                        # the measured 326-token reasoning+answer baseline
-                        # while ``intent_judge_timeout_sec`` (6s default)
-                        # still bounds slow or runaway generations; the
-                        # model normally stops long before the cap.
+                        # this cap, so 1500 tokens covers reasoning plus
+                        # the JSON answer while ``intent_judge_timeout_sec``
+                        # still bounds slow or runaway generations.
                         "max_tokens": 1500,
                         "num_ctx": 8192,
                         "keep_alive": _ollama_keep_alive_for_power_mode(
@@ -497,17 +506,17 @@ Examples:
             # mid-JSON (or leave it empty) when the thinking runs long. The
             # model usually ends its thinking with the full JSON answer, so
             # recover it from the reasoning text when content did not parse.
-            # The last balanced object wins — the answer comes after any
-            # earlier echoes of the system prompt's JSON example.
+            # We iterate candidates in reverse so trailing notes or bracket
+            # checks don't shadow an earlier complete judgment object.
             if judgment is None and isinstance(message, dict):
                 reasoning = message.get("reasoning_content")
                 if isinstance(reasoning, str):
-                    extracted = _extract_json_object(reasoning, last=True)
-                    if extracted:
-                        recovered = self._parse_response(extracted)
+                    for candidate in reversed(_extract_json_objects(reasoning)):
+                        recovered = self._parse_response(candidate)
                         if recovered is not None:
                             judgment = recovered
-                            response_text = extracted
+                            response_text = candidate
+                            break
 
             if judgment is None and not response_text:
                 # Ollama's /api/generate returned ``response``; chat() shape

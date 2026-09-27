@@ -698,9 +698,6 @@ class TestPasteActivationSuppression:
     def _make_keys(self):
         """Get real pynput key objects for ctrl, shift, and d."""
         from pynput import keyboard
-        import importlib
-        import src.jarvis.dictation.dictation_engine as de
-        importlib.reload(de)  # ensures _MODIFIER_MAP is populated
         return (
             keyboard.Key.ctrl_l,
             keyboard.Key.shift,
@@ -728,6 +725,8 @@ class TestPasteActivationSuppression:
             engine._on_key_press(d)
             # Must NOT start a new recording during paste
             mock_start.assert_not_called()
+            # Synthetic modifiers must NOT be added to _pressed_modifiers
+            assert len(engine._pressed_modifiers) == 0
 
         # Now simulate paste completed: clear flag and release synthetic keys
         engine._paste_in_progress = False
@@ -742,6 +741,22 @@ class TestPasteActivationSuppression:
         with patch.object(engine, "_start_recording") as mock_start:
             engine._on_key_press(d)
             mock_start.assert_called_once()
+
+        engine.stop()
+
+    def test_audio_callback_stops_on_maximum_duration_ceiling(self):
+        """Audio callback stops recording when maximum duration ceiling is exceeded."""
+        import numpy as np
+        from src.jarvis.dictation.dictation_engine import _MAX_RECORDING_SECONDS
+
+        engine = _make_engine()
+        engine._recording = True
+        engine._record_start_time = time.time() - (_MAX_RECORDING_SECONDS + 5.0)
+
+        with patch.object(engine, "_stop_recording") as mock_stop:
+            dummy_data = np.zeros((1600, 1), dtype=np.float32)
+            engine._audio_callback(dummy_data, 1600, None, 0)
+            mock_stop.assert_called_once()
 
         engine.stop()
 

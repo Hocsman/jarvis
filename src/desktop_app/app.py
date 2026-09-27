@@ -3192,7 +3192,22 @@ def _check_openai_compat_reachable(cfg, timeout_sec: float = 4.0) -> bool:
 def _build_unreachable_message(cfg) -> str:
     """Build the message text for the unreachable server dialog,
     without Qt dependencies so tests can verify it directly."""
-    base = (getattr(cfg, "llm_base_url", "") or "").strip() or "your configured server"
+    raw_base = (getattr(cfg, "llm_base_url", "") or "").strip()
+    if raw_base:
+        from urllib.parse import urlsplit, urlunsplit
+        try:
+            parts = urlsplit(raw_base)
+            if parts.username or parts.password:
+                host_port = parts.hostname or ""
+                if parts.port:
+                    host_port = f"{host_port}:{parts.port}"
+                base = urlunsplit((parts.scheme, host_port, parts.path, parts.query, parts.fragment))
+            else:
+                base = raw_base
+        except Exception:
+            base = raw_base
+    else:
+        base = "your configured server"
     return (
         f"⚠️ Jarvis couldn't reach a ready LLM server at {base}.\n\n"
         "Make sure your local server (for example LM Studio, Ollama, llama.cpp, "
@@ -3203,8 +3218,9 @@ def _build_unreachable_message(cfg) -> str:
     )
 
 
-def _show_openai_unreachable_dialog(cfg, splash: QWidget) -> None:
-    """Suspend the startup splash while the warning or setup wizard is open."""
+def _show_openai_unreachable_dialog(cfg, splash: QWidget) -> bool:
+    """Suspend the startup splash while the warning or setup wizard is open.
+    Returns True if the setup wizard was opened and completed."""
     from PyQt6.QtWidgets import QMessageBox
 
     dialog = QMessageBox()
@@ -3220,7 +3236,8 @@ def _show_openai_unreachable_dialog(cfg, splash: QWidget) -> None:
     try:
         dialog.exec()
         if dialog.clickedButton() == open_wizard_btn:
-            _run_setup_wizard()
+            return _run_setup_wizard()
+        return False
     finally:
         splash.setVisible(splash_was_visible)
 
@@ -3449,7 +3466,9 @@ def main() -> int:
 
             if not _reach[0]:
                 print("⚠️ LLM server not reachable at startup", flush=True)
-                _show_openai_unreachable_dialog(_provider_cfg, splash)
+                if _show_openai_unreachable_dialog(_provider_cfg, splash):
+                    _provider_cfg = _load_provider_settings()
+                    _ollama_needed, _chat_on_ollama = _ollama_runtime_flags(_provider_cfg)
 
         ollama_runtime_ownership = OllamaRuntimeOwnership()
 

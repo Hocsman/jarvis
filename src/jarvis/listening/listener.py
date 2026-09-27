@@ -37,48 +37,29 @@ if TYPE_CHECKING:
     from ..memory.db import Database
     from ..memory.conversation import DialogueMemory
 
+from ..utils.audio_stream import (
+    is_input_format_error,
+    open_input_stream,
+)
 
-def _is_input_format_error(exc: Exception) -> bool:
-    """Distinguish unsupported capture formats from access/device failures."""
-    code = exc.args[1] if len(exc.args) > 1 else None
-    message = str(exc).lower()
-    return code in (-9998, -9997) or any(part in message for part in (
-        'invalid number of channels', 'invalid channel count',
-        'invalid sample rate', 'paerrorcode -9998', 'paerrorcode -9997',
-    ))
-
-
-def _open_input_stream(sample_rate, frame_ms, device_kwargs, *, callback=None, serialise=True):
+def _open_input_stream(
+    sample_rate: int,
+    frame_ms: int,
+    device_kwargs: dict[str, Any],
+    *,
+    callback: Optional[Callable] = None,
+    serialise: bool = True,
+) -> tuple[Any, int, int]:
     """Open mono first, then bounded native-rate/channel alternatives on the same input."""
-    candidates = [(sample_rate, 1)]
-    last_error = None
-    for rate, channels in candidates:
-        try:
-            with portaudio_lock if serialise else nullcontext():
-                stream = sd.InputStream(
-                    samplerate=rate, channels=channels, dtype='float32',
-                    blocksize=max(1, int(rate * frame_ms / 1000)),
-                    callback=callback, **device_kwargs,
-                )
-            debug_log(f"Input format accepted: {rate} Hz, {channels} channel(s)", "voice")
-            return stream, rate, channels
-        except Exception as exc:
-            if not _is_input_format_error(exc):
-                raise
-            last_error = exc
-            debug_log(f"Input format rejected: {rate} Hz, {channels} channel(s): {exc}", "voice")
-            if len(candidates) == 1:
-                try:
-                    info = (sd.query_devices(device_kwargs['device']) if 'device' in device_kwargs
-                            else sd.query_devices(kind='input'))
-                    native_rate = int(info.get('default_samplerate', sample_rate))
-                    max_channels = int(info.get('max_input_channels', 1))
-                except Exception:
-                    raise exc
-                rates = list(dict.fromkeys(r for r in (sample_rate, native_rate) if r > 0))
-                counts = list(dict.fromkeys(c for c in (1, 2, max_channels) if 0 < c <= max_channels))
-                candidates.extend((r, c) for c in counts for r in rates if (r, c) != candidates[0])
-    raise last_error
+    return open_input_stream(
+        sample_rate,
+        frame_ms,
+        device_kwargs,
+        callback=callback,
+        serialise=serialise,
+        sd_backend=sd,
+        lock=portaudio_lock,
+    )
 
 
 def is_whisper_hallucination(no_speech_prob: float, threshold: float) -> bool:
@@ -146,7 +127,7 @@ def _resample(audio, src_rate: int, dst_rate: int):
     if src_rate == dst_rate or np is None:
         return audio
     ratio = dst_rate / src_rate
-    n_out = int(len(audio) * ratio)
+    n_out = round(len(audio) * ratio)
     indices = np.arange(n_out) / ratio
     return np.interp(indices, np.arange(len(audio)), audio).astype(np.float32)
 
@@ -584,8 +565,8 @@ class VoiceListener(threading.Thread):
         self.is_speech_active = False
         self._silence_frames = 0
         self._utterance_frames: list = []
-        self._frame_samples = 0
         self._samplerate = int(getattr(self.cfg, "sample_rate", 16000))
+        self._frame_samples = max(1, int(self._samplerate * 20 / 1000))
         self._vad: Optional = None
 
         # Off unless he set the environment variable, and it says so when
@@ -1769,9 +1750,19 @@ class VoiceListener(threading.Thread):
 
         # Use WebRTC VAD
         try:
-            vad_audio = _resample(frame.flatten(), getattr(self, "_stream_samplerate", self._samplerate), 16000)
+            stream_rate = getattr(self, "_stream_samplerate", self._samplerate)
+            vad_rate = 16000
+            target_samples = int(vad_rate * getattr(self, "vad_frame_ms", 20) / 1000)
+            if stream_rate == vad_rate:
+                vad_audio = frame.flatten()
+            else:
+                vad_audio = _resample(frame.flatten(), stream_rate, vad_rate)
+            if len(vad_audio) < target_samples:
+                vad_audio = np.pad(vad_audio, (0, target_samples - len(vad_audio)))
+            elif len(vad_audio) > target_samples:
+                vad_audio = vad_audio[:target_samples]
             pcm16 = np.clip(vad_audio * 32768.0, -32768, 32767).astype(np.int16).tobytes()
-            return bool(self._vad.is_speech(pcm16, 16000))
+            return bool(self._vad.is_speech(pcm16, vad_rate))
         except Exception as exc:
             if not self._vad_error_logged:
                 self._vad_error_logged = True
@@ -2034,16 +2025,20 @@ class VoiceListener(threading.Thread):
 
     def _audio_frames(self, buf):
         """Keep native-rate frame boundaries across arbitrary callback block sizes."""
-        mono = buf.mean(axis=1) if buf.ndim > 1 else buf.flatten()
+        if buf.ndim > 1:
+            mono = buf[:, 0] if buf.shape[1] == 1 else buf.mean(axis=1)
+        else:
+            mono = buf.flatten()
         if mono.size:
             self._audio_peak = max(self._audio_peak, float(np.max(np.abs(mono))))
-        if self._pending_audio is not None:
+        if self._pending_audio is not None and self._pending_audio.size:
             mono = np.concatenate((self._pending_audio, mono))
-        count = len(mono) // self._frame_samples
-        end = count * self._frame_samples
-        self._pending_audio = mono[end:].copy()
+        frame_samples = max(1, self._frame_samples)
+        count = len(mono) // frame_samples
+        end = count * frame_samples
+        self._pending_audio = mono[end:].copy() if end < len(mono) else None
         self._audio_frames_seen += count
-        return [mono[start:start + self._frame_samples] for start in range(0, end, self._frame_samples)]
+        return [mono[start:start + frame_samples] for start in range(0, end, frame_samples)]
 
     def _on_audio(self, indata, frames, time_info, status):
         """Audio callback from sounddevice."""

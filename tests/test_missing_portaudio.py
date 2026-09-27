@@ -1,5 +1,5 @@
 """
-Regression tests for the most-reported desktop crash (#503 and friends).
+Test import resilience when optional audio/input dependencies fail to load.
 
 When the PortAudio shared library is missing (common on Linux),
 ``import sounddevice`` raises **OSError**, not ImportError. Similarly,
