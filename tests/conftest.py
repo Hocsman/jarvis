@@ -678,5 +678,15 @@ class ViewerClient:
     def put(self, *args, **kwargs):
         return self.open(*args, method="PUT", **kwargs)
 
+    def patch(self, *args, **kwargs):
+        return self.open(*args, method="PATCH", **kwargs)
+
     def delete(self, *args, **kwargs):
         return self.open(*args, method="DELETE", **kwargs)
+
+    def __enter__(self):
+        self._client.__enter__()
+        return self
+
+    def __exit__(self, *exc_info):
+        return self._client.__exit__(*exc_info)

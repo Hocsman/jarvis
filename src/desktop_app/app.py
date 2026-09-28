@@ -1201,16 +1201,28 @@ def _port_holds_viewer_server(port: int) -> bool:
 
     The viewer may already be up (a window opened earlier in the session,
     or a stale server from a crashed launch), and the port may equally
-    belong to an unrelated program. The health marker tells them apart;
-    a timeout, an error page or any other answer counts as foreign.
+    belong to an unrelated program. The health marker tells them apart.
+    The probe talks to loopback directly: no proxy, because a configured
+    system proxy cannot reach the user's loopback and would report a
+    healthy viewer as foreign; no redirect following, because a listener
+    that forwards the probe is not identifying itself and must not turn
+    the check into a request to an arbitrary destination; a capped read
+    and a 2s timeout, because this runs on the GUI thread.
     """
+    import http.client
     import json
-    import urllib.request
 
-    url = f"http://127.0.0.1:{port}/api/health"
     try:
-        with urllib.request.urlopen(url, timeout=2) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        try:
+            conn.request("GET", "/api/health")
+            resp = conn.getresponse()
+            if resp.status != 200:
+                debug_log(f"viewer identity check on port {port}: status {resp.status}", "desktop")
+                return False
+            payload = json.loads(resp.read(4096).decode("utf-8"))
+        finally:
+            conn.close()
         return payload.get("app") == "jarvis-memory-viewer"
     except Exception as e:
         debug_log(f"viewer identity check failed on port {port}: {e}", "desktop")

@@ -104,7 +104,10 @@ def _local_only_gate() -> Optional[Any]:
 
     supplied = request.headers.get(TOKEN_HEADER) or ""
     if not supplied.isascii() or not secrets.compare_digest(supplied, _LAUNCH_TOKEN):
-        debug_log(f"viewer gate: refused untokened {request.method} {request.path}", "memory")
+        debug_log(
+            f"viewer gate: refused {request.method} {request.path}: missing or invalid write token",
+            "memory",
+        )
         return jsonify(error="write token required"), 403
 
     if request.path in _JSON_REQUIRED_PATHS and not request.is_json:
@@ -112,6 +115,20 @@ def _local_only_gate() -> Optional[Any]:
         return jsonify(error="application/json required"), 415
 
     return None
+
+
+@app.after_request
+def _frame_and_cache_guard(response: Response) -> Response:
+    """The page holds the launch token, so it must never render inside a
+    foreign frame: a framed genuine page is same-origin and tokened, and
+    clickjacking it sidesteps the whole gate. It must also never come
+    back from a cache: a stale page wields a dead token and every write
+    fails closed until a hard reload. Both headers ride on every
+    response, gate refusals included."""
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.route("/api/health")

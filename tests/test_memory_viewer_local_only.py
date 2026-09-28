@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import socket
 import threading
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -50,6 +51,36 @@ SWEEP_PATHS = (
     "/api/diary/scrub-deflections",
     "/api/diary/optimise-topics",
 )
+
+
+def _example_path(rule) -> str:
+    """A concrete path for a URL rule: every converter gets a stand-in
+    that matches its shape, so the request routes and the gate answers
+    before any handler runs."""
+    parts = []
+    for segment in rule.rule.strip("/").split("/"):
+        if segment.startswith("<") and segment.endswith(">"):
+            converter = segment[1:-1]
+            parts.append("1" if converter.startswith("int:") else "x")
+        else:
+            parts.append(segment)
+    return "/" + "/".join(parts)
+
+
+@contextmanager
+def _served(wsgi_app):
+    """Run a WSGI app on an ephemeral loopback port for one probe."""
+    from werkzeug.serving import make_server
+
+    srv = make_server("127.0.0.1", 0, wsgi_app)
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield srv.server_port
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        thread.join(timeout=5)
 
 
 @pytest.fixture()
@@ -178,8 +209,11 @@ class TestOriginGate:
 @pytest.mark.unit
 @pytest.mark.skipif(not _HAS_FLASK, reason="Flask not available")
 class TestTokenGate:
-    """The per-launch token is what a same-machine request from outside
-    the served page cannot forge. Reads stay open: the embedded view
+    """The per-launch token is a browser-boundary control: a web page
+    that is not the served page can never read it, and so can never
+    write. (A local non-browser process can scrape it from GET / — it
+    could equally read the database files directly — the token defends
+    the browser, not the machine.) Reads stay open: the embedded view
     loads them, and no response carries a CORS allowance, so a foreign
     page can request but never read."""
 
@@ -216,6 +250,20 @@ class TestTokenGate:
         resp = viewer.client.post(path, json={})
 
         assert resp.status_code == 403
+
+    def test_every_mutating_route_refuses_a_tokenless_write(self, viewer):
+        """The mechanism, not a list of endpoints: the gate keys on the
+        method, so every mutating rule in the app, present and future,
+        must refuse a tokenless request before its handler runs."""
+        checked = 0
+        for rule in viewer.mv.app.url_map.iter_rules():
+            for method in sorted(rule.methods & {"POST", "PUT", "PATCH", "DELETE"}):
+                resp = viewer.client.open(_example_path(rule), method=method, json={})
+
+                assert resp.status_code == 403, f"{method} {rule.rule}"
+                checked += 1
+
+        assert checked >= len(SWEEP_PATHS)
 
     def test_a_refused_write_leaves_the_core_untouched(self, viewer):
         viewer.client.put("/api/core/profile", json={"raw": "- injecté\n"})
@@ -259,6 +307,56 @@ class TestSweepsRequireJson:
 
 @pytest.mark.unit
 @pytest.mark.skipif(not _HAS_FLASK, reason="Flask not available")
+class TestFramingAndCache:
+    """The served page holds the launch token, so it must never render
+    inside a foreign frame (a framed genuine page is same-origin with a
+    valid token: clickjacking it sidesteps the whole gate), and it must
+    never be cached (a cached page wields a dead token after a server
+    restart, and every write fails 403 until a hard reload)."""
+
+    def test_the_page_refuses_to_be_framed(self, viewer):
+        resp = viewer.client.get("/")
+
+        assert resp.headers["X-Frame-Options"] == "DENY"
+        assert "frame-ancestors 'none'" in resp.headers["Content-Security-Policy"]
+
+    def test_the_token_bearing_page_is_not_cached(self, viewer):
+        resp = viewer.client.get("/")
+
+        assert resp.headers["Cache-Control"] == "no-store"
+
+    def test_refusals_carry_the_same_headers(self, viewer):
+        resp = viewer.client.get("/api/core", headers={"Host": "attacker.example:5050"})
+
+        assert resp.status_code == 400
+        assert resp.headers["X-Frame-Options"] == "DENY"
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(not _HAS_FLASK, reason="Flask not available")
+class TestViewerClientCarriesTheToken:
+    """The shared test helper must send the token on every mutating verb
+    the gate covers, PATCH included, or an endpoint test using it would
+    silently test the gate instead of the endpoint."""
+
+    def test_patch_carries_the_token(self, viewer):
+        from conftest import ViewerClient
+
+        client = ViewerClient(viewer.mv)
+
+        # No PATCH route exists: past the gate the answer is 405.
+        # Without the injected token the gate would answer 403 first.
+        assert client.patch("/api/health").status_code == 405
+
+    def test_the_context_manager_delegates(self, viewer):
+        from conftest import ViewerClient
+
+        with ViewerClient(viewer.mv) as client:
+            assert client.get("/api/health").status_code == 200
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(not _HAS_FLASK, reason="Flask not available")
 class TestHealthIdentity:
     """The desktop app treats an occupied port as "our server already
     runs" — a foreign program holding the port would then be pointed at
@@ -270,23 +368,13 @@ class TestHealthIdentity:
         assert payload["app"] == "jarvis-memory-viewer"
 
     def test_the_app_recognises_a_live_viewer_server(self, viewer):
-        from werkzeug.serving import make_server
-
         from desktop_app.app import _port_holds_viewer_server
 
-        srv = make_server("127.0.0.1", 0, viewer.mv.app)
-        thread = threading.Thread(target=srv.serve_forever, daemon=True)
-        thread.start()
-        try:
-            assert _port_holds_viewer_server(srv.server_port) is True
-        finally:
-            srv.shutdown()
-            srv.server_close()
-            thread.join(timeout=5)
+        with _served(viewer.mv.app) as port:
+            assert _port_holds_viewer_server(port) is True
 
     def test_the_app_recognises_a_foreign_server(self):
         from flask import Flask, jsonify
-        from werkzeug.serving import make_server
 
         from desktop_app.app import _port_holds_viewer_server
 
@@ -296,15 +384,39 @@ class TestHealthIdentity:
         def other_health():
             return jsonify({"app": "something-else"})
 
-        srv = make_server("127.0.0.1", 0, other)
-        thread = threading.Thread(target=srv.serve_forever, daemon=True)
-        thread.start()
-        try:
-            assert _port_holds_viewer_server(srv.server_port) is False
-        finally:
-            srv.shutdown()
-            srv.server_close()
-            thread.join(timeout=5)
+        with _served(other) as port:
+            assert _port_holds_viewer_server(port) is False
+
+    def test_the_probe_reaches_loopback_past_a_configured_proxy(self, viewer, monkeypatch):
+        """The machine has a proxy configured; the probe must still
+        reach its own loopback directly. A proxy cannot route to the
+        user's loopback, and a healthy viewer must not be reported as
+        foreign on a proxy-configured machine."""
+        from desktop_app.app import _port_holds_viewer_server
+
+        monkeypatch.setenv("http_proxy", "http://127.0.0.1:1")
+        monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
+        with _served(viewer.mv.app) as port:
+            assert _port_holds_viewer_server(port) is True
+
+    def test_the_probe_does_not_follow_a_redirect(self, viewer):
+        """Whoever holds the port must answer for itself. A listener
+        that forwards the probe elsewhere is not identifying itself,
+        and the app must not chase it: that would turn the identity
+        check into a request to an arbitrary destination."""
+        from flask import Flask, redirect
+
+        from desktop_app.app import _port_holds_viewer_server
+
+        with _served(viewer.mv.app) as real_port:
+            forwarder = Flask("forwarder")
+
+            @forwarder.route("/api/health")
+            def forward():
+                return redirect(f"http://127.0.0.1:{real_port}/api/health")
+
+            with _served(forwarder) as fwd_port:
+                assert _port_holds_viewer_server(fwd_port) is False
 
     def test_a_dead_port_is_not_ours(self):
         from desktop_app.app import _port_holds_viewer_server
