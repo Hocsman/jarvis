@@ -693,6 +693,45 @@ def test_a_call_completing_at_the_wire_reports_its_honest_result():
 
 
 @pytest.mark.unit
+def test_a_failure_resolved_before_the_teardown_propagates_untouched(monkeypatch):
+    """A failure already on the future when the expiry is classified is
+    the call's own outcome, not a budget expiry. The production window
+    is a sliver (the worker resolves the future between the internal
+    wait firing and the classifier's read), so the seam is arranged
+    deterministically: the patched ``Future.result`` resolves the
+    future the way the worker would, then raises the expiry the real
+    wait had already decided on. ``match`` discriminates: a relabelled
+    expiry would say "timed out after"."""
+    import concurrent.futures
+
+    worker = _stub_worker()
+    queue = worker._queue
+    real_put = queue.put_nowait
+
+    def pulling_put(cmd):
+        real_put(cmd)
+        cmd.pulled = True
+
+    queue.put_nowait = pulling_put
+
+    real_result = concurrent.futures.Future.result
+    calls = {"n": 0}
+
+    def racing_result(self, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            if not self.done():
+                self.set_exception(RuntimeError("tool blew up"))
+            raise concurrent.futures.TimeoutError()
+        return real_result(self, timeout)
+
+    monkeypatch.setattr(concurrent.futures.Future, "result", racing_result)
+
+    with pytest.raises(RuntimeError, match="tool blew up"):
+        worker.invoke("alpha", {}, 0.05)
+
+
+@pytest.mark.unit
 def test_a_teardown_echo_landing_after_the_expiry_reports_the_timeout():
     """An exception that lands on the future only after the caller's
     own shutdown began is the teardown's echo: the cancellation this
@@ -700,7 +739,7 @@ def test_a_teardown_echo_landing_after_the_expiry_reports_the_timeout():
     out. Re-raising it would tell the caller their expired call was a
     session failure and would hand a sibling's teardown to the wrong
     owner; the expiry is the honest report."""
-    from jarvis.tools.external.mcp_client import MCPServerSessionError
+    from jarvis.tools.external import mcp_runtime as rt
 
     worker = _stub_worker()
     queue = worker._queue
@@ -715,18 +754,16 @@ def test_a_teardown_echo_landing_after_the_expiry_reports_the_timeout():
     def echoing_shutdown():
         cmd = queue.command
         if cmd is not None and not cmd.fut.done():
-            echo = MCPServerSessionError(
-                "MCP server 'srv' session lost while servicing call: CancelledError"
+            # The production translation, not a hand-rolled copy: the
+            # echo is whatever _caller_facing makes of a cancellation.
+            cmd.fut.set_exception(
+                rt._caller_facing(asyncio.CancelledError(), "srv")
             )
-            echo.__cause__ = asyncio.CancelledError()
-            cmd.fut.set_exception(echo)
         worker.alive = False
 
     worker.shutdown = echoing_shutdown
 
-    from jarvis.tools.external.mcp_runtime import MCPCallTimeoutError
-
-    with pytest.raises(MCPCallTimeoutError):
+    with pytest.raises(rt.MCPCallTimeoutError):
         worker.invoke("alpha", {}, 0.05)
 
 
@@ -747,7 +784,8 @@ def test_a_call_cancelled_by_a_sibling_timeout_surfaces_as_a_session_error(
     The same shutdown must not let the second caller's queued command
     execute afterwards: its timeout was already reported, and a side
     effect arriving after the report contradicts it. The command never
-    ran, so its caller's outcome stays the retryable death.
+    ran; the refusal's death sentinel lands on a future whose caller
+    has already left with the expiry.
     """
     import threading
 

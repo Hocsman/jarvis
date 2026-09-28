@@ -194,7 +194,9 @@ class _PersistentMCPRuntime:
         side-effecting tool it timed out on may have run. Only a worker
         that died (e.g. the subprocess crashed) triggers the single retry
         with a fresh worker, whose second failure surfaces as
-        ``MCPServerSessionError`` at the public layer.
+        ``MCPServerSessionError`` at the public layer; a session error
+        translated out of a cancellation surfaces directly, without a
+        retry, because the call may have executed.
         """
         effective_timeout = _resolve_invoke_timeout(server_cfg, timeout)
 
@@ -363,7 +365,7 @@ class MCPCallTimeoutError(TimeoutError):
     """
 
 
-def _caller_facing(e: BaseException, server_name: str) -> BaseException:
+def _caller_facing(e: BaseException, server_name: str) -> Exception:
     """The exception a waiting caller receives for a failed command.
 
     ``Exception`` subclasses travel as-is. A bare ``BaseException``
@@ -499,12 +501,17 @@ class _ServerWorker:
                         if cmd is None:
                             return
                         if not self.alive:
-                            # Shutdown raced this command into the queue
-                            # ahead of the sentinel. Starting it now
-                            # would run a tool whose caller has already
-                            # been answered with a timeout; it never
-                            # ran, so the death sentinel keeps the
-                            # runtime's single retry safe.
+                            # The worker was shut down while this
+                            # command sat in the queue (a sibling
+                            # call's expiry, a config-change
+                            # replacement, the daemon's teardown),
+                            # and the exit sentinel is behind it:
+                            # without this refusal it would still
+                            # execute. It never ran, so the death
+                            # sentinel is the honest resolution: a
+                            # caller still waiting gets the runtime's
+                            # single retry, and a caller already
+                            # answered keeps the report it received.
                             if not cmd.fut.done():
                                 cmd.fut.set_exception(
                                     _WorkerDeadError(
