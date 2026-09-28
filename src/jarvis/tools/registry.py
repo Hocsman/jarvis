@@ -855,9 +855,14 @@ def run_tool_with_retries(
                     error_message=err_msg,
                 ))
             except Exception as e:
+                # An exception with an empty message (a bare TimeoutError
+                # out of the runtime, say) must not reach the model as a
+                # dangling "error: "; the type name always travels.
+                detail = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+                debug_log(f"mcp tool '{raw_name}' raised: {detail}", "tools")
                 return _finish(ToolExecutionResult(
                     success=False, reply_text=None,
-                    error_message=f"MCP tool '{raw_name}' error: {e}",
+                    error_message=f"MCP tool '{raw_name}' error: {detail}",
                 ))
 
     # Friendly user print helper (non-debug only)

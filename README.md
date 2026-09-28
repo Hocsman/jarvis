@@ -497,7 +497,7 @@ See [full MCP setup guide](#mcp-integrations) below.
 
 ## MCP Integrations
 
-> **Session persistence:** each MCP server is launched once and its stdio session is kept open across tool calls. Stateful servers (e.g. browser automation, where the server owns a long-running Chrome process) work correctly. If you have a server you'd rather not keep resident, set `"idle_timeout_sec": 300` on its config entry and Jarvis will free it after that long without activity.
+> **Session persistence:** each MCP server is launched once and its stdio session is kept open across tool calls. Stateful servers (e.g. browser automation, where the server owns a long-running Chrome process) work correctly. If you have a server you'd rather not keep resident, set `"idle_timeout_sec": 300` on its config entry and Jarvis will free it after that long without activity. Each server also accepts `"timeout_sec"` (default 120 s), which bounds discovery and every tool call; a call that exceeds it fails as a timeout without retry and the server restarts fresh, so give stateful servers with slow tools a generous value.
 
 <details>
 <summary><strong>Home Assistant</strong> - Smart home voice control</summary>
