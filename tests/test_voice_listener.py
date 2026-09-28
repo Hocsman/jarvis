@@ -1500,8 +1500,19 @@ class TestWhisperRateLimitRetry:
                                 assert mock_class.call_count > 1
                                 assert listener.model is None
 
-                                # Verify exponential backoff: 2, 4, 8, 16
-                                sleep_values = [c.args[0] for c in mock_sleep.call_args_list]
+                                # Verify exponential backoff: 2, 4, 8, 16.
+                                # The recorder is process-wide while the patch
+                                # is up, and this loop's sequence starts at 2s:
+                                # sub-second sleeps belong to unrelated
+                                # background threads left running by an earlier
+                                # test (a fallback spinner's 0.2s tick, say)
+                                # and are filtered out. Any whole-second bound
+                                # below 2 separates the two; 1 matches the
+                                # Piper suite's filter.
+                                sleep_values = [
+                                    c.args[0] for c in mock_sleep.call_args_list
+                                    if c.args and c.args[0] >= 1
+                                ]
                                 assert sleep_values == [2, 4, 8, 16]
 
     def test_hfhub_429_via_response_status_code_retried(self):
