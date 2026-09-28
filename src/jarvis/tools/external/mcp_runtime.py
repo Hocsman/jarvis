@@ -51,7 +51,7 @@ from typing import Any, Dict, Optional
 
 from ...debug import debug_log
 from . import mcp_client as _mcp_client_module
-from .mcp_client import MCPClient
+from .mcp_client import MCPClient, MCPServerSessionError
 
 _DEFAULT_INVOKE_TIMEOUT_SEC = 120.0
 _SETUP_TIMEOUT_SEC = 30.0
@@ -363,6 +363,28 @@ class MCPCallTimeoutError(TimeoutError):
     """
 
 
+def _caller_facing(e: BaseException, server_name: str) -> BaseException:
+    """The exception a waiting caller receives for a failed command.
+
+    ``Exception`` subclasses travel as-is. A bare ``BaseException``
+    (a cancellation delivered by a sibling call's timeout, an anyio
+    task-group teardown) would escape every ``except Exception`` on
+    the caller's path: the tool funnel would skip the ledger row for
+    a gate-approved call that may have executed, and the turn would
+    die. The caller is an ordinary thread rather than a task, so the
+    honest and catchable form is a session error naming what arrived,
+    with the original kept as ``__cause__``.
+    """
+    if isinstance(e, Exception):
+        return e
+    translated = MCPServerSessionError(
+        f"MCP server '{server_name}' session lost while servicing call: "
+        f"{type(e).__name__}"
+    )
+    translated.__cause__ = e
+    return translated
+
+
 class _Command:
     """One queued request for the worker.
 
@@ -476,6 +498,21 @@ class _ServerWorker:
                             return
                         if cmd is None:
                             return
+                        if not self.alive:
+                            # Shutdown raced this command into the queue
+                            # ahead of the sentinel. Starting it now
+                            # would run a tool whose caller has already
+                            # been answered with a timeout; it never
+                            # ran, so the death sentinel keeps the
+                            # runtime's single retry safe.
+                            if not cmd.fut.done():
+                                cmd.fut.set_exception(
+                                    _WorkerDeadError(
+                                        f"MCP server '{self._server_name}' "
+                                        "session ended"
+                                    )
+                                )
+                            continue
                         # Set before anything else: from this point the
                         # call may execute, and a budget expiry on the
                         # caller side must classify it as a timeout
@@ -498,13 +535,19 @@ class _ServerWorker:
                                 fut.set_result(res)
                         except BaseException as e:  # noqa: BLE001
                             if not fut.done():
-                                fut.set_exception(e)
+                                fut.set_exception(
+                                    _caller_facing(e, self._server_name)
+                                )
         except BaseException as e:  # noqa: BLE001
             # Setup or session loop crashed. Surface to ``start()`` if
             # we never signalled readiness; otherwise log and let the
-            # finally block notify any in-flight callers.
+            # finally block notify any in-flight callers. Either way
+            # the caller receives an ``Exception`` the funnel catches,
+            # never a bare ``BaseException``.
             if not self._ready.done():
-                self._ready.set_exception(e)
+                self._ready.set_exception(
+                    _caller_facing(e, self._server_name)
+                )
             else:
                 debug_log(
                     f"MCP persistent session '{self._server_name}' exited: {e}",
@@ -589,38 +632,37 @@ class _ServerWorker:
             # What the expiry means depends on how far the command got,
             # and ``pulled`` (set by the worker at dequeue, before any
             # side effect can start) is what says so. A pulled command
-            # may have executed: it fails as a timeout and is never
-            # retried, whatever else happened to the worker in the
-            # interim (a config-change replacement or the daemon's
-            # teardown flipping ``alive`` mid-call must not turn an
-            # executed call into a retried one). An unpulled command on
-            # a dead worker never ran, and the runtime's single retry
-            # is safe. ``alive`` is read before ``shutdown()`` flips
-            # it, and the future is re-read after: the worker may have
-            # resolved either in the meantime, and its answer wins.
+            # may have executed: it is never retried, whatever else
+            # happened to the worker in the interim (a config-change
+            # replacement or the daemon's teardown flipping ``alive``
+            # mid-call must not turn an executed call into a retried
+            # one). An unpulled command on a worker already dead at the
+            # expiry never ran, and the runtime's single retry is safe.
+            #
+            # The classification reads the future BEFORE the teardown:
+            # what the call resolved to on its own is its honest
+            # outcome. After ``shutdown()`` only a result is honoured
+            # (a success that landed at the wire beats the expiry that
+            # raced it); an exception landing after the teardown began
+            # is the teardown's own echo — the cancellation this
+            # timeout delivered, possibly through a sibling caller's —
+            # and the expiry is the honest report.
             was_alive = self.alive
+            resolved = fut.done()
+            inner = fut.exception() if resolved else None
             self.shutdown()
-            inner = fut.exception() if fut.done() else None
-            if not command.pulled and (
-                isinstance(inner, _WorkerDeadError)
-                or (inner is None and not was_alive)
-            ):
-                raise _WorkerDeadError(
-                    f"MCP server '{self._server_name}' died while servicing call"
-                ) from None
-            if command.pulled and fut.done():
-                if inner is None:
-                    # The call completed at the wire; its honest result
-                    # beats the expiry that raced it.
+            if command.pulled:
+                if fut.done() and fut.exception() is None:
                     return fut.result()
-                if isinstance(inner, Exception):
+                if resolved and isinstance(inner, Exception):
                     # The call's own failure (a tool error, a session
                     # exception, a tool-side timeout): propagates as-is
                     # rather than being relabelled as a budget expiry.
                     raise inner
-                # A BaseException (cancellation, an anyio group): the
-                # budget expiry is the honest report, and no
-                # BaseException leaks into the engine.
+            elif isinstance(inner, _WorkerDeadError) or not was_alive:
+                raise _WorkerDeadError(
+                    f"MCP server '{self._server_name}' died while servicing call"
+                ) from None
             label = f"tool '{payload[0]}'" if kind == "call" else "list_tools"
             debug_log(
                 f"MCP {label} on server '{self._server_name}' exceeded "
