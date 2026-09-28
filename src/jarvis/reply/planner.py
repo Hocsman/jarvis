@@ -353,22 +353,55 @@ def strip_memory_directives(plan: Sequence[str]) -> List[str]:
     return [s for s in plan if not is_search_memory_step(s)]
 
 
-def tool_steps_of(plan: Sequence[str]) -> List[str]:
+_TOOL_NAME_HEAD_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_-]*)")
+
+_LOWERCASE_TOOL_NAMES = frozenset({"screenshot", "remember", "forget"})
+
+
+def is_tool_step(step: str, known_names: Optional[Sequence[str]] = None) -> bool:
+    """True if the plan step represents an executable tool call rather
+    than a directive or natural-language synthesis step."""
+    s = (step or "").strip()
+    if not s or is_search_memory_step(s):
+        return False
+    if plan_step_args(s) or ("<" in s and ">" in s):
+        return True
+    m = _TOOL_NAME_HEAD_RE.match(s)
+    if m:
+        head = m.group(1)
+        if known_names is not None and head in set(known_names):
+            return True
+        if "__" in head:
+            return True
+        if head in _LOWERCASE_TOOL_NAMES:
+            return True
+        if any(c.isupper() for c in head[1:]) and any(c.islower() for c in head):
+            return True
+    return False
+
+
+def tool_steps_of(
+    plan: Sequence[str],
+    known_names: Optional[Sequence[str]] = None,
+) -> List[str]:
     """Non-synthesis, non-directive tool steps of a plan.
 
     Drops any `searchMemory` directives (engine-internal) and the final
-    synthesis step. A 1-step plan is a reply-only plan by the planner's
-    contract (rule 9), so it has no tool steps and we return an empty
-    list — that lets the engine's plan-driven paths (direct-exec,
-    progress nudge) skip cleanly for the pure-reply case.
+    synthesis step. When a plan has a single step that is a concrete tool
+    call (e.g. ``webSearch query='...'``), it is retained as an executable
+    tool step so the engine can direct-execute it. A 1-step pure-reply plan
+    (e.g. ``Reply to the user.``) has no tool steps. Multi-step plans always
+    conclude with a synthesis step by prompt contract (rule 8), so their final
+    step is unconditionally stripped regardless of the language it was written in.
     """
     steps = strip_memory_directives(plan)
-    if len(steps) > 1:
-        return list(steps[:-1])
-    return []
-
-
-_TOOL_NAME_HEAD_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_-]*)")
+    if not steps:
+        return []
+    if len(steps) == 1:
+        if is_tool_step(steps[0], known_names=known_names):
+            return list(steps)
+        return []
+    return list(steps[:-1])
 
 
 def tool_names_in_plan(
@@ -863,4 +896,5 @@ __all__ = [
     "strip_memory_directives",
     "memory_topic_of",
     "is_search_memory_step",
+    "is_tool_step",
 ]

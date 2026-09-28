@@ -686,12 +686,31 @@ class TestUrlArgNormalisation:
 class TestToolStepsOf:
     def test_multi_step_drops_final_synthesis_step(self):
         assert tool_steps_of(["a", "b", "reply"]) == ["a", "b"]
+        assert tool_steps_of(["webSearch query='foo'", "Reply to the user."]) == ["webSearch query='foo'"]
+        assert tool_steps_of(["webSearch query='foo'", "Répondre à l'utilisateur."]) == ["webSearch query='foo'"]
+        assert tool_steps_of(["webSearch query='foo'", "Dem Benutzer antworten."]) == ["webSearch query='foo'"]
+        assert tool_steps_of(["webSearch query='foo'", "Responder al usuario."]) == ["webSearch query='foo'"]
 
     def test_single_step_has_no_tool_steps(self):
-        """A 1-step plan is reply-only by contract (rule 9), so it
-        contributes no tool steps. Engine uses this to skip the
-        direct-exec path and the progress nudge for pure-reply plans."""
+        """A pure reply 1-step plan contributes no tool steps across languages."""
         assert tool_steps_of(["only"]) == []
+        assert tool_steps_of(["Reply to the user."]) == []
+        assert tool_steps_of(["Répondre à l'utilisateur."]) == []
+        assert tool_steps_of(["Dem Benutzer antworten."]) == []
+        assert tool_steps_of(["Responder al usuario con la información."]) == []
+
+    def test_single_step_tool_plan_is_preserved(self):
+        """A 1-step tool plan carries executable tool steps for direct execution."""
+        assert tool_steps_of(["webSearch query='capital of France'"]) == [
+            "webSearch query='capital of France'"
+        ]
+        assert tool_steps_of(["getTime location='Tokyo'"]) == [
+            "getTime location='Tokyo'"
+        ]
+        assert tool_steps_of(["screenshot"]) == ["screenshot"]
+        assert tool_steps_of(["mcp__weather__get_temp location='London'"]) == [
+            "mcp__weather__get_temp location='London'"
+        ]
 
     def test_empty_plan(self):
         assert tool_steps_of([]) == []
@@ -701,6 +720,13 @@ class TestToolStepsOf:
             "searchMemory topic='user preferences'",
             "webSearch query='foo'",
             "Reply to the user.",
+        ]
+        assert tool_steps_of(plan) == ["webSearch query='foo'"]
+
+    def test_search_memory_followed_by_single_tool_step(self):
+        plan = [
+            "searchMemory topic='user preferences'",
+            "webSearch query='foo'",
         ]
         assert tool_steps_of(plan) == ["webSearch query='foo'"]
 
