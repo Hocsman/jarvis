@@ -26,6 +26,8 @@ try:
 except ImportError:
     _HAS_FLASK = False
 
+from conftest import ViewerClient
+
 
 PAGE = """# Appris
 
@@ -63,7 +65,7 @@ class TestApprisApi:
         invalidate_appris_cache()
 
         memory_viewer.app.config["TESTING"] = True
-        self.client = memory_viewer.app.test_client()
+        self.client = ViewerClient(memory_viewer)
         yield
 
     def _lignes(self):

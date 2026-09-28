@@ -37,6 +37,7 @@ class TestGraphPresetProtection:
 
         memory_viewer.app.config["TESTING"] = True
         self.client = memory_viewer.app.test_client()
+        self.auth = {"X-Jarvis-Token": memory_viewer.get_launch_token()}
         self.store = store
 
         yield
@@ -51,14 +52,14 @@ class TestGraphPresetProtection:
         assert ids == {"root", *FIXED_BRANCH_IDS}
 
     def test_delete_root_returns_400(self):
-        resp = self.client.delete("/api/graph/node/root")
+        resp = self.client.delete("/api/graph/node/root", headers=self.auth)
         assert resp.status_code == 400
         assert "root" in resp.get_json()["error"].lower()
         assert self.store.get_node("root") is not None
 
     def test_delete_fixed_branch_returns_400(self):
         for branch_id in FIXED_BRANCH_IDS:
-            resp = self.client.delete(f"/api/graph/node/{branch_id}")
+            resp = self.client.delete(f"/api/graph/node/{branch_id}", headers=self.auth)
             assert resp.status_code == 400, (
                 f"DELETE on fixed branch {branch_id!r} must be rejected"
             )
@@ -69,7 +70,7 @@ class TestGraphPresetProtection:
         node = self.store.create_node(
             name="Scratch", description="d", parent_id="root"
         )
-        resp = self.client.delete(f"/api/graph/node/{node.id}")
+        resp = self.client.delete(f"/api/graph/node/{node.id}", headers=self.auth)
         assert resp.status_code == 200
         assert resp.get_json() == {"success": True}
         assert self.store.get_node(node.id) is None

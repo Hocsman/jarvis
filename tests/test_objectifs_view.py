@@ -17,6 +17,7 @@ import json
 
 import pytest
 
+from conftest import ViewerClient
 from src.jarvis.objectifs.page import invalidate_objectifs_cache, objectifs_path
 
 
@@ -54,7 +55,7 @@ def viewer(tmp_path):
     _real = memory_viewer.load_settings
     memory_viewer.load_settings = lambda: cfg
     try:
-        yield memory_viewer.app.test_client(), cfg
+        yield ViewerClient(memory_viewer), cfg
     finally:
         memory_viewer.load_settings = _real
         invalidate_objectifs_cache()

@@ -134,7 +134,9 @@ class TestImportDiaryEndpoint:
     @pytest.fixture(autouse=True)
     def setup_app(self, tmp_path):
         """Set up Flask test client with a temporary database."""
+        from src.desktop_app import memory_viewer
         from src.desktop_app.memory_viewer import app, get_graph_store
+        from conftest import ViewerClient
 
         self.db_path = str(tmp_path / "test.db")
 
@@ -153,7 +155,7 @@ class TestImportDiaryEndpoint:
         self.db.conn.commit()
 
         app.config["TESTING"] = True
-        self.client = app.test_client()
+        self.client = ViewerClient(memory_viewer)
 
         yield
         self.db.close()
@@ -187,7 +189,7 @@ class TestImportDiaryEndpoint:
             "NONE",
         ]
 
-        resp = self.client.post("/api/graph/import-diary")
+        resp = self.client.post("/api/graph/import-diary", json={})
         assert resp.status_code == 200
 
         messages = self._parse_ndjson(resp.data)
@@ -218,7 +220,7 @@ class TestImportDiaryEndpoint:
         cfg = MagicMock()
         mock_settings.return_value = cfg
 
-        resp = self.client.post("/api/graph/import-diary")
+        resp = self.client.post("/api/graph/import-diary", json={})
         messages = self._parse_ndjson(resp.data)
 
         assert len(messages) == 1
@@ -249,7 +251,7 @@ class TestImportDiaryEndpoint:
             "NONE",                     # traverse
         ]
 
-        resp = self.client.post("/api/graph/import-diary")
+        resp = self.client.post("/api/graph/import-diary", json={})
         messages = self._parse_ndjson(resp.data)
 
         progress_msgs = [m for m in messages if m["type"] == "progress"]

@@ -1196,6 +1196,27 @@ class LogViewerWindow(QMainWindow):
         webbrowser.open(url)
 
 
+def _port_holds_viewer_server(port: int) -> bool:
+    """True when whatever answers on `port` identifies as the memory viewer.
+
+    The viewer may already be up (a window opened earlier in the session,
+    or a stale server from a crashed launch), and the port may equally
+    belong to an unrelated program. The health marker tells them apart;
+    a timeout, an error page or any other answer counts as foreign.
+    """
+    import json
+    import urllib.request
+
+    url = f"http://127.0.0.1:{port}/api/health"
+    try:
+        with urllib.request.urlopen(url, timeout=2) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        return payload.get("app") == "jarvis-memory-viewer"
+    except Exception as e:
+        debug_log(f"viewer identity check failed on port {port}: {e}", "desktop")
+        return False
+
+
 class MemoryViewerWindow(QMainWindow):
     """Window for viewing Jarvis memory using embedded web view."""
 
@@ -1293,11 +1314,19 @@ class MemoryViewerWindow(QMainWindow):
             sock.close()
 
             if result == 0:
-                # Port is already in use, assume server is running
-                self.is_server_running = True
-                print(f"   ✓ Server already running on port {self.MEMORY_VIEWER_PORT}", flush=True)
-                debug_log(f"memory viewer server already running on port {self.MEMORY_VIEWER_PORT}", "desktop")
-                return True
+                # Port is occupied. Point the view at the listener only
+                # when it identifies as a memory viewer server (a stale
+                # instance answers the health marker); a foreign program
+                # holding the port gets an error page instead of the
+                # window's trust.
+                if _port_holds_viewer_server(self.MEMORY_VIEWER_PORT):
+                    self.is_server_running = True
+                    print(f"   ✓ Server already running on port {self.MEMORY_VIEWER_PORT}", flush=True)
+                    debug_log(f"memory viewer server already running on port {self.MEMORY_VIEWER_PORT}", "desktop")
+                    return True
+                print(f"   ✗ Port {self.MEMORY_VIEWER_PORT} is held by another program", flush=True)
+                debug_log(f"port {self.MEMORY_VIEWER_PORT} held by a foreign listener; viewer not started", "desktop")
+                return False
 
             # Check if we're running as a frozen/bundled app
             is_frozen = getattr(sys, 'frozen', False)

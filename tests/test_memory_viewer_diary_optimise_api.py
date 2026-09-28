@@ -55,6 +55,7 @@ class TestDiaryOptimiseTopicsEndpoint:
 
         memory_viewer.app.config["TESTING"] = True
         self.client = memory_viewer.app.test_client()
+        self.auth = {"X-Jarvis-Token": memory_viewer.get_launch_token()}
 
     # Controlled fake events from optimise_diary_topics.
     _FAKE_EVENTS = [
@@ -81,7 +82,7 @@ class TestDiaryOptimiseTopicsEndpoint:
             patch("src.jarvis.memory.conversation.optimise_diary_topics", _make_fake_optimise(fake_events)),
             patch("jarvis.memory.conversation.optimise_diary_topics", _make_fake_optimise(fake_events)),
         ):
-            resp = self.client.post("/api/diary/optimise-topics")
+            resp = self.client.post("/api/diary/optimise-topics", json={}, headers=self.auth)
         assert resp.status_code == 200
         events = []
         for line in resp.data.decode("utf-8").splitlines():
