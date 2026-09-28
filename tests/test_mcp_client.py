@@ -16,14 +16,23 @@ def shutdown_persistent_runtime():
 
 
 def _make_tracked_doubles(call_count, enter_count, exit_count, *, fail_on_call=None,
-                          tools_payload=None):
+                          tools_payload=None, delays=None, list_count=None):
     """Build patchable doubles for ``stdio_client`` and ``ClientSession``.
 
     ``fail_on_call`` may be a list whose values trigger ``call_tool`` to
     raise ``RuntimeError(value)`` on the matching invocation index. A
     ``None`` entry means succeed normally.
+
+    ``delays`` is a mutable dict read at call time (``{"call": secs,
+    "list": secs}``) so one test can flip between a slow and a fast tool
+    without rebuilding the doubles; the await happens after the counter
+    increments, so a call cancelled mid-sleep still counts as started.
+    ``list_count`` counts ``list_tools`` invocations the same way
+    ``call_count`` counts ``call_tool`` ones.
     """
     fail_on_call = list(fail_on_call or [])
+    delays = delays if delays is not None else {}
+    list_count = list_count if list_count is not None else {"n": 0}
 
     class TrackedConn:
         async def __aenter__(self_):
@@ -46,6 +55,9 @@ def _make_tracked_doubles(call_count, enter_count, exit_count, *, fail_on_call=N
                 async def call_tool(_self, name, arguments):
                     idx = call_count["n"]
                     call_count["n"] += 1
+                    delay = delays.get("call", 0.0)
+                    if delay:
+                        await asyncio.sleep(delay)
                     if idx < len(fail_on_call) and fail_on_call[idx] is not None:
                         raise RuntimeError(fail_on_call[idx])
                     return type(
@@ -55,6 +67,10 @@ def _make_tracked_doubles(call_count, enter_count, exit_count, *, fail_on_call=N
                     )()
 
                 async def list_tools(_self):
+                    list_count["n"] += 1
+                    delay = delays.get("list", 0.0)
+                    if delay:
+                        await asyncio.sleep(delay)
                     payload = tools_payload or []
                     fake_tools = [
                         type("T", (), {"name": n, "description": d, "inputSchema": s})()
@@ -300,6 +316,442 @@ def test_list_tools_uses_persistent_session(
     assert enter_count["n"] == 1, (
         "list_tools and invoke_tool should reuse the same stdio session"
     )
+
+
+@pytest.mark.unit
+def test_a_timed_out_call_fails_once_as_a_timeout_and_is_not_retried(
+    monkeypatch, shutdown_persistent_runtime
+):
+    """A tool slower than its budget: ``call_tool`` starts exactly once,
+    the caller sees a ``TimeoutError`` (not ``MCPServerSessionError``) in
+    about ``timeout_sec``, and the next call opens a fresh connection.
+
+    The timed-out tool is a side-effecting one that may still be running;
+    executing it again after one approval is executing it twice, which is
+    exactly what a silent retry after a timeout does.
+    """
+    import time
+
+    from jarvis.tools.external.mcp_client import MCPClient, MCPServerSessionError
+
+    enter_count = {"n": 0}
+    exit_count = {"n": 0}
+    call_count = {"n": 0}
+    delays = {"call": 1.0}
+
+    TrackedConn, TrackedSession = _make_tracked_doubles(
+        call_count, enter_count, exit_count, delays=delays
+    )
+    _patch_mcp_doubles(monkeypatch, TrackedConn, TrackedSession)
+
+    client = MCPClient(
+        {"slow": {"transport": "stdio", "command": "/bin/true", "args": []}}
+    )
+
+    started = time.monotonic()
+    with pytest.raises(TimeoutError) as excinfo:
+        client.invoke_tool("slow", "alpha", {"x": 1}, timeout_sec=0.3)
+    elapsed = time.monotonic() - started
+
+    assert call_count["n"] == 1, "a timed-out call must never run again"
+    assert not isinstance(excinfo.value, MCPServerSessionError), (
+        "a timeout must surface as a timeout, not as a session failure"
+    )
+    message = str(excinfo.value)
+    assert "slow" in message, message
+    assert "alpha" in message, message
+    assert "0.3" in message, message
+    # The counters and the exception type are the deterministic pins;
+    # this bound only guards against a hang (the tool sleeps 1.0s).
+    assert elapsed < 2.0, f"should fail in about timeout_sec, took {elapsed:.2f}s"
+
+    # The timed-out worker is dropped: the next call opens a fresh connection.
+    delays["call"] = 0.0
+    res = client.invoke_tool("slow", "beta", {}, timeout_sec=5.0)
+    assert res["isError"] is False
+    assert enter_count["n"] == 2, "the next call must start a fresh session"
+    assert call_count["n"] == 2
+
+
+@pytest.mark.unit
+def test_a_timed_out_discovery_fails_once_as_a_timeout_and_is_not_retried(
+    monkeypatch, shutdown_persistent_runtime
+):
+    """The same contract for ``list_tools``: one attempt, a timeout that
+    names the server, the operation and the budget, then a fresh session
+    for the next call."""
+    import time
+
+    from jarvis.tools.external.mcp_client import MCPClient, MCPServerSessionError
+
+    enter_count = {"n": 0}
+    exit_count = {"n": 0}
+    call_count = {"n": 0}
+    list_count = {"n": 0}
+    delays = {"list": 1.0}
+
+    TrackedConn, TrackedSession = _make_tracked_doubles(
+        call_count,
+        enter_count,
+        exit_count,
+        tools_payload=[("alpha", "a tool", {"type": "object"})],
+        delays=delays,
+        list_count=list_count,
+    )
+    _patch_mcp_doubles(monkeypatch, TrackedConn, TrackedSession)
+
+    client = MCPClient(
+        {"slow": {"transport": "stdio", "command": "/bin/true", "args": []}}
+    )
+
+    started = time.monotonic()
+    with pytest.raises(TimeoutError) as excinfo:
+        client.list_tools("slow", timeout_sec=0.3)
+    elapsed = time.monotonic() - started
+
+    assert list_count["n"] == 1, "a timed-out discovery must never run again"
+    assert not isinstance(excinfo.value, MCPServerSessionError)
+    message = str(excinfo.value)
+    assert "slow" in message, message
+    assert "list_tools" in message, message
+    assert "0.3" in message, message
+    # The counters and the exception type are the deterministic pins;
+    # this bound only guards against a hang (the discovery sleeps 1.0s).
+    assert elapsed < 2.0, f"should fail in about timeout_sec, took {elapsed:.2f}s"
+
+    delays["list"] = 0.0
+    listed = client.list_tools("slow", timeout_sec=5.0)
+    assert {t["name"] for t in listed} == {"alpha"}
+    assert enter_count["n"] == 2, "the next discovery must start a fresh session"
+
+
+@pytest.mark.unit
+def test_an_explicit_timeout_overrides_the_server_config(
+    monkeypatch, shutdown_persistent_runtime
+):
+    """The per-call ``timeout_sec`` argument wins over the server's
+    configured budget, in both directions."""
+    from jarvis.tools.external.mcp_client import MCPClient
+
+    enter_count = {"n": 0}
+    exit_count = {"n": 0}
+    call_count = {"n": 0}
+    delays = {"call": 0.6}
+
+    TrackedConn, TrackedSession = _make_tracked_doubles(
+        call_count, enter_count, exit_count, delays=delays
+    )
+    _patch_mcp_doubles(monkeypatch, TrackedConn, TrackedSession)
+
+    client = MCPClient({
+        "generous": {
+            "transport": "stdio", "command": "/bin/true", "args": [],
+            "timeout_sec": 5.0,
+        },
+        "stingy": {
+            "transport": "stdio", "command": "/bin/true", "args": [],
+            "timeout_sec": 0.2,
+        },
+    })
+
+    # A tight explicit budget beats the generous config: times out.
+    with pytest.raises(TimeoutError):
+        client.invoke_tool("generous", "alpha", {}, timeout_sec=0.3)
+    assert call_count["n"] == 1
+
+    # A generous explicit budget beats the stingy config: succeeds.
+    res = client.invoke_tool("stingy", "alpha", {}, timeout_sec=3.0)
+    assert res["isError"] is False
+    assert call_count["n"] == 2
+
+
+_GARBAGE_TIMEOUT_CONFIGS = [
+    pytest.param({"timeout_sec": 0}, id="zero"),
+    pytest.param({"timeout_sec": -5}, id="negative"),
+    pytest.param({"timeout_sec": "nan"}, id="nan"),
+    pytest.param({"timeout_sec": "inf"}, id="inf"),
+    pytest.param({"timeout_sec": True}, id="bool"),
+    pytest.param({"timeout_sec": "abc"}, id="string"),
+    pytest.param({"timeout": 0.01}, id="dropped-alias"),
+]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("cfg_extra", _GARBAGE_TIMEOUT_CONFIGS)
+def test_an_invalid_timeout_config_falls_back_to_the_default(
+    monkeypatch, shutdown_persistent_runtime, cfg_extra
+):
+    """An unusable budget never reaches the wait: the module default
+    applies and a fast tool succeeds exactly once. A zero, negative,
+    ``nan`` or ``inf`` budget would fail every call at once (or overflow),
+    ``True`` would silently mean one second, and the undocumented
+    ``timeout`` alias is not read at all."""
+    from jarvis.tools.external import mcp_runtime as _runtime_mod
+    from jarvis.tools.external.mcp_client import MCPClient
+
+    monkeypatch.setattr(_runtime_mod, "_DEFAULT_INVOKE_TIMEOUT_SEC", 5.0)
+
+    enter_count = {"n": 0}
+    exit_count = {"n": 0}
+    call_count = {"n": 0}
+    delays = {"call": 0.2}
+
+    TrackedConn, TrackedSession = _make_tracked_doubles(
+        call_count, enter_count, exit_count, delays=delays
+    )
+    _patch_mcp_doubles(monkeypatch, TrackedConn, TrackedSession)
+
+    cfg = {"transport": "stdio", "command": "/bin/true", "args": [], **cfg_extra}
+    client = MCPClient({"srv": cfg})
+
+    res = client.invoke_tool("srv", "alpha", {})
+
+    assert res["isError"] is False
+    assert call_count["n"] == 1
+
+
+@pytest.mark.unit
+def test_the_default_budget_is_read_from_the_module_constant(
+    monkeypatch, shutdown_persistent_runtime
+):
+    """Pin the fallback's source: monkeypatching
+    ``_DEFAULT_INVOKE_TIMEOUT_SEC`` below the tool's duration must time
+    the call out. A hardcoded literal 120 would let it succeed."""
+    from jarvis.tools.external import mcp_runtime as _runtime_mod
+    from jarvis.tools.external.mcp_client import MCPClient
+
+    monkeypatch.setattr(_runtime_mod, "_DEFAULT_INVOKE_TIMEOUT_SEC", 0.25)
+
+    enter_count = {"n": 0}
+    exit_count = {"n": 0}
+    call_count = {"n": 0}
+    delays = {"call": 1.0}
+
+    TrackedConn, TrackedSession = _make_tracked_doubles(
+        call_count, enter_count, exit_count, delays=delays
+    )
+    _patch_mcp_doubles(monkeypatch, TrackedConn, TrackedSession)
+
+    cfg = {
+        "transport": "stdio", "command": "/bin/true", "args": [],
+        "timeout_sec": "abc",
+    }
+    client = MCPClient({"srv": cfg})
+
+    with pytest.raises(TimeoutError):
+        client.invoke_tool("srv", "alpha", {})
+    assert call_count["n"] == 1
+
+
+@pytest.mark.unit
+def test_the_budget_cascade_prefers_the_first_valid_candidate():
+    """Resolution order: a valid explicit argument wins; an invalid one
+    falls to the server's value; an invalid server value falls to the
+    module default. The fallback is fail-open, and every rejection is
+    the resolver's, never the wait's."""
+    from jarvis.tools.external import mcp_runtime as rt
+
+    assert rt._resolve_invoke_timeout({"timeout_sec": 30.0}, 10.0) == 10.0
+    assert rt._resolve_invoke_timeout({"timeout_sec": 30.0}, "abc") == 30.0
+    assert rt._resolve_invoke_timeout({"timeout_sec": 0}, 10.0) == 10.0
+    assert rt._resolve_invoke_timeout({"timeout_sec": "abc"}, None) == (
+        rt._DEFAULT_INVOKE_TIMEOUT_SEC
+    )
+    assert rt._resolve_invoke_timeout({}, True) == rt._DEFAULT_INVOKE_TIMEOUT_SEC
+
+
+def _stub_worker():
+    """A ``_ServerWorker`` with no loop and no task, for pinning how
+    ``_submit`` classifies a budget expiry. The fake loop runs scheduled
+    callbacks inline and the fake queue captures the command, so a test
+    arranges exactly the worker-side state the classifier will read."""
+    from jarvis.tools.external import mcp_runtime as rt
+
+    worker = rt._ServerWorker.__new__(rt._ServerWorker)
+    worker._server_name = "srv"
+    worker.config = {}
+    worker._task = None
+    worker._idle_timeout = None
+    worker.alive = True
+
+    class _FakeLoop:
+        def call_soon_threadsafe(self, fn, *args):
+            fn(*args)
+
+    class _FakeQueue:
+        def __init__(self):
+            self.command = None
+
+        def put_nowait(self, cmd):
+            self.command = cmd
+
+    worker._loop = _FakeLoop()
+    worker._queue = _FakeQueue()
+    return worker
+
+
+@pytest.mark.unit
+def test_an_expiry_on_a_pulled_command_is_a_timeout_even_on_a_dead_worker():
+    """The classification oracle, and the race the ``pulled`` flag
+    exists for: a command the worker pulled off the queue may have
+    executed, so a budget expiry there is a timeout and never a death,
+    whatever else happened to the worker in the interim. A third party
+    shutting the worker down mid-call (a config change, the daemon
+    teardown) must not turn an executed call into a retried one."""
+    from jarvis.tools.external import mcp_runtime as rt
+
+    worker = _stub_worker()
+    queue = worker._queue
+    real_put = queue.put_nowait
+
+    def pulling_put(cmd):
+        real_put(cmd)
+        cmd.pulled = True       # the worker took it off the queue...
+        worker.alive = False    # ...and something killed the worker
+
+    queue.put_nowait = pulling_put
+
+    with pytest.raises(rt.MCPCallTimeoutError):
+        worker.invoke("alpha", {}, 0.05)
+
+
+@pytest.mark.unit
+def test_an_unpulled_command_on_a_dead_worker_is_a_safe_retry():
+    """The other side of the oracle: a command that never left the
+    queue never executed, so a dead worker there is the honest
+    ``_WorkerDeadError`` the runtime answers with its single retry."""
+    from jarvis.tools.external import mcp_runtime as rt
+
+    worker = _stub_worker()
+    queue = worker._queue
+    real_put = queue.put_nowait
+
+    def dying_put(cmd):
+        real_put(cmd)
+        worker.alive = False    # died before pulling anything
+
+    queue.put_nowait = dying_put
+
+    with pytest.raises(rt._WorkerDeadError):
+        worker.invoke("alpha", {}, 0.05)
+
+
+@pytest.mark.unit
+def test_a_drain_resolving_the_future_during_shutdown_stays_a_death():
+    """When the worker's drain resolves our future with the death
+    sentinel in the window between the expiry and the classification,
+    the sentinel wins: the command was still queued, it never ran, and
+    the retry is safe."""
+    from jarvis.tools.external import mcp_runtime as rt
+
+    worker = _stub_worker()
+
+    def draining_shutdown():
+        cmd = worker._queue.command
+        if cmd is not None and not cmd.fut.done():
+            cmd.fut.set_exception(rt._WorkerDeadError("session ended"))
+        worker.alive = False
+
+    worker.shutdown = draining_shutdown
+
+    with pytest.raises(rt._WorkerDeadError):
+        worker.invoke("alpha", {}, 0.05)
+
+
+@pytest.mark.unit
+def test_a_call_completing_at_the_wire_reports_its_honest_result():
+    """A result that lands between the expiry and the classification is
+    the call's outcome, not a timeout: reporting a failure for a call
+    that succeeded is the same kind of lie as reporting a success for
+    one that never ran."""
+    worker = _stub_worker()
+    queue = worker._queue
+    real_put = queue.put_nowait
+
+    def pulling_put(cmd):
+        real_put(cmd)
+        cmd.pulled = True
+
+    queue.put_nowait = pulling_put
+
+    def resolving_shutdown():
+        cmd = queue.command
+        if cmd is not None and not cmd.fut.done():
+            cmd.fut.set_result("late-result")
+        worker.alive = False
+
+    worker.shutdown = resolving_shutdown
+
+    assert worker.invoke("alpha", {}, 0.05) == "late-result"
+
+
+@pytest.mark.unit
+def test_a_tool_side_failure_landing_after_the_expiry_propagates_untouched():
+    """An exception the call itself produced (including a tool-side
+    ``TimeoutError``, which on Python 3.11+ is the same class as the
+    budget's) is the call's failure: it propagates as-is rather than
+    being relabelled as a budget expiry it never hit. The ``match``
+    discriminates: a relabelled expiry would say "timed out after"."""
+    worker = _stub_worker()
+    queue = worker._queue
+    real_put = queue.put_nowait
+
+    def pulling_put(cmd):
+        real_put(cmd)
+        cmd.pulled = True
+
+    queue.put_nowait = pulling_put
+
+    def failing_shutdown():
+        cmd = queue.command
+        if cmd is not None and not cmd.fut.done():
+            cmd.fut.set_exception(RuntimeError("tool blew up"))
+        worker.alive = False
+
+    worker.shutdown = failing_shutdown
+
+    with pytest.raises(RuntimeError, match="tool blew up"):
+        worker.invoke("alpha", {}, 0.05)
+
+
+@pytest.mark.unit
+def test_the_registry_names_a_bare_timeout_error(tools_unrestricted):
+    """A ``TimeoutError`` with an empty message must not reach the model
+    as a dangling ``error: ``; the error text names the exception type."""
+    from unittest.mock import patch
+
+    from jarvis.tools.registry import run_tool_with_retries
+
+    class MockDB:
+        pass
+
+    class MockConfig:
+        def __init__(self):
+            self.mcps = {"test-server": {"command": "fake"}}
+            self.voice_debug = False
+
+    class TimeoutMCPClient:
+        def __init__(self, config):
+            pass
+
+        def invoke_tool(self, server_name, tool_name, arguments):
+            raise TimeoutError()
+
+    with patch("jarvis.tools.registry.MCPClient", TimeoutMCPClient):
+        result = run_tool_with_retries(
+            db=MockDB(),
+            cfg=MockConfig(),
+            tool_name="test-server__slow_tool",
+            tool_args={},
+            system_prompt="t",
+            original_prompt="t",
+            redacted_text="t",
+            max_retries=0,
+        )
+
+    assert result.success is False
+    assert "TimeoutError" in result.error_message
+    assert not result.error_message.endswith(": ")
 
 
 @pytest.mark.unit
@@ -696,15 +1148,17 @@ class TestMCPContentAndErrors:
         assert d["text"], "Empty error response must provide non-empty error text"
         assert "error" in d["text"].lower() or "failed" in d["text"].lower()
 
-    def test_invoke_tool_forwards_timeout_sec_from_server_config(self, monkeypatch):
-        """Server config timeout_sec must be forwarded to runtime.invoke."""
+    def test_invoke_tool_sends_the_config_timeout_to_the_runtime(self, monkeypatch):
+        """The config's timeout_sec travels inside the config itself; the
+        runtime is the single place that resolves the budget."""
         from jarvis.tools.external.mcp_client import MCPClient
 
-        captured_kwargs = {}
+        captured = {}
 
         class FakeRuntime:
             def invoke(self, server_name, cfg, tool_name, arguments, timeout=None):
-                captured_kwargs["timeout"] = timeout
+                captured["timeout"] = timeout
+                captured["cfg"] = cfg
                 return type("R", (), {"content": "ok", "isError": False, "meta": None})()
 
         monkeypatch.setattr(
@@ -719,7 +1173,8 @@ class TestMCPContentAndErrors:
             }
         })
         client.invoke_tool("weather", "get_forecast", {})
-        assert captured_kwargs.get("timeout") == 42.5
+        assert captured["timeout"] is None
+        assert captured["cfg"]["timeout_sec"] == 42.5
 
     def test_invoke_tool_forwards_explicit_timeout_sec_arg(self, monkeypatch):
         """Explicit timeout_sec passed to invoke_tool overrides server config."""
@@ -746,15 +1201,17 @@ class TestMCPContentAndErrors:
         client.invoke_tool("weather", "get_forecast", {}, timeout_sec=15.0)
         assert captured_kwargs.get("timeout") == 15.0
 
-    def test_list_tools_forwards_timeout_sec_from_server_config(self, monkeypatch):
-        """Server config timeout_sec must be forwarded to runtime.list_tools."""
+    def test_list_tools_sends_the_config_timeout_to_the_runtime(self, monkeypatch):
+        """The config's timeout_sec travels inside the config itself; the
+        runtime is the single place that resolves the budget."""
         from jarvis.tools.external.mcp_client import MCPClient
 
-        captured_kwargs = {}
+        captured = {}
 
         class FakeRuntime:
             def list_tools(self, server_name, cfg, timeout=None):
-                captured_kwargs["timeout"] = timeout
+                captured["timeout"] = timeout
+                captured["cfg"] = cfg
                 return []
 
         monkeypatch.setattr(
@@ -769,7 +1226,8 @@ class TestMCPContentAndErrors:
             }
         })
         client.list_tools("weather")
-        assert captured_kwargs.get("timeout") == 42.5
+        assert captured["timeout"] is None
+        assert captured["cfg"]["timeout_sec"] == 42.5
 
     def test_list_tools_forwards_explicit_timeout_sec_arg(self, monkeypatch):
         """Explicit timeout_sec passed to list_tools overrides server config."""

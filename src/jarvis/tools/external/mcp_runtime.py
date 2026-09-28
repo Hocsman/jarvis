@@ -29,12 +29,22 @@ self-terminate after that long without activity. Stateful servers
 (chrome-devtools-mcp) should leave it unset so the underlying
 process (Chrome) stays resident. Stateless servers (e.g. transcript
 fetchers) can opt in to free their subprocess between bursts of use.
+
+Invoke budget
+-------------
+Every discovery and tool call is bounded by ``timeout_sec``: the
+per-call argument, else the server config's value, else a 120s
+default; only finite positive numbers count. A call that exceeds its
+budget kills its worker and surfaces as ``MCPCallTimeoutError``. It is
+never retried, because the tool may be a side-effecting one that
+already ran; the next call starts a fresh session.
 """
 
 from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import math
 import threading
 import time
 from typing import Any, Dict, Optional
@@ -46,6 +56,58 @@ from .mcp_client import MCPClient
 _DEFAULT_INVOKE_TIMEOUT_SEC = 120.0
 _SETUP_TIMEOUT_SEC = 30.0
 _SHUTDOWN_THREAD_JOIN_SEC = 5.0
+
+
+def _validated_seconds(raw: Any) -> Optional[float]:
+    """``raw`` as a finite positive float, or None when it is not one.
+
+    Booleans convert to floats, so they are refused explicitly: a config
+    of ``true`` silently meaning "one second" is nobody's intent.
+    ``Future.result(timeout=...)`` has undefined wait semantics for
+    ``nan`` and overflows on ``inf``, and a zero or negative budget
+    fails every call at once.
+    """
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value) or value <= 0:
+        return None
+    return value
+
+
+def _resolve_invoke_timeout(
+    server_cfg: Dict[str, Any], override: Optional[Any] = None
+) -> float:
+    """Return the budget for one round trip: the explicit ``override``
+    when it validates, else the server's ``timeout_sec``, else
+    ``_DEFAULT_INVOKE_TIMEOUT_SEC``. Every rejected candidate announces
+    itself in the debug log rather than failing the call in a way nobody
+    can trace back to a config typo."""
+    if server_cfg.get("timeout_sec") is None and server_cfg.get("timeout") is not None:
+        debug_log(
+            f"mcp server config carries 'timeout'={server_cfg['timeout']!r}; "
+            "the key is named 'timeout_sec', and 'timeout' is not read",
+            "mcp",
+        )
+    for source, raw in (
+        ("explicit timeout_sec", override),
+        ("server timeout_sec", server_cfg.get("timeout_sec")),
+    ):
+        if raw is None:
+            continue
+        value = _validated_seconds(raw)
+        if value is None:
+            debug_log(
+                f"mcp {source}={raw!r} is not a finite positive number; "
+                "falling back",
+                "mcp",
+            )
+            continue
+        return value
+    return _DEFAULT_INVOKE_TIMEOUT_SEC
 
 
 _runtime_lock = threading.Lock()
@@ -124,22 +186,17 @@ class _PersistentMCPRuntime:
     ) -> Any:
         """Call a tool on the named server, retrying once if the worker died.
 
-        ``timeout`` bounds the call_tool round trip (not setup). On expiry,
-        a ``concurrent.futures.TimeoutError`` is raised. If the worker
-        died during the call (e.g. the subprocess crashed), the timeout
-        is converted to ``_WorkerDeadError`` so this method's retry path
-        can replace the worker transparently.
+        ``timeout`` bounds the call_tool round trip (not setup); when not
+        given, the budget is resolved from ``server_cfg``'s
+        ``timeout_sec``, falling back to ``_DEFAULT_INVOKE_TIMEOUT_SEC``.
+        A call that exceeds its budget drops the worker and surfaces as
+        ``MCPCallTimeoutError``; it is never retried, because the
+        side-effecting tool it timed out on may have run. Only a worker
+        that died (e.g. the subprocess crashed) triggers the single retry
+        with a fresh worker, whose second failure surfaces as
+        ``MCPServerSessionError`` at the public layer.
         """
-        if timeout is None:
-            raw_t = server_cfg.get("timeout_sec", server_cfg.get("timeout"))
-            try:
-                effective_timeout = (
-                    float(raw_t) if raw_t is not None else _DEFAULT_INVOKE_TIMEOUT_SEC
-                )
-            except (TypeError, ValueError):
-                effective_timeout = _DEFAULT_INVOKE_TIMEOUT_SEC
-        else:
-            effective_timeout = float(timeout)
+        effective_timeout = _resolve_invoke_timeout(server_cfg, timeout)
 
         worker = self._get_worker(server_name, server_cfg)
         try:
@@ -153,8 +210,15 @@ class _PersistentMCPRuntime:
             )
             self._drop_worker(server_name)
             worker = self._get_worker(server_name, server_cfg)
-            return worker.invoke(tool_name, arguments, effective_timeout)
-        except concurrent.futures.TimeoutError:
+            try:
+                return worker.invoke(tool_name, arguments, effective_timeout)
+            except MCPCallTimeoutError:
+                self._drop_worker(server_name)
+                raise
+        except MCPCallTimeoutError:
+            # The worker shut itself down in ``_submit``; evict it so the
+            # next call starts a fresh session. The call itself is not
+            # retried.
             self._drop_worker(server_name)
             raise
 
@@ -171,17 +235,13 @@ class _PersistentMCPRuntime:
         services subsequent ``call_tool`` requests. This avoids the
         startup cost of spawning the server twice (once for discovery,
         once for the first invocation).
+
+        ``timeout`` bounds the discovery round trip (not setup) and is
+        resolved exactly like ``invoke``'s. A discovery that exceeds its
+        budget drops the worker and surfaces as ``MCPCallTimeoutError``;
+        it is never retried.
         """
-        if timeout is None:
-            raw_t = server_cfg.get("timeout_sec", server_cfg.get("timeout"))
-            try:
-                effective_timeout = (
-                    float(raw_t) if raw_t is not None else _DEFAULT_INVOKE_TIMEOUT_SEC
-                )
-            except (TypeError, ValueError):
-                effective_timeout = _DEFAULT_INVOKE_TIMEOUT_SEC
-        else:
-            effective_timeout = float(timeout)
+        effective_timeout = _resolve_invoke_timeout(server_cfg, timeout)
 
         worker = self._get_worker(server_name, server_cfg)
         try:
@@ -193,8 +253,12 @@ class _PersistentMCPRuntime:
             )
             self._drop_worker(server_name)
             worker = self._get_worker(server_name, server_cfg)
-            return worker.list_tools(effective_timeout)
-        except concurrent.futures.TimeoutError:
+            try:
+                return worker.list_tools(effective_timeout)
+            except MCPCallTimeoutError:
+                self._drop_worker(server_name)
+                raise
+        except MCPCallTimeoutError:
             self._drop_worker(server_name)
             raise
 
@@ -206,8 +270,9 @@ class _PersistentMCPRuntime:
         Reuses an existing worker iff it is still alive and its cached
         config equals the requested one. A dead worker or a config
         change triggers shutdown of the old worker and creation of a
-        fresh one. Callers hold no lock during ``worker.start()`` so
-        startup work happens without blocking other servers.
+        fresh one. ``worker.start()`` runs under ``_workers_lock``: a
+        setup that hangs blocks calls to every server for up to
+        ``_SETUP_TIMEOUT_SEC``.
         """
         with self._workers_lock:
             existing = self._workers.get(server_name)
@@ -287,6 +352,39 @@ class _WorkerDeadError(RuntimeError):
     ``MCPServerSessionError`` if it escapes the retry."""
 
 
+class MCPCallTimeoutError(TimeoutError):
+    """A call exceeded its time budget.
+
+    The worker is shut down (a session with a call still in flight is
+    not trustworthy) and the call is not retried: the tool may be a slow
+    side-effecting one that already ran, and running it twice after one
+    approval is worse than reporting the timeout. The message names the
+    server, the tool (or ``list_tools``) and the seconds.
+    """
+
+
+class _Command:
+    """One queued request for the worker.
+
+    ``pulled`` is set by the worker task the moment the command leaves
+    the queue, before any side effect can start. ``_submit`` reads it
+    after a budget expiry to tell the two failures apart: a pulled
+    command may have executed and is never retried, while an unpulled
+    one can no longer run (the worker is shut down) and is safe to
+    retry.
+    """
+
+    __slots__ = ("kind", "payload", "fut", "pulled")
+
+    def __init__(
+        self, kind: str, payload: Any, fut: "concurrent.futures.Future"
+    ) -> None:
+        self.kind = kind
+        self.payload = payload
+        self.fut = fut
+        self.pulled = False
+
+
 class _ServerWorker:
     """Holds a single stdio session open and dispatches tool calls.
 
@@ -312,14 +410,17 @@ class _ServerWorker:
         # ``idle_timeout_sec`` opts in to self-termination after a period
         # of inactivity. ``None`` (default) means the worker stays
         # resident for the runtime's lifetime — required for stateful
-        # servers like chrome-devtools-mcp.
+        # servers like chrome-devtools-mcp. Only a finite positive number
+        # opts in; anything else means no idle timeout and announces
+        # itself in the debug log.
         idle = server_cfg.get("idle_timeout_sec")
-        try:
-            self._idle_timeout: Optional[float] = (
-                float(idle) if idle is not None else None
+        self._idle_timeout: Optional[float] = _validated_seconds(idle)
+        if idle is not None and self._idle_timeout is None:
+            debug_log(
+                f"mcp server '{server_name}' idle_timeout_sec={idle!r} is not "
+                "a finite positive number; the worker stays resident",
+                "mcp",
             )
-        except (TypeError, ValueError):
-            self._idle_timeout = None
 
     def start(self) -> None:
         async def _setup() -> None:
@@ -375,7 +476,12 @@ class _ServerWorker:
                             return
                         if cmd is None:
                             return
-                        kind, payload, fut = cmd
+                        # Set before anything else: from this point the
+                        # call may execute, and a budget expiry on the
+                        # caller side must classify it as a timeout
+                        # rather than a death that is safe to retry.
+                        cmd.pulled = True
+                        kind, payload, fut = cmd.kind, cmd.payload, cmd.fut
                         try:
                             if kind == "call":
                                 tool_name, arguments = payload
@@ -407,6 +513,8 @@ class _ServerWorker:
         finally:
             self.alive = False
             # Drain any in-flight requests so callers don't hang forever.
+            # Queued commands are by definition unpulled: they never ran,
+            # so the death sentinel here licenses the runtime's retry.
             if self._queue is not None:
                 while True:
                     try:
@@ -415,9 +523,8 @@ class _ServerWorker:
                         break
                     if cmd is None:
                         continue
-                    _, _, fut = cmd
-                    if not fut.done():
-                        fut.set_exception(
+                    if not cmd.fut.done():
+                        cmd.fut.set_exception(
                             _WorkerDeadError(
                                 f"MCP server '{self._server_name}' session ended"
                             )
@@ -444,10 +551,12 @@ class _ServerWorker:
     ) -> Any:
         """Submit a ``call_tool`` request and wait up to ``timeout`` seconds.
 
-        ``concurrent.futures.TimeoutError`` propagates if the tool genuinely
-        takes too long. If the worker died after we enqueued (queue drained
-        without resolving our future), the timeout is converted to
-        ``_WorkerDeadError`` so the runtime retry path can take over.
+        A live worker whose tool simply takes too long raises
+        ``MCPCallTimeoutError`` and is shut down; the call is not
+        re-run, because the tool may be a side-effecting one that
+        already executed. Only a worker that died (its queue drained
+        without ever resolving our future) becomes ``_WorkerDeadError``,
+        which the runtime answers with its single retry.
         """
         return self._submit(("call", (tool_name, arguments)), timeout)
 
@@ -467,21 +576,61 @@ class _ServerWorker:
             )
         kind, payload = cmd
         fut: concurrent.futures.Future = concurrent.futures.Future()
+        command = _Command(kind, payload, fut)
         # Single cross-thread hop: schedule the put on the loop and
         # wait on the result future. ``put_nowait`` is safe because
         # the queue is unbounded.
         self._loop.call_soon_threadsafe(
-            queue.put_nowait, (kind, payload, fut)
+            queue.put_nowait, command
         )
         try:
             return fut.result(timeout=timeout)
         except concurrent.futures.TimeoutError:
+            # What the expiry means depends on how far the command got,
+            # and ``pulled`` (set by the worker at dequeue, before any
+            # side effect can start) is what says so. A pulled command
+            # may have executed: it fails as a timeout and is never
+            # retried, whatever else happened to the worker in the
+            # interim (a config-change replacement or the daemon's
+            # teardown flipping ``alive`` mid-call must not turn an
+            # executed call into a retried one). An unpulled command on
+            # a dead worker never ran, and the runtime's single retry
+            # is safe. ``alive`` is read before ``shutdown()`` flips
+            # it, and the future is re-read after: the worker may have
+            # resolved either in the meantime, and its answer wins.
+            was_alive = self.alive
             self.shutdown()
-            if not self.alive:
+            inner = fut.exception() if fut.done() else None
+            if not command.pulled and (
+                isinstance(inner, _WorkerDeadError)
+                or (inner is None and not was_alive)
+            ):
                 raise _WorkerDeadError(
                     f"MCP server '{self._server_name}' died while servicing call"
                 ) from None
-            raise
+            if command.pulled and fut.done():
+                if inner is None:
+                    # The call completed at the wire; its honest result
+                    # beats the expiry that raced it.
+                    return fut.result()
+                if isinstance(inner, Exception):
+                    # The call's own failure (a tool error, a session
+                    # exception, a tool-side timeout): propagates as-is
+                    # rather than being relabelled as a budget expiry.
+                    raise inner
+                # A BaseException (cancellation, an anyio group): the
+                # budget expiry is the honest report, and no
+                # BaseException leaks into the engine.
+            label = f"tool '{payload[0]}'" if kind == "call" else "list_tools"
+            debug_log(
+                f"MCP {label} on server '{self._server_name}' exceeded "
+                f"{timeout:g}s; dropping the worker without a retry",
+                "mcp",
+            )
+            raise MCPCallTimeoutError(
+                f"MCP server '{self._server_name}' timed out after "
+                f"{timeout:g}s servicing {label}"
+            ) from None
 
     def shutdown(self) -> None:
         """Best-effort graceful stop, falling back to task cancellation."""

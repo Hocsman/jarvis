@@ -347,22 +347,20 @@ class MCPClient:
         Routes through the persistent MCP runtime so the same stdio
         session that services discovery also services subsequent
         ``invoke_tool`` calls — avoids paying subprocess startup twice.
+
+        The discovery budget is the ``timeout_sec`` argument, else the
+        server config's ``timeout_sec``, else the runtime default. A
+        discovery that exceeds it surfaces as a ``TimeoutError`` and is
+        not retried; the next call starts a fresh session.
         """
         cfg = self._require_stdio_cfg(server_name)
         from .mcp_runtime import get_runtime, _WorkerDeadError
 
-        effective_timeout = timeout_sec
-        if effective_timeout is None:
-            raw_t = cfg.get("timeout_sec", cfg.get("timeout"))
-            if raw_t is not None:
-                try:
-                    effective_timeout = float(raw_t)
-                except (TypeError, ValueError):
-                    effective_timeout = None
-
         runtime = get_runtime()
         try:
-            res = runtime.list_tools(server_name, cfg, timeout=effective_timeout)
+            # ``timeout_sec`` travels unparsed: the runtime validates it
+            # (and the server config's own ``timeout_sec``) in one place.
+            res = runtime.list_tools(server_name, cfg, timeout=timeout_sec)
         except _WorkerDeadError as e:
             raise MCPServerSessionError(str(e)) from e
 
@@ -389,23 +387,21 @@ class MCPClient:
         If that retry also fails, a ``MCPServerSessionError`` propagates;
         callers can distinguish that from tool-level errors carried in
         the returned dict's ``isError`` field.
+
+        The call's budget is the ``timeout_sec`` argument, else the
+        server config's ``timeout_sec``, else the runtime default. A
+        call that exceeds it surfaces as a ``TimeoutError`` and is not
+        retried: the tool may be a slow side-effecting one that ran.
         """
         cfg = self._require_stdio_cfg(server_name)
         from .mcp_runtime import get_runtime, _WorkerDeadError
 
-        effective_timeout = timeout_sec
-        if effective_timeout is None:
-            raw_t = cfg.get("timeout_sec", cfg.get("timeout"))
-            if raw_t is not None:
-                try:
-                    effective_timeout = float(raw_t)
-                except (TypeError, ValueError):
-                    effective_timeout = None
-
         runtime = get_runtime()
         try:
+            # ``timeout_sec`` travels unparsed: the runtime validates it
+            # (and the server config's own ``timeout_sec``) in one place.
             res = runtime.invoke(
-                server_name, cfg, tool_name, arguments, timeout=effective_timeout
+                server_name, cfg, tool_name, arguments, timeout=timeout_sec
             )
         except _WorkerDeadError as e:
             raise MCPServerSessionError(str(e)) from e
