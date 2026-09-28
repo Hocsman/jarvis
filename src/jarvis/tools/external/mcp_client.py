@@ -19,10 +19,13 @@ class MCPServerSessionError(RuntimeError):
     """Raised when a stateful MCP server's session has been lost.
 
     Public, stable type that callers can catch to distinguish a
-    transient session failure (subprocess crashed, idle timeout
-    elapsed mid-call) from a tool-level error returned by ``call_tool``.
-    The persistent runtime retries once internally before this surfaces
-    to ``MCPClient`` callers.
+    session-level failure (subprocess crashed, idle timeout elapsed
+    mid-call, a cancellation or task-group teardown delivered into an
+    in-flight call) from a tool-level error returned by ``call_tool``.
+    A dead worker is retried once internally before this surfaces; a
+    session error translated out of a teardown propagates on the first
+    attempt, because the call may already have executed and is never
+    re-run.
     """
 
 # Static directories to search when a command isn't on the daemon's PATH.
@@ -384,8 +387,11 @@ class MCPClient:
 
         On a transient session loss (subprocess died, idle timeout
         elapsed mid-call) the runtime retries once with a fresh worker.
-        If that retry also fails, a ``MCPServerSessionError`` propagates;
-        callers can distinguish that from tool-level errors carried in
+        If that retry also fails, a ``MCPServerSessionError`` propagates.
+        A session error translated out of a teardown (a cancellation
+        delivered into the in-flight call) surfaces on the first
+        attempt: the call may have executed, so it is never re-run.
+        Callers can distinguish both from tool-level errors carried in
         the returned dict's ``isError`` field.
 
         The call's budget is the ``timeout_sec`` argument, else the
