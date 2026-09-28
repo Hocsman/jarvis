@@ -16,7 +16,8 @@ def shutdown_persistent_runtime():
 
 
 def _make_tracked_doubles(call_count, enter_count, exit_count, *, fail_on_call=None,
-                          tools_payload=None, delays=None, list_count=None):
+                          tools_payload=None, delays=None, list_count=None,
+                          call_hook=None):
     """Build patchable doubles for ``stdio_client`` and ``ClientSession``.
 
     ``fail_on_call`` may be a list whose values trigger ``call_tool`` to
@@ -28,7 +29,9 @@ def _make_tracked_doubles(call_count, enter_count, exit_count, *, fail_on_call=N
     without rebuilding the doubles; the await happens after the counter
     increments, so a call cancelled mid-sleep still counts as started.
     ``list_count`` counts ``list_tools`` invocations the same way
-    ``call_count`` counts ``call_tool`` ones.
+    ``call_count`` counts ``call_tool`` ones. ``call_hook`` is called
+    with the tool name at ``call_tool`` entry, before any delay, so a
+    test can synchronise on a call being in flight.
     """
     fail_on_call = list(fail_on_call or [])
     delays = delays if delays is not None else {}
@@ -55,6 +58,8 @@ def _make_tracked_doubles(call_count, enter_count, exit_count, *, fail_on_call=N
                 async def call_tool(_self, name, arguments):
                     idx = call_count["n"]
                     call_count["n"] += 1
+                    if call_hook is not None:
+                        call_hook(name)
                     delay = delays.get("call", 0.0)
                     if delay:
                         await asyncio.sleep(delay)
@@ -637,11 +642,13 @@ def test_an_unpulled_command_on_a_dead_worker_is_a_safe_retry():
 
 
 @pytest.mark.unit
-def test_a_drain_resolving_the_future_during_shutdown_stays_a_death():
-    """When the worker's drain resolves our future with the death
-    sentinel in the window between the expiry and the classification,
-    the sentinel wins: the command was still queued, it never ran, and
-    the retry is safe."""
+def test_a_death_landing_during_the_teardown_reports_the_expiry():
+    """A death sentinel that resolves the future only while the
+    caller's own teardown is running arrives after the budget was
+    spent: the honest report is the expiry. The retry belongs to
+    deaths the expiry can see (a worker already dead, or a sentinel
+    already on the future); a corpse that races the teardown does not
+    resurrect it, and the caller waits one budget, not two."""
     from jarvis.tools.external import mcp_runtime as rt
 
     worker = _stub_worker()
@@ -654,7 +661,7 @@ def test_a_drain_resolving_the_future_during_shutdown_stays_a_death():
 
     worker.shutdown = draining_shutdown
 
-    with pytest.raises(rt._WorkerDeadError):
+    with pytest.raises(rt.MCPCallTimeoutError):
         worker.invoke("alpha", {}, 0.05)
 
 
@@ -686,12 +693,15 @@ def test_a_call_completing_at_the_wire_reports_its_honest_result():
 
 
 @pytest.mark.unit
-def test_a_tool_side_failure_landing_after_the_expiry_propagates_untouched():
-    """An exception the call itself produced (including a tool-side
-    ``TimeoutError``, which on Python 3.11+ is the same class as the
-    budget's) is the call's failure: it propagates as-is rather than
-    being relabelled as a budget expiry it never hit. The ``match``
-    discriminates: a relabelled expiry would say "timed out after"."""
+def test_a_teardown_echo_landing_after_the_expiry_reports_the_timeout():
+    """An exception that lands on the future only after the caller's
+    own shutdown began is the teardown's echo: the cancellation this
+    very timeout delivered, translated into a session error on its way
+    out. Re-raising it would tell the caller their expired call was a
+    session failure and would hand a sibling's teardown to the wrong
+    owner; the expiry is the honest report."""
+    from jarvis.tools.external.mcp_client import MCPServerSessionError
+
     worker = _stub_worker()
     queue = worker._queue
     real_put = queue.put_nowait
@@ -702,16 +712,99 @@ def test_a_tool_side_failure_landing_after_the_expiry_propagates_untouched():
 
     queue.put_nowait = pulling_put
 
-    def failing_shutdown():
+    def echoing_shutdown():
         cmd = queue.command
         if cmd is not None and not cmd.fut.done():
-            cmd.fut.set_exception(RuntimeError("tool blew up"))
+            echo = MCPServerSessionError(
+                "MCP server 'srv' session lost while servicing call: CancelledError"
+            )
+            echo.__cause__ = asyncio.CancelledError()
+            cmd.fut.set_exception(echo)
         worker.alive = False
 
-    worker.shutdown = failing_shutdown
+    worker.shutdown = echoing_shutdown
 
-    with pytest.raises(RuntimeError, match="tool blew up"):
+    from jarvis.tools.external.mcp_runtime import MCPCallTimeoutError
+
+    with pytest.raises(MCPCallTimeoutError):
         worker.invoke("alpha", {}, 0.05)
+
+
+@pytest.mark.unit
+def test_a_call_cancelled_by_a_sibling_timeout_surfaces_as_a_session_error(
+    monkeypatch, shutdown_persistent_runtime
+):
+    """Two callers, one server, one serialised queue.
+
+    The second caller's budget expires while the first call is in
+    flight; the shutdown cancels the worker task, and the cancellation
+    lands inside the first call. What the first caller receives must be
+    an ``Exception`` the tool funnel can catch and record: a raw
+    ``CancelledError`` is a ``BaseException`` that escapes every
+    ``except Exception`` on the way out, skips the ledger row for a
+    gate-approved call that may have executed, and kills the turn.
+
+    The same shutdown must not let the second caller's queued command
+    execute afterwards: its timeout was already reported, and a side
+    effect arriving after the report contradicts it. The command never
+    ran, so its caller's outcome stays the retryable death.
+    """
+    import threading
+
+    from jarvis.tools.external.mcp_client import MCPClient, MCPServerSessionError
+    from jarvis.tools.external.mcp_runtime import MCPCallTimeoutError
+
+    enter_count = {"n": 0}
+    exit_count = {"n": 0}
+    call_count = {"n": 0}
+    started = []
+    slow_started = threading.Event()
+
+    def hook(name):
+        started.append(name)
+        if name == "slow":
+            slow_started.set()
+
+    TrackedConn, TrackedSession = _make_tracked_doubles(
+        call_count, enter_count, exit_count,
+        delays={"call": 5.0}, call_hook=hook,
+    )
+    _patch_mcp_doubles(monkeypatch, TrackedConn, TrackedSession)
+
+    client = MCPClient(
+        {"srv": {"transport": "stdio", "command": "/bin/true", "args": []}}
+    )
+
+    outcome = {}
+
+    def slow_call():
+        try:
+            client.invoke_tool("srv", "slow", {}, timeout_sec=10.0)
+            outcome["result"] = "returned"
+        except BaseException as e:  # noqa: BLE001 — the type IS the assertion
+            outcome["error"] = e
+
+    thread = threading.Thread(target=slow_call, daemon=True)
+    thread.start()
+    assert slow_started.wait(timeout=5.0), "the slow call never started"
+
+    # The second caller queues behind the first and times out; its
+    # timeout shuts the worker down mid-flight on the first call.
+    with pytest.raises(MCPCallTimeoutError):
+        client.invoke_tool("srv", "quick", {}, timeout_sec=0.3)
+
+    thread.join(timeout=10.0)
+    assert not thread.is_alive(), "the in-flight call never came back"
+
+    error = outcome.get("error")
+    assert isinstance(error, MCPServerSessionError), (
+        f"the cancelled in-flight call surfaced as {error!r}, which the "
+        "tool funnel's `except Exception` cannot catch"
+    )
+    assert started == ["slow"], (
+        "the queued command executed after its own timeout was reported"
+    )
+    assert call_count["n"] == 1
 
 
 @pytest.mark.unit
