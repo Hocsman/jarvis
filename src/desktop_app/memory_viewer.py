@@ -8,10 +8,12 @@ Run directly: python -m desktop_app.memory_viewer
 from __future__ import annotations
 
 import json
+import secrets
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 from flask import Flask, jsonify, request, Response
 
@@ -28,6 +30,113 @@ _db_conn: Optional[sqlite3.Connection] = None
 _graph_store: Optional[GraphMemoryStore] = None
 _core: Optional[MemoryCore] = None
 _activity_db = None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Local-only gate
+#
+# The server binds to 127.0.0.1, but the bind alone is not a boundary: a
+# DNS-rebinding page reaches it under an attacker's Host name, and any
+# website can aim a cross-site form POST at it. Every request must
+# therefore name a trusted host; every write must come from the viewer's
+# own origin and carry the per-launch token this server embedded in the
+# page it served; and the bulk sweeps, which start an LLM rewrite of the
+# whole diary or graph, only accept application/json — a shape no HTML
+# form can produce and a content type that forces a CORS preflight this
+# server never grants. Every refusal is logged and says nothing beyond
+# the status code.
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: Host names a request may carry. The server answers on loopback only,
+#: so any other name is a rebinding attempt or a misconfigured proxy.
+_ALLOWED_HOSTS = frozenset({"localhost", "127.0.0.1"})
+
+#: Methods that change state and therefore face the full gate.
+_MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+#: The bulk sweeps must arrive as application/json.
+_JSON_REQUIRED_PATHS = frozenset({
+    "/api/graph/import-diary",
+    "/api/graph/consolidate-all",
+    "/api/diary/scrub-deflections",
+    "/api/diary/optimise-topics",
+})
+
+#: Header the served page sends the launch token in. Being a custom
+#: header, a cross-origin fetch carrying it triggers a CORS preflight,
+#: which this server never grants.
+TOKEN_HEADER = "X-Jarvis-Token"
+
+#: Per-launch write token. The server mints it, embeds it in the index
+#: it serves, and requires it back on every mutating request. A foreign
+#: page cannot read it: no response carries a CORS allowance.
+_LAUNCH_TOKEN = secrets.token_urlsafe(32)
+
+
+def get_launch_token() -> str:
+    """The write token for this server launch."""
+    return _LAUNCH_TOKEN
+
+
+@app.before_request
+def _local_only_gate() -> Optional[Any]:
+    """Refuse foreign hosts, cross-site writes and untokened writes."""
+    hostname = urlsplit(request.host_url).hostname or ""
+    if hostname not in _ALLOWED_HOSTS:
+        debug_log(
+            f"viewer gate: refused {request.method} {request.path} from host {hostname!r}",
+            "memory",
+        )
+        return jsonify(error="host not allowed"), 400
+
+    if request.method not in _MUTATING_METHODS:
+        return None
+
+    origin = request.headers.get("Origin")
+    if origin and origin != "null":
+        parts = urlsplit(origin)
+        if parts.scheme != "http" or (parts.netloc or "").lower() != request.host.lower():
+            debug_log(
+                f"viewer gate: refused cross-origin {request.method} {request.path} from {origin}",
+                "memory",
+            )
+            return jsonify(error="cross-origin write refused"), 403
+
+    supplied = request.headers.get(TOKEN_HEADER) or ""
+    if not supplied.isascii() or not secrets.compare_digest(supplied, _LAUNCH_TOKEN):
+        debug_log(
+            f"viewer gate: refused {request.method} {request.path}: missing or invalid write token",
+            "memory",
+        )
+        return jsonify(error="write token required"), 403
+
+    if request.path in _JSON_REQUIRED_PATHS and not request.is_json:
+        debug_log(f"viewer gate: refused non-JSON {request.method} {request.path}", "memory")
+        return jsonify(error="application/json required"), 415
+
+    return None
+
+
+@app.after_request
+def _frame_and_cache_guard(response: Response) -> Response:
+    """The page holds the launch token, so it must never render inside a
+    foreign frame: a framed genuine page is same-origin and tokened, and
+    clickjacking it sidesteps the whole gate. It must also never come
+    back from a cache: a stale page wields a dead token and every write
+    fails closed until a hard reload. Both headers ride on every
+    response, gate refusals included."""
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/api/health")
+def health() -> Response:
+    """Identity marker. The desktop app asks this of whatever answers on
+    the viewer port before pointing a window at it, so a foreign program
+    holding the port is not mistaken for a stale viewer."""
+    return jsonify({"app": "jarvis-memory-viewer", "status": "ok"})
 
 
 def _get_db_path() -> str:
@@ -1343,13 +1452,14 @@ def diary_optimise_topics() -> Response:
 
 @app.route("/")
 def index() -> str:
-    """Serve the memory viewer frontend."""
+    """Serve the memory viewer frontend, launch token embedded."""
     return """<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>🧠 Jarvis Memory</title>
+    <script>window.__JARVIS_VIEWER_TOKEN__ = "__VIEWER_TOKEN__";</script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -3072,6 +3182,19 @@ def index() -> str:
     </main>
 
     <script>
+        // Every write the page sends carries the launch token the server
+        // embedded in the head; wrapping fetch once beats threading the
+        // header through thirty call sites.
+        const VIEWER_TOKEN = window.__JARVIS_VIEWER_TOKEN__ || '';
+        const _nativeFetch = window.fetch.bind(window);
+        window.fetch = function (url, opts) {
+            opts = Object.assign({}, opts);
+            const headers = new Headers(opts.headers || {});
+            headers.set('X-Jarvis-Token', VIEWER_TOKEN);
+            opts.headers = headers;
+            return _nativeFetch(url, opts);
+        };
+
         // State
         let currentTab = 'memories';
         let selectedTopics = new Set();
@@ -4663,7 +4786,11 @@ def index() -> str:
                 document.getElementById('btn-start-import').textContent = 'Importing…';
 
                 try {
-                    const resp = await fetch('/api/graph/import-diary', { method: 'POST' });
+                    const resp = await fetch('/api/graph/import-diary', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: '{}',
+                    });
                     const reader = resp.body.getReader();
                     const decoder = new TextDecoder();
                     let buffer = '';
@@ -4769,7 +4896,11 @@ def index() -> str:
                 document.getElementById('btn-start-consolidate').textContent = 'Consolidating…';
 
                 try {
-                    const resp = await fetch('/api/graph/consolidate-all', { method: 'POST' });
+                    const resp = await fetch('/api/graph/consolidate-all', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: '{}',
+                    });
                     const reader = resp.body.getReader();
                     const decoder = new TextDecoder();
                     let buffer = '';
@@ -4916,6 +5047,8 @@ def index() -> str:
                 try {
                     const resp = await fetch('/api/diary/scrub-deflections', {
                         method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: '{}',
                         signal: controller.signal,
                     });
                     const reader = resp.body.getReader();
@@ -5083,7 +5216,11 @@ def index() -> str:
                 document.getElementById('btn-start-optimise').textContent = 'Optimising…';
 
                 try {
-                    const resp = await fetch('/api/diary/optimise-topics', { method: 'POST' });
+                    const resp = await fetch('/api/diary/optimise-topics', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: '{}',
+                    });
                     const reader = resp.body.getReader();
                     const decoder = new TextDecoder();
                     let buffer = '';
@@ -5195,7 +5332,7 @@ def index() -> str:
         loadMemories();
     </script>
 </body>
-</html>"""
+</html>""".replace("__VIEWER_TOKEN__", _LAUNCH_TOKEN)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

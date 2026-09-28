@@ -34,6 +34,7 @@ class TestCoreApi:
 
         memory_viewer.app.config["TESTING"] = True
         self.client = memory_viewer.app.test_client()
+        self.auth = {"X-Jarvis-Token": memory_viewer.get_launch_token()}
         yield
         memory_viewer._core = None
 
@@ -96,7 +97,7 @@ class TestCoreApi:
     def test_an_edit_is_written_through_to_the_file(self):
         body = "# Profil\n\n- 2026-07-20 · dit : Il vit à Lyon.\n"
 
-        resp = self.client.put("/api/core/profile", json={"raw": body})
+        resp = self.client.put("/api/core/profile", json={"raw": body}, headers=self.auth)
 
         assert resp.status_code == 200
         assert [e.text for e in self.core.active(SECTION_PROFILE)] == ["Il vit à Lyon."]
@@ -107,7 +108,7 @@ class TestCoreApi:
         an unreliable place to edit it."""
         body = "# Mon profil\n\nUne note en prose.\n\n- Il déteste le lundi.\n"
 
-        self.client.put("/api/core/profile", json={"raw": body})
+        self.client.put("/api/core/profile", json={"raw": body}, headers=self.auth)
 
         assert self.core.path_for(SECTION_PROFILE).read_text(encoding="utf-8") == body
 
@@ -121,17 +122,18 @@ class TestCoreApi:
                 "- 2026-07-18 · dit : Il vit à Paris.",
                 "- ~~2026-07-18 · dit : Il vit à Paris.~~",
             )},
+            headers=self.auth,
         )
 
         assert self.core.active(SECTION_PROFILE) == []
 
     def test_an_unknown_section_is_refused(self):
-        resp = self.client.put("/api/core/banana", json={"raw": "- x\n"})
+        resp = self.client.put("/api/core/banana", json={"raw": "- x\n"}, headers=self.auth)
 
         assert resp.status_code == 404
 
     def test_a_save_with_no_body_is_refused(self):
-        resp = self.client.put("/api/core/profile", json={})
+        resp = self.client.put("/api/core/profile", json={}, headers=self.auth)
 
         assert resp.status_code == 400
 
@@ -139,14 +141,14 @@ class TestCoreApi:
         self.core.remember(SECTION_PROFILE, "Il vit à Lyon.", on_date="2026-07-20")
         before = self.core.path_for(SECTION_PROFILE).read_text(encoding="utf-8")
 
-        self.client.put("/api/core/profile", json={})
+        self.client.put("/api/core/profile", json={}, headers=self.auth)
 
         assert self.core.path_for(SECTION_PROFILE).read_text(encoding="utf-8") == before
 
     def test_saving_reports_back_what_is_now_believed(self):
         body = "# Profil\n\n- 2026-07-20 · dit : Il vit à Lyon.\n"
 
-        data = self.client.put("/api/core/profile", json={"raw": body}).get_json()
+        data = self.client.put("/api/core/profile", json={"raw": body}, headers=self.auth).get_json()
 
         assert [e["text"] for e in data["entries"]] == ["Il vit à Lyon."]
 
@@ -215,6 +217,7 @@ class TestActivityApi:
         memory_viewer._activity_db = self.db
         memory_viewer.app.config["TESTING"] = True
         self.client = memory_viewer.app.test_client()
+        self.auth = {"X-Jarvis-Token": memory_viewer.get_launch_token()}
         yield
         self.db.close()
         memory_viewer._activity_db = None
@@ -249,7 +252,7 @@ class TestActivityApi:
     def test_the_user_can_clear_the_ledger(self):
         self._record()
 
-        resp = self.client.delete("/api/activity")
+        resp = self.client.delete("/api/activity", headers=self.auth)
 
         assert resp.status_code == 200
         assert self.db.recent_actions() == []

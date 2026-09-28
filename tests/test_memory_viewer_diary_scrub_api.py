@@ -84,12 +84,13 @@ class TestDiaryScrubEndpoint:
 
         memory_viewer.app.config["TESTING"] = True
         self.client = memory_viewer.app.test_client()
+        self.auth = {"X-Jarvis-Token": memory_viewer.get_launch_token()}
         self.db_path = db_path
         self.seed_db = seed_db
         yield
 
     def _stream(self) -> list[dict]:
-        resp = self.client.post("/api/diary/scrub-deflections")
+        resp = self.client.post("/api/diary/scrub-deflections", json={}, headers=self.auth)
         assert resp.status_code == 200
         events = []
         for line in resp.data.decode("utf-8").splitlines():

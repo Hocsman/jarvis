@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from conftest import ViewerClient
 from src.jarvis.memory.db import Database
 from src.jarvis.routines.journal import Entree, append_run
 from src.jarvis.routines.recurrence import Regle
@@ -54,7 +55,7 @@ def viewer(tmp_path):
     _real = memory_viewer.load_settings
     memory_viewer.load_settings = lambda: cfg
     try:
-        yield db, memory_viewer.app.test_client(), cfg
+        yield db, ViewerClient(memory_viewer), cfg
     finally:
         memory_viewer.load_settings = _real
         memory_viewer._activity_db = None

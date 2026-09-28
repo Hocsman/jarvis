@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from conftest import ViewerClient
 from src.jarvis.memory.db import Database
 
 
@@ -29,7 +30,7 @@ def viewer(tmp_path):
 
     db = Database(str(tmp_path / "t.db"), sqlite_vss_path=None)
     memory_viewer._activity_db = db
-    yield db, memory_viewer.app.test_client()
+    yield db, ViewerClient(memory_viewer)
     memory_viewer._activity_db = None
     db.close()
 

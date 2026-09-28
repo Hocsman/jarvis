@@ -641,3 +641,52 @@ def get_like_requests():
 
         return get
     return make
+
+
+class ViewerClient:
+    """Memory-viewer test client that carries the launch token.
+
+    The viewer server requires its per-launch token on every mutating
+    request, and the page it serves sends it by wrapping ``fetch``. This
+    wrapper does the same for tests, so endpoint-behaviour suites stay
+    about the endpoint and not about the local-only gate — the gate has
+    its own suite in ``tests/test_memory_viewer_local_only.py``.
+
+    Pass the imported ``memory_viewer`` module itself, under either import
+    path (``desktop_app.memory_viewer`` or ``src.desktop_app.memory_viewer``
+    are distinct instances), so the token matches the app under test.
+    """
+
+    def __init__(self, memory_viewer):
+        self._client = memory_viewer.app.test_client()
+        self._token = memory_viewer.get_launch_token()
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+    def open(self, *args, **kwargs):
+        headers = dict(kwargs.pop("headers", None) or {})
+        headers.setdefault("X-Jarvis-Token", self._token)
+        return self._client.open(*args, headers=headers, **kwargs)
+
+    def get(self, *args, **kwargs):
+        return self.open(*args, method="GET", **kwargs)
+
+    def post(self, *args, **kwargs):
+        return self.open(*args, method="POST", **kwargs)
+
+    def put(self, *args, **kwargs):
+        return self.open(*args, method="PUT", **kwargs)
+
+    def patch(self, *args, **kwargs):
+        return self.open(*args, method="PATCH", **kwargs)
+
+    def delete(self, *args, **kwargs):
+        return self.open(*args, method="DELETE", **kwargs)
+
+    def __enter__(self):
+        self._client.__enter__()
+        return self
+
+    def __exit__(self, *exc_info):
+        return self._client.__exit__(*exc_info)
