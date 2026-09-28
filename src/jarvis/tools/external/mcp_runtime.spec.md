@@ -36,6 +36,7 @@ resident for the daemon's lifetime.
 | Server config changes | Old worker is shut down; a fresh worker replaces it. |
 | Worker raises `_WorkerDeadError` | Runtime drops it and retries the call once with a new worker. Second failure surfaces as `MCPServerSessionError` to the public layer. |
 | Call exceeds its `timeout_sec` budget | The worker is shut down and evicted, and the call surfaces as `MCPCallTimeoutError` (a `TimeoutError`) naming the server, the tool (or `list_tools`) and the seconds. It is never retried: a slow side-effecting tool may have run, and running it twice after one approval is worse than reporting the timeout. A stateful server restarts on the next call. |
+| Worker shuts down while a command is queued | The queued command does not execute: the worker refuses it at dequeue with the death sentinel. A caller whose budget already expired gets the expiry reported: the sentinel lands after its classification read, and an unpulled command can produce no result to honour. |
 | `idle_timeout_sec` set on a server config | Worker self-terminates after that long without activity. Next call spawns a new worker. |
 | Daemon shutdown calls `shutdown_runtime()` | Each worker is asked to exit (sentinel `None`); any wedged task is cancelled. The loop is stopped, the thread is joined with a 5s timeout. |
 
@@ -47,6 +48,11 @@ resident for the daemon's lifetime.
 - A worker is never reused after `alive` flips to `False`. The
   finally-block in `_run` drains pending requests, resolving each
   outstanding future with `_WorkerDeadError` so callers do not hang.
+- A caller never receives a bare `BaseException` from a command: a
+  cancellation delivered by a sibling call's timeout, or an anyio
+  task-group teardown, surfaces as `MCPServerSessionError` (the
+  original kept as `__cause__`) so the tool funnel records the call in
+  the ledger instead of losing the turn.
 - `MCPClient.invoke_tool_async` is unchanged and still uses one-shot
   sessions. Sync `MCPClient.list_tools` / `invoke_tool` route through
   the runtime.
@@ -108,10 +114,15 @@ verified there:
   prefers the first valid candidate.
 - The expiry classification (`_submit`'s `pulled` oracle): a pulled
   command expires as a timeout even on a worker something else killed;
-  an unpulled command on a dead worker is the retryable death; a drain
-  resolving the future during shutdown stays a death; a result landing
-  at the wire reports honestly; a tool-side failure propagates
-  untouched.
+  an unpulled command on a worker already dead at the expiry is the
+  retryable death; a result landing at the wire reports honestly; a
+  failure resolved before the teardown propagates untouched; anything
+  landing after the teardown began (a drain sentinel, a cancellation
+  echo) reports the expiry.
+- The two-thread scenario: a sibling caller's timeout cancels an
+  in-flight call, which surfaces as `MCPServerSessionError` (never a
+  bare `CancelledError`), and the sibling's queued command never
+  executes after its expiry was reported.
 - The registry renders an exception with an empty message by its type
   name, never as a dangling `error: ` or `raised: `.
 
