@@ -347,6 +347,11 @@ class MCPClient:
         Routes through the persistent MCP runtime so the same stdio
         session that services discovery also services subsequent
         ``invoke_tool`` calls — avoids paying subprocess startup twice.
+
+        The discovery budget is the ``timeout_sec`` argument, else the
+        server config's ``timeout_sec``, else the runtime default. A
+        discovery that exceeds it surfaces as a ``TimeoutError`` and is
+        not retried; the next call starts a fresh session.
         """
         cfg = self._require_stdio_cfg(server_name)
         from .mcp_runtime import get_runtime, _WorkerDeadError

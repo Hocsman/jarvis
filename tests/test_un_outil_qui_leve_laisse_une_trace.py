@@ -112,6 +112,31 @@ def test_an_ordinary_builtin_still_reports_ok(tmp_path, monkeypatch):
     assert issues == ["ok"]
 
 
+def test_a_builtin_raising_without_a_message_names_its_type(tmp_path, monkeypatch):
+    """An exception whose str() is empty must not reach the model as a
+    dangling "raised: "; the type name always travels, exactly as the
+    MCP branch renders it."""
+    from src.jarvis.tools import registry
+
+    class _QuiLeveMuet:
+        description = "raises without a word"
+
+        def risk_for(self, args):
+            return "lecture"
+
+        def execute(self, **kw):
+            raise TimeoutError()
+
+    monkeypatch.setitem(registry.BUILTIN_TOOLS, "webSearch", _QuiLeveMuet())
+    db = _db(tmp_path)
+
+    resultat = _appelle(db, _cfg(tmp_path))
+
+    assert resultat.success is False
+    assert "TimeoutError" in resultat.error_message
+    assert not resultat.error_message.endswith(": ")
+
+
 # ── And the read that raised in the first place ────────────────────────
 
 

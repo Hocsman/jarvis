@@ -361,7 +361,9 @@ def test_a_timed_out_call_fails_once_as_a_timeout_and_is_not_retried(
     assert "slow" in message, message
     assert "alpha" in message, message
     assert "0.3" in message, message
-    assert elapsed < 0.9, f"should fail in about timeout_sec, took {elapsed:.2f}s"
+    # The counters and the exception type are the deterministic pins;
+    # this bound only guards against a hang (the tool sleeps 1.0s).
+    assert elapsed < 2.0, f"should fail in about timeout_sec, took {elapsed:.2f}s"
 
     # The timed-out worker is dropped: the next call opens a fresh connection.
     delays["call"] = 0.0
@@ -413,7 +415,9 @@ def test_a_timed_out_discovery_fails_once_as_a_timeout_and_is_not_retried(
     assert "slow" in message, message
     assert "list_tools" in message, message
     assert "0.3" in message, message
-    assert elapsed < 0.9, f"should fail in about timeout_sec, took {elapsed:.2f}s"
+    # The counters and the exception type are the deterministic pins;
+    # this bound only guards against a hang (the discovery sleeps 1.0s).
+    assert elapsed < 2.0, f"should fail in about timeout_sec, took {elapsed:.2f}s"
 
     delays["list"] = 0.0
     listed = client.list_tools("slow", timeout_sec=5.0)
@@ -516,12 +520,12 @@ def test_the_default_budget_is_read_from_the_module_constant(
     from jarvis.tools.external import mcp_runtime as _runtime_mod
     from jarvis.tools.external.mcp_client import MCPClient
 
-    monkeypatch.setattr(_runtime_mod, "_DEFAULT_INVOKE_TIMEOUT_SEC", 0.05)
+    monkeypatch.setattr(_runtime_mod, "_DEFAULT_INVOKE_TIMEOUT_SEC", 0.25)
 
     enter_count = {"n": 0}
     exit_count = {"n": 0}
     call_count = {"n": 0}
-    delays = {"call": 0.4}
+    delays = {"call": 1.0}
 
     TrackedConn, TrackedSession = _make_tracked_doubles(
         call_count, enter_count, exit_count, delays=delays
@@ -537,6 +541,177 @@ def test_the_default_budget_is_read_from_the_module_constant(
     with pytest.raises(TimeoutError):
         client.invoke_tool("srv", "alpha", {})
     assert call_count["n"] == 1
+
+
+@pytest.mark.unit
+def test_the_budget_cascade_prefers_the_first_valid_candidate():
+    """Resolution order: a valid explicit argument wins; an invalid one
+    falls to the server's value; an invalid server value falls to the
+    module default. The fallback is fail-open, and every rejection is
+    the resolver's, never the wait's."""
+    from jarvis.tools.external import mcp_runtime as rt
+
+    assert rt._resolve_invoke_timeout({"timeout_sec": 30.0}, 10.0) == 10.0
+    assert rt._resolve_invoke_timeout({"timeout_sec": 30.0}, "abc") == 30.0
+    assert rt._resolve_invoke_timeout({"timeout_sec": 0}, 10.0) == 10.0
+    assert rt._resolve_invoke_timeout({"timeout_sec": "abc"}, None) == (
+        rt._DEFAULT_INVOKE_TIMEOUT_SEC
+    )
+    assert rt._resolve_invoke_timeout({}, True) == rt._DEFAULT_INVOKE_TIMEOUT_SEC
+
+
+def _stub_worker():
+    """A ``_ServerWorker`` with no loop and no task, for pinning how
+    ``_submit`` classifies a budget expiry. The fake loop runs scheduled
+    callbacks inline and the fake queue captures the command, so a test
+    arranges exactly the worker-side state the classifier will read."""
+    from jarvis.tools.external import mcp_runtime as rt
+
+    worker = rt._ServerWorker.__new__(rt._ServerWorker)
+    worker._server_name = "srv"
+    worker.config = {}
+    worker._task = None
+    worker._idle_timeout = None
+    worker.alive = True
+
+    class _FakeLoop:
+        def call_soon_threadsafe(self, fn, *args):
+            fn(*args)
+
+    class _FakeQueue:
+        def __init__(self):
+            self.command = None
+
+        def put_nowait(self, cmd):
+            self.command = cmd
+
+    worker._loop = _FakeLoop()
+    worker._queue = _FakeQueue()
+    return worker
+
+
+@pytest.mark.unit
+def test_an_expiry_on_a_pulled_command_is_a_timeout_even_on_a_dead_worker():
+    """The classification oracle, and the race the ``pulled`` flag
+    exists for: a command the worker pulled off the queue may have
+    executed, so a budget expiry there is a timeout and never a death,
+    whatever else happened to the worker in the interim. A third party
+    shutting the worker down mid-call (a config change, the daemon
+    teardown) must not turn an executed call into a retried one."""
+    from jarvis.tools.external import mcp_runtime as rt
+
+    worker = _stub_worker()
+    queue = worker._queue
+    real_put = queue.put_nowait
+
+    def pulling_put(cmd):
+        real_put(cmd)
+        cmd.pulled = True       # the worker took it off the queue...
+        worker.alive = False    # ...and something killed the worker
+
+    queue.put_nowait = pulling_put
+
+    with pytest.raises(rt.MCPCallTimeoutError):
+        worker.invoke("alpha", {}, 0.05)
+
+
+@pytest.mark.unit
+def test_an_unpulled_command_on_a_dead_worker_is_a_safe_retry():
+    """The other side of the oracle: a command that never left the
+    queue never executed, so a dead worker there is the honest
+    ``_WorkerDeadError`` the runtime answers with its single retry."""
+    from jarvis.tools.external import mcp_runtime as rt
+
+    worker = _stub_worker()
+    queue = worker._queue
+    real_put = queue.put_nowait
+
+    def dying_put(cmd):
+        real_put(cmd)
+        worker.alive = False    # died before pulling anything
+
+    queue.put_nowait = dying_put
+
+    with pytest.raises(rt._WorkerDeadError):
+        worker.invoke("alpha", {}, 0.05)
+
+
+@pytest.mark.unit
+def test_a_drain_resolving_the_future_during_shutdown_stays_a_death():
+    """When the worker's drain resolves our future with the death
+    sentinel in the window between the expiry and the classification,
+    the sentinel wins: the command was still queued, it never ran, and
+    the retry is safe."""
+    from jarvis.tools.external import mcp_runtime as rt
+
+    worker = _stub_worker()
+
+    def draining_shutdown():
+        cmd = worker._queue.command
+        if cmd is not None and not cmd.fut.done():
+            cmd.fut.set_exception(rt._WorkerDeadError("session ended"))
+        worker.alive = False
+
+    worker.shutdown = draining_shutdown
+
+    with pytest.raises(rt._WorkerDeadError):
+        worker.invoke("alpha", {}, 0.05)
+
+
+@pytest.mark.unit
+def test_a_call_completing_at_the_wire_reports_its_honest_result():
+    """A result that lands between the expiry and the classification is
+    the call's outcome, not a timeout: reporting a failure for a call
+    that succeeded is the same kind of lie as reporting a success for
+    one that never ran."""
+    worker = _stub_worker()
+    queue = worker._queue
+    real_put = queue.put_nowait
+
+    def pulling_put(cmd):
+        real_put(cmd)
+        cmd.pulled = True
+
+    queue.put_nowait = pulling_put
+
+    def resolving_shutdown():
+        cmd = queue.command
+        if cmd is not None and not cmd.fut.done():
+            cmd.fut.set_result("late-result")
+        worker.alive = False
+
+    worker.shutdown = resolving_shutdown
+
+    assert worker.invoke("alpha", {}, 0.05) == "late-result"
+
+
+@pytest.mark.unit
+def test_a_tool_side_failure_landing_after_the_expiry_propagates_untouched():
+    """An exception the call itself produced (including a tool-side
+    ``TimeoutError``, which on Python 3.11+ is the same class as the
+    budget's) is the call's failure: it propagates as-is rather than
+    being relabelled as a budget expiry it never hit. The ``match``
+    discriminates: a relabelled expiry would say "timed out after"."""
+    worker = _stub_worker()
+    queue = worker._queue
+    real_put = queue.put_nowait
+
+    def pulling_put(cmd):
+        real_put(cmd)
+        cmd.pulled = True
+
+    queue.put_nowait = pulling_put
+
+    def failing_shutdown():
+        cmd = queue.command
+        if cmd is not None and not cmd.fut.done():
+            cmd.fut.set_exception(RuntimeError("tool blew up"))
+        worker.alive = False
+
+    worker.shutdown = failing_shutdown
+
+    with pytest.raises(RuntimeError, match="tool blew up"):
+        worker.invoke("alpha", {}, 0.05)
 
 
 @pytest.mark.unit

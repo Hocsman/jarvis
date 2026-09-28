@@ -19,7 +19,8 @@ resident for the daemon's lifetime.
   (`JarvisMCPRuntime`). All MCP I/O happens on this loop.
 - Per server, a `_ServerWorker` task lives on that loop. The task
   holds `stdio_client(...)` and `ClientSession(...)` open and consumes
-  `(kind, payload, future)` tuples from an `asyncio.Queue`.
+  `_Command` objects (kind, payload, future, and a `pulled` flag the
+  worker sets at dequeue) from an `asyncio.Queue`.
 - Callers (registry → `MCPClient.list_tools` / `invoke_tool`) submit
   requests via `runtime.invoke(...)` / `runtime.list_tools(...)`. Each
   call hops the request onto the loop with `call_soon_threadsafe(put_nowait, ...)`
@@ -54,10 +55,13 @@ resident for the daemon's lifetime.
 
 - `MCPClient.list_tools(server_name, timeout_sec=None)`: returns a list of tool dicts.
   Routes through the persistent runtime so discovery and the first
-  invocation share a session.
+  invocation share a session. Raises `MCPCallTimeoutError` when
+  discovery exceeds its budget (not retried).
 - `MCPClient.invoke_tool(server_name, tool_name, arguments=None, timeout_sec=None)`: returns
   the standard MCP response dict. Raises `MCPServerSessionError` if
-  the runtime cannot keep a session alive after one retry.
+  the runtime cannot keep a session alive after one retry, and
+  `MCPCallTimeoutError` when the call exceeds its budget (not
+  retried).
 - `MCPServerSessionError` (in `mcp_client.py`): public, stable type
   signalling a session-level failure (distinct from a tool-level error
   carried in the response dict's `isError`).
@@ -75,7 +79,7 @@ Each server entry in `config.mcps` is a dict consumed by
 | Key | Type | Default | Effect |
 |-----|------|---------|--------|
 | `idle_timeout_sec` | float \| null | null | If set to a finite positive number, the worker self-terminates after that long with an empty queue. Any other value (boolean, non-numeric, non-finite, ≤ 0) means no idle timeout, with a debug log. Stateful servers (browser automation) must leave this unset. |
-| `timeout_sec` | float \| null | 120.0 (`_DEFAULT_INVOKE_TIMEOUT_SEC`) | Bounds discovery and each tool call on this server. Only finite positive numbers count; an invalid value falls back to the default with a debug log rather than failing every call at once (`0`, negatives), hanging (`nan`), overflowing (`inf`) or silently meaning one second (`true`). A per-call `timeout_sec` argument overrides it and is validated the same way. The `timeout` alias is not read. |
+| `timeout_sec` | float \| null | 120.0 (`_DEFAULT_INVOKE_TIMEOUT_SEC`) | Bounds discovery and each tool call on this server. Only finite positive numbers count; an invalid value falls back to the default with a debug log rather than failing every call at once (`0`, negatives), waiting on an undefined budget (`nan`), overflowing (`inf`) or silently meaning one second (`true`). A per-call `timeout_sec` argument overrides it and is validated the same way; an invalid per-call value falls back to the server's value, then the default. A config carrying the old `timeout` key gets a rename notice in the debug log; the key is not read. |
 
 
 ## Test contract
@@ -99,9 +103,17 @@ verified there:
   both directions.
 - Invalid timeout configs (`0`, negative, `nan`, `inf`, boolean,
   non-numeric, the unread `timeout` alias) fall back to
-  `_DEFAULT_INVOKE_TIMEOUT_SEC`, read from the module constant.
+  `_DEFAULT_INVOKE_TIMEOUT_SEC`, read from the module constant, and
+  the budget cascade (explicit argument → server value → default)
+  prefers the first valid candidate.
+- The expiry classification (`_submit`'s `pulled` oracle): a pulled
+  command expires as a timeout even on a worker something else killed;
+  an unpulled command on a dead worker is the retryable death; a drain
+  resolving the future during shutdown stays a death; a result landing
+  at the wire reports honestly; a tool-side failure propagates
+  untouched.
 - The registry renders an exception with an empty message by its type
-  name, never as a dangling `error: `.
+  name, never as a dangling `error: ` or `raised: `.
 
 ## Non-goals
 
