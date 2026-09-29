@@ -40,6 +40,27 @@ def _record(db, **kw):
     return db.record_action(**payload)
 
 
+def test_startup_prune_enforces_the_retention_window(db):
+    """The daemon applies the ledger's retention window at startup, so
+    an install that never runs the reminder scheduler (reminders
+    disabled) and never opens the Activity tab still keeps the 90-day
+    promise: the old row goes, the fresh one stays."""
+    from src.jarvis.daemon import _apply_ledger_retention
+
+    _record(db, tool="oldCall")
+    db.conn.execute(
+        "UPDATE action_log SET ts_utc = '2020-01-01T00:00:00Z' WHERE tool = 'oldCall'"
+    )
+    db.conn.commit()
+    _record(db, tool="freshCall")
+
+    _apply_ledger_retention(db)
+
+    tools = [r["tool"] for r in db.recent_actions(50)]
+    assert "freshCall" in tools
+    assert "oldCall" not in tools
+
+
 # ── What it keeps ─────────────────────────────────────────────────────
 
 

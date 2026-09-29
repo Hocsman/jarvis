@@ -67,6 +67,10 @@ _JSON_REQUIRED_PATHS = frozenset({
 #: which this server never grants.
 TOKEN_HEADER = "X-Jarvis-Token"
 
+#: The reads that write. Viewing a node increments its access score,
+#: so the route requires the launch token like any mutation.
+_TOKEN_REQUIRED_GET_PREFIXES = ("/api/graph/node/",)
+
 #: Per-launch write token. The server mints it, embeds it in the index
 #: it serves, and requires it back on every mutating request. A foreign
 #: page cannot read it: no response carries a CORS allowance.
@@ -80,7 +84,13 @@ def get_launch_token() -> str:
 
 @app.before_request
 def _local_only_gate() -> Optional[Any]:
-    """Refuse foreign hosts, cross-site writes and untokened writes."""
+    """Refuse foreign hosts, cross-site writes and untokened writes.
+
+    Reads are token-free, except the ones that write: the node view
+    increments the node's access score, so it requires the launch
+    token like any mutation. The page's fetch wrapper sends the token
+    on every request, so the UI never notices the distinction.
+    """
     hostname = urlsplit(request.host_url).hostname or ""
     if hostname not in _ALLOWED_HOSTS:
         debug_log(
@@ -90,17 +100,25 @@ def _local_only_gate() -> Optional[Any]:
         return jsonify(error="host not allowed"), 400
 
     if request.method not in _MUTATING_METHODS:
-        return None
+        # Reads are token-free, except the ones that write: viewing a
+        # node increments its access score, which the graph spec asks
+        # of a UI view, and the UI is the served page, which holds the
+        # launch token. A drive-by subresource GET from a foreign site
+        # (<img>, a no-cors fetch) carries no token and must not move
+        # the score.
+        if not request.path.startswith(_TOKEN_REQUIRED_GET_PREFIXES):
+            return None
 
-    origin = request.headers.get("Origin")
-    if origin and origin != "null":
-        parts = urlsplit(origin)
-        if parts.scheme != "http" or (parts.netloc or "").lower() != request.host.lower():
-            debug_log(
-                f"viewer gate: refused cross-origin {request.method} {request.path} from {origin}",
-                "memory",
-            )
-            return jsonify(error="cross-origin write refused"), 403
+    else:
+        origin = request.headers.get("Origin")
+        if origin and origin != "null":
+            parts = urlsplit(origin)
+            if parts.scheme != "http" or (parts.netloc or "").lower() != request.host.lower():
+                debug_log(
+                    f"viewer gate: refused cross-origin {request.method} {request.path} from {origin}",
+                    "memory",
+                )
+                return jsonify(error="cross-origin write refused"), 403
 
     supplied = request.headers.get(TOKEN_HEADER) or ""
     if not supplied.isascii() or not secrets.compare_digest(supplied, _LAUNCH_TOKEN):
@@ -110,7 +128,8 @@ def _local_only_gate() -> Optional[Any]:
         )
         return jsonify(error="write token required"), 403
 
-    if request.path in _JSON_REQUIRED_PATHS and not request.is_json:
+    if request.method in _MUTATING_METHODS \
+            and request.path in _JSON_REQUIRED_PATHS and not request.is_json:
         debug_log(f"viewer gate: refused non-JSON {request.method} {request.path}", "memory")
         return jsonify(error="application/json required"), 415
 
@@ -209,6 +228,23 @@ def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {key: row[key] for key in row.keys()}
 
 
+def _bounded_int_param(name: str, default: int, lo: int, hi: int) -> int:
+    """An integer query parameter clamped into [lo, hi], default on garbage.
+
+    A negative LIMIT means "no limit" to SQLite and an unparsable value
+    raises out of the route, so neither may reach the query: the server
+    binds to loopback, but any website can aim a GET at it.
+    """
+    raw = request.args.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(value, hi))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # API Routes
 # ─────────────────────────────────────────────────────────────────────────────
@@ -232,7 +268,7 @@ def get_memories() -> Response:
     topic_filter = request.args.get("topic", "").strip()
     from_date = request.args.get("from_date", "").strip()
     to_date = request.args.get("to_date", "").strip()
-    limit = min(int(request.args.get("limit", 100)), 500)
+    limit = _bounded_int_param("limit", 100, 1, 500)
 
     params: list[Any] = []
     conditions: list[str] = []
@@ -330,7 +366,7 @@ def get_meals() -> Response:
 
     from_date = request.args.get("from_date", "").strip()
     to_date = request.args.get("to_date", "").strip()
-    limit = min(int(request.args.get("limit", 100)), 500)
+    limit = _bounded_int_param("limit", 100, 1, 500)
 
     params: list[Any] = []
     conditions: list[str] = []
@@ -491,7 +527,10 @@ def activity_get() -> Response:
     """
     try:
         db = get_activity_db()
-        db.prune_actions(max_age_days=90)
+        # The tab shows the ledger; it does not curate it. The 90-day
+        # prune runs on the reminder scheduler's tick: a GET any
+        # website can reach must not open a write transaction on the
+        # daemon's database.
         return jsonify({
             "actions": [
                 {
@@ -791,7 +830,7 @@ def journal_get() -> Response:
 
     try:
         cfg = load_settings()
-        days = max(1, min(int(request.args.get("days", 14)), 90))
+        days = _bounded_int_param("days", 14, 1, 90)
         pages = []
         for back in range(days):
             jour = datetime.now() - timedelta(days=back)
@@ -897,7 +936,7 @@ def graph_get_all_nodes() -> Response:
     store = get_graph_store()
     try:
         root_id = request.args.get("root", "root")
-        max_depth = min(int(request.args.get("max_depth", 10)), 20)
+        max_depth = _bounded_int_param("max_depth", 10, 1, 20)
         data = store.get_graph_data(root_id, max_depth=max_depth)
         return jsonify(data)
     except Exception as e:
@@ -939,7 +978,7 @@ def graph_get_tree() -> Response:
     store = get_graph_store()
     try:
         root_id = request.args.get("root", "root")
-        max_depth = min(int(request.args.get("max_depth", 10)), 20)
+        max_depth = _bounded_int_param("max_depth", 10, 1, 20)
         tree = store.get_subtree(root_id, max_depth=max_depth)
         if root_id == "root":
             tree = _hide_superseded_branches(tree)
@@ -1058,7 +1097,7 @@ def graph_recent_nodes() -> Response:
     """Get recently accessed nodes."""
     store = get_graph_store()
     try:
-        limit = min(int(request.args.get("limit", 10)), 50)
+        limit = _bounded_int_param("limit", 10, 1, 50)
         nodes = store.get_recent_nodes(limit)
         return jsonify({"nodes": [n.to_dict() for n in nodes]})
     except Exception as e:
@@ -1070,7 +1109,7 @@ def graph_top_nodes() -> Response:
     """Get most frequently accessed nodes."""
     store = get_graph_store()
     try:
-        limit = min(int(request.args.get("limit", 15)), 50)
+        limit = _bounded_int_param("limit", 15, 1, 50)
         nodes = store.get_top_nodes(limit)
         return jsonify({"nodes": [n.to_dict() for n in nodes]})
     except Exception as e:
@@ -3393,7 +3432,7 @@ def index() -> str:
                 <div class="meal-card" data-id="${meal.id}">
                     <div class="meal-info">
                         <div class="meal-header">
-                            <h3>${meal.description}</h3>
+                            <h3>${escapeHtml(meal.description)}</h3>
                             <button class="action-btn delete meal-delete" title="Delete meal">🗑️</button>
                         </div>
                         <div class="meal-time">${new Date(meal.ts_utc).toLocaleString()}</div>
@@ -3558,12 +3597,6 @@ def index() -> str:
             { key: 'profile', title: '🪨 Profil', blurb: 'What it knows about you' },
             { key: 'rules', title: '📏 Règles', blurb: 'Rules you have given it' },
         ];
-
-        function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text == null ? '' : text;
-            return div.innerHTML;
-        }
 
         function renderCoreEntries(entries) {
             if (!entries.length) {
@@ -4817,7 +4850,7 @@ def index() -> str:
                                     const log = document.getElementById('import-log');
                                     const icon = msg.error ? '❌' : '📅';
                                     const detail = msg.error ? `error: ${msg.error}` : `${msg.facts} fact${msg.facts !== 1 ? 's' : ''}`;
-                                    log.innerHTML += `<div>${icon} ${msg.date} — ${detail}</div>`;
+                                    log.innerHTML += `<div>${icon} ${escapeHtml(msg.date)} — ${escapeHtml(detail)}</div>`;
                                     log.scrollTop = log.scrollHeight;
                                 } else if (msg.type === 'complete') {
                                     document.getElementById('import-status').textContent = msg.message;
@@ -4931,7 +4964,7 @@ def index() -> str:
                                     document.getElementById('consolidate-status').textContent = `Consolidating ${msg.node}…`;
                                     const log = document.getElementById('consolidate-log');
                                     const arrow = msg.delta < 0 ? '⬇️' : (msg.delta > 0 ? '⬆️' : '➖');
-                                    log.innerHTML += `<div>${arrow} ${msg.node} — ${msg.before} → ${msg.after} lines (Δ${msg.delta})</div>`;
+                                    log.innerHTML += `<div>${arrow} ${escapeHtml(msg.node)} — ${msg.before} → ${msg.after} lines (Δ${msg.delta})</div>`;
                                     log.scrollTop = log.scrollHeight;
                                     // Real progress when the total is known; fall back to indeterminate pulse otherwise.
                                     const pct = totalNodes
