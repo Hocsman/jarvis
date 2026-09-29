@@ -55,8 +55,13 @@ from .mcp_client import MCPClient, MCPServerSessionError
 
 _DEFAULT_INVOKE_TIMEOUT_SEC = 120.0
 _SETUP_TIMEOUT_SEC = 30.0
-_SHUTDOWN_THREAD_JOIN_SEC = 5.0
-_LOOP_DRAIN_SEC = 2.0
+_SETUP_SCHEDULE_TIMEOUT_SEC = 5.0
+_SHUTDOWN_THREAD_JOIN_SEC = 7.0
+# The mcp SDK's stdio teardown escalates: stdin close, a 2s graceful
+# wait, then a process-tree kill with its own 2s budget. The drain must
+# outlast that escalation, or the loop closes mid-kill and a server that
+# ignores stdin EOF survives the daemon.
+_LOOP_DRAIN_SEC = 5.0
 
 
 def _validated_seconds(raw: Any) -> Optional[float]:
@@ -120,17 +125,18 @@ def get_runtime() -> "_PersistentMCPRuntime":
     """Return the shared persistent runtime, starting it on first use.
 
     After ``shutdown_runtime()`` there is no runtime to return: the
-    daemon's teardown is terminal for the process, and resurrecting a
-    fresh thread and fresh subprocesses for a straggler call would
-    leave them unreaped. The ``RuntimeError`` is an ordinary
-    ``Exception``, so the tool funnel records the failed call like any
-    session failure.
+    teardown is terminal for the daemon run, and resurrecting a fresh
+    thread and fresh subprocesses for a straggler call would leave them
+    unreaped. The next ``daemon.main()`` re-arms the latch at startup.
+    The ``RuntimeError`` is an ordinary ``Exception``, so the tool
+    funnel records the failed call like any session failure.
     """
     global _runtime
     with _runtime_lock:
         if _shutdown_requested:
             raise RuntimeError(
-                "Persistent MCP runtime is shut down for this process"
+                "Persistent MCP runtime is shut down; "
+                "it returns with the next daemon run"
             )
         if _runtime is None or _runtime.closed:
             _runtime = _PersistentMCPRuntime()
@@ -151,12 +157,14 @@ def shutdown_runtime() -> None:
             debug_log(f"persistent MCP runtime shutdown error: {e}", "mcp")
 
 
-def _reset_shutdown_latch() -> None:
+def reset_shutdown_latch() -> None:
     """Re-arm ``get_runtime()`` after ``shutdown_runtime()``.
 
-    The daemon's shutdown is terminal for its process; the test suite
-    tears the runtime down between tests in one long-lived process and
-    needs the next test to start clean.
+    The latch is terminal for a daemon run, not for the process:
+    ``daemon.main()`` calls this at startup, and the bundled desktop
+    app re-runs ``main()`` in-process (tray toggle, settings restart,
+    setup wizard). The test suite calls it between tests for the same
+    reason.
     """
     global _shutdown_requested
     with _runtime_lock:
@@ -311,9 +319,18 @@ class _PersistentMCPRuntime:
         change triggers shutdown of the old worker and creation of a
         fresh one. ``worker.start()`` runs under ``_workers_lock``: a
         setup that hangs blocks calls to every server for up to
-        ``_SETUP_TIMEOUT_SEC``.
+        ``_SETUP_TIMEOUT_SEC``, plus the failed-start teardown's
+        bounded sentinel wait.
         """
         with self._workers_lock:
+            if self.closed:
+                # The runtime is shutting down. A worker spawned now
+                # would ride a loop that is about to close: destroyed
+                # mid-handshake, subprocess possibly unreaped, and its
+                # caller stuck in the setup budget during teardown.
+                raise MCPServerSessionError(
+                    f"MCP runtime is shut down; call to '{server_name}' refused"
+                )
             existing = self._workers.get(server_name)
             if existing is not None and existing.alive and existing.config == server_cfg:
                 return existing
@@ -500,10 +517,21 @@ class _ServerWorker:
 
     def start(self) -> None:
         async def _setup() -> None:
+            if not self.alive:
+                # ``start()`` failed (the loop stalled past the schedule
+                # budget) and the worker was torn down before this
+                # callback ran. Spawning now would create a task and a
+                # subprocess nothing can reach: the worker is cached
+                # only after a successful start. When the loop stalled
+                # the other way around and the task exists, the
+                # teardown's sentinel and cancel handle it instead.
+                return
             self._queue = asyncio.Queue()
             self._task = asyncio.ensure_future(self._run())
 
-        asyncio.run_coroutine_threadsafe(_setup(), self._loop).result(timeout=5)
+        asyncio.run_coroutine_threadsafe(_setup(), self._loop).result(
+            timeout=_SETUP_SCHEDULE_TIMEOUT_SEC
+        )
         # Block until the worker has initialised the MCP session, or
         # surfaced a startup error. Without this, the first ``invoke``
         # would race the session handshake.
@@ -579,7 +607,7 @@ class _ServerWorker:
                             # execution visible to an expiring caller
                             # as "unpulled on a dead worker", the one
                             # shape the runtime retries. Either order
-                            # is now safe: a flip before the re-check
+                            # is safe: a flip before the re-check
                             # refuses a command that never ran, and a
                             # flip after it is invisible to the
                             # classification, because a caller reads

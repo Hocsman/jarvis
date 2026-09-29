@@ -14,10 +14,11 @@ def shutdown_persistent_runtime():
     except Exception:
         pass
     try:
-        # The latch makes shutdown terminal for the process; the suite
-        # tears the runtime down between tests and needs it re-armed.
-        from jarvis.tools.external.mcp_runtime import _reset_shutdown_latch
-        _reset_shutdown_latch()
+        # The latch makes shutdown terminal for the daemon run; the
+        # suite tears the runtime down between tests and needs it
+        # re-armed, exactly as daemon.main() re-arms it at startup.
+        from jarvis.tools.external.mcp_runtime import reset_shutdown_latch
+        reset_shutdown_latch()
     except Exception:
         pass
 
@@ -905,16 +906,7 @@ def test_a_failed_setup_tears_its_half_started_session_down(
     HangingConn, HangingSession = _make_hanging_initialize_doubles(
         enter_count, exit_count
     )
-    monkeypatch.setattr(
-        "jarvis.tools.external.mcp_client._resolve_command", lambda c: c
-    )
-    monkeypatch.setattr(
-        "jarvis.tools.external.mcp_client.stdio_client",
-        lambda params, **kw: HangingConn(),
-    )
-    monkeypatch.setattr(
-        "jarvis.tools.external.mcp_client.ClientSession", HangingSession
-    )
+    _patch_mcp_doubles(monkeypatch, HangingConn, HangingSession)
 
     client = MCPClient(
         {"hanging": {"transport": "stdio", "command": "/bin/true", "args": []}}
@@ -1021,6 +1013,164 @@ def test_the_runtime_stays_down_once_the_process_asked_it_to(
     )
     with pytest.raises(RuntimeError):
         client.invoke_tool("srv", "alpha", {})
+
+
+@pytest.mark.unit
+def test_a_new_daemon_run_rearms_the_runtime(shutdown_persistent_runtime):
+    """The latch is terminal for the daemon RUN, not the process: the
+    bundled desktop app re-runs ``daemon.main()`` in-process (tray
+    toggle, settings restart, setup wizard), and the run re-arms the
+    runtime at startup. A straggler between the teardown and the next
+    run still gets the refusal."""
+    from jarvis.tools.external.mcp_runtime import (
+        get_runtime,
+        reset_shutdown_latch,
+        shutdown_runtime,
+    )
+
+    get_runtime()
+    shutdown_runtime()
+    with pytest.raises(RuntimeError):
+        get_runtime()
+
+    reset_shutdown_latch()  # what daemon.main() does at startup
+    runtime = get_runtime()
+    assert not runtime.closed
+
+
+@pytest.mark.unit
+def test_the_daemon_rearms_the_runtime_before_discovery():
+    """Wiring pin: ``daemon.main()`` re-arms the latch before MCP
+    discovery runs, or a restarted bundled daemon would discover an
+    empty catalogue and every MCP tool would silently vanish."""
+    import inspect
+
+    from jarvis import daemon
+
+    source = inspect.getsource(daemon.main)
+    assert "reset_shutdown_latch" in source
+    assert source.index("reset_shutdown_latch") < source.index(
+        "initialize_mcp_tools"
+    )
+
+
+@pytest.mark.unit
+def test_a_straggler_call_does_not_spawn_on_a_closing_runtime(
+    monkeypatch, shutdown_persistent_runtime
+):
+    """A queued command resolved by the teardown drain must not retry
+    into a fresh worker on the closing loop: the spawn would be
+    destroyed mid-handshake, its subprocess could outlive the run, and
+    the caller would sit in the setup budget during shutdown. The
+    closed runtime refuses the retry, and the caller receives a
+    session error the funnel records."""
+    import threading
+    import time
+
+    from jarvis.tools.external.mcp_client import MCPClient, MCPServerSessionError
+    from jarvis.tools.external.mcp_runtime import get_runtime, shutdown_runtime
+
+    enter_count = {"n": 0}
+    exit_count = {"n": 0}
+    call_count = {"n": 0}
+    started = threading.Event()
+
+    def hook(name):
+        if name == "slow":
+            started.set()
+
+    TrackedConn, TrackedSession = _make_tracked_doubles(
+        call_count, enter_count, exit_count,
+        delays={"call": 1.0}, call_hook=hook,
+    )
+    _patch_mcp_doubles(monkeypatch, TrackedConn, TrackedSession)
+
+    client = MCPClient(
+        {"srv": {"transport": "stdio", "command": "/bin/true", "args": []}}
+    )
+    outcomes = {}
+
+    def call(label):
+        try:
+            client.invoke_tool("srv", label, {}, timeout_sec=10.0)
+            outcomes[label] = "returned"
+        except BaseException as e:  # noqa: BLE001 — the type IS the assertion
+            outcomes[label] = e
+
+    slow = threading.Thread(target=call, args=("slow",), daemon=True)
+    slow.start()
+    assert started.wait(timeout=5.0), "the slow call never started"
+
+    queued = threading.Thread(target=call, args=("queued",), daemon=True)
+    queued.start()
+    # Wait until the second command is actually in the worker's queue,
+    # so the teardown below deterministically finds it queued.
+    runtime = get_runtime()
+    worker = runtime._workers.get("srv")
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if worker is not None and worker._queue is not None \
+                and worker._queue.qsize() >= 1:
+            break
+        time.sleep(0.01)
+    assert worker is not None and worker._queue.qsize() >= 1, \
+        "the queued call never reached the worker queue"
+
+    shutdown_runtime()
+    slow.join(timeout=5.0)
+    queued.join(timeout=5.0)
+    assert not slow.is_alive() and not queued.is_alive()
+
+    assert isinstance(outcomes.get("slow"), MCPServerSessionError), (
+        f"the in-flight call surfaced as {outcomes.get('slow')!r}"
+    )
+    assert isinstance(outcomes.get("queued"), MCPServerSessionError), (
+        f"the queued call surfaced as {outcomes.get('queued')!r}"
+    )
+    assert enter_count["n"] == 1, (
+        "the retry spawned a fresh session on the closing runtime"
+    )
+
+
+@pytest.mark.unit
+def test_a_stalled_loop_leaves_no_scheduled_setup_behind(
+    monkeypatch, shutdown_persistent_runtime
+):
+    """When the loop is stalled past the schedule budget, ``_setup``
+    has not run; the failure must cancel it, or it later spawns a
+    worker and a subprocess that nothing can reach: the worker was
+    never cached, so no shutdown path ever sees it."""
+    import time
+
+    from jarvis.tools.external import mcp_runtime as _runtime_mod
+    from jarvis.tools.external.mcp_client import MCPClient
+
+    monkeypatch.setattr(_runtime_mod, "_SETUP_SCHEDULE_TIMEOUT_SEC", 0.2)
+
+    enter_count = {"n": 0}
+    exit_count = {"n": 0}
+    call_count = {"n": 0}
+    TrackedConn, TrackedSession = _make_tracked_doubles(
+        call_count, enter_count, exit_count
+    )
+    _patch_mcp_doubles(monkeypatch, TrackedConn, TrackedSession)
+
+    # Stall the runtime loop with a synchronous sleep inside a callback.
+    runtime = _runtime_mod.get_runtime()
+    runtime._loop.call_soon_threadsafe(time.sleep, 1.0)
+
+    client = MCPClient(
+        {"srv": {"transport": "stdio", "command": "/bin/true", "args": []}}
+    )
+    with pytest.raises(TimeoutError):
+        client.invoke_tool("srv", "alpha", {}, timeout_sec=2.0)
+
+    # Let the stalled loop free and run whatever is still scheduled:
+    # a cancelled _setup never opens a connection.
+    time.sleep(1.3)
+    assert enter_count["n"] == 0, (
+        "the scheduled _setup spawned a session after its start() failed"
+    )
 
 
 @pytest.mark.unit
