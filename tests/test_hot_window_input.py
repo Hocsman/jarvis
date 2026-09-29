@@ -14,6 +14,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
+from conftest import _created_listeners
 from jarvis.listening.state_manager import StateManager, ListeningState
 from jarvis.listening.intent_judge import IntentJudgment
 
@@ -69,6 +70,7 @@ def _create_listener(**kwargs):
         from jarvis.listening.listener import VoiceListener
         listener = VoiceListener(mock_db, mock_cfg, mock_tts, mock_dialogue_memory)
 
+    _created_listeners.append(listener)
     return listener, mock_tts
 
 
@@ -112,11 +114,20 @@ def _wait_for_hot_window_expiry(listener, timeout=2.0):
     that thread tens of milliseconds late; a fixed sleep sized to the window
     then finds it still open. Waiting on the span's end observes the timer
     itself, so the test measures the window and not the scheduler. A window
-    that never opened never closes either, and shows up as a timeout."""
+    that never opened never closes either, and shows up as a timeout.
+
+    Before returning, step past the clock's granularity: the span's end is
+    stamped when the timer observes the expiry, and the acceptance check
+    includes that boundary (start <= span_end). A caller stamping an
+    "after expiry" time the instant this returns can land on the same
+    millisecond tick as the boundary and read as inside the window, which
+    is the flake this margin removes.
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
         if (listener.state_manager._hot_window_span_end > 0
                 and not listener.state_manager.is_hot_window_active()):
+            time.sleep(0.025)
             return True
         time.sleep(0.01)
     return False
@@ -1216,12 +1227,13 @@ class TestEchoCaughtBeforeBeepAndIntentJudge:
 
     @patch("builtins.print")
     def test_echo_does_not_extend_hot_window(self, _print):
-        """Echo rejection should NOT reset/extend the hot window timer.
+        """Echo rejection must NOT reset/extend the hot window timer.
 
-        Previously, each echo chunk called reset_hot_window_expiry(), extending
-        the window by another full duration. With multiple echo chunks, this
-        created a window lasting 6+ seconds instead of 3, causing speech long
-        after TTS to be treated as hot window input.
+        The window measures one fixed span from the TTS finish. If each
+        echo chunk restarted that span, a run of chunks would keep the
+        window open for the sum of their arrivals instead of its own
+        duration, and speech long after TTS would be treated as hot
+        window input.
         """
         listener, _ = _create_listener(echo_tolerance=0.02, hot_window_seconds=0.10)
         tts_text = "The answer is sunny and warm."

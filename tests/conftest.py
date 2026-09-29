@@ -690,3 +690,29 @@ class ViewerClient:
 
     def __exit__(self, *exc_info):
         return self._client.__exit__(*exc_info)
+
+
+# Listeners created by test helpers across modules (test_hot_window_input's
+# factory is imported by other suites). The autouse drainer below stops
+# each one's thinking tune after every test, wherever it was created.
+_created_listeners: List[Any] = []
+
+
+@pytest.fixture(autouse=True)
+def _stop_lingering_tunes():
+    """Stop every thinking tune a test started, after the test.
+
+    A test that enables the tune and gets a query accepted leaves the
+    listener's TunePlayer running: on a machine without audio output
+    that is the fallback spinner, a daemon thread calling time.sleep(0.2)
+    in a loop for the rest of the session. It pollutes any process-wide
+    time.sleep patch a later test sets up (its 0.2s entries land in the
+    recorder) and interleaves its prints with their captured output.
+    """
+    yield
+    while _created_listeners:
+        listener = _created_listeners.pop()
+        try:
+            listener._stop_thinking_tune()
+        except Exception:
+            pass

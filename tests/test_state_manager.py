@@ -166,22 +166,40 @@ class TestHotWindowActivation:
 
 
 class TestHotWindowExpiry:
-    """Tests for hot window expiry timer."""
+    """Tests for hot window expiry timer.
+
+    The waits poll instead of sleeping a fixed slice of a tiny window:
+    on a loaded runner a timer thread can wake tens of milliseconds
+    late and a fixed sleep can overshoot, and the assertion then
+    measures the scheduler instead of the state machine.
+    """
+
+    @staticmethod
+    def _wait_for_state(sm, active: bool, timeout: float = 2.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if sm.is_hot_window_active() is active:
+                return True
+            time.sleep(0.01)
+        return False
+
+    @staticmethod
+    def _stay_active(sm, duration: float) -> None:
+        """Assert the window is active throughout ``duration``."""
+        deadline = time.monotonic() + duration
+        while time.monotonic() < deadline:
+            assert sm.is_hot_window_active() is True
+            time.sleep(0.01)
 
     def test_hot_window_expires_after_duration(self):
         """Hot window expires after configured duration."""
-        sm = StateManager(echo_tolerance=0.02, hot_window_seconds=0.05)
+        sm = StateManager(echo_tolerance=0.02, hot_window_seconds=0.30)
 
         with patch('builtins.print'):
             sm.schedule_hot_window_activation()
 
-            # Wait for activation
-            time.sleep(0.04)
-            assert sm.is_hot_window_active() is True
-
-            # Wait for expiry
-            time.sleep(0.1)
-            assert sm.is_hot_window_active() is False
+            assert self._wait_for_state(sm, True), "hot window never activated"
+            assert self._wait_for_state(sm, False), "hot window never expired"
             assert sm.get_state() == ListeningState.WAKE_WORD
 
         sm.stop()
@@ -192,8 +210,7 @@ class TestHotWindowExpiry:
 
         with patch('builtins.print'):
             sm.schedule_hot_window_activation()
-            time.sleep(0.04)
-            assert sm.is_hot_window_active() is True
+            assert self._wait_for_state(sm, True), "hot window never activated"
 
             sm.expire_hot_window()
             assert sm.is_hot_window_active() is False
@@ -202,54 +219,52 @@ class TestHotWindowExpiry:
 
     def test_reset_hot_window_expiry_extends_timer(self):
         """reset_hot_window_expiry restarts the timer so echo time doesn't eat the window."""
-        sm = StateManager(echo_tolerance=0.02, hot_window_seconds=0.30)
+        sm = StateManager(echo_tolerance=0.02, hot_window_seconds=0.60)
 
         with patch('builtins.print'):
             sm.schedule_hot_window_activation()
-            time.sleep(0.05)
-            assert sm.is_hot_window_active() is True
+            assert self._wait_for_state(sm, True), "hot window never activated"
 
-            # Wait until part of the window has elapsed
-            time.sleep(0.15)
-            assert sm.is_hot_window_active() is True  # still within 0.30s
+            # Let part of the window elapse
+            self._stay_active(sm, 0.30)
 
             # Reset the timer (simulating echo rejection)
             sm.reset_hot_window_expiry()
 
-            # After the original window would have expired, it should still be active
-            time.sleep(0.20)
-            assert sm.is_hot_window_active() is True
+            # Still active past the point where the original window
+            # would have ended (0.02 + 0.60 ≈ 0.62s after scheduling;
+            # the reset landed at ~0.33s and this runs to ~0.73s)
+            self._stay_active(sm, 0.40)
 
-            # Wait for the full reset window to expire
-            time.sleep(0.20)
-            assert sm.is_hot_window_active() is False
+            # The extended window expires too
+            assert self._wait_for_state(sm, False), "reset window never expired"
 
         sm.stop()
 
     def test_reset_hot_window_expiry_reactivates_expired_window(self):
         """reset_hot_window_expiry reactivates a hot window that expired during echo processing."""
-        sm = StateManager(echo_tolerance=0.02, hot_window_seconds=0.08)
+        sm = StateManager(echo_tolerance=0.02, hot_window_seconds=0.30)
 
         with patch('builtins.print'):
             sm.schedule_hot_window_activation()
-            time.sleep(0.04)
-            assert sm.is_hot_window_active() is True
+            assert self._wait_for_state(sm, True), "hot window never activated"
 
             # Let the hot window fully expire
-            time.sleep(0.12)
+            assert self._wait_for_state(sm, False), "hot window never expired"
             assert sm.get_state() == ListeningState.WAKE_WORD
 
             # Simulate echo rejection arriving after expiry — should reactivate
             sm.reset_hot_window_expiry()
             assert sm.is_hot_window_active() is True
 
-            # New timer should keep it alive for another full window
-            time.sleep(0.04)
-            assert sm.is_hot_window_active() is True
-
-            # Then expire normally
-            time.sleep(0.06)
-            assert sm.is_hot_window_active() is False
+            # The new timer keeps it alive for another full window, not a short one
+            reactivated_at = time.monotonic()
+            self._stay_active(sm, 0.15)
+            assert self._wait_for_state(sm, False), "reactivated window never expired"
+            assert time.monotonic() - reactivated_at >= 0.25, (
+                "the reactivated window expired early: the reset did not "
+                "schedule a full fresh timer"
+            )
 
         sm.stop()
 
