@@ -1092,6 +1092,20 @@ def _check_and_update_diary(
         _notify("complete", False)
 
 
+def _apply_ledger_retention(db) -> None:
+    """Enforce the ledger's 90-day window at daemon startup.
+
+    The reminder scheduler keeps the window while it runs, but no
+    scheduler exists when reminders are disabled, and the memory
+    viewer's Activity tab is read-only. Pruning at startup keeps the
+    retention promise for every install.
+    """
+    try:
+        db.prune_actions(90)
+    except Exception as e:  # noqa: BLE001
+        debug_log(f"startup ledger prune skipped: {e}", "tools")
+
+
 def main() -> None:
     """Main daemon entry point."""
     global _global_dialogue_memory, _global_stop_requested, _global_tts_engine, _global_dictation_engine, _global_listener
@@ -1117,6 +1131,7 @@ def main() -> None:
     global _global_cfg, _global_db
     _global_cfg = cfg
     _global_db = db
+    _apply_ledger_retention(db)
 
     debug_log("daemon started", "jarvis")
     print("✓ Daemon started", flush=True)

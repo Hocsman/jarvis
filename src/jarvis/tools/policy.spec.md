@@ -109,7 +109,7 @@ The spoken question is a fixed sentence with the tool name in it. Its wording is
 
 One row per tool call, written from the gate so it covers every route into execution, and both halves of the decision: what was stopped and what was let through.
 
-Each row holds the timestamp, the origin, the tool, its redacted arguments, the risk, the verdict, the outcome, the duration, and the request id when the row belongs to a question. Kept 90 days, pruned on read, and erasable in one click from the Activity tab.
+Each row holds the timestamp, the origin, the tool, its redacted arguments, the risk, the verdict, the outcome, the duration, and the request id when the row belongs to a question. Kept 90 days, pruned at daemon startup and on the reminder scheduler's tick, and erasable in one click from the Activity tab.
 
 | Outcome | Means |
 |---------|-------|

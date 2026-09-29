@@ -19,9 +19,10 @@ The gate these tests pin:
    no HTML form can produce and a content type that forces a CORS
    preflight the server never grants.
 
-Reads stay token-free for the embedded view, and the desktop app asks
-whatever holds the port to identify itself before pointing a window at
-it.
+Reads stay token-free for the embedded view, except the node view,
+which writes an access score and carries the token like a mutation;
+and the desktop app asks whatever holds the port to identify itself
+before pointing a window at it.
 """
 
 from __future__ import annotations
@@ -213,9 +214,10 @@ class TestTokenGate:
     that is not the served page can never read it, and so can never
     write. (A local non-browser process can scrape it from GET / — it
     could equally read the database files directly — the token defends
-    the browser, not the machine.) Reads stay open: the embedded view
-    loads them, and no response carries a CORS allowance, so a foreign
-    page can request but never read."""
+    the browser, not the machine.) Reads stay open, except the node
+    view, which writes: the embedded view loads them, and no response
+    carries a CORS allowance, so a foreign page can request but never
+    read."""
 
     def test_a_write_without_the_token_is_refused(self, viewer):
         resp = viewer.client.put("/api/core/profile", json={"raw": "- x\n"})
