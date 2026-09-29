@@ -54,10 +54,12 @@ _LOCK_OFFSET = 1024
 # Try to import WebEngine (optional dependency for embedded memory viewer)
 try:
     from PyQt6.QtWebEngineWidgets import QWebEngineView
+    from PyQt6.QtWebEngineCore import QWebEnginePage
     HAS_WEBENGINE = True
 except ImportError:
     HAS_WEBENGINE = False
     QWebEngineView = None
+    QWebEnginePage = None
 
 from jarvis.debug import debug_log
 from jarvis.config import default_config_path, _default_db_path, SUPPORTED_CHAT_MODELS, get_supported_model_ids
@@ -1229,6 +1231,49 @@ def _port_holds_viewer_server(port: int) -> bool:
         return False
 
 
+# The embedded viewer navigates exactly one origin: the loopback server
+# that serves the page. Two schemes pass without a host check: ``about:``
+# for Qt's internal page states, and ``data:`` because ``setHtml`` is a
+# navigation to a self-contained ``data:text/html`` document (the error
+# page rides it).
+_VIEWER_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+_VIEWER_LOCAL_SCHEMES = frozenset({"about", "data"})
+
+
+def _is_local_navigation(url) -> bool:
+    """Whether the embedded memory viewer may navigate to ``url``."""
+    if (url.scheme() or "").lower() in _VIEWER_LOCAL_SCHEMES:
+        return True
+    return (url.host() or "").lower() in _VIEWER_LOCAL_HOSTS
+
+
+if QWebEnginePage is not None:
+
+    class _LocalOnlyPage(QWebEnginePage):
+        """WebEngine page that refuses every non-loopback navigation.
+
+        The served page holds the launch token and references no remote
+        asset; this makes navigation a property of the view too, so no
+        link or injected redirect inside the embedded page can navigate
+        the machine to a remote host. Subresource requests (fetch, XHR,
+        images) do not pass through this guard; that the machine
+        contacts nobody rests on the served page referencing no remote
+        URL, which tests/test_memory_viewer_offline.py pins.
+        """
+
+        def acceptNavigationRequest(self, url, navigation_type, is_main_frame):
+            if _is_local_navigation(url):
+                return super().acceptNavigationRequest(url, navigation_type, is_main_frame)
+            debug_log(
+                f"viewer navigation refused: {url.scheme()}://{url.host()}",
+                "desktop",
+            )
+            return False
+
+else:
+    _LocalOnlyPage = None
+
+
 class MemoryViewerWindow(QMainWindow):
     """Window for viewing Jarvis memory using embedded web view."""
 
@@ -1263,6 +1308,7 @@ class MemoryViewerWindow(QMainWindow):
             # Use embedded web view - URL will be set in showEvent when window is shown
             try:
                 self.web_view = QWebEngineView()
+                self.web_view.setPage(_LocalOnlyPage(self.web_view))
                 layout.addWidget(self.web_view)
                 web_view_created = True
             except Exception as e:
