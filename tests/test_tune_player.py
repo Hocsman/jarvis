@@ -154,26 +154,28 @@ def test_stop_closes_the_stream_and_returns_quickly(monkeypatch):
     created = _install_fake_sounddevice(monkeypatch)
     tp = TunePlayer(enabled=True)
     tp.start_tune()
-
-    # Wait until the stream is actually started.
-    for _ in range(100):
+    try:
+        # Wait until the stream is actually started.
+        for _ in range(100):
+            stream = created.get("stream")
+            if stream is not None and stream.started:
+                break
+            time.sleep(0.01)
         stream = created.get("stream")
-        if stream is not None and stream.started:
-            break
-        time.sleep(0.01)
-    stream = created.get("stream")
-    assert stream is not None and stream.started
+        assert stream is not None and stream.started
 
-    t0 = time.time()
-    tp.stop_tune()
-    elapsed = time.time() - t0
+        t0 = time.time()
+        tp.stop_tune()
+        elapsed = time.time() - t0
 
-    # Only the tune thread closes the stream; stop_tune must NOT abort
-    # from the caller's thread — that races with close() on macOS.
-    assert stream.closed
-    assert not stream.aborted
-    assert elapsed < 1.0
-    assert not tp.is_playing()
+        # Only the tune thread closes the stream; stop_tune must NOT abort
+        # from the caller's thread — that races with close() on macOS.
+        assert stream.closed
+        assert not stream.aborted
+        assert elapsed < 1.0
+        assert not tp.is_playing()
+    finally:
+        tp.stop_tune()
 
 
 def test_fallback_when_sounddevice_unavailable(monkeypatch):
@@ -188,18 +190,21 @@ def test_fallback_when_sounddevice_unavailable(monkeypatch):
 
     tp = TunePlayer(enabled=True)
     tp.start_tune()
-    # Give the thread a moment to reach the fallback loop.
-    for _ in range(50):
-        if tp.is_playing():
-            break
-        time.sleep(0.01)
-    assert tp.is_playing()
+    try:
+        # Give the thread a moment to reach the fallback loop.
+        for _ in range(50):
+            if tp.is_playing():
+                break
+            time.sleep(0.01)
+        assert tp.is_playing()
 
-    t0 = time.time()
-    tp.stop_tune()
-    elapsed = time.time() - t0
-    assert elapsed < 1.5
-    assert not tp.is_playing()
+        t0 = time.time()
+        tp.stop_tune()
+        elapsed = time.time() - t0
+        assert elapsed < 1.5
+        assert not tp.is_playing()
+    finally:
+        tp.stop_tune()
 
 
 def test_stream_callback_wraps_seamlessly(monkeypatch):

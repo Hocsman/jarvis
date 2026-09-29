@@ -66,21 +66,29 @@ def _wait_for_complete(events, timeout=5.0):
 
 
 def _wait_for_ipc_complete(capsys, timeout=5.0):
-    """Block until a ``__CHAT__:`` ``complete`` event appears on stdout."""
+    """Block until a ``__CHAT__:`` ``complete`` event appears on stdout.
+
+    Lines are accumulated across polls: ``readouterr`` consumes the
+    buffer, and the worker emits ``start`` before importing the reply
+    engine, so the two events can be arbitrarily far apart (a cold
+    engine import takes hundreds of milliseconds). Returning only the
+    last poll's lines would drop the earlier events, which is the race
+    this accumulator removes.
+    """
     deadline = time.time() + timeout
+    seen = []
     while time.time() < deadline:
         out = capsys.readouterr().out
-        chat_lines = [
-            ln for ln in out.splitlines()
-            if ln.startswith(daemon.CHAT_IPC_PREFIX)
-        ]
-        for ln in chat_lines:
+        for ln in out.splitlines():
+            if ln.startswith(daemon.CHAT_IPC_PREFIX):
+                seen.append(ln)
+        for ln in seen:
             try:
                 payload = json.loads(ln[len(daemon.CHAT_IPC_PREFIX):])
             except json.JSONDecodeError:
                 continue
             if payload.get("type") == "complete":
-                return chat_lines
+                return seen
         time.sleep(0.02)
     raise AssertionError("__CHAT__: complete event was not emitted within timeout")
 
