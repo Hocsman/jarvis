@@ -2133,11 +2133,14 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
     # When a query contains a conjunction joining two question-clauses, the
     # model needs to search for each part separately. We split upfront so we
     # can inject a targeted "still need to answer: X" nudge after each tool
-    # result. Only activated in text-based mode; native tool calling models
-    # manage multi-step reasoning through their own chain-of-thought.
+    # result. The split runs on the REDACTED text: the clauses end up inside
+    # a message to the model (and in the debug log), and everything the model
+    # reads is the redacted form. Only activated in text-based mode; native
+    # tool calling models manage multi-step reasoning through their own
+    # chain-of-thought.
     _compound_sub_questions: list = []
     if use_text_tools:
-        _compound_sub_questions = split_compound_query(text, language=language)
+        _compound_sub_questions = split_compound_query(redacted, language=language)
         if _compound_sub_questions:
             debug_log(
                 f"Compound query detected ({len(_compound_sub_questions)} parts): "
@@ -3155,10 +3158,10 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
 
                 if use_text_tools:
                     # Plan-aware remainder nudge. When a pre-loop plan exists,
-                    # prefer it over the legacy compound_query split: the plan
-                    # was computed from the actual query + tools + memory, not
-                    # from a hand-rolled conjunction table, so it generalises to
-                    # multi-part queries the split heuristic misses.
+                    # prefer it over the compound_query split: the plan is
+                    # computed from the actual query + tools + memory, not
+                    # from a hand-rolled conjunction table, so it generalises
+                    # to multi-part queries the split heuristic misses.
                     # +1 because the current tool result is not yet in `messages`
                     # (appended below); the nudge must point at the NEXT step,
                     # not the one that just ran. The direct-exec path above uses

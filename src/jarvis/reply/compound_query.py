@@ -28,8 +28,6 @@ from typing import Optional
 # semantic weight than a Latin letter.
 DEFAULT_MIN_CLAUSE_CHARS = 9
 CJK_MIN_CLAUSE_CHARS = 4
-# Back-compat alias kept for existing tests that imported the original constant.
-MIN_CLAUSE_CHARS = DEFAULT_MIN_CLAUSE_CHARS
 
 
 @dataclass(frozen=True)
