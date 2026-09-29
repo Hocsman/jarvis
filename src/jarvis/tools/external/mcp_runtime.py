@@ -55,7 +55,13 @@ from .mcp_client import MCPClient, MCPServerSessionError
 
 _DEFAULT_INVOKE_TIMEOUT_SEC = 120.0
 _SETUP_TIMEOUT_SEC = 30.0
-_SHUTDOWN_THREAD_JOIN_SEC = 5.0
+_SETUP_SCHEDULE_TIMEOUT_SEC = 5.0
+_SHUTDOWN_THREAD_JOIN_SEC = 7.0
+# The mcp SDK's stdio teardown escalates: stdin close, a 2s graceful
+# wait, then a process-tree kill with its own 2s budget. The drain must
+# outlast that escalation, or the loop closes mid-kill and a server that
+# ignores stdin EOF survives the daemon.
+_LOOP_DRAIN_SEC = 5.0
 
 
 def _validated_seconds(raw: Any) -> Optional[float]:
@@ -112,12 +118,26 @@ def _resolve_invoke_timeout(
 
 _runtime_lock = threading.Lock()
 _runtime: Optional["_PersistentMCPRuntime"] = None
+_shutdown_requested = False
 
 
 def get_runtime() -> "_PersistentMCPRuntime":
-    """Return the shared persistent runtime, starting it on first use."""
+    """Return the shared persistent runtime, starting it on first use.
+
+    After ``shutdown_runtime()`` there is no runtime to return: the
+    teardown is terminal for the daemon run, and resurrecting a fresh
+    thread and fresh subprocesses for a straggler call would leave them
+    unreaped. The next ``daemon.main()`` re-arms the latch at startup.
+    The ``RuntimeError`` is an ordinary ``Exception``, so the tool
+    funnel records the failed call like any session failure.
+    """
     global _runtime
     with _runtime_lock:
+        if _shutdown_requested:
+            raise RuntimeError(
+                "Persistent MCP runtime is shut down; "
+                "it returns with the next daemon run"
+            )
         if _runtime is None or _runtime.closed:
             _runtime = _PersistentMCPRuntime()
         return _runtime
@@ -125,8 +145,9 @@ def get_runtime() -> "_PersistentMCPRuntime":
 
 def shutdown_runtime() -> None:
     """Tear down the shared runtime. Safe to call multiple times."""
-    global _runtime
+    global _runtime, _shutdown_requested
     with _runtime_lock:
+        _shutdown_requested = True
         instance = _runtime
         _runtime = None
     if instance is not None:
@@ -134,6 +155,20 @@ def shutdown_runtime() -> None:
             instance.shutdown()
         except Exception as e:  # noqa: BLE001
             debug_log(f"persistent MCP runtime shutdown error: {e}", "mcp")
+
+
+def reset_shutdown_latch() -> None:
+    """Re-arm ``get_runtime()`` after ``shutdown_runtime()``.
+
+    The latch is terminal for a daemon run, not for the process:
+    ``daemon.main()`` calls this at startup, and the bundled desktop
+    app re-runs ``main()`` in-process (tray toggle, settings restart,
+    setup wizard). The test suite calls it between tests for the same
+    reason.
+    """
+    global _shutdown_requested
+    with _runtime_lock:
+        _shutdown_requested = False
 
 
 class _PersistentMCPRuntime:
@@ -158,10 +193,20 @@ class _PersistentMCPRuntime:
                 self._loop.run_forever()
             finally:
                 try:
-                    # Cancel any leftover tasks before closing.
+                    # Cancel any leftover tasks, then let the
+                    # cancellations run before closing: a worker
+                    # destroyed while still pending never reaches its
+                    # finally drain, and a caller waiting on it would
+                    # sit out its whole budget against a dead loop.
+                    # Bounded, so a task wedged in uncancellable work
+                    # delays the close by at most ``_LOOP_DRAIN_SEC``.
                     pending = asyncio.all_tasks(self._loop)
                     for task in pending:
                         task.cancel()
+                    if pending:
+                        self._loop.run_until_complete(
+                            asyncio.wait(pending, timeout=_LOOP_DRAIN_SEC)
+                        )
                 except Exception as e:  # noqa: BLE001
                     debug_log(f"MCP runtime task cleanup error: {e}", "mcp")
                 try:
@@ -274,9 +319,18 @@ class _PersistentMCPRuntime:
         change triggers shutdown of the old worker and creation of a
         fresh one. ``worker.start()`` runs under ``_workers_lock``: a
         setup that hangs blocks calls to every server for up to
-        ``_SETUP_TIMEOUT_SEC``.
+        ``_SETUP_TIMEOUT_SEC``, plus the failed-start teardown's
+        bounded sentinel wait.
         """
         with self._workers_lock:
+            if self.closed:
+                # The runtime is shutting down. A worker spawned now
+                # would ride a loop that is about to close: destroyed
+                # mid-handshake, subprocess possibly unreaped, and its
+                # caller stuck in the setup budget during teardown.
+                raise MCPServerSessionError(
+                    f"MCP runtime is shut down; call to '{server_name}' refused"
+                )
             existing = self._workers.get(server_name)
             if existing is not None and existing.alive and existing.config == server_cfg:
                 return existing
@@ -295,7 +349,22 @@ class _PersistentMCPRuntime:
                     "Persistent MCP runtime event loop is not available"
                 )
             worker = _ServerWorker(loop, server_name, server_cfg)
-            worker.start()
+            try:
+                worker.start()
+            except BaseException:
+                # A half-started worker is never cached, so nothing
+                # else can ever reach it: tear it down here, or its
+                # task and spawned subprocess outlive the attempt and
+                # stack up one per retry.
+                try:
+                    worker.shutdown()
+                except Exception as shutdown_err:  # noqa: BLE001
+                    debug_log(
+                        f"MCP worker '{server_name}' failed-start "
+                        f"shutdown error: {shutdown_err}",
+                        "mcp",
+                    )
+                raise
             self._workers[server_name] = worker
             return worker
 
@@ -448,10 +517,21 @@ class _ServerWorker:
 
     def start(self) -> None:
         async def _setup() -> None:
+            if not self.alive:
+                # ``start()`` failed (the loop stalled past the schedule
+                # budget) and the worker was torn down before this
+                # callback ran. Spawning now would create a task and a
+                # subprocess nothing can reach: the worker is cached
+                # only after a successful start. When the loop stalled
+                # the other way around and the task exists, the
+                # teardown's sentinel and cancel handle it instead.
+                return
             self._queue = asyncio.Queue()
             self._task = asyncio.ensure_future(self._run())
 
-        asyncio.run_coroutine_threadsafe(_setup(), self._loop).result(timeout=5)
+        asyncio.run_coroutine_threadsafe(_setup(), self._loop).result(
+            timeout=_SETUP_SCHEDULE_TIMEOUT_SEC
+        )
         # Block until the worker has initialised the MCP session, or
         # surfaced a startup error. Without this, the first ``invoke``
         # would race the session handshake.
@@ -512,19 +592,30 @@ class _ServerWorker:
                             # caller still waiting gets the runtime's
                             # single retry, and a caller already
                             # answered keeps the report it received.
-                            if not cmd.fut.done():
-                                cmd.fut.set_exception(
-                                    _WorkerDeadError(
-                                        f"MCP server '{self._server_name}' "
-                                        "session ended"
-                                    )
-                                )
+                            self._refuse(cmd)
                             continue
                         # Set before anything else: from this point the
                         # call may execute, and a budget expiry on the
                         # caller side must classify it as a timeout
                         # rather than a death that is safe to retry.
                         cmd.pulled = True
+                        if not self.alive:
+                            # The re-check closes the window between
+                            # the liveness check and the mark. A
+                            # shutdown landing inside it would
+                            # otherwise leave a command on its way to
+                            # execution visible to an expiring caller
+                            # as "unpulled on a dead worker", the one
+                            # shape the runtime retries. Either order
+                            # is safe: a flip before the re-check
+                            # refuses a command that never ran, and a
+                            # flip after it is invisible to the
+                            # classification, because a caller reads
+                            # ``pulled`` only after its own
+                            # ``shutdown()`` returned, and that is
+                            # what flips ``alive``.
+                            self._refuse(cmd)
+                            continue
                         kind, payload, fut = cmd.kind, cmd.payload, cmd.fut
                         try:
                             if kind == "call":
@@ -573,12 +664,17 @@ class _ServerWorker:
                         break
                     if cmd is None:
                         continue
-                    if not cmd.fut.done():
-                        cmd.fut.set_exception(
-                            _WorkerDeadError(
-                                f"MCP server '{self._server_name}' session ended"
-                            )
-                        )
+                    self._refuse(cmd)
+
+    def _refuse(self, cmd: "_Command") -> None:
+        """Resolve a command that will never execute with the death
+        sentinel, so the runtime's single retry is safe for it."""
+        if not cmd.fut.done():
+            cmd.fut.set_exception(
+                _WorkerDeadError(
+                    f"MCP server '{self._server_name}' session ended"
+                )
+            )
 
     async def _queue_get_with_idle(self) -> Any:
         """Await the next command, honouring ``idle_timeout_sec`` if set."""

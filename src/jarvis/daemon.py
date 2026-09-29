@@ -1102,6 +1102,12 @@ def main() -> None:
     _global_stop_requested = False
     _global_skip_shutdown_diary_update = False
 
+    # Re-arm the persistent MCP runtime: the previous run's teardown
+    # latched it, and bundled desktop mode re-runs this function
+    # in-process (tray toggle, settings restart, setup wizard).
+    from .tools.external.mcp_runtime import reset_shutdown_latch
+    reset_shutdown_latch()
+
     _install_signal_handlers()
 
     cfg = load_settings()
