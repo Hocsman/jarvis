@@ -32,13 +32,14 @@ resident for the daemon's lifetime.
 |-------|--------|
 | First `get_runtime()` call | Spawns the background thread + loop. |
 | First call referencing a server | Creates a `_ServerWorker`, awaits `_ready` (the worker signals readiness once `session.initialize()` returns). |
+| Worker setup fails or times out | The half-started session is torn down (task cancelled, subprocess reaped) before the failure reaches the caller. The worker is cached only after a successful start, so retries do not stack unreachable sessions. |
 | Server config equality holds | Subsequent calls reuse the cached worker. |
 | Server config changes | Old worker is shut down; a fresh worker replaces it. |
 | Worker raises `_WorkerDeadError` | Runtime drops it and retries the call once with a new worker. Second failure surfaces as `MCPServerSessionError` to the public layer. |
 | Call exceeds its `timeout_sec` budget | The worker is shut down and evicted, and the call surfaces as `MCPCallTimeoutError` (a `TimeoutError`) naming the server, the tool (or `list_tools`) and the seconds. It is never retried: a slow side-effecting tool may have run, and running it twice after one approval is worse than reporting the timeout. A stateful server restarts on the next call. |
 | Worker shuts down while a command is queued | The queued command does not execute: the worker refuses it at dequeue with the death sentinel. A caller whose budget already expired gets the expiry reported: the sentinel lands after its classification read, and an unpulled command can produce no result to honour. |
 | `idle_timeout_sec` set on a server config | Worker self-terminates after that long without activity. Next call spawns a new worker. |
-| Daemon shutdown calls `shutdown_runtime()` | Each worker is asked to exit (sentinel `None`); any wedged task is cancelled. The loop is stopped, the thread is joined with a 5s timeout. |
+| Daemon shutdown calls `shutdown_runtime()` | Teardown is terminal for the process: the latch makes any later `get_runtime()` raise `RuntimeError`, so a straggler call cannot resurrect a thread and subprocesses nobody would reap; the funnel records the failure like any session error. Each worker is asked to exit (sentinel `None`); any wedged task is cancelled. The loop runs the cancellations to completion (bounded by `_LOOP_DRAIN_SEC`) before closing, so an in-flight caller is resolved promptly with a session error instead of waiting out its budget against a dead loop. The thread is joined with a 5s timeout. |
 
 ## Invariants
 
@@ -48,6 +49,10 @@ resident for the daemon's lifetime.
 - A worker is never reused after `alive` flips to `False`. The
   finally-block in `_run` drains pending requests, resolving each
   outstanding future with `_WorkerDeadError` so callers do not hang.
+- A command never executes on a worker whose shutdown has begun: the
+  dequeue refusal is re-checked after the `pulled` mark, so a shutdown
+  landing between the check and the mark is refused (never run, death
+  sentinel, retry safe) rather than executed and misclassified.
 - A caller never receives a bare `BaseException` from a command: a
   cancellation delivered by a sibling call's timeout, or an anyio
   task-group teardown, surfaces as `MCPServerSessionError` (the
@@ -75,7 +80,10 @@ resident for the daemon's lifetime.
   when a call exceeds its budget. The worker is dropped and the call is
   not retried.
 - `get_runtime()` / `shutdown_runtime()`: module-level helpers used
-  by the daemon's startup and shutdown paths.
+  by the daemon's startup and shutdown paths. `shutdown_runtime()`
+  latches: afterwards `get_runtime()` raises `RuntimeError` for the
+  rest of the process (`_reset_shutdown_latch()` re-arms it for the
+  test suite, which tears the runtime down between tests).
 
 ## Configuration
 
@@ -123,6 +131,13 @@ verified there:
   in-flight call, which surfaces as `MCPServerSessionError` (never a
   bare `CancelledError`), and the sibling's queued command never
   executes after its expiry was reported.
+- A setup that never finishes its handshake tears its half-started
+  session down (the connection exits), and attempts do not stack
+  sessions.
+- `shutdown_runtime()` during an in-flight call resolves the caller
+  promptly with a session error, well inside its budget.
+- After `shutdown_runtime()`, `get_runtime()` refuses and a straggler
+  `invoke_tool` raises rather than spawning anything.
 - The registry renders an exception with an empty message by its type
   name, never as a dangling `error: ` or `raised: `.
 

@@ -56,6 +56,7 @@ from .mcp_client import MCPClient, MCPServerSessionError
 _DEFAULT_INVOKE_TIMEOUT_SEC = 120.0
 _SETUP_TIMEOUT_SEC = 30.0
 _SHUTDOWN_THREAD_JOIN_SEC = 5.0
+_LOOP_DRAIN_SEC = 2.0
 
 
 def _validated_seconds(raw: Any) -> Optional[float]:
@@ -112,12 +113,25 @@ def _resolve_invoke_timeout(
 
 _runtime_lock = threading.Lock()
 _runtime: Optional["_PersistentMCPRuntime"] = None
+_shutdown_requested = False
 
 
 def get_runtime() -> "_PersistentMCPRuntime":
-    """Return the shared persistent runtime, starting it on first use."""
+    """Return the shared persistent runtime, starting it on first use.
+
+    After ``shutdown_runtime()`` there is no runtime to return: the
+    daemon's teardown is terminal for the process, and resurrecting a
+    fresh thread and fresh subprocesses for a straggler call would
+    leave them unreaped. The ``RuntimeError`` is an ordinary
+    ``Exception``, so the tool funnel records the failed call like any
+    session failure.
+    """
     global _runtime
     with _runtime_lock:
+        if _shutdown_requested:
+            raise RuntimeError(
+                "Persistent MCP runtime is shut down for this process"
+            )
         if _runtime is None or _runtime.closed:
             _runtime = _PersistentMCPRuntime()
         return _runtime
@@ -125,8 +139,9 @@ def get_runtime() -> "_PersistentMCPRuntime":
 
 def shutdown_runtime() -> None:
     """Tear down the shared runtime. Safe to call multiple times."""
-    global _runtime
+    global _runtime, _shutdown_requested
     with _runtime_lock:
+        _shutdown_requested = True
         instance = _runtime
         _runtime = None
     if instance is not None:
@@ -134,6 +149,18 @@ def shutdown_runtime() -> None:
             instance.shutdown()
         except Exception as e:  # noqa: BLE001
             debug_log(f"persistent MCP runtime shutdown error: {e}", "mcp")
+
+
+def _reset_shutdown_latch() -> None:
+    """Re-arm ``get_runtime()`` after ``shutdown_runtime()``.
+
+    The daemon's shutdown is terminal for its process; the test suite
+    tears the runtime down between tests in one long-lived process and
+    needs the next test to start clean.
+    """
+    global _shutdown_requested
+    with _runtime_lock:
+        _shutdown_requested = False
 
 
 class _PersistentMCPRuntime:
@@ -158,10 +185,20 @@ class _PersistentMCPRuntime:
                 self._loop.run_forever()
             finally:
                 try:
-                    # Cancel any leftover tasks before closing.
+                    # Cancel any leftover tasks, then let the
+                    # cancellations run before closing: a worker
+                    # destroyed while still pending never reaches its
+                    # finally drain, and a caller waiting on it would
+                    # sit out its whole budget against a dead loop.
+                    # Bounded, so a task wedged in uncancellable work
+                    # delays the close by at most ``_LOOP_DRAIN_SEC``.
                     pending = asyncio.all_tasks(self._loop)
                     for task in pending:
                         task.cancel()
+                    if pending:
+                        self._loop.run_until_complete(
+                            asyncio.wait(pending, timeout=_LOOP_DRAIN_SEC)
+                        )
                 except Exception as e:  # noqa: BLE001
                     debug_log(f"MCP runtime task cleanup error: {e}", "mcp")
                 try:
@@ -295,7 +332,22 @@ class _PersistentMCPRuntime:
                     "Persistent MCP runtime event loop is not available"
                 )
             worker = _ServerWorker(loop, server_name, server_cfg)
-            worker.start()
+            try:
+                worker.start()
+            except BaseException:
+                # A half-started worker is never cached, so nothing
+                # else can ever reach it: tear it down here, or its
+                # task and spawned subprocess outlive the attempt and
+                # stack up one per retry.
+                try:
+                    worker.shutdown()
+                except Exception as shutdown_err:  # noqa: BLE001
+                    debug_log(
+                        f"MCP worker '{server_name}' failed-start "
+                        f"shutdown error: {shutdown_err}",
+                        "mcp",
+                    )
+                raise
             self._workers[server_name] = worker
             return worker
 
@@ -512,19 +564,30 @@ class _ServerWorker:
                             # caller still waiting gets the runtime's
                             # single retry, and a caller already
                             # answered keeps the report it received.
-                            if not cmd.fut.done():
-                                cmd.fut.set_exception(
-                                    _WorkerDeadError(
-                                        f"MCP server '{self._server_name}' "
-                                        "session ended"
-                                    )
-                                )
+                            self._refuse(cmd)
                             continue
                         # Set before anything else: from this point the
                         # call may execute, and a budget expiry on the
                         # caller side must classify it as a timeout
                         # rather than a death that is safe to retry.
                         cmd.pulled = True
+                        if not self.alive:
+                            # The re-check closes the window between
+                            # the liveness check and the mark. A
+                            # shutdown landing inside it would
+                            # otherwise leave a command on its way to
+                            # execution visible to an expiring caller
+                            # as "unpulled on a dead worker", the one
+                            # shape the runtime retries. Either order
+                            # is now safe: a flip before the re-check
+                            # refuses a command that never ran, and a
+                            # flip after it is invisible to the
+                            # classification, because a caller reads
+                            # ``pulled`` only after its own
+                            # ``shutdown()`` returned, and that is
+                            # what flips ``alive``.
+                            self._refuse(cmd)
+                            continue
                         kind, payload, fut = cmd.kind, cmd.payload, cmd.fut
                         try:
                             if kind == "call":
@@ -573,12 +636,17 @@ class _ServerWorker:
                         break
                     if cmd is None:
                         continue
-                    if not cmd.fut.done():
-                        cmd.fut.set_exception(
-                            _WorkerDeadError(
-                                f"MCP server '{self._server_name}' session ended"
-                            )
-                        )
+                    self._refuse(cmd)
+
+    def _refuse(self, cmd: "_Command") -> None:
+        """Resolve a command that will never execute with the death
+        sentinel, so the runtime's single retry is safe for it."""
+        if not cmd.fut.done():
+            cmd.fut.set_exception(
+                _WorkerDeadError(
+                    f"MCP server '{self._server_name}' session ended"
+                )
+            )
 
     async def _queue_get_with_idle(self) -> Any:
         """Await the next command, honouring ``idle_timeout_sec`` if set."""
