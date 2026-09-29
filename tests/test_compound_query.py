@@ -5,7 +5,6 @@ import pytest
 from jarvis.reply.compound_query import (
     CJK_MIN_CLAUSE_CHARS,
     DEFAULT_MIN_CLAUSE_CHARS,
-    MIN_CLAUSE_CHARS,
     split_compound_query,
 )
 
@@ -47,20 +46,30 @@ class TestSplitCompoundQuery:
         assert split_compound_query("pros and cons of remote work", language="en") == []
 
     def test_short_left_side_does_not_split(self):
-        """Boundary: left clause below MIN_CLAUSE_CHARS prevents split."""
-        short = "x" * (MIN_CLAUSE_CHARS - 1)
-        long = "x" * (MIN_CLAUSE_CHARS + 5)
+        """Boundary: left clause below DEFAULT_MIN_CLAUSE_CHARS prevents split."""
+        short = "x" * (DEFAULT_MIN_CLAUSE_CHARS - 1)
+        long = "x" * (DEFAULT_MIN_CLAUSE_CHARS + 5)
         assert split_compound_query(f"{short} and {long}", language="en") == []
 
     def test_short_right_side_does_not_split(self):
-        short = "x" * (MIN_CLAUSE_CHARS - 1)
-        long = "x" * (MIN_CLAUSE_CHARS + 5)
+        short = "x" * (DEFAULT_MIN_CLAUSE_CHARS - 1)
+        long = "x" * (DEFAULT_MIN_CLAUSE_CHARS + 5)
         assert split_compound_query(f"{long} and {short}", language="en") == []
 
     def test_both_at_threshold_splits(self):
-        at_threshold = "x" * MIN_CLAUSE_CHARS
+        at_threshold = "x" * DEFAULT_MIN_CLAUSE_CHARS
         parts = split_compound_query(f"{at_threshold} and {at_threshold}", language="en")
         assert len(parts) == 2
+
+    def test_a_redaction_marker_counts_toward_the_clause_length(self):
+        """The engine splits the redacted utterance, so a placeholder can
+        carry a clause over the threshold its raw value never reached:
+        the marker's length is part of the contract, not an accident."""
+        parts = split_compound_query(
+            "[REDACTED_OTP] and the code for later", language="en",
+        )
+        assert len(parts) == 2
+        assert parts[0] == "[REDACTED_OTP]"
 
     def test_multiple_ands_only_first_split(self):
         """First ' and ' wins — keeps the splitter deterministic."""

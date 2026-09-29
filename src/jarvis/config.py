@@ -307,8 +307,8 @@ class Settings:
     # as the router and the evaluator.
     planner_model: str
     # Whether the pre-loop planner is enabled. True = planner always runs;
-    # False = planner never runs (legacy behaviour, with the
-    # compound_query fallback still active). Default True — the planner
+    # False = planner never runs, and the compound-query split drives the
+    # remainder nudge on its own. Default True — the planner
     # fails open to an empty plan so the cost of a miss is one cheap LLM
     # round-trip, and the upside is multi-step queries actually complete.
     planner_enabled: bool
