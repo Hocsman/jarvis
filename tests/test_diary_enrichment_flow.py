@@ -46,6 +46,37 @@ class TestDiaryToEnrichmentFlow:
             ]
             dm._last_activity_time = now - age_seconds
 
+    def test_keyword_cluster_recalls_an_entry_matching_any_single_keyword(self, db):
+        """Enrichment keywords are a topic cluster with OR semantics (the
+        function's own contract: "will be OR'd together"): an entry that
+        mentions only ONE of the keywords must still be recalled. AND-ing
+        the cluster would demand words the user never said."""
+        from jarvis.memory.conversation import (
+            search_conversation_memory_by_keywords,
+        )
+
+        db.upsert_conversation_summary(
+            date_utc="2026-04-26",
+            summary="The user mentioned they live in Manchester and have been "
+                    "trying new vegetarian restaurants around the Northern Quarter.",
+            topics=None,
+            source_app="jarvis",
+        )
+
+        results = search_conversation_memory_by_keywords(
+            db=db,
+            cfg=_cfg(),
+            keywords=["restaurants", "dining", "recommendations"],
+            max_results=5,
+        )
+
+        assert results, (
+            "OR semantics: the entry mentions 'restaurants' and must be "
+            "recalled even though it contains neither 'dining' nor "
+            "'recommendations'"
+        )
+        assert any("Manchester" in r for r in results)
+
     def test_diary_save_then_enrichment_retrieval_fts(self, db):
         """After diary save + cleanup, FTS enrichment finds the saved context.
 
