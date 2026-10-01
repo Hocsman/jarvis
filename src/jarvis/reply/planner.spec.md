@@ -192,7 +192,12 @@ The engine consumes the plan in two phases.
 - **LLM path**: when the step contains a `<placeholder>`, uses unknown
   argument keys, or doesn't fit the `key=value` shape, the step is
   passed to the LLM resolver which can substitute entities from prior
-  results and remap names.
+  results and remap names. The resolver also receives the turn's memory
+  digest (`memory_context`, the same `_prompt_memory` the plan-drop
+  guard keys on) as a fenced background-data block, so a fact recalled
+  by enrichment (e.g. the user's city) can ground an argument the step
+  leaves out. The fast path never sees memory: a fully concrete step is
+  dispatched exactly as written.
 - Returns `None` for synthesis steps (the LLM emits the literal
   `null`), unknown tools, or invalid JSON. All `None` paths fall back
   to the normal chat-model turn.

@@ -453,6 +453,48 @@ class TestResolveNextToolCall:
         )
         assert spy.called, "Placeholder substitution must go through the LLM"
 
+    def test_memory_context_reaches_the_llm_resolver(self):
+        """A step the fast path declines goes to the LLM resolver, and the
+        engine-supplied memory digest must be part of what the resolver
+        sees — otherwise a recalled fact (the user's city) cannot ground
+        the composed tool call, only the final chat reply."""
+        cfg = _cfg()
+        captured: dict = {}
+
+        def spy(**kwargs):
+            captured.update(kwargs)
+            return "null"
+
+        with patch.object(planner_mod, "call_llm_direct", side_effect=spy):
+            resolve_next_tool_call(
+                cfg,
+                "webSearch query='good restaurants in <city the user lives in>'",
+                [],
+                self._schema(),
+                memory_context="The user lives in Manchester.",
+            )
+        assert captured, "the placeholder step must reach the LLM resolver"
+        assert "Manchester" in captured.get("user_content", "")
+
+    def test_no_memory_context_adds_no_memory_block(self):
+        """Without memory the resolver prompt carries no memory block —
+        an empty scaffold would only confuse a small model."""
+        cfg = _cfg()
+        captured: dict = {}
+
+        def spy(**kwargs):
+            captured.update(kwargs)
+            return "null"
+
+        with patch.object(planner_mod, "call_llm_direct", side_effect=spy):
+            resolve_next_tool_call(
+                cfg,
+                "webSearch query='films by <director from step 1>'",
+                [],
+                self._schema(),
+            )
+        assert "MEMORY" not in captured.get("user_content", "")
+
     def test_deterministic_parse_accepts_bare_tool_name_as_empty_args(self):
         """A plan step naming the tool with no trailing args must parse to
         ``(name, {})`` without an LLM call.

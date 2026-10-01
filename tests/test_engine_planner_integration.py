@@ -13,7 +13,7 @@ injection into the tool-result messages.
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -647,3 +647,119 @@ def test_direct_exec_fires_despite_prior_query_tool_carryover(
         "direct-exec must fire for the current plan's getWeather step even when "
         "prior-query tool results are present in dialogue carryover"
     )
+
+
+def test_direct_exec_resolver_receives_the_memory_digest(
+    mock_config, db, dialogue_memory
+):
+    """When enrichment produced a digest, the plan step resolver must see
+    it: a recalled fact (the user's city) has to be able to ground the
+    composed tool call, not only the final chat reply."""
+    from jarvis.reply import engine as engine_mod
+    from jarvis.tools.types import ToolExecutionResult
+
+    mock_config.ollama_chat_model = "gemma4:e2b"  # SMALL → use_text_tools
+    mock_config.llm_chat_model = "gemma4:e2b"
+    mock_config.evaluator_enabled = False
+
+    plan = [
+        "searchMemory topic='user home city and dining preferences'",
+        "webSearch query='good restaurants tonight'",
+        "Reply to the user with the combined findings.",
+    ]
+
+    captured: list[dict] = []
+    resolved_calls = iter([
+        ("webSearch", {"query": "good restaurants tonight"}),
+    ])
+
+    def fake_resolve(*args, **kwargs):
+        captured.append(kwargs)
+        try:
+            return next(resolved_calls)
+        except StopIteration:
+            return None
+
+    fake_graph_store = MagicMock()
+    fake_graph_store.search_nodes.return_value = []
+    fake_graph_store.get_ancestors.return_value = []
+
+    with patch.object(engine_mod, "plan_query", return_value=plan), \
+         patch.object(engine_mod, "select_tools", return_value=["webSearch", "stop"]), \
+         patch.object(engine_mod, "extract_search_params_for_memory",
+                      return_value={"keywords": ["restaurants"]}), \
+         patch("jarvis.memory.conversation.search_conversation_memory_by_keywords",
+               return_value=["The user lives in Manchester."]), \
+         patch("jarvis.memory.graph.GraphMemoryStore",
+               return_value=fake_graph_store), \
+         patch.object(engine_mod, "digest_memory_for_query",
+                      return_value="The user lives in Manchester."), \
+         patch.object(engine_mod, "_resolve_plan_step", side_effect=fake_resolve), \
+         patch.object(engine_mod, "run_tool_with_retries",
+                      return_value=ToolExecutionResult(success=True, reply_text="OK")), \
+         patch.object(engine_mod, "chat_with_messages",
+                      return_value=_assistant_content("Bundobust in Manchester.")):
+        engine_mod.run_reply_engine(
+            db=db,
+            cfg=mock_config,
+            tts=None,
+            text="any good restaurants for me tonight?",
+            dialogue_memory=dialogue_memory,
+        )
+
+    assert captured, "the webSearch plan step should have been direct-executed"
+    assert "Manchester" in captured[0].get("memory_context", "")
+
+
+def test_direct_exec_resolver_gets_empty_memory_when_nothing_recalled(
+    mock_config, db, dialogue_memory
+):
+    """No recalled memory → the resolver receives an empty memory_context,
+    never a stale or fabricated one."""
+    from jarvis.reply import engine as engine_mod
+    from jarvis.tools.types import ToolExecutionResult
+
+    mock_config.ollama_chat_model = "gemma4:e2b"
+    mock_config.llm_chat_model = "gemma4:e2b"
+    mock_config.evaluator_enabled = False
+
+    plan = [
+        "webSearch query='Possessor 2020 director'",
+        "Reply to the user with the findings.",
+    ]
+
+    captured: list[dict] = []
+    resolved_calls = iter([("webSearch", {"query": "Possessor 2020 director"})])
+
+    def fake_resolve(*args, **kwargs):
+        captured.append(kwargs)
+        try:
+            return next(resolved_calls)
+        except StopIteration:
+            return None
+
+    fake_graph_store = MagicMock()
+    fake_graph_store.search_nodes.return_value = []
+    fake_graph_store.get_ancestors.return_value = []
+
+    with patch.object(engine_mod, "plan_query", return_value=plan), \
+         patch.object(engine_mod, "select_tools", return_value=["webSearch", "stop"]), \
+         patch.object(engine_mod, "extract_search_params_for_memory",
+                      return_value={}), \
+         patch("jarvis.memory.graph.GraphMemoryStore",
+               return_value=fake_graph_store), \
+         patch.object(engine_mod, "_resolve_plan_step", side_effect=fake_resolve), \
+         patch.object(engine_mod, "run_tool_with_retries",
+                      return_value=ToolExecutionResult(success=True, reply_text="OK")), \
+         patch.object(engine_mod, "chat_with_messages",
+                      return_value=_assistant_content("Brandon Cronenberg.")):
+        engine_mod.run_reply_engine(
+            db=db,
+            cfg=mock_config,
+            tts=None,
+            text="who directed Possessor?",
+            dialogue_memory=dialogue_memory,
+        )
+
+    assert captured, "the webSearch plan step should have been direct-executed"
+    assert captured[0].get("memory_context", "") == ""

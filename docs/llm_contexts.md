@@ -169,8 +169,8 @@ Every distinct LLM call in Jarvis, what feeds it, what consumes it, and how it i
 - **File**: [src/jarvis/reply/planner.py](src/jarvis/reply/planner.py) — `resolve_next_tool_call()`.
 - **Trigger**: top of each agentic-loop iteration when `use_text_tools` is True AND the plan from #12 still has unexecuted tool steps (whether single-step or multi-step). Runs instead of the chat model for that turn. **Fast path skips the LLM entirely** when the step is fully concrete (tool name + `key='value'` args, no `<placeholder>`); the LLM call only fires when entity substitution or key remapping is needed.
 - **Model**: same chain as #12, dispatched via `get_auxiliary_backend(cfg, model)` like #12.
-- **Inputs**: next planned step text, prior tool calls (name + args + result excerpt), per-turn tool schema.
-- **System prompt**: `_STEP_RESOLVER_SYSTEM` at [planner.py:300](src/jarvis/reply/planner.py:300). Teaches one-JSON-object output, placeholder substitution from prior results, `null` for synthesis steps.
+- **Inputs**: next planned step text, prior tool calls (name + args + result excerpt), per-turn tool schema, and the turn's memory digest (`memory_context`, only when enrichment recalled something; empty otherwise). The digest never reaches the fast path (fully concrete steps dispatch as written).
+- **System prompt**: `_STEP_RESOLVER_SYSTEM` at [planner.py:573](src/jarvis/reply/planner.py:573). Teaches one-JSON-object output, placeholder substitution from prior results, grounding missing argument values from the memory block, `null` for synthesis steps.
 - **Output**: `(tool_name, arguments)` tuple or `None`. Unknown tool names are rejected via the allow-list guard.
 - **Limits**: `planner_timeout_sec`. Fail-open → `None` (engine falls back to the chat-model turn).
 
