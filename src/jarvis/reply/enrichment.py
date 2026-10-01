@@ -20,6 +20,28 @@ def call_llm_direct(*, cfg, chat_model, system_prompt, user_content,
 
 
 
+def _drop_degenerate_time_window(params: dict) -> dict:
+    """Drop a from/to pair that spans zero or negative time.
+
+    The extractor prompt teaches day-wide ranges; an identical from and to
+    is the small model echoing the current-time hint, and no diary entry
+    can fall inside a zero-width window, so keeping the pair would filter
+    out every long-term fact for the turn.
+    """
+    start, end = params.get("from"), params.get("to")
+    if not (isinstance(start, str) and isinstance(end, str)):
+        return params
+    try:
+        start_dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        end_dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
+    except ValueError:
+        return params
+    if start_dt >= end_dt:
+        debug_log("dropping degenerate from/to time window (zero width)", "memory")
+        params = {k: v for k, v in params.items() if k not in ("from", "to")}
+    return params
+
+
 def extract_search_params_for_memory(query: str, cfg, chat_model: str,
                                    timeout_sec: float = 8.0,
                                    thinking: bool = False,
@@ -118,7 +140,7 @@ Examples:
                     try:
                         params = json.loads(json_match.group())
                         if 'keywords' in params and isinstance(params['keywords'], list):
-                            return params
+                            return _drop_degenerate_time_window(params)
                     except json.JSONDecodeError:
                         pass
 

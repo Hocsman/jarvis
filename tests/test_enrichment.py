@@ -166,6 +166,34 @@ class TestExtractorPromptRendering:
             )
         assert result is None
 
+    def test_zero_width_time_window_is_dropped(self):
+        """A small model sometimes echoes the current-time hint as an
+        identical from/to instant. No diary entry can fall inside a
+        zero-width window, so keeping it would silently void long-term
+        recall for the turn."""
+        raw = ('{"keywords": ["restaurants"], '
+               '"from": "2026-10-01T13:18:00Z", "to": "2026-10-01T13:18:00Z"}')
+        with patch("jarvis.reply.enrichment.call_llm_direct", return_value=raw):
+            result = extract_search_params_for_memory(
+                "know any good restaurants for me?", _cfg(), "m", timeout_sec=0.1,
+            )
+        assert result is not None
+        assert result["keywords"] == ["restaurants"]
+        assert "from" not in result and "to" not in result
+
+    def test_real_time_window_survives(self):
+        """A day-wide range is what the prompt teaches; it must pass
+        through untouched."""
+        raw = ('{"keywords": ["eat"], '
+               '"from": "2026-09-30T00:00:00Z", "to": "2026-09-30T23:59:59Z"}')
+        with patch("jarvis.reply.enrichment.call_llm_direct", return_value=raw):
+            result = extract_search_params_for_memory(
+                "what did I eat yesterday?", _cfg(), "m", timeout_sec=0.1,
+            )
+        assert result is not None
+        assert result["from"] == "2026-09-30T00:00:00Z"
+        assert result["to"] == "2026-09-30T23:59:59Z"
+
     def test_short_circuits_when_chat_model_is_empty(self):
         """No chat model configured ⇒ no LLM call burned. A confused or
         partially-configured user otherwise pays for an Ollama "model is
