@@ -23,10 +23,14 @@ def call_llm_direct(*, cfg, chat_model, system_prompt, user_content,
 def _drop_degenerate_time_window(params: dict) -> dict:
     """Drop a from/to pair that spans zero or negative time.
 
-    The extractor prompt teaches day-wide ranges; an identical from and to
-    is the small model echoing the current-time hint, and no diary entry
-    can fall inside a zero-width window, so keeping the pair would filter
-    out every long-term fact for the turn.
+    The extractor prompt teaches day-wide ranges; an identical from and
+    to is the small model echoing the current-time hint. The downstream
+    time filter is day-granular and inclusive, so the echo does not
+    empty the recall — it pins it to today, which excludes the older
+    entries the query is really about. Dropping the pair restores
+    unfiltered recall. Bounds that fail to parse or compare are kept
+    exactly as they arrived: the guard must never cost more than the
+    window it drops.
     """
     start, end = params.get("from"), params.get("to")
     if not (isinstance(start, str) and isinstance(end, str)):
@@ -34,9 +38,18 @@ def _drop_degenerate_time_window(params: dict) -> dict:
     try:
         start_dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
         end_dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
-    except ValueError:
+        # The model is inconsistent about the Z suffix; comparing a
+        # naive bound with an aware one raises TypeError, so a naive
+        # bound counts as UTC and the echo is recognised across mixed
+        # formats too.
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=timezone.utc)
+        if end_dt.tzinfo is None:
+            end_dt = end_dt.replace(tzinfo=timezone.utc)
+        degenerate = start_dt >= end_dt
+    except (ValueError, TypeError):
         return params
-    if start_dt >= end_dt:
+    if degenerate:
         debug_log("dropping degenerate from/to time window (zero width)", "memory")
         params = {k: v for k, v in params.items() if k not in ("from", "to")}
     return params

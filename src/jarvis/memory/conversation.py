@@ -1631,7 +1631,10 @@ def search_conversation_memory_by_keywords(
         max_results: Maximum number of results to return (default: 10)
 
     Returns:
-        List of formatted context strings (limited to max_results)
+        List of formatted context strings (limited to max_results). Each
+        keyword is searched separately; results are merged and
+        deduplicated by exact text, first occurrence winning (its score
+        feeds the recency ordering below).
     """
     contexts = []
 
@@ -1672,6 +1675,20 @@ def search_conversation_memory_by_keywords(
 
         search_results = []
         for keyword in per_keyword:
+            # The FTS normaliser tokenises on [A-Za-z0-9_] (see
+            # db._normalize_fts_query): a keyword written entirely in a
+            # non-Latin script normalises to an empty query, and
+            # search_hybrid answers an empty query with its
+            # latest-entries fallback — unrelated recent summaries that
+            # would out-sort the sibling keywords' real matches in the
+            # merge below. Such a keyword contributes nothing here; its
+            # semantics still ride the embedding query above.
+            if not re.search(r"[A-Za-z0-9_]", keyword):
+                debug_log(
+                    f"      ⏭️ keyword skipped, not FTS-tokenisable: {keyword!r}",
+                    "memory",
+                )
+                continue
             search_results.extend(db.search_hybrid(keyword, vec_json, top_k=max_results))
 
         # Collect results with scores and dates for recency-aware ordering

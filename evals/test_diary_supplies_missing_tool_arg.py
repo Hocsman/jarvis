@@ -35,20 +35,21 @@ Once the engine strips the directive, the plan still holds a tool step,
 which keeps two branches live. The ACTION PLAN block reaches the system
 prompt on every tier, and on small models plan-driven direct-exec
 resolves the ``webSearch`` call from the step text, the prior tool
-results and the tool schema before the chat model runs. The memory digest
-is not among those inputs, so on that path the diary city has no way into
-the argument: that is the gap this eval exists to catch. Routing runs
-before the planner and stays live (the pinned step also puts
-``webSearch`` in the allow-list), as does everything after the planner:
-keyword extraction, diary search, digest, the step resolver and the chat
-loop.
+results, the tool schema and the turn's memory digest before the chat
+model runs: the recalled city grounds the composed argument. On large
+models the chat model composes the call itself, reading the diary block
+in its system prompt. Routing runs before the planner and stays live
+(the pinned step also puts ``webSearch`` in the allow-list), as does
+everything after the planner: keyword extraction, diary search, digest,
+the step resolver and the chat loop.
 
+The digest-to-argument wiring is pinned deterministically on every tier
+by ``tests/test_planner.py`` and ``tests/test_engine_planner_integration.py``.
+What this eval adds is the live end-to-end fold: gemma4:e2b does not
+fold the memory block into the composed call, so the class is xfail on
+the small tier and a hard guard from a reliable judge model upwards.
 Memory-recall reliability on small models is itself an open failure
-mode separate from the tool carry-over guard. The digest now reaches the
-step resolver (the gap this eval was written to expose is closed, and
-the wiring is proven live on the large tier), but gemma4:e2b still does
-not fold the block into the composed call, so the eval is xfail on the
-small tier and a hard guard from a reliable judge model upwards.
+mode, separate from the tool carry-over guard.
 
 Run: EVAL_JUDGE_MODEL=gemma4:e2b ./scripts/run_evals.sh diary_supplies_missing_tool_arg
 """
@@ -64,7 +65,7 @@ from helpers import (
     seed_diary_summaries,
     JUDGE_MODEL,
 )
-from jarvis.reply.prompts.model_variants import ModelSize, detect_model_size
+from jarvis.reply.prompts import ModelSize, detect_model_size
 
 
 _DIARY_MANCHESTER = [
@@ -103,8 +104,8 @@ def _make_runner(capture: ToolCallCapture):
 @pytest.mark.xfail(
     detect_model_size(JUDGE_MODEL) == ModelSize.SMALL,
     reason="small-tier resolver does not fold the memory digest into the "
-           "composed tool call; the grounding wiring is proven on the "
-           "large tier",
+           "composed tool call; the wiring itself is pinned by the "
+           "deterministic planner/engine tests",
     strict=False,
 )
 class TestDiarySuppliesMissingToolArg:
@@ -149,6 +150,10 @@ class TestDiarySuppliesMissingToolArg:
         ):
             response = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                # Deliberately time-free: a time word makes the extractor
+                # emit a from/to window that would exclude the seeded
+                # 2026-04-26 diary entry for reasons unrelated to the
+                # grounding path under test.
                 text="know any good restaurants for me?",
                 dialogue_memory=eval_dialogue_memory,
             )

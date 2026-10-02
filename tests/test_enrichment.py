@@ -194,6 +194,39 @@ class TestExtractorPromptRendering:
         assert result["from"] == "2026-09-30T00:00:00Z"
         assert result["to"] == "2026-09-30T23:59:59Z"
 
+    def test_mixed_timezone_formats_still_drop_the_echo(self):
+        """The small model this guard targets is inconsistent about the Z
+        suffix: one bound aware, the other naive. Comparing them must not
+        blow up the whole extraction (a TypeError there is laundered into
+        ``None`` and the turn loses its keywords), and the echo — the same
+        instant in both bounds — must still be recognised and dropped."""
+        raw = ('{"keywords": ["restaurants"], '
+               '"from": "2026-10-01T13:18:00Z", "to": "2026-10-01T13:18:00"}')
+        with patch("jarvis.reply.enrichment.call_llm_direct", return_value=raw):
+            result = extract_search_params_for_memory(
+                "know any good restaurants for me?", _cfg(), "m", timeout_sec=0.1,
+            )
+        assert result is not None, (
+            "an incomparable from/to pair voided the whole extraction; "
+            "the guard must never cost more than the window it drops"
+        )
+        assert result["keywords"] == ["restaurants"]
+        assert "from" not in result and "to" not in result
+
+    def test_unparseable_window_is_kept_with_its_keywords(self):
+        """Bounds that cannot be parsed at all are the extractor's problem,
+        not the guard's: the params ride through exactly as they arrived
+        and the keywords survive."""
+        raw = ('{"keywords": ["restaurants"], '
+               '"from": "not a timestamp", "to": "2026-10-01T13:18:00Z"}')
+        with patch("jarvis.reply.enrichment.call_llm_direct", return_value=raw):
+            result = extract_search_params_for_memory(
+                "know any good restaurants for me?", _cfg(), "m", timeout_sec=0.1,
+            )
+        assert result is not None
+        assert result["keywords"] == ["restaurants"]
+        assert result["from"] == "not a timestamp"
+
     def test_short_circuits_when_chat_model_is_empty(self):
         """No chat model configured ⇒ no LLM call burned. A confused or
         partially-configured user otherwise pays for an Ollama "model is

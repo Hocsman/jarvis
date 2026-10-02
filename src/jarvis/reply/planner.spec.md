@@ -185,23 +185,33 @@ The engine consumes the plan in two phases.
   deterministically and return without any LLM call. This removes the
   resolver LLM as a failure surface for the common case — small models
   occasionally flake (timeout, empty, spurious `null`) even on
-  trivially-concrete steps like `webSearch query='foo'`, which used to
-  fall back to the chat model and produce a refusal instead of the
-  search. The fast path is purely regex-driven, language-agnostic, and
-  never calls the model.
+  trivially-concrete steps like `webSearch query='foo'`, and without the
+  fast path such a flake falls back to the chat model, which tends to
+  produce a refusal instead of the search. The fast path is purely
+  regex-driven, language-agnostic, and never calls the model.
 - **LLM path**: when the step contains a `<placeholder>`, uses unknown
   argument keys, or doesn't fit the `key=value` shape, the step is
   passed to the LLM resolver which can substitute entities from prior
-  results and remap names. The resolver also receives the turn's memory
-  digest (`memory_context`, the same `_prompt_memory` the plan-drop
-  guard keys on) as a fenced background-data block, so a fact recalled
-  by enrichment (e.g. the user's city) can ground an argument the step
-  leaves out. The fast path never sees memory: a fully concrete step is
-  dispatched exactly as written.
+  results and remap names. The resolver also receives the turn's
+  prompt-memory (`memory_context`: the memory digest, or the raw
+  graph-context block when digestion is off or failed — the same value
+  the engine's plan-step drop guard keys on) as a background-data block
+  fenced by `<<<BEGIN/END RELEVANT MEMORY>>>` markers, so a fact
+  recalled by enrichment (e.g. the user's city) can ground an argument
+  the step leaves out. The fence is structural, not a label: the block
+  can carry web-derived text, and this prompt's output is executed. The
+  fast path never sees memory: a fully concrete step is dispatched
+  exactly as written.
 - Returns `None` for synthesis steps (the LLM emits the literal
   `null`), unknown tools, or invalid JSON. All `None` paths fall back
   to the normal chat-model turn.
 - Validates the tool name against the provided schema's allow-list.
+- **Substitution guard**: when the step text heads with an allow-listed
+  tool name, a resolved call naming a different tool is rejected
+  (`None`) — the plan asked for the head tool, and the resolver's
+  output is executed without the chat model ever seeing it, so a
+  substitution (misresolution, or memory-borne injected text steering
+  the choice) must not be dispatched.
 - Filters the returned `arguments` against the tool's declared
   JSON-schema property keys; unknown keys are dropped before dispatch.
   Tools that declare no properties keep the args as-is (they are
@@ -210,6 +220,8 @@ The engine consumes the plan in two phases.
 - Both planner LLM calls (`plan_query` and `resolve_next_tool_call`)
   request `num_ctx=8192` from Ollama so enriched memory and tool
   catalogue don't silently truncate in the 4096-token default window.
+  The resolver additionally runs at temperature 0: it composes JSON,
+  not prose.
 
 ## Fail-open invariants
 
