@@ -2599,6 +2599,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                         next_step_text=_plan_tool_steps[_tool_results_so_far],
                         prior_results=_prior,
                         tools_schema=tools_json_schema or [],
+                        memory_context=_prompt_memory,
                     )
                     if _resolved is not None:
                         _name, _args = _resolved

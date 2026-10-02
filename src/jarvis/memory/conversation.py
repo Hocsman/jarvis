@@ -1631,7 +1631,10 @@ def search_conversation_memory_by_keywords(
         max_results: Maximum number of results to return (default: 10)
 
     Returns:
-        List of formatted context strings (limited to max_results)
+        List of formatted context strings (limited to max_results). Each
+        keyword is searched separately; results are merged and
+        deduplicated by exact text, first occurrence winning (its score
+        feeds the recency ordering below).
     """
     contexts = []
 
@@ -1646,45 +1649,51 @@ def search_conversation_memory_by_keywords(
     try:
         debug_log(f"      🔍 Keyword-based search for: {clean_keywords}", "memory")
 
-        # Build FTS OR query for better recall
-        # Words, not syntax. `_normalize_fts_query` builds the FTS5
-        # expression, and joining with " OR " here handed it an operator
-        # it lowercases into a search term: "boxing OR club" became the
-        # phrase "boxing or club" and matched nothing. It went unseen
-        # while the builder was unreachable, because the fallback passed
-        # the operator through untouched and the accident worked.
-        fts_query = " ".join(clean_keywords[:5])  # Limit to 5 keywords
+        # The cluster is a set of OR'd topic keywords (see the docstring),
+        # not a phrase: no diary entry is expected to contain them all.
+        # Each keyword is searched on its own and the results merged below,
+        # because the FTS normaliser treats a multi-word string as a
+        # phrase/NEAR query, which would AND the cluster into nothing.
+        per_keyword = clean_keywords[:5]  # Limit to 5 keywords
 
         # For embedding, combine keywords to get semantic meaning of the topic cluster
         embed_query = " ".join(clean_keywords)
 
-        debug_log(f"      📝 FTS query: '{fts_query}'", "memory")
+        debug_log(f"      📝 FTS queries (OR): {per_keyword}", "memory")
         debug_log(f"      📝 Embed query: '{embed_query}'", "memory")
 
         # Same rule as the write side: no store, no round-trip. A query
         # vector with nothing to compare it against costs a hop per turn
         # and changes no result.
+        vec_json = None
         if cfg.embedding_model and db.stores_embeddings:
             try:
                 vec = _embed_text(embed_query, cfg, timeout_sec=timeout_sec)
                 vec_json = json.dumps(vec) if vec is not None else None
-
-                if vec_json:
-                    # Hybrid search with OR query for FTS and combined embedding
-                    search_results = db.search_hybrid(fts_query, vec_json, top_k=max_results)
-                else:
-                    # Fallback: FTS-only with OR query
-                    search_results = db.search_hybrid(fts_query, None, top_k=max_results)
             except Exception as e:
                 debug_log(f"      ❌ Embedding failed, using FTS only: {e}", "memory")
-                # Fallback to FTS-only
-                search_results = db.search_hybrid(fts_query, None, top_k=max_results)
-        else:
-            # No embedding service available, use FTS-only
-            search_results = db.search_hybrid(fts_query, None, top_k=max_results)
+
+        search_results = []
+        for keyword in per_keyword:
+            # The FTS normaliser tokenises on [A-Za-z0-9_] (see
+            # db._normalize_fts_query): a keyword written entirely in a
+            # non-Latin script normalises to an empty query, and
+            # search_hybrid answers an empty query with its
+            # latest-entries fallback — unrelated recent summaries that
+            # would out-sort the sibling keywords' real matches in the
+            # merge below. Such a keyword contributes nothing here; its
+            # semantics still ride the embedding query above.
+            if not re.search(r"[A-Za-z0-9_]", keyword):
+                debug_log(
+                    f"      ⏭️ keyword skipped, not FTS-tokenisable: {keyword!r}",
+                    "memory",
+                )
+                continue
+            search_results.extend(db.search_hybrid(keyword, vec_json, top_k=max_results))
 
         # Collect results with scores and dates for recency-aware ordering
         scored_results: list[tuple[float, str, str]] = []  # (score, date, text)
+        seen_texts: set[str] = set()
         for result in search_results:
             if isinstance(result, dict):
                 result_text = result.get('text', '')
@@ -1692,7 +1701,8 @@ def search_conversation_memory_by_keywords(
             else:
                 result_text = result[2] if len(result) > 2 else ''
                 score = result[1] if len(result) > 1 else 0.0
-            if isinstance(result_text, str) and result_text:
+            if isinstance(result_text, str) and result_text and result_text not in seen_texts:
+                seen_texts.add(result_text)
                 # Extract date from "[YYYY-MM-DD] ..." prefix for recency tiebreaking
                 date_str = result_text[1:11] if result_text.startswith('[') and len(result_text) > 11 else ''
                 scored_results.append((float(score) if score else 0.0, date_str, result_text))

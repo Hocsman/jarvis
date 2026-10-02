@@ -227,22 +227,6 @@ class TestPlanQuery:
             )
         assert steps == []
 
-    def test_memory_context_arg_still_accepted_for_back_compat(self):
-        """Old callers pass `memory_context=` as a positional or keyword
-        argument. Planner now ignores it (the planner runs before memory
-        search), but the signature must still accept it so downstream
-        code doesn't break."""
-        cfg = _cfg()
-        with patch.object(planner_mod, "call_llm_direct", return_value="Reply to user."):
-            steps = plan_query(
-                cfg,
-                "tell me a joke about cats please",
-                "",
-                [],
-                memory_context="some old memory text",
-            )
-        assert steps == ["Reply to user."]
-
     def test_prompt_warns_against_fabricating_optional_arguments(self):
         """The planner prompt must explicitly tell the model to omit
         optional arguments when the user didn't supply a value, and warn
@@ -452,6 +436,119 @@ class TestResolveNextToolCall:
             {"query": "films directed by Brandon Cronenberg"},
         )
         assert spy.called, "Placeholder substitution must go through the LLM"
+
+    def test_memory_context_reaches_the_llm_resolver(self):
+        """A step the fast path declines goes to the LLM resolver, and the
+        engine-supplied memory digest must be part of what the resolver
+        sees — otherwise a recalled fact (the user's city) cannot ground
+        the composed tool call, only the final chat reply."""
+        cfg = _cfg()
+        captured: dict = {}
+
+        def spy(**kwargs):
+            captured.update(kwargs)
+            return "null"
+
+        with patch.object(planner_mod, "call_llm_direct", side_effect=spy):
+            resolve_next_tool_call(
+                cfg,
+                "webSearch query='good restaurants in <city the user lives in>'",
+                [],
+                self._schema(),
+                memory_context="The user lives in Manchester.",
+            )
+        assert captured, "the placeholder step must reach the LLM resolver"
+        assert "Manchester" in captured.get("user_content", "")
+        user_content = captured.get("user_content", "")
+        assert "<<<BEGIN RELEVANT MEMORY>>>" in user_content, (
+            "the memory block is data inside a prompt whose output is "
+            "executed: it needs the repo's structural fence, not a label "
+            "the digest itself could contain"
+        )
+        assert "<<<END RELEVANT MEMORY>>>" in user_content
+        assert user_content.index("<<<END RELEVANT MEMORY>>>") < user_content.index(
+            "NEXT PLANNED STEP:"
+        ), "the fence must close before the step section opens"
+
+    def test_fast_path_never_sees_memory(self):
+        """A fully concrete step is dispatched exactly as written: the
+        memory block exists for the LLM resolver only (planner.spec.md,
+        resolve_next_tool_call). No LLM round-trip, no memory influence."""
+        cfg = _cfg()
+        with patch.object(planner_mod, "call_llm_direct") as spy:
+            result = resolve_next_tool_call(
+                cfg,
+                "webSearch query='weather in Paris'",
+                [],
+                self._schema(),
+                memory_context="The user lives in Manchester.",
+            )
+        assert result == ("webSearch", {"query": "weather in Paris"})
+        assert not spy.called, "a concrete step must not spend an LLM call"
+
+    def test_resolved_tool_must_match_the_step_head(self):
+        """The resolver's answer is executed without the chat model ever
+        seeing it. When the plan step heads with an allow-listed tool
+        name, a resolved call for a DIFFERENT allowed tool is a
+        substitution — misresolution at best, memory-borne injected text
+        steering the choice at worst — and must fall back to the
+        chat-model turn instead."""
+        cfg = _cfg()
+        schema = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "webSearch",
+                    "description": "Search the web.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "getTime",
+                    "description": "Time and date lookup.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    },
+                },
+            },
+        ]
+        raw = '{"name": "getTime", "arguments": {"city": "Paris"}}'
+        with patch.object(planner_mod, "call_llm_direct", return_value=raw):
+            result = resolve_next_tool_call(
+                cfg,
+                "webSearch for the director's latest film",
+                [],
+                schema,
+            )
+        assert result is None, (
+            "the step asked for webSearch and the resolver answered "
+            f"getTime; a substitution must not be dispatched: {result}"
+        )
+
+    def test_no_memory_context_adds_no_memory_block(self):
+        """Without memory the resolver prompt carries no memory block —
+        an empty scaffold would only confuse a small model."""
+        cfg = _cfg()
+        captured: dict = {}
+
+        def spy(**kwargs):
+            captured.update(kwargs)
+            return "null"
+
+        with patch.object(planner_mod, "call_llm_direct", side_effect=spy):
+            resolve_next_tool_call(
+                cfg,
+                "webSearch query='films by <director from step 1>'",
+                [],
+                self._schema(),
+            )
+        assert "MEMORY" not in captured.get("user_content", "")
 
     def test_deterministic_parse_accepts_bare_tool_name_as_empty_args(self):
         """A plan step naming the tool with no trailing args must parse to
