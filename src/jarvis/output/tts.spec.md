@@ -259,8 +259,9 @@ network) the default voice speaks the item instead, and the path is not
 tried again for the life of the engine. A reply in the wrong accent is
 worse than one in the right voice and better than silence.
 
-The choice is logged at debug level: the language, the voice file, and
-whether it came from the map or is the fallback.
+The choice is logged at debug level when it changes: the language, the
+voice file, and whether it came from the map or is the default voice. A
+reply of many sentences names its voice once.
 
 ### Fetching
 
@@ -372,5 +373,7 @@ language.
 - A mapped voice that cannot be loaded leaves the reply spoken in the
   default voice, and is not fetched again on the next sentence.
 - Every voice is played at its own sample rate.
+- The debug log names the voice once for a reply of many sentences, and
+  again when the voice changes.
 - The language passed to `speak` travels with its item to the worker.
 - Markdown and links are stripped before speech.

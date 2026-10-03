@@ -195,8 +195,8 @@ def test_every_voice_is_played_at_its_own_sample_rate(world):
 
 @pytest.mark.unit
 def test_auto_follows_the_detected_language(world):
-    """`response_language` empty is auto: she answers in the language she
-    was spoken to, so that is the language the voice has to follow."""
+    """`response_language` empty is auto: she is expected to answer in the
+    language she was spoken to, so that is the language the voice follows."""
     moteur = _engine(world, voices={"fr": FRENCH, "de": GERMAN}, response_language="")
 
     moteur._speak_once("Bonjour.", language="fr")
@@ -333,6 +333,43 @@ def test_the_choice_is_named_in_the_debug_log(world, monkeypatch):
     moteur._speak_once("Bonjour.", language="fr")
 
     assert any(FRENCH in line for line in lines), lines
+
+
+def _voice_lines(lines, *noms):
+    """The lines that name a voice as the one chosen, not the ones that
+    report a model file being loaded."""
+    return [
+        line for line in lines
+        if any(nom in line for nom in noms) and "loading" not in line.lower()
+    ]
+
+
+@pytest.mark.unit
+def test_a_reply_of_many_sentences_names_its_voice_once(world, monkeypatch):
+    """A streamed reply reaches the engine a sentence at a time. One line per
+    sentence would bury the log; the voice is news only when it changes."""
+    lines = []
+    monkeypatch.setattr(tts_module, "debug_log", lambda msg, *a, **k: lines.append(msg))
+    moteur = _engine(world, voices={"fr": FRENCH})
+
+    for phrase in ("Premiere phrase.", "Deuxieme phrase.", "Troisieme phrase."):
+        moteur._speak_once(phrase, language="fr")
+
+    assert len(_voice_lines(lines, FRENCH)) == 1, lines
+
+
+@pytest.mark.unit
+def test_a_change_of_voice_is_named_again(world, monkeypatch):
+    lines = []
+    monkeypatch.setattr(tts_module, "debug_log", lambda msg, *a, **k: lines.append(msg))
+    moteur = _engine(world, voices={"fr": FRENCH, "de": GERMAN})
+
+    moteur._speak_once("Bonjour.", language="fr")
+    moteur._speak_once("Guten Tag.", language="de")
+    moteur._speak_once("Encore un mot.", language="fr")
+
+    assert len(_voice_lines(lines, FRENCH)) == 2, lines
+    assert len(_voice_lines(lines, GERMAN)) == 1, lines
 
 
 # ── From speak() to the worker ─────────────────────────────────────────

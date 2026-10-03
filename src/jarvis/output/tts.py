@@ -117,6 +117,19 @@ def _voice_model_path(value: str) -> str:
     return str(_get_piper_models_dir() / f"{value}.onnx")
 
 
+def _reply_language_code(
+    response_language: Optional[str], detected_language: Optional[str]
+) -> str:
+    """The language a reply is expected to be written in, as a key.
+
+    The configured language wins because the persona prompt asks the model
+    to write in it whatever was spoken to her. When it is empty the reply is
+    expected in the language she heard. Empty when neither is known.
+    """
+    language = response_language if (response_language or "").strip() else detected_language
+    return _language_code(language) if (language or "").strip() else ""
+
+
 def select_tts_voice(
     voices: Optional[Mapping[str, str]],
     fallback: str,
@@ -125,31 +138,21 @@ def select_tts_voice(
 ) -> str:
     """The voice model that speaks a reply.
 
-    ``response_language`` is the language the assistant is told to write
-    in, so when it is set it is the language of the reply whatever was
-    spoken to her. When it is empty she answers in the language she heard,
-    and ``detected_language`` is the one to follow.
+    ``response_language`` is the language the assistant is asked to write
+    in, so when it is set it is taken as the language of the reply whatever
+    was spoken to her. When it is empty she is expected to answer in the
+    language she heard, and ``detected_language`` is the one to follow.
 
     ``voices`` maps a language to a voice. A language it does not name, or
     no known language at all, speaks with ``fallback``.
     """
-    if not voices:
+    code = _reply_language_code(response_language, detected_language)
+    if not voices or not code:
         return fallback
-    language = response_language if (response_language or "").strip() else detected_language
-    code = _language_code(language) if (language or "").strip() else ""
-    chosen = fallback
-    reason = "fallback"
-    if code:
-        for key, voice in voices.items():
-            if _language_code(key) == code:
-                chosen, reason = _voice_model_path(voice), "mapped"
-                break
-    debug_log(
-        f"voice for {code or 'an unknown language'}: "
-        f"{os.path.basename(chosen)} ({reason})",
-        "tts",
-    )
-    return chosen
+    for key, voice in voices.items():
+        if _language_code(key) == code:
+            return _voice_model_path(voice)
+    return fallback
 
 
 def _get_default_piper_model_path(language: Optional[str] = None) -> str:
@@ -823,6 +826,9 @@ class PiperTTS:
         self._mapped_voices: dict[str, tuple[Any, int]] = {}
         self._unloadable_voices: set[str] = set()
         self._mapped_lock = threading.Lock()
+        # The last choice named in the debug log, so a reply of many
+        # sentences names its voice once and a change of voice names it again.
+        self._last_voice_logged: Optional[tuple[str, str]] = None
 
         # Audio stream for interruption
         self._audio_stream = None
@@ -930,7 +936,7 @@ class PiperTTS:
         return None, 0, error
 
     def _ensure_initialized(self) -> bool:
-        """Initialize the default Piper voice. Returns True if successful.
+        """Initialise the default Piper voice. Returns True if successful.
 
         The default voice is the one every language the map does not name
         speaks with: the pinned model, else the voice for the configured
@@ -984,6 +990,23 @@ class PiperTTS:
             self._mapped_voices[model_path] = (voice, sample_rate)
             return voice, sample_rate
 
+    def _name_the_choice(self, language: str, voice_path: str, source: str) -> None:
+        """Say in the debug log which voice speaks, when that is news.
+
+        A streamed reply reaches the engine a sentence at a time, so naming
+        the voice for each one would bury the log. It is named when the
+        language or the voice differs from the last item's.
+        """
+        choice = (language, voice_path)
+        if choice == self._last_voice_logged:
+            return
+        self._last_voice_logged = choice
+        debug_log(
+            f"voice for {language or 'an unknown language'}: "
+            f"{os.path.basename(voice_path)} ({source})",
+            "tts",
+        )
+
     def _voice_for(self, detected_language: Optional[str]) -> Optional[tuple[Any, int]]:
         """The loaded voice that speaks a reply, with its sample rate.
 
@@ -996,7 +1019,13 @@ class PiperTTS:
             response_language=self.response_language,
             detected_language=detected_language,
         )
-        if os.path.expanduser(chosen) != os.path.expanduser(default_path):
+        is_default = os.path.expanduser(chosen) == os.path.expanduser(default_path)
+        self._name_the_choice(
+            _reply_language_code(self.response_language, detected_language),
+            chosen,
+            "default" if is_default else "mapped",
+        )
+        if not is_default:
             mapped = self._load_mapped_voice(chosen)
             if mapped is not None:
                 return mapped
