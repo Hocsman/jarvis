@@ -98,7 +98,21 @@ The central controller that manages:
 | **SetupWizard** | First-run configuration (Ollama, models, profile) |
 | **DictationHistoryWindow** | Scrollable list of past dictations with copy/delete/clear actions |
 | **ChatWindow** | Text chat interface alongside voice; shares one conversation with the voice path and is enabled only while the daemon is running (see `chat_window.spec.md`) |
+| **DashboardWindow** | The HUD dashboard: a web page driven over a `QWebChannel`, and the window the app starts with (see Dashboard below) |
 | **OrbWindow** | Frameless, translucent, always-on-top orb driven by the assistant's state; toggled from the tray or with `Ctrl+Shift+J` (`Cmd+Shift+J` on macOS) |
+
+### Dashboard
+
+`DashboardWindow` (`dashboard_window.py`) hosts the HUD page `dashboard/index.html` in a `QWebEngineView`. `DashboardBridge` (`dashboard/bridge.py`) is registered on a `QWebChannel` as `window.jarvis` and carries everything the page shows: system stats, the voice state (orb accent and status line), the weather when location is enabled, and the chat. The window is created lazily and is what the app opens at startup; the tray's `🖥️ Dashboard` action raises it.
+
+**Where it can be shown.** A web view needs QtWebEngine, and QtWebEngine crashes the app the moment a view is shown inside a frozen macOS bundle. The memory viewer falls back to the system browser there; the dashboard cannot, because its channel to the bridge exists only inside this process. `_dashboard_available()` is therefore false without WebEngine and in a frozen macOS build. In that case the tray has no `🖥️ Dashboard` action, `show_dashboard()` does nothing, and the app starts with the floating orb instead.
+
+**Chat.** The page's `submitQuery` reaches the daemon through a submit hook that the tray wires when a daemon starts, clears when it stops or dies, and pushes to the window on every lifecycle change (`_set_chat_daemon_status`), so a dashboard opened before the daemon starts and one opened after it behave the same. With no hook wired the bridge answers with a local preview line and nothing is sent. The route depends on where the daemon runs:
+
+- **Subprocess mode**: the hook writes a `__CHAT_QUERY__:` line to the daemon's stdin. The daemon's `__CHAT__:` lines come back through `_on_chat_ipc_line`, which feeds the dashboard as well as the chat window.
+- **Bundled mode**: the hook calls `jarvis.daemon.submit_text_query` with `on_start`, `on_token`, `on_stage`, `on_complete` and `on_busy`. The daemon calls back from its worker thread, so each event is rewritten as the `__CHAT__:` line the subprocess bus would have carried and emitted through a `ChatIpcSignals`, which queues it onto the Qt main thread; the dashboard then parses it as it parses a subprocess line. These events reach the dashboard alone. The chat window keeps calling the daemon with its own callbacks, and a reply it had also been handed as an event would show twice once it seeds its transcript from the dialogue memory on first show. The two windows share the daemon's one dialogue memory, not each other's transcript.
+
+Nothing on this route logs the query text: the `start` event carries the redacted query, and the debug lines name no message.
 
 ### Orb
 
@@ -106,7 +120,7 @@ The central controller that manages:
 
 The orb listens to nothing. It has no audio input, takes no audio source as an argument, and the package exposes no audio API: a frame is a function of state and time only, so the orb renders the same whether the daemon runs in the same process, in a subprocess, or not at all. The widget renders only while it is on screen (`pause_rendering` / `resume_rendering`), and its clock restarts on resume so a transition in flight never jumps.
 
-Two hosts embed it. `OrbWindow` is the floating instance: frameless, translucent, always on top and draggable; built at startup with a provider that reads the shared `JarvisState`, shown at launch only when WebEngine is unavailable (the dashboard draws its own canvas orb from the same state), and otherwise toggled from the tray action `🟠 Toggle Orb` or the hotkey `Ctrl+Shift+J` (`Cmd+Shift+J` on macOS: a global pynput hotkey, disabled on macOS 26+ where pynput crashes the process, and a window-scoped Qt shortcut that works while the orb has focus). Hiding the window pauses the widget; showing it resumes it. `ChatWindow` embeds its own instance in the introductory panel that only an empty conversation shows, drives it through `set_state` (THINKING while a query is in flight, IDLE otherwise), pauses it the moment a message lands or the window hides, and resumes it when the window shows with an empty transcript (see `chat_window.spec.md`).
+Two hosts embed it. `OrbWindow` is the floating instance: frameless, translucent, always on top and draggable; built at startup with a provider that reads the shared `JarvisState`, shown at launch only when the dashboard is unavailable (see Dashboard; the dashboard draws its own canvas orb from the same state), and otherwise toggled from the tray action `🟠 Toggle Orb` or the hotkey `Ctrl+Shift+J` (`Cmd+Shift+J` on macOS: a global pynput hotkey, disabled on macOS 26+ where pynput crashes the process, and a window-scoped Qt shortcut that works while the orb has focus). Hiding the window pauses the widget; showing it resumes it. `ChatWindow` embeds its own instance in the introductory panel that only an empty conversation shows, drives it through `set_state` (THINKING while a query is in flight, IDLE otherwise), pauses it the moment a message lands or the window hides, and resumes it when the window shows with an empty transcript (see `chat_window.spec.md`).
 
 ### Tray Menu: GPU Library Recovery (Windows)
 
@@ -184,6 +198,8 @@ In bundled mode, the daemon runs in the same process, so callbacks can be set di
 - `on_status`: Status messages ("Writing diary entry...")
 - `on_complete`: Completion signal (success/failure)
 
+Chat has no stdout bus in this mode: the chat window and the dashboard each call `jarvis.daemon.submit_text_query` directly (see Dashboard for the dashboard's route). Cancellation and rewind are direct calls too.
+
 #### Subprocess Mode (Development)
 
 In subprocess mode, the daemon runs as a separate process. IPC is achieved via stdout:
@@ -191,8 +207,8 @@ In subprocess mode, the daemon runs as a separate process. IPC is achieved via s
 - **Chat events**: Daemon emits `__CHAT__:` events (start/token/stage/complete/busy, the confirmation events, the rewind verdicts); the desktop app writes queries, cancellations, rewinds and confirmation decisions to the daemon's stdin as `__CHAT_QUERY__:`, `__CHAT_CANCEL__`, `__CHAT_REWIND__:` and `__CHAT_DECISION__:` lines (see `chat_window.spec.md`). Chat lines never reach the log viewer, in either mode.
 - Desktop app intercepts these lines from the log stream
 - DiaryUpdateDialog's `process_log_line()` parses and emits signals
-- Chat IPC lines are marshalled onto the Qt main thread via `ChatIpcSignals`, then `_on_chat_ipc_line()` forwards them to `ChatWindow.process_ipc_line()`
-- When the daemon starts, stops, or a subprocess exits unexpectedly, the tray updates any open ChatWindow lifecycle banner and clears or refreshes its stdin hooks (submit, cancel, control) and the confirmation decision writer together, so the window never writes to a dead pipe.
+- Chat IPC lines are marshalled onto the Qt main thread via `ChatIpcSignals`, then `_on_chat_ipc_line()` forwards them to `ChatWindow.process_ipc_line()` and, when it is open, to `DashboardWindow.process_ipc_line()`
+- When the daemon starts, stops, or a subprocess exits unexpectedly, the tray updates any open ChatWindow lifecycle banner and clears or refreshes its stdin hooks (submit, cancel, control), the dashboard's submit hook and the confirmation decision writer together, so no window writes to a dead pipe.
 - Same UI experience as bundled mode
 
 ## Theme System
@@ -292,7 +308,7 @@ The Knowledge tab hides the `user` and `directives` branches once they are empty
 ### Fallbacks
 
 - **No Ollama**: Shows setup wizard or auto-starts
-- **No WebEngine**: Opens memory viewer in system browser
+- **No WebEngine**: Opens memory viewer in system browser, and the floating orb replaces the dashboard
 - **Model not supported**: Warning dialog with option to change
 - **Update failed**: Error dialog with details
 
@@ -304,8 +320,9 @@ The Knowledge tab hides the `user` and `directives` branches once they are empty
 | Ollama start | `open -a Ollama` | `ollama serve` (hidden) | `ollama serve` |
 | Crash logs | `~/Library/Logs/Jarvis` | `%LOCALAPPDATA%\Jarvis` | `~/.jarvis` |
 | Memory viewer | System browser* | Embedded WebEngine | Embedded WebEngine |
+| Dashboard | Floating orb instead* | Embedded WebEngine | Embedded WebEngine |
 
-*macOS bundled apps use system browser due to QtWebEngine sandbox issues.
+*macOS bundled apps cannot show a QtWebEngine view (sandbox issues): the memory viewer opens in the system browser and the floating orb replaces the dashboard.
 
 ## File Locations
 
