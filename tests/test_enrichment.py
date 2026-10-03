@@ -231,8 +231,7 @@ class TestExtractorPromptRendering:
         """No chat model configured ⇒ no LLM call burned. A confused or
         partially-configured user otherwise pays for an Ollama "model is
         required" round-trip on every reply that passes through enrichment.
-        Other resolvers (planner, evaluator) gate explicitly; this one must
-        too for parity."""
+        The planner gates explicitly; this one must too for parity."""
         with patch("jarvis.reply.enrichment.call_llm_direct") as mock_call:
             result = extract_search_params_for_memory(
                 "q", _cfg(), "", timeout_sec=0.1,
@@ -967,16 +966,38 @@ class TestDigestLoopForMaxTurns:
         base = dict(
             llm_chat_model="m",
             ollama_base_url="http://x",
-            ollama_chat_model="m",
-            evaluator_model="",
             intent_judge_model="",
             llm_digest_timeout_sec=8.0,
             llm_thinking_enabled=False,
         )
         base.update(over)
-        if "ollama_chat_model" in over and "llm_chat_model" not in over:
-            base["llm_chat_model"] = over["ollama_chat_model"]
         return SimpleNamespace(**base)
+
+    def _model_used(self, cfg):
+        """The model the digest hands to its LLM call."""
+        from jarvis.reply.enrichment import digest_loop_for_max_turns
+
+        with patch(
+            "jarvis.reply.enrichment.call_llm_direct", return_value="Done."
+        ) as call:
+            digest_loop_for_max_turns(
+                user_query="what is the weather",
+                loop_messages=[{"role": "assistant", "content": "Checking."}],
+                cfg=cfg,
+            )
+        return call.call_args.kwargs["chat_model"]
+
+    def test_runs_on_the_intent_judge_model_when_one_is_set(self):
+        cfg = self._cfg(llm_chat_model="chat:8b", intent_judge_model="judge:1b")
+
+        assert self._model_used(cfg) == "judge:1b"
+
+    def test_falls_back_to_the_resolved_chat_model_without_a_judge(self):
+        """``ollama_chat_model`` is the on-disk alias; the loader has already
+        promoted it into ``llm_chat_model``, which is the field to read."""
+        cfg = self._cfg(llm_chat_model="chat:8b", ollama_chat_model="stale-alias")
+
+        assert self._model_used(cfg) == "chat:8b"
 
     def test_happy_path_returns_cleaned_reply_and_prompt_includes_query(self):
         from jarvis.reply.enrichment import digest_loop_for_max_turns
@@ -1089,7 +1110,7 @@ class TestDigestLoopForMaxTurns:
             out = digest_loop_for_max_turns(
                 user_query="hello",
                 loop_messages=[{"role": "assistant", "content": "x"}],
-                cfg=self._cfg(ollama_chat_model=""),
+                cfg=self._cfg(llm_chat_model=""),
             )
 
         assert out is None

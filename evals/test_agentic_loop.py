@@ -1,16 +1,16 @@
 """
-Evaluator-Driven Agentic Loop Evaluations
+Agentic Loop Evaluations
 
-Covers the evaluator's end-to-end behaviour against a real small model
-(gemma4:e2b by default): the per-turn terminal/continue decision, nudge
-injection, nudge cap enforcement, max-turn digest fallback, the
-toolSearchTool escape hatch, and multi-turn multi-tool complexity.
+Covers the reply engine's agentic loop end to end against a real small
+model (gemma4:e2b by default): termination after a single grounded tool
+call, an honest "can't do" when no tool fits, the max-turn digest
+fallback, the toolSearchTool escape hatch, and multi-turn multi-tool
+complexity.
 
 These evals complement the mock-LLM unit tests in
-``tests/test_evaluator.py`` and ``tests/test_engine_tool_search_loop.py``
-by observing what a live small model actually does when looped through
-the evaluator. Tool *implementations* are mocked for determinism; the
-chat model and the evaluator model run for real.
+``tests/test_engine_tool_search_loop.py`` by observing what a live small
+model actually does when looped through the engine. Tool *implementations*
+are mocked for determinism; the chat model runs for real.
 
 Run: ./scripts/run_evals.sh
 """
@@ -31,7 +31,7 @@ from helpers import (
 
 # =============================================================================
 # Canned tool payloads — short, deterministic, keyword-rich so the chat model
-# has something concrete to talk about after the evaluator forces the call.
+# has something concrete to talk about after the tool call.
 # =============================================================================
 
 MOCK_WEATHER_PARIS = (
@@ -105,13 +105,9 @@ MOCK_MADRID_LIVE = (
 
 
 def _configure(mock_config):
-    """Pin the eval to the live small model with the evaluator enabled."""
+    """Pin the eval to the live small model."""
     mock_config.ollama_base_url = "http://localhost:11434"
     mock_config.ollama_chat_model = JUDGE_MODEL
-    # Evaluator on (default None for SMALL already enables it, but be explicit
-    # so failures are unambiguous if the model-size detection changes).
-    mock_config.evaluator_enabled = True
-    mock_config.evaluator_nudge_max = 2
     mock_config.tool_search_max_calls = 3
     return mock_config
 
@@ -171,76 +167,13 @@ def _make_tool_runner(capture: ToolCallCapture, responder):
 
 
 # =============================================================================
-# 1. Premature-prose nudge: router says "just call the tool" but turn-1 is prose
-# =============================================================================
-
-
-class TestPrematureProseNudge:
-    """The evaluator must nudge the agent back into a tool call when the
-    router's pre-seeded tool could directly perform the action but the model
-    opened with prose."""
-
-    @pytest.mark.eval
-    @requires_judge_llm
-    @pytest.mark.xfail(
-        reason=(
-            "Plumbing verified in unit tests (tests/test_engine_tool_search_loop.py, "
-            "tests/test_evaluator.py). Live behaviour on gemma4:e2b is flaky: "
-            "the small model sometimes refuses in prose despite the nudge. "
-            "Tracked for iterative prompt tuning; architecture ships as-is."
-        ),
-        strict=False,
-    )
-    def test_navigate_prose_gets_nudged_into_tool_call(
-        self, mock_config, eval_db, eval_dialogue_memory
-    ):
-        from jarvis.reply.engine import run_reply_engine
-
-        _configure(mock_config)
-        capture = ToolCallCapture()
-
-        def _respond(name, args):
-            if name == "chrome-devtools__navigate_page":
-                return MOCK_NAV_SUCCESS
-            if name == "toolSearchTool":
-                return MOCK_TOOLSEARCH_NAV
-            return "OK"
-
-        router = _make_router_stub(["chrome-devtools__navigate_page", "stop"])
-        runner = _make_tool_runner(capture, _respond)
-
-        with patch("jarvis.reply.engine.select_tools", side_effect=router), \
-             patch("jarvis.reply.engine.run_tool_with_retries", side_effect=runner), \
-             patch(
-                 "jarvis.reply.engine.get_location_context_with_timezone",
-                 return_value=("Location: Kensington, UK", None),
-             ):
-            reply = run_reply_engine(
-                db=eval_db, cfg=mock_config, tts=None,
-                text="Open the YouTube homepage.",
-                dialogue_memory=eval_dialogue_memory,
-            )
-
-        names = capture.tool_names()
-        print(f"\n📊 Premature-prose nudge:")
-        print(f"   tool calls: {names}")
-        print(f"   reply: {(reply or '')[:160]}...")
-
-        assert "chrome-devtools__navigate_page" in names, (
-            "Evaluator should have nudged the model into calling "
-            "chrome-devtools__navigate_page. "
-            f"Tools actually called: {names}. Reply: {(reply or '')[:200]!r}"
-        )
-
-
-# =============================================================================
-# 2. Terminal-on-success: one tool call, no thrashing
+# 1. Terminal-on-success: one tool call, no thrashing
 # =============================================================================
 
 
 class TestTerminalOnSuccessfulToolUse:
     """When the agent uses the correct tool and summarises the result, the
-    evaluator must mark terminal; a single call should be enough."""
+    loop must end there; a single call should be enough."""
 
     @pytest.mark.eval
     @requires_judge_llm
@@ -278,8 +211,8 @@ class TestTerminalOnSuccessfulToolUse:
         print(f"   all tool calls: {capture.tool_names()}")
         print(f"   reply: {(reply or '')[:200]}...")
 
-        # Guard against the two shields that used to mask evaluator failures
-        # here: the malformed-output fallback and the max-turns digest
+        # Guard against the two shields that can mask a loop that failed to
+        # stop: the malformed-output fallback and the max-turns digest
         # caveat. Either means the loop did not terminate cleanly on the
         # first grounded tool summary, even when the surrounding content
         # reads correctly.
@@ -287,7 +220,7 @@ class TestTerminalOnSuccessfulToolUse:
         assert_not_max_turns_digest(reply, context="single-weather-terminal")
 
         assert len(weather_calls) == 1, (
-            f"Expected exactly one getWeather call (evaluator should terminate "
+            f"Expected exactly one getWeather call (the loop should end "
             f"after the first successful summary). Got {len(weather_calls)}: "
             f"{capture.tool_names()}"
         )
@@ -302,14 +235,14 @@ class TestTerminalOnSuccessfulToolUse:
 
 
 # =============================================================================
-# 3. Terminal on honest "can't do": no action tool available
+# 2. Honest "can't do": no action tool available
 # =============================================================================
 
 
 class TestTerminalOnHonestCantDo:
     """When no tool in the allow-list can perform the action and toolSearchTool
-    turns up nothing, the agent should honestly decline and the evaluator must
-    mark terminal — no infinite continuation, no confabulated success."""
+    turns up nothing, the agent should honestly decline and the loop must
+    end — no infinite continuation, no confabulated success."""
 
     @pytest.mark.eval
     @requires_judge_llm
@@ -367,62 +300,7 @@ class TestTerminalOnHonestCantDo:
 
 
 # =============================================================================
-# 4. Nudge-cap enforcement: pathological loop is capped cleanly
-# =============================================================================
-
-
-class TestNudgeCapEnforcement:
-    """When the evaluator keeps wanting to nudge but the model won't comply,
-    the nudge cap must stop the loop before agentic_max_turns and the reply
-    must still be non-empty."""
-
-    @pytest.mark.eval
-    @requires_judge_llm
-    def test_nudge_cap_stops_loop(self, mock_config, eval_db, eval_dialogue_memory):
-        from jarvis.reply.engine import run_reply_engine
-
-        _configure(mock_config)
-        mock_config.evaluator_nudge_max = 1  # tight cap so the test is fast
-        mock_config.agentic_max_turns = 4
-        capture = ToolCallCapture()
-
-        def _respond(name, args):
-            if name == "getWeather":
-                return MOCK_WEATHER_LONDON
-            if name == "toolSearchTool":
-                return MOCK_TOOLSEARCH_EMPTY
-            return "OK"
-
-        # An action-inappropriate tool is pre-seeded; the evaluator may try to
-        # nudge toward it, but the cap must stop the ping-pong.
-        router = _make_router_stub(["getWeather", "stop"])
-        runner = _make_tool_runner(capture, _respond)
-
-        with patch("jarvis.reply.engine.select_tools", side_effect=router), \
-             patch("jarvis.reply.engine.run_tool_with_retries", side_effect=runner), \
-             patch(
-                 "jarvis.reply.engine.get_location_context_with_timezone",
-                 return_value=("Location: London, UK", None),
-             ):
-            reply = run_reply_engine(
-                db=eval_db, cfg=mock_config, tts=None,
-                text="Tell me a long poem about the sea.",
-                dialogue_memory=eval_dialogue_memory,
-            )
-
-        print(f"\n📊 Nudge-cap enforcement:")
-        print(f"   tool calls: {capture.tool_names()}")
-        print(f"   reply length: {len(reply or '')}")
-        print(f"   reply: {(reply or '')[:240]}...")
-
-        assert reply and reply.strip(), (
-            "Reply must be non-empty even when the evaluator keeps wanting "
-            "to nudge — the cap backstop must still deliver a reply."
-        )
-
-
-# =============================================================================
-# 5. Max-turn digest caveat: the loop never terminates, digest fires
+# 3. Max-turn digest caveat: the loop never terminates, digest fires
 # =============================================================================
 
 
@@ -432,10 +310,9 @@ class TestMaxTurnDigestCaveat:
     tool-call loop), the engine must still deliver a non-empty reply by
     running the digest backstop.
 
-    Evaluator-driven coverage was removed when the evaluator was retired
-    in favour of the planner. The behaviour the user cares about — "you
-    must never be left with an empty reply, even if the loop misbehaves"
-    — is asserted here without coupling to deprecated internals."""
+    The behaviour the user cares about — "you must never be left with an
+    empty reply, even if the loop misbehaves" — is asserted here without
+    coupling to the loop's internals."""
 
     @pytest.mark.eval
     @requires_judge_llm
@@ -517,7 +394,7 @@ class TestMaxTurnDigestCaveat:
 
 
 # =============================================================================
-# 6. toolSearchTool escape hatch: widen allow-list mid-loop, then act
+# 4. toolSearchTool escape hatch: widen allow-list mid-loop, then act
 # =============================================================================
 
 
@@ -597,7 +474,7 @@ class TestToolSearchToolEscapeHatch:
 
 
 # =============================================================================
-# 6b. The refusal names the way out
+# 4b. The refusal names the way out
 # =============================================================================
 
 
@@ -708,16 +585,16 @@ class TestRefusalNamesTheWayOut:
 
 
 # =============================================================================
-# 7. Complex multi-turn / multi-tool scenarios
+# 5. Complex multi-turn / multi-tool scenarios
 # =============================================================================
 
 
 class TestComplexMultiTurnMultiTool:
-    """Flavours of end-to-end complexity that stress the evaluator loop:
+    """Flavours of end-to-end complexity that stress the agentic loop:
     chained research, parallel comparisons, cross-turn pronoun resolution,
-    nudge-driven query refinement, and an escape-hatch follow-up."""
+    query refinement, and an escape-hatch follow-up."""
 
-    # ---- 7a ---------------------------------------------------------------
+    # ---- 5a ---------------------------------------------------------------
     @pytest.mark.eval
     @requires_judge_llm
     def test_chained_research_possessor_director(
@@ -779,7 +656,7 @@ class TestComplexMultiTurnMultiTool:
             f"progressed. Args: {arg_fingerprints}"
         )
 
-    # ---- 7b ---------------------------------------------------------------
+    # ---- 5b ---------------------------------------------------------------
     @pytest.mark.eval
     @requires_judge_llm
     def test_parallel_comparison_paris_vs_london(
@@ -845,7 +722,7 @@ class TestComplexMultiTurnMultiTool:
                 f"{reply[:300]!r}"
             )
 
-    # ---- 7c ---------------------------------------------------------------
+    # ---- 5c ---------------------------------------------------------------
     @pytest.mark.eval
     @requires_judge_llm
     def test_cross_turn_pronoun_resolution(
@@ -927,14 +804,14 @@ class TestComplexMultiTurnMultiTool:
                 f"Got: {reply2[:300]!r}"
             )
 
-    # ---- 7d ---------------------------------------------------------------
+    # ---- 5d ---------------------------------------------------------------
     @pytest.mark.eval
     @requires_judge_llm
     def test_correction_loop_accepts_single_or_retry(
         self, mock_config, eval_db, eval_dialogue_memory
     ):
-        """At least one webSearch must happen; a nudge-driven retry is
-        acceptable, zero searches is not."""
+        """At least one webSearch must happen; a retry is acceptable, zero
+        searches is not."""
         from jarvis.reply.engine import run_reply_engine
 
         _configure(mock_config)
@@ -973,15 +850,15 @@ class TestComplexMultiTurnMultiTool:
             f"Tools called: {capture.tool_names()}"
         )
 
-    # ---- 7e ---------------------------------------------------------------
+    # ---- 5e ---------------------------------------------------------------
     @pytest.mark.eval
     @requires_judge_llm
     @pytest.mark.xfail(
         reason=(
             "Plumbing verified in unit tests. Live behaviour on gemma4:e2b "
             "is flaky on multi-turn escape-hatch flows: the small model "
-            "sometimes refuses turn 1 in prose despite the nudge. Tracked "
-            "for iterative prompt tuning; architecture ships as-is."
+            "sometimes refuses turn 1 in prose. Tracked for iterative "
+            "prompt tuning; architecture ships as-is."
         ),
         strict=False,
     )
@@ -1054,82 +931,4 @@ class TestComplexMultiTurnMultiTool:
         assert found_lofi, (
             f"Turn 2 tool arg must contain the self-contained keyword "
             f"'lo-fi' (or a reasonable paraphrase). Calls: {turn2}"
-        )
-
-
-# =============================================================================
-# 8. Structured tool_call emission — the evaluator must not only nudge
-#    textually, it must emit a structured {name, arguments} that the engine can
-#    execute directly. This is the recovery path for small chat models that
-#    routinely ignore textual nudges.
-# =============================================================================
-
-
-class TestStructuredToolCallEmission:
-    """The evaluator prompt now asks for a structured ``tool_call`` field
-    alongside the textual nudge. Verify that a live small-model evaluator
-    actually populates it when the intent is unambiguous."""
-
-    @pytest.mark.eval
-    @requires_judge_llm
-    @pytest.mark.xfail(
-        reason=(
-            "Prompt compliance depends on the live small evaluator model. "
-            "Deterministic coverage lives in tests/test_evaluator.py "
-            "(parse) and tests/test_engine_tool_search_loop.py (direct-exec). "
-            "Tracked for iterative prompt tuning; architecture ships as-is."
-        ),
-        strict=False,
-    )
-    def test_evaluator_emits_structured_tool_call_for_obvious_search(
-        self, mock_config
-    ):
-        from jarvis.reply.evaluator import evaluate_turn
-
-        _configure(mock_config)
-
-        result = evaluate_turn(
-            user_query="Give me an overview of China.",
-            assistant_response_summary=(
-                "I can look that up for you. Would you like me to search the "
-                "web for an overview of China?"
-            ),
-            available_tools=[
-                ("webSearch", "Search the web and return ranked results."),
-                ("stop", "Explicit end-of-turn sentinel."),
-            ],
-            turns_used=1,
-            cfg=mock_config,
-        )
-
-        print(f"\n📊 Structured tool_call emission:")
-        print(f"   terminal: {result.terminal}")
-        print(f"   nudge: {result.nudge!r}")
-        print(f"   tool_call: {result.tool_call!r}")
-
-        assert result.terminal is False, (
-            "Evaluator should continue: the agent offered prose instead of "
-            "calling webSearch. "
-            f"Got terminal={result.terminal}, reason={result.reason!r}."
-        )
-        assert isinstance(result.tool_call, dict), (
-            "Evaluator should emit a structured tool_call so the engine can "
-            "run the search directly without relying on the chat model to "
-            f"parse the textual nudge. Got tool_call={result.tool_call!r}."
-        )
-        assert result.tool_call.get("name") == "webSearch", (
-            f"Structured tool_call.name should be 'webSearch'. "
-            f"Got {result.tool_call!r}."
-        )
-        args = result.tool_call.get("arguments") or {}
-        assert isinstance(args, dict) and args, (
-            "Structured tool_call.arguments should be a non-empty dict with "
-            f"the intended query. Got {result.tool_call!r}."
-        )
-        arg_blob = " ".join(
-            str(v).lower() for v in args.values() if isinstance(v, str)
-        )
-        assert "china" in arg_blob, (
-            f"Structured tool_call.arguments should mention 'china'. "
-            f"Got {result.tool_call!r}."
         )

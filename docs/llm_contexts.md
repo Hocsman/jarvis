@@ -10,7 +10,7 @@ Every distinct LLM call in Jarvis, what feeds it, what consumes it, and how it i
 
 - **File**: [src/jarvis/reply/engine.py](src/jarvis/reply/engine.py) — `reply()` and the loop at ~lines 1370-1650; native tool-call path in `chat_with_messages()` (~1424, 1455).
 - **Trigger**: every user message. Runs up to `agentic_max_turns` (default 8) iterations per reply.
-- **Model / gating**: `cfg.llm_chat_model` via `get_llm_backend(cfg)`. Not optional. No size branching on the loop itself — size branching affects the digests/evaluator around it.
+- **Model / gating**: `cfg.llm_chat_model` via `get_llm_backend(cfg)`. Not optional. No size branching on the loop itself — size branching affects the digests around it.
 - **Inputs**:
   - Redacted user query
   - Recent dialogue (last 5 minutes), including in-loop tool-call + tool-role messages from prior replies within the active conversation (tool carryover, `DialogueMemory.record_tool_turn` / `get_recent_turns_with_tools` in [src/jarvis/memory/conversation.py](src/jarvis/memory/conversation.py); per-prompt cap via `cfg.tool_carryover_max_turns` / `tool_carryover_per_entry_chars`; storage cap `_tool_turns_max_storage = 16`; cleared on `stop` signal AND on new-conversation entry; UNTRUSTED WEB EXTRACT fence markers preserved on truncation; both `content` and `tool_calls[*].function.arguments` scrubbed on write)
@@ -21,7 +21,7 @@ Every distinct LLM call in Jarvis, what feeds it, what consumes it, and how it i
   - Time + location context (computed once per reply, placed at the END of the system message's dynamic region: never the head: so every in-loop call sends a byte-identical system message and the server's KV/prefix cache can reuse the whole prompt head; in text-tools mode it sits just before the tool-call syntax guidance so the instruction block stays final)
   - Tool schema: native via `generate_tools_json_schema()` ([src/jarvis/tools/registry.py](src/jarvis/tools/registry.py)) or text fallback via `_text_tool_call_guidance()` ([engine.py:68](src/jarvis/reply/engine.py:68))
   - Tool results from prior turns (raw or digested — see #5)
-- **Output**: OpenAI-style `{content, tool_calls, thinking}`. Consumed by the tool orchestrator and TTS pipeline. Natural-language content is delivered immediately; no post-turn evaluator runs.
+- **Output**: OpenAI-style `{content, tool_calls, thinking}`. Consumed by the tool orchestrator and TTS pipeline. Natural-language content is delivered immediately.
 - **Limits**: `num_ctx: 8192` (explicit). Timeout `llm_chat_timeout_sec` (45s). Auto-fallback from native to text tool-calls on HTTP 400 (`ToolsNotSupportedError`), sticky for the session. Risk: `fetch_web_page` truncates at 50,000 chars (~37k tokens) — mitigated for SMALL models by tool-result digest (#5) which compresses the payload before it enters the messages history. LARGE models receive the raw payload and may silently see a truncated context.
 - **Routine entry**: an unattended run calls this same context with `origin="routine"`, `tts=None`, and a `RoutineScope`. The scope replaces the router entirely — the envelope's tools that exist are the whole catalogue, `stop` and `toolSearchTool` are not appended, and one filter runs after every branch that can add a name. The scope is also handed to all three `run_tool_with_retries` call sites, where the gate re-checks it per call. No new LLM context: the planner and the digests run unchanged, and #8 (tool router) simply does not fire.
 - **Text-chat entry**: The desktop `ChatWindow` (see `src/desktop_app/chat_window.spec.md`) submits via `jarvis.daemon.submit_text_query`, which calls this same context on a worker thread with `tts=None` and `language=None` (no Whisper-detected language for typed input). Voice and text share the global `DialogueMemory` so they are one conversation. No new LLM context is introduced — the planner, router, enrichment, and digests all run unchanged. Text chat never speaks; the reply is returned to the UI via callbacks (bundled) or `__CHAT__:` IPC events (subprocess).
@@ -84,7 +84,7 @@ Every distinct LLM call in Jarvis, what feeds it, what consumes it, and how it i
 ## 6. Max-Turn Loop Digest
 
 - **File**: [src/jarvis/reply/enrichment.py](src/jarvis/reply/enrichment.py) — `digest_loop_for_max_turns()` (~line 847).
-- **Trigger**: when the loop exhausts `agentic_max_turns` without producing a natural-language reply (e.g. pure tool-call loop). The evaluator no longer drives this — termination on content is immediate.
+- **Trigger**: when the loop exhausts `agentic_max_turns` without producing a natural-language reply (e.g. pure tool-call loop).
 - **Model / gating**: `_resolve_loop_digest_model(cfg)` — prefers `intent_judge_model`, falls back to `cfg.llm_chat_model`. Dispatched via `get_auxiliary_backend(cfg, model)` (the enrichment shim): a bare judge-model tag on a remote OpenAI-compatible endpoint routes to local Ollama.
 - **Inputs**: user query + loop activity (tool calls, results summaries, any prose).
 - **System prompt**: `_LOOP_DIGEST_SYSTEM_PROMPT` — caveat-prefixed, user-language, concise.
@@ -283,7 +283,7 @@ Driven by `detect_model_size(model_name) → SMALL (≤7B) | LARGE (8B+)`:
 
 ## Config keys
 
-- Models: `llm_chat_model`, `intent_judge_model`, `tool_router_model`, `planner_model`, `evaluator_model`, `confirmation_model`, `reminder_model`, `appris_model`, `embedding_model` (the legacy `ollama_chat_model` key on disk is still readable as a fallback alias for the v1 → v2 config migration)
+- Models: `llm_chat_model`, `intent_judge_model`, `tool_router_model`, `planner_model`, `confirmation_model`, `reminder_model`, `appris_model`, `embedding_model` (the legacy `ollama_chat_model` key on disk is still readable as a fallback alias for the v1 → v2 config migration)
 - Provider and destination: `llm_provider`, `llm_base_url`, `llm_api_key`, `llm_api_key_env`, `llm_extra_body`, `embedding_provider`, `embedding_base_url`, `auto_redact_before_cloud`. `llm_base_url` also decides local from remote: an auxiliary pin is honoured on a loopback or private-network endpoint and replaced by the chat model on a remote one.
 - Flags: `memory_digest_enabled`, `tool_result_digest_enabled`, `llm_thinking_enabled`, `intent_judge_thinking_enabled`, `tool_selection_strategy`, `low_power_mode`, `reminders_enabled`, `routines_enabled`, `dictation_filler_removal`, `dictation_thinking_enabled`, `response_language`
 - Timeouts: `llm_chat_timeout_sec` (45s), `llm_digest_timeout_sec` (8s, shared across #4/#5/#6), `llm_tools_timeout_sec`, `intent_judge_timeout_sec` (15s), `confirmation_timeout_sec`, `reminder_timeout_sec`, `appris_timeout_sec`, `confirmation_ttl_sec`

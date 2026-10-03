@@ -27,7 +27,6 @@ def _configure(mock_config):
     mock_config.ollama_chat_model = JUDGE_MODEL
     mock_config.llm_chat_model = JUDGE_MODEL
     mock_config.planner_enabled = True
-    mock_config.evaluator_enabled = False
     mock_config.location_enabled = True
     return mock_config
 

@@ -17,7 +17,6 @@ Any code change must either adhere to our spec files perfectly or you should ask
 | `src/jarvis/dictation/dictation.spec.md` | Hold-to-dictate engine, hotkey, clipboard paste | Independent from assistant pipeline; shared Whisper model; pause flag on listener |
 | `src/jarvis/listening/listening.spec.md` | Voice listener, wake word detection, audio pipeline | — |
 | `src/jarvis/reply/reply.spec.md` | LLM reply generation, tool use, profiles | Tools return raw data; profiles handle formatting |
-| `src/jarvis/reply/evaluator.spec.md` | **Deprecated** — evaluator no longer runs in the reply engine; preserved for reference | Replaced by the planner; see planner.spec.md |
 | `src/jarvis/reply/planner.spec.md` | Task-list planner: pre-loop query decomposition + direct-exec step resolver for small models | Fail-open; rides warm small model chain; advisory for large models, direct-exec for small |
 | `src/jarvis/tools/policy.spec.md` | Risk vocabulary, verdicts, `yuba/outils.md`, the gate at the tool funnel, the action ledger | Unclassified is destructive; the file is generated once then belongs to the user; refusing is not failing; the ledger records what was done, never what was seen |
 | `src/jarvis/objectifs/objectifs.spec.md` | Multi-step goals: the `objectifs.md` page, the four tools, the completion judge (LLM #18), the prompt line, the tab | Nothing is written by deduction: every line carries its source, the judge's vocabulary cannot say "finished", and its verdict has no writer. No schedule and no envelope in this slice — a goal is remembered, never run |
