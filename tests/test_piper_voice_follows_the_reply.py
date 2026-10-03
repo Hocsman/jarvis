@@ -324,17 +324,6 @@ def test_a_bare_voice_name_is_a_file_in_the_models_directory(world):
     assert chosen == str(world.models / f"{FRENCH}.onnx")
 
 
-@pytest.mark.unit
-def test_the_choice_is_named_in_the_debug_log(world, monkeypatch):
-    lines = []
-    monkeypatch.setattr(tts_module, "debug_log", lambda msg, *a, **k: lines.append(msg))
-    moteur = _engine(world, voices={"fr": FRENCH})
-
-    moteur._speak_once("Bonjour.", language="fr")
-
-    assert any(FRENCH in line for line in lines), lines
-
-
 def _voice_lines(lines, *noms):
     """The lines that name a voice as the one chosen, not the ones that
     report a model file being loaded."""
@@ -342,6 +331,19 @@ def _voice_lines(lines, *noms):
         line for line in lines
         if any(nom in line for nom in noms) and "loading" not in line.lower()
     ]
+
+
+@pytest.mark.unit
+def test_the_choice_is_named_in_the_debug_log(world, monkeypatch):
+    """The model file being loaded is logged for its own reasons and names the
+    voice too, so only the lines that are not about loading count here."""
+    lines = []
+    monkeypatch.setattr(tts_module, "debug_log", lambda msg, *a, **k: lines.append(msg))
+    moteur = _engine(world, voices={"fr": FRENCH})
+
+    moteur._speak_once("Bonjour.", language="fr")
+
+    assert _voice_lines(lines, FRENCH), lines
 
 
 @pytest.mark.unit
@@ -390,3 +392,76 @@ def test_speak_carries_the_language_to_the_voice_that_says_it(world):
         moteur.stop()
 
     assert [voix for voix, _ in world.synthesised] == [FRENCH, GERMAN]
+
+
+# ── From the config file to the engine ─────────────────────────────────
+#
+# Every test above builds the engine by hand. What the user touches is the
+# config file, and a map that is read, shown in the settings window and
+# then dropped on the way to the engine would leave all of them green.
+
+
+def _settings_from(config: dict):
+    from unittest.mock import patch
+
+    from jarvis.config import load_settings
+
+    with patch("jarvis.config._load_json", return_value={"_config_version": 1, **config}), \
+         patch("jarvis.config._save_json", return_value=True):
+        return load_settings()
+
+
+@pytest.mark.unit
+def test_the_factory_hands_the_map_to_the_piper_engine(world):
+    moteur = tts_module.create_tts_engine(
+        engine="piper",
+        piper_model_path=world.voice_path(ENGLISH),
+        piper_voices={"fr": world.voice_path(FRENCH)},
+    )
+
+    moteur._speak_once("Bonjour.", language="fr")
+    assert world.last_voice == FRENCH
+
+    moteur._speak_once("Hello.", language="en")
+    assert world.last_voice == ENGLISH
+
+
+@pytest.mark.unit
+def test_a_voice_listed_in_the_config_file_is_the_one_the_daemon_speaks_with(world):
+    from jarvis import daemon
+
+    reglages = _settings_from({
+        "tts_engine": "piper",
+        "tts_enabled": True,
+        "tts_piper_model_path": world.voice_path(ENGLISH),
+        "tts_piper_voices": {"fr": world.voice_path(FRENCH), "de": world.voice_path(GERMAN)},
+    })
+
+    moteur = daemon.build_tts_engine(reglages)
+
+    moteur._speak_once("Bonjour.", language="fr")
+    assert world.last_voice == FRENCH
+    moteur._speak_once("Guten Tag.", language="de")
+    assert world.last_voice == GERMAN
+    moteur._speak_once("Hello.", language="en")
+    assert world.last_voice == ENGLISH
+
+
+@pytest.mark.unit
+def test_the_configured_response_language_reaches_the_engine_from_the_config_file(world):
+    """The language that wins over detection is read from the same file, so
+    it has to travel the same road."""
+    from jarvis import daemon
+
+    reglages = _settings_from({
+        "tts_engine": "piper",
+        "tts_enabled": True,
+        "response_language": "german",
+        "tts_piper_model_path": world.voice_path(ENGLISH),
+        "tts_piper_voices": {"fr": world.voice_path(FRENCH), "de": world.voice_path(GERMAN)},
+    })
+
+    moteur = daemon.build_tts_engine(reglages)
+
+    moteur._speak_once("Guten Tag.", language="fr")
+    assert world.last_voice == GERMAN

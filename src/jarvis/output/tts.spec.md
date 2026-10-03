@@ -39,6 +39,12 @@ Any other name yields Piper. The config layer lowercases `tts_engine` and
 falls back to `piper` for a value that is not one of the three, so the
 factory only ever sees a valid name from the daemon.
 
+The daemon builds the engine from the settings in one function,
+`build_tts_engine`, which carries every `tts_*` setting and
+`response_language` to the factory. A setting that is read, shown in the
+settings window and not passed on there would be silently ignored, so
+that road is what the tests follow from the config file to the voice.
+
 An engine built with `enabled=False` accepts every call and does
 nothing: `speak` queues nothing, `start` starts nothing. Callers test
 `tts.enabled` before relying on speech.
@@ -376,4 +382,7 @@ language.
 - The debug log names the voice once for a reply of many sentences, and
   again when the voice changes.
 - The language passed to `speak` travels with its item to the worker.
+- Settings read from the config file reach the engine: a language listed in
+  `tts_piper_voices` is spoken in its voice when the daemon builds the
+  engine, and `response_language` travels the same road.
 - Markdown and links are stripped before speech.
