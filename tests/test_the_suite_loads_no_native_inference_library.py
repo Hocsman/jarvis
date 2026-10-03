@@ -192,10 +192,17 @@ def _run_inner_session(tmp_path: Path):
         "PYTHONPATH": os.pathsep.join([str(TESTS_DIR), str(SRC_DIR)]),
         "PYTHONDONTWRITEBYTECODE": "1",
     }
-    subprocess.run(
+    session = subprocess.run(
         [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-q",
          f"--junitxml={report}", "test_inner.py"],
         cwd=tmp_path, env=env, capture_output=True, text=True, timeout=180,
+    )
+    # A session that could not start (a conftest that fails to import, a crash
+    # while loading) writes no report. Say what the process said instead of
+    # failing later on a missing file.
+    assert report.exists(), (
+        f"the inner pytest session wrote no report (exit code {session.returncode})\n"
+        f"--- stdout ---\n{session.stdout}\n--- stderr ---\n{session.stderr}"
     )
     outcomes = {}
     for case in ET.parse(report).getroot().iter("testcase"):
@@ -212,5 +219,6 @@ class TestTheGuardEndToEnd:
         return _run_inner_session(tmp_path_factory.mktemp("inner_session"))
 
     def test_speaking_through_a_mock_voice_loads_no_inference_runtime(self, inner):
-        failure = inner["test_speaking_through_a_mock_voice_loads_no_inference_runtime"]
-        assert failure == "", failure
+        name = "test_speaking_through_a_mock_voice_loads_no_inference_runtime"
+        assert name in inner, f"the inner session reported {sorted(inner)}, not {name}"
+        assert inner[name] == "", inner[name]
