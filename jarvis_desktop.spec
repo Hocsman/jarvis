@@ -26,8 +26,18 @@ Plugins = PyQt6/Qt6/plugins
 # Collect all necessary data files
 # Note: Let PyInstaller's built-in hooks handle sounddevice, ctranslate2, and Qt WebEngine
 # Manual collection can conflict with hooks and cause crashes
+#
+# PyInstaller follows imports and nothing else, so every file the app opens
+# through Path(__file__) has to be listed here, under the path it has in src/
+# (the package folder is what the code resolves against). Name the page, not
+# its folder: the folder also holds Python modules, which reach the build
+# through import analysis and must not be copied again as data. The .ico icons
+# are only read at build time (icon= below) and stay out.
+# tests/test_pyinstaller_spec.py derives the files that must ship from the
+# tree and fails when one is missing from this list.
 datas = [
     (str(src_path / 'desktop_app' / 'desktop_assets' / '*.png'), 'desktop_app/desktop_assets'),
+    (str(src_path / 'desktop_app' / 'dashboard' / 'index.html'), 'desktop_app/dashboard'),
 ]
 
 # Collect Piper TTS data files (espeak-ng-data is required for phonemization)

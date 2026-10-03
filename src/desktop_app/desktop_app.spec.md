@@ -25,6 +25,7 @@ src/desktop_app/
 ├── diary_dialog.py      # End-of-session diary update dialog
 ├── chat_window.py       # Text chat interface (see chat_window.spec.md)
 ├── memory_viewer.py     # Flask-based memory browser
+├── dashboard/           # The dashboard window's bridge and page (the page ships as data, see Packaging)
 ├── updater.py           # Update checking logic
 ├── update_dialog.py     # Update notification dialogs
 └── desktop_assets/      # Icons and images
@@ -262,6 +263,20 @@ sequenceDiagram
 - **Visible Windows install progress**: The Inno Setup installer runs with `/SILENT` (not `/VERYSILENT`) so its own progress window is visible while the install runs — bridging the gap between the download dialog closing and the new app launching, which would otherwise look like a hang
 - **Quarantine stripping (macOS)**: The shell script runs `xattr -dr com.apple.quarantine` on the newly-installed bundle. Builds are unsigned (ad-hoc signing breaks Qt WebEngine's symlinks — see `release.yml`), so without this step Gatekeeper may re-trigger the "unidentified developer" prompt on every update
 - **One-generation rollback (macOS, Linux)**: The previous `.app` / directory is moved aside to `<name>.backup` rather than deleted outright, so a user can restore the prior version manually if the new one fails to launch. The backup from the previous update is cleared before creating a new one, so at most one backup exists on disk at a time. This is a simplified version of Squirrel's versioned-folder rollback — enough safety for a single-bundle install, without the architectural overhead
+
+## Packaging
+
+The desktop app ships as a PyInstaller build described by `jarvis_desktop.spec`: a onedir folder on Windows and Linux (`dist/Jarvis/Jarvis.exe` or `dist/Jarvis/Jarvis`, next to an `_internal` folder that holds the data files), and a `Jarvis.app` bundle on macOS. Windows wraps the folder in an Inno Setup installer (`installer/windows/jarvis_setup.iss`).
+
+### Data files
+
+PyInstaller follows imports and nothing else, so every file the app opens through `Path(__file__)` is listed in the spec's `datas`, and lands at the path it has under `src/`, because the code resolves such files against its own package folder. Today that is the dashboard page (`desktop_app/dashboard/index.html`) and the tray icons (`desktop_app/desktop_assets/*.png`). Python modules are never listed as data, they reach the build through import analysis. The `.ico` icons are embedded in the executable at build time and are not data.
+
+The rule is enforced from the tree, not from a list kept by hand. `tests/test_pyinstaller_spec.py` runs the spec once per platform with PyInstaller's names stubbed, expands `datas` the way PyInstaller does, and fails when a runtime data file under `src/` is not bundled or lands somewhere else. A file whose kind is unknown fails it too, until its suffix is classified in `scripts/check_bundle_layout.py`: guessing is how a file goes missing.
+
+### Checking a build
+
+`scripts/test_bundled_app.bat` and `scripts/test_bundled_app.sh` build, run `scripts/check_bundle_layout.py` on the result, and only then launch the app. The check looks for the executable the platform's build produces and for every runtime data file where the frozen app resolves it (`_internal` on Windows and Linux, `Contents/Resources` or `Contents/Frameworks` on macOS), and names each one that is missing. The Windows batch file asks for plain ASCII output.
 
 ## Memory Viewer
 
