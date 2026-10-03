@@ -170,6 +170,37 @@ def _isolate_dictation_history(_bac_a_sable, request, monkeypatch):
     assert patched, "neither dictation history module could be imported"
 
 
+@pytest.fixture(autouse=True)
+def _isolate_jarvis_state(_bac_a_sable, request, monkeypatch):
+    """Keep the suite's state changes off the live state file.
+
+    The assistant's state (idle, listening, speaking, ...) is shared with the
+    desktop app through a file in the system temp directory, and the orb of a
+    running Jarvis polls it. A test that drives the listener or a speech
+    engine publishes to it, so without this a test run would flicker the orb
+    of the app the developer has open. Each test gets its own file and a fresh
+    process-wide manager.
+    """
+    target = str(_bac_a_sable / f"state-{abs(hash(request.node.nodeid)):x}")
+
+    # The suite imports modules both as ``jarvis.x`` and as ``src.jarvis.x``,
+    # which are two distinct module objects. Patching one leaves the other
+    # publishing to the live file; both share the sandbox file, so a state
+    # published through one is read through the other.
+    import importlib
+
+    patched = 0
+    for path in ("jarvis.state", "src.jarvis.state"):
+        try:
+            module = importlib.import_module(path)
+        except ImportError:
+            continue
+        monkeypatch.setattr(module, "_state_file_path", lambda: target)
+        monkeypatch.setattr(module, "_jarvis_state_instance", None)
+        patched += 1
+    assert patched, "neither jarvis state module could be imported"
+
+
 def _foyer_des_donnees() -> Path:
     """The user's own data home: the parent of the database's default path."""
     from jarvis.config import _default_db_path

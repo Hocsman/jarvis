@@ -63,6 +63,7 @@ except ImportError:
 
 from jarvis.debug import debug_log
 from jarvis.config import default_config_path, _default_db_path, SUPPORTED_CHAT_MODELS, get_supported_model_ids
+from jarvis.state import JarvisState, get_jarvis_state
 from desktop_app.diary_dialog import DiaryUpdateDialog
 from desktop_app.themes import JARVIS_THEME_STYLESHEET
 from desktop_app.face_widget import FaceWindow
@@ -1671,8 +1672,6 @@ class JarvisSystemTray:
         self.memory_viewer = MemoryViewerWindow()
 
         # Create face window (hidden by default)
-        # Note: Creating the face window also initializes the SpeakingState singleton
-        # in the main thread, which is important for cross-thread signal delivery
         self.face_window = FaceWindow()
 
         # Floating orb, always on top, built at startup and shown on
@@ -2000,11 +1999,7 @@ class JarvisSystemTray:
             self.stop_daemon()
 
         # Face should look asleep while wizard is open (daemon isn't running)
-        try:
-            from desktop_app.face_widget import JarvisState, get_jarvis_state
-            get_jarvis_state().set_state(JarvisState.ASLEEP)
-        except Exception:
-            pass
+        get_jarvis_state().set_state(JarvisState.ASLEEP)
 
         wizard = SetupWizard()
         result = wizard.exec()
@@ -2480,7 +2475,6 @@ class JarvisSystemTray:
         try:
             from desktop_app.orb.orb_window import OrbWindow
             from desktop_app.orb.state_controller import StateController
-            from desktop_app.face_widget import get_jarvis_state
 
             particles = True
             try:
@@ -2840,11 +2834,7 @@ class JarvisSystemTray:
             self._set_chat_daemon_status(status)
             self._daemon_stop_expected = False
             # Reset face to asleep so it doesn't look ready while daemon is down
-            try:
-                from desktop_app.face_widget import JarvisState, get_jarvis_state
-                get_jarvis_state().set_state(JarvisState.ASLEEP)
-            except Exception:
-                pass
+            get_jarvis_state().set_state(JarvisState.ASLEEP)
 
     def _read_daemon_logs(self) -> None:
         """Read logs from daemon subprocess in a background thread."""

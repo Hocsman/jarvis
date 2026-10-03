@@ -22,6 +22,7 @@ from ..tools.confirmation import (
     utterance_channel_available,
 )
 from ..debug import debug_log
+from ..state import JarvisState, get_jarvis_state
 from ..llm import (
     extract_text_from_response,
     get_auxiliary_backend,
@@ -2921,13 +2922,8 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 except Exception:
                     pass
 
-                # Set face state to IDLE (waiting for wake word)
-                try:
-                    from desktop_app.face_widget import get_jarvis_state, JarvisState
-                    state_manager = get_jarvis_state()
-                    state_manager.set_state(JarvisState.IDLE)
-                except Exception:
-                    pass
+                # Waiting for the wake word
+                get_jarvis_state().set_state(JarvisState.IDLE)
 
                 # Stop is a dismissal — clear any tool carryover from the
                 # prior turn so the next wake-word turn starts fresh, and

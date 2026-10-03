@@ -178,11 +178,11 @@ System is waiting for wake word activation.
 - Text-based detection finds wake word (or aliases) in transcript
 
 **On trigger:**
-1. Start thinking beep immediately and set face state to LISTENING
+1. Start thinking beep immediately and publish the state LISTENING
 2. Wait for utterance to complete (user finishes speaking)
 3. Send transcript buffer + wake timestamp to intent judge
 4. If `directed=true` and `query` exists, dispatch to reply engine
-5. If rejected, stop the beep and revert face state to IDLE
+5. If rejected, stop the beep and publish IDLE
 
 ### 2. Hot Window Mode
 
@@ -202,7 +202,7 @@ After TTS finishes, allow wake-word-free follow-up.
 
 **`could_be_hot_window` (intent judge context):** Derived from timestamp comparison — returns True if the hot window is active, activation is pending, the utterance started within the window span even after expiry, or the utterance overlaps with the span (started before, ended during).
 
-**Expiry:** Timer-based, guaranteed to fire even if no audio. The `hot_window_seconds` clock starts the instant the window opens, before the face and the console are told, so the window is the same length on a cold process (where telling the face imports the desktop widget) and on a warm one. An announcement the clock has already outrun is skipped.
+**Expiry:** Timer-based, guaranteed to fire even if no audio. The `hot_window_seconds` clock starts the instant the window opens, before the state is published and the console is told, so the window is the same length however slow that announcement is (a state file on a busy disk, a console that blocks). An announcement the clock has already outrun is skipped.
 
 ### 3. During TTS
 
@@ -341,17 +341,17 @@ Transcript:
 Judge output: {"directed": true, "query": "Ni hao", "reasoning": "New speech directed at assistant"}
 ```
 
-## Early Feedback (Beep & Face State)
+## Early Feedback (Beep & Published State)
 
-To minimise perceived latency, audio and visual feedback starts **immediately after Whisper transcription**, before the intent judge runs:
+To minimise perceived latency, audio and visual feedback starts **immediately after Whisper transcription**, before the intent judge runs. The visual half is the assistant's shared state (`src/jarvis/state.py`, see `state.spec.md`), which whatever shows the assistant to the user reads:
 
-- **Wake word mode:** If the transcribed text contains the wake word (fuzzy-matched), start the thinking beep and set face state to LISTENING.
-- **Hot window:** If voice started during an active (or pending) hot window, start the thinking beep and set face state to LISTENING.
+- **Wake word mode:** If the transcribed text contains the wake word (fuzzy-matched), start the thinking beep and publish LISTENING.
+- **Hot window:** If voice started during an active (or pending) hot window, start the thinking beep and publish LISTENING.
 - **No trigger:** If neither condition is met, no feedback is given.
 
-If the intent judge later rejects the query (and no hot window override applies), the beep is stopped and face state reverts to IDLE. This brief false-positive beep is acceptable — users prefer immediate acknowledgement over delayed but perfect accuracy.
+If the intent judge later rejects the query (and no hot window override applies), the beep is stopped and the state reverts to IDLE. This brief false-positive beep is acceptable — users prefer immediate acknowledgement over delayed but perfect accuracy.
 
-**Face state is not set during TTS** — the beep is suppressed while TTS is playing to avoid self-triggering.
+**LISTENING is not published early during TTS** — the beep is suppressed while TTS is playing to avoid self-triggering.
 
 ## Configuration
 
@@ -425,7 +425,7 @@ Silence Timeout → Whisper Transcription
 Add to Transcript Buffer (with timestamps)
     ↓
 Wake Detection Check:
-    └→ Text contains wake word? → Start thinking beep + LISTENING face
+    └→ Text contains wake word? → Start thinking beep + publish LISTENING
     ↓
 If wake detected OR in hot window:
     → Fuzzy echo check (partial_ratio ≥ 70 = echo → reject + reset timer)

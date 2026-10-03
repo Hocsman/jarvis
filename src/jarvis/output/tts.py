@@ -17,6 +17,7 @@ from typing import Optional, Callable
 from urllib.parse import urlparse
 
 from ..debug import debug_log
+from ..state import JarvisState, get_jarvis_state
 from ..utils.audio_lock import portaudio_lock
 
 
@@ -580,7 +581,7 @@ class ChatterboxTTS:
         # stays owed until the speech has finished.
         spoken = False
         
-        # Signal speaking state to face widget
+        # Publish the speaking state
         self._notify_speaking_state(True)
 
         try:
@@ -651,7 +652,7 @@ class ChatterboxTTS:
         finally:
             self._is_speaking.clear()
             
-            # Signal speaking stopped to face widget
+            # Speech ended (nothing is published: the daemon manages what follows)
             self._notify_speaking_state(False)
             
             # Call completion callback if set and not interrupted
@@ -663,25 +664,14 @@ class ChatterboxTTS:
                 self._completion_callback = None
     
     def _notify_speaking_state(self, is_speaking: bool) -> None:
-        """Notify the face widget of speaking state changes.
+        """Publish SPEAKING when speech starts.
 
-        Uses file-based approach to work across processes:
-        - Dev mode runs daemon as subprocess (different process)
-        - File-based state works across process boundaries
+        When speaking ends the state is left alone: the daemon manages the
+        transition out of SPEAKING.
         """
-        # Import here to avoid circular dependencies
-        try:
-            from desktop_app.face_widget import get_jarvis_state, JarvisState
-            state_manager = get_jarvis_state()
-            if is_speaking:
-                debug_log("setting face state to SPEAKING (chatterbox)", "tts")
-                state_manager.set_state(JarvisState.SPEAKING)
-            # Note: When speaking ends, we don't change state here - let daemon manage transitions
-        except ImportError:
-            debug_log("face widget not available (ImportError) (chatterbox)", "tts")
-        except Exception as e:
-            # Don't let face widget errors affect TTS
-            debug_log(f"failed to set face state to SPEAKING (chatterbox): {e}", "tts")
+        if is_speaking:
+            debug_log("setting state to SPEAKING (chatterbox)", "tts")
+            get_jarvis_state().set_state(JarvisState.SPEAKING)
 
     # Loopback guard helpers (same interface as TextToSpeech)
     def is_speaking(self) -> bool:
@@ -962,7 +952,7 @@ class PiperTTS:
         # stays owed until the speech has finished.
         spoken = False
 
-        # Signal speaking state to face widget
+        # Publish the speaking state
         self._notify_speaking_state(True)
 
         try:
@@ -1104,17 +1094,10 @@ class PiperTTS:
                 self._completion_callback = None
 
     def _notify_speaking_state(self, is_speaking: bool) -> None:
-        """Notify the face widget of speaking state changes."""
-        try:
-            from desktop_app.face_widget import get_jarvis_state, JarvisState
-            state_manager = get_jarvis_state()
-            if is_speaking:
-                debug_log("setting face state to SPEAKING (piper)", "tts")
-                state_manager.set_state(JarvisState.SPEAKING)
-        except ImportError:
-            debug_log("face widget not available (ImportError) (piper)", "tts")
-        except Exception as e:
-            debug_log(f"failed to set face state to SPEAKING (piper): {e}", "tts")
+        """Publish SPEAKING when speech starts."""
+        if is_speaking:
+            debug_log("setting state to SPEAKING (piper)", "tts")
+            get_jarvis_state().set_state(JarvisState.SPEAKING)
 
     # Loopback guard helpers (same interface as TextToSpeech)
     def is_speaking(self) -> bool:
@@ -1467,17 +1450,10 @@ class KokoroTTS:
                 self._completion_callback = None
 
     def _notify_speaking_state(self, is_speaking: bool) -> None:
-        """Notify the face/orb widget of speaking state changes."""
-        try:
-            from desktop_app.face_widget import get_jarvis_state, JarvisState
-            state_manager = get_jarvis_state()
-            if is_speaking:
-                debug_log("setting face state to SPEAKING (kokoro)", "tts")
-                state_manager.set_state(JarvisState.SPEAKING)
-        except ImportError:
-            debug_log("face widget not available (ImportError) (kokoro)", "tts")
-        except Exception as e:
-            debug_log(f"failed to set face state to SPEAKING (kokoro): {e}", "tts")
+        """Publish SPEAKING when speech starts."""
+        if is_speaking:
+            debug_log("setting state to SPEAKING (kokoro)", "tts")
+            get_jarvis_state().set_state(JarvisState.SPEAKING)
 
     # Loopback guard helpers (same interface as the other engines).
     def is_speaking(self) -> bool:

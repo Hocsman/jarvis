@@ -10,6 +10,8 @@ The desktop app is a **separate package** from the core `jarvis` module. It depe
 - Building alternative UIs (web, mobile) without modifying core logic
 - Keeping PyQt6 dependencies isolated from the core package
 
+The direction is one-way and checked: `tests/test_jarvis_does_not_import_desktop_app.py` parses every module under `src/jarvis` and fails on any import of `desktop_app`, including one inside a function. What both sides need belongs to `jarvis`, and the desktop app imports it from there. The assistant's state (what it is doing right now) is the standing example: it lives in `src/jarvis/state.py` (see `src/jarvis/state.spec.md`), the voice pipeline publishes it, and the desktop app only reads it.
+
 ## Package Structure
 
 ```
@@ -19,7 +21,7 @@ src/desktop_app/
 ├── splash_screen.py     # Animated startup splash
 ├── setup_wizard.py      # First-run setup wizard
 ├── settings_window.py   # Auto-generated settings UI from config metadata
-├── face_widget.py       # Animated face visualization
+├── face_widget.py       # Animated face that follows the assistant's state
 ├── orb/                 # State-driven orb window and widget (see Orb below)
 ├── themes.py            # Qt stylesheets and color palette
 ├── diary_dialog.py      # End-of-session diary update dialog
@@ -93,7 +95,7 @@ The central controller that manages:
 |--------|---------|
 | **LogViewerWindow** | Real-time log output from the daemon, with "Report Issue" button |
 | **MemoryViewerWindow** | Web-based memory browser (Flask server) |
-| **FaceWindow** | Animated face that reacts to speaking state |
+| **FaceWindow** | Animated face that follows the assistant's state (idle, listening, thinking, speaking, dictating) |
 | **SettingsWindow** | Auto-generated config editor with tabbed categories |
 | **SetupWizard** | First-run configuration (Ollama, models, profile) |
 | **DictationHistoryWindow** | Scrollable list of past dictations with copy/delete/clear actions |
@@ -106,7 +108,17 @@ The central controller that manages:
 
 The orb listens to nothing. It has no audio input, takes no audio source as an argument, and the package exposes no audio API: a frame is a function of state and time only, so the orb renders the same whether the daemon runs in the same process, in a subprocess, or not at all. The widget renders only while it is on screen (`pause_rendering` / `resume_rendering`), and its clock restarts on resume so a transition in flight never jumps.
 
-Two hosts embed it. `OrbWindow` is the floating instance: frameless, translucent, always on top and draggable; built at startup with a provider that reads the shared `JarvisState`, shown at launch only when WebEngine is unavailable (the dashboard draws its own canvas orb from the same state), and otherwise toggled from the tray action `🟠 Toggle Orb` or the hotkey `Ctrl+Shift+J` (`Cmd+Shift+J` on macOS: a global pynput hotkey, disabled on macOS 26+ where pynput crashes the process, and a window-scoped Qt shortcut that works while the orb has focus). Hiding the window pauses the widget; showing it resumes it. `ChatWindow` embeds its own instance in the introductory panel that only an empty conversation shows, drives it through `set_state` (THINKING while a query is in flight, IDLE otherwise), pauses it the moment a message lands or the window hides, and resumes it when the window shows with an empty transcript (see `chat_window.spec.md`).
+Two hosts embed it. `OrbWindow` is the floating instance: frameless, translucent, always on top and draggable; built at startup with a provider that reads the shared `JarvisState` (see Assistant State below), shown at launch only when WebEngine is unavailable (the dashboard draws its own canvas orb from the same state), and otherwise toggled from the tray action `🟠 Toggle Orb` or the hotkey `Ctrl+Shift+J` (`Cmd+Shift+J` on macOS: a global pynput hotkey, disabled on macOS 26+ where pynput crashes the process, and a window-scoped Qt shortcut that works while the orb has focus). Hiding the window pauses the widget; showing it resumes it. `ChatWindow` embeds its own instance in the introductory panel that only an empty conversation shows, drives it through `set_state` (THINKING while a query is in flight, IDLE otherwise), pauses it the moment a message lands or the window hides, and resumes it when the window shows with an empty transcript (see `chat_window.spec.md`).
+
+### Assistant State
+
+The orb, the dashboard and the face show what the assistant is doing by reading the shared `JarvisState` through `get_jarvis_state()`, both defined in `src/jarvis/state.py` and imported from `jarvis` (`src/jarvis/state.spec.md` owns the contract: the values, who publishes each, and the file that carries it between processes). The desktop app reads it by polling and never subscribes, because the daemon publishes from its own threads, and from another process in a development checkout.
+
+- The floating orb's `StateController` polls a provider each frame.
+- The dashboard bridge polls at 5 Hz and maps the value to the HUD orb's accent and label.
+- The face polls each frame.
+
+The desktop app publishes one value itself: `ASLEEP`, when the daemon stops and while the setup wizard is open, so nothing looks ready while nothing is listening. It defines no state of its own.
 
 ### Tray Menu: GPU Library Recovery (Windows)
 

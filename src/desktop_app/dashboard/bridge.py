@@ -23,6 +23,7 @@ from typing import Any, Callable, Optional
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal, pyqtSlot
 
 from jarvis.debug import debug_log
+from jarvis.state import get_jarvis_state
 from jarvis.utils.weather_now import fetch_weather_summary
 from jarvis.utils.location import get_location_info
 
@@ -292,7 +293,6 @@ class DashboardBridge(QObject):
 
     def _current_jarvis_state(self) -> str:
         try:
-            from desktop_app.face_widget import get_jarvis_state
             st = get_jarvis_state().state
             return getattr(st, "value", str(st))
         except Exception:
