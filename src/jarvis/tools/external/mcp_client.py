@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import asyncio
 import os
 import shutil
 from typing import Any, Dict, Optional, List
-from contextlib import asynccontextmanager
 
+# mcp_runtime reads ClientSession through this module, so it is imported here.
 from mcp import ClientSession  # type: ignore
 from mcp.client.stdio import stdio_client, StdioServerParameters  # type: ignore
 
@@ -182,13 +181,11 @@ class _StdioConnection:
     owns the ``/dev/null`` file used to suppress the MCP server's stderr.
 
     The wrapped context manager is built synchronously by
-    ``MCPClient._connect_stdio`` so existing call sites and tests that
-    construct a connection eagerly continue to work. The wrapper's job
-    is to close the devnull handle when the async context exits,
-    regardless of how the inner context terminates. Without this the
-    devnull handle leaked once per ``_session`` call (i.e. every MCP
-    tool invocation), eventually exhausting the process FD limit on
-    long-running daemons.
+    ``MCPClient._connect_stdio``, so a construction error surfaces at the
+    call site. The wrapper's job is to close the devnull handle when the
+    async context exits, regardless of how the inner context terminates.
+    Without it the handle would leak once per connection, eventually
+    exhausting the process FD limit on long-running daemons.
     """
 
     def __init__(self, inner_cm, errlog) -> None:
@@ -309,39 +306,6 @@ class MCPClient:
             raise
         return _StdioConnection(inner, errlog=devnull)
 
-    @asynccontextmanager
-    async def _session(self, server_name: str):
-        cfg = self.server_configs.get(server_name)
-        if not cfg:
-            raise ValueError(f"Unknown MCP server '{server_name}'. Check config.mcps.")
-        transport = str(cfg.get("transport") or "stdio").lower()
-        if transport != "stdio":
-            raise NotImplementedError(f"Unsupported MCP transport '{transport}'. Only 'stdio' is supported currently.")
-
-        async with self._connect_stdio(cfg) as (read, write):
-            # Disable anyio TaskGroup cancellation propagation issues by scoping session strictly here
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                try:
-                    yield session
-                finally:
-                    # Let nested contexts handle their own shutdown cleanly
-                    pass
-
-    async def list_tools_async(self, server_name: str) -> List[Dict[str, Any]]:
-        async with self._session(server_name) as session:
-            tools_result = await session.list_tools()
-            # Extract tools from the ListToolsResult object
-            tools_list = getattr(tools_result, "tools", tools_result) if hasattr(tools_result, "tools") else tools_result
-            
-            return [tool_to_dict(t) for t in tools_list]
-
-    async def invoke_tool_async(self, server_name: str, tool_name: str, arguments: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        async with self._session(server_name) as session:
-            res = await session.call_tool(tool_name, arguments or {})
-            return _result_to_dict(res)
-
-    # Convenience sync wrappers
     def list_tools(
         self, server_name: str, timeout_sec: Optional[float] = None
     ) -> List[Dict[str, Any]]:
@@ -381,9 +345,9 @@ class MCPClient:
 
         Routes through the persistent MCP runtime so the server's stdio
         session stays alive across calls. Stateful servers (e.g.
-        chrome-devtools-mcp, which owns a Chrome process) cannot survive
-        the one-shot ``asyncio.run`` pattern: tearing down the session
-        kills the subprocess and any children it launched.
+        chrome-devtools-mcp, which owns a Chrome process) need their
+        session to outlive a call: tearing it down kills the subprocess
+        and any children it launched.
 
         On a transient session loss (subprocess died, idle timeout
         elapsed mid-call) the runtime retries once with a fresh worker.
