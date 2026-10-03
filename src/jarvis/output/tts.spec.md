@@ -125,10 +125,11 @@ fires without playing anything; it has no audio to play.
 in seconds, computed from the synthesised samples, after synthesis and
 before playback starts. It does not fire when nothing was synthesised.
 
-**The orb.** When an item starts, the engine sets the SPEAKING state on
-the shared state holder if that holder can be imported, and ignores the
-failure if it cannot. Speech never depends on it. Nothing in this module
-clears the state when speech ends; whoever owns the transitions does.
+**Speaking state.** When an item starts, the engine publishes SPEAKING
+through the shared state (`state.spec.md`). Publishing never raises, so
+the engine calls it bare and speech never depends on it. Nothing in this
+module clears the state when speech ends; whoever owns the transitions
+does.
 
 ## Interrupting
 
