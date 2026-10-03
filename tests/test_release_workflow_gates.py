@@ -207,15 +207,20 @@ def _uses_status_function(expression: str) -> bool:
     ))
 
 
-def _simulate(workflow: dict, ref: str, failing=(), outputs=None) -> dict[str, str]:
+def _simulate(workflow: dict, ref: str, failing=(), outputs=None, cancelled_after=None) -> dict[str, str]:
     """Result of every job in a run of ``workflow`` pushed to ``ref``.
 
     A job that runs succeeds unless it is in ``failing``. ``outputs`` gives the
     outputs of a job that ran and succeeded, as ``{job: {name: value}}``.
+
+    ``cancelled_after`` plays out a run that a newer push cancels once the
+    named jobs have finished: no other job starts unless its ``if`` uses a
+    status function and still holds with ``cancelled()`` true.
     """
     jobs = workflow["jobs"]
     outputs = outputs or {}
     results: dict[str, str] = {}
+    cancelled = cancelled_after is not None
 
     def settled(name):
         return all(need in results for need in _needs(jobs[name]))
@@ -240,18 +245,22 @@ def _simulate(workflow: dict, ref: str, failing=(), outputs=None) -> dict[str, s
                         return (outputs.get(parts[1], {}) if ran else {}).get(parts[3], "")
                 raise NotImplementedError(f"context {path!r} is not modelled")
 
+            not_started = cancelled and name not in cancelled_after
             status = {
                 "success": all(result == "success" for result in needs.values()),
                 "always": True,
                 "failure": any(result == "failure" for result in needs.values()),
-                "cancelled": False,
+                "cancelled": not_started,
             }
             condition = job.get("if")
             if condition is None:
-                runs = status["success"]
+                runs = status["success"] and not not_started
             else:
                 value = bool(_Expression(str(condition), {"status": status, "lookup": lookup}).evaluate())
-                runs = value if _uses_status_function(str(condition)) else (status["success"] and value)
+                if _uses_status_function(str(condition)):
+                    runs = value
+                else:
+                    runs = status["success"] and value and not not_started
             results[name] = ("failure" if name in failing else "success") if runs else "skipped"
         assert progressed, "the job graph has a cycle or a dependency on a job that does not exist"
     return results
@@ -302,6 +311,22 @@ class TestTheSimulationSeesWhatItShould:
         results = _simulate(self.SOUND, "refs/heads/develop", failing={"tests"})
 
         assert results == {"tests": "failure", "build": "skipped", "publish": "skipped"}
+
+    def test_always_starts_a_job_even_after_the_run_was_cancelled(self):
+        results = _simulate(self.SOUND, "refs/heads/develop", cancelled_after={"tests"})
+
+        assert results == {"tests": "success", "build": "success", "publish": "skipped"}
+
+    def test_not_cancelled_leaves_a_cancelled_run_alone(self):
+        workflow = {"jobs": {
+            "tests": {"uses": "./.github/workflows/tests.yml"},
+            "build": {"needs": ["tests"], "if": "!cancelled() && needs.tests.result == 'success'"},
+            "publish": {"needs": ["build"]},
+        }}
+
+        assert _simulate(workflow, "refs/heads/develop")["build"] == "success"
+        results = _simulate(workflow, "refs/heads/develop", cancelled_after={"tests"})
+        assert results == {"tests": "success", "build": "skipped", "publish": "skipped"}
 
     def test_a_skipped_dependency_skips_its_dependents_without_a_status_function(self):
         workflow = {"jobs": {
@@ -381,6 +406,22 @@ class TestARedSuiteBlocksTheRelease:
         assert results[gate] == "failure"
         ran = [name for name, result in results.items() if name != gate and result != "skipped"]
         assert ran == [], f"{ran} ran with the suite red on {ref}"
+
+
+class TestACancelledRunStartsNothing:
+    """A newer push cancels the run in progress (``concurrency``). Whatever had
+    not started must stay unstarted: a build that starts after the cancel
+    spends a runner on a commit nobody will ship."""
+
+    @pytest.mark.parametrize("ref", BRANCH_REFS)
+    def test_no_job_starts_once_the_run_is_cancelled(self, release, ref):
+        gate = _gate_job_name(release["jobs"])
+        finished = {gate, "semantic-release"}
+
+        results = _simulate(release, ref, outputs=RELEASE_OUTPUT, cancelled_after=finished)
+
+        started = [name for name, result in results.items() if name not in finished and result != "skipped"]
+        assert started == [], f"{started} started after the run was cancelled on {ref}"
 
 
 class TestAFailedBuildPublishesNothing:
@@ -464,6 +505,31 @@ class TestTheReleaseStillShipsWhenEverythingPasses:
 
         assert results["release-main"] == "skipped"
         assert results["release-develop"] == "skipped"
+
+
+class TestEveryScriptAWorkflowRunsIsInTheRepository:
+    """The other tests here read the workflows as text. A branch that names a
+    script without carrying it would pass all of them and then fail every
+    build at that step, so no release could pass."""
+
+    @staticmethod
+    def _scripts_run_by(workflow: dict) -> set[str]:
+        named = set()
+        for job in workflow["jobs"].values():
+            for step in _steps(job):
+                named.update(re.findall(r"\bscripts/[\w.\-]+", _run_text(step).replace("\\", "/")))
+        return named
+
+    @pytest.mark.parametrize("name", ["release.yml", "tests.yml"])
+    def test_each_script_a_step_runs_exists(self, name):
+        for script in sorted(self._scripts_run_by(_load(name))):
+            assert (ROOT / script).is_file(), (
+                f"{name} runs {script} but this branch does not carry it. "
+                "If it belongs to another branch, merge that one first."
+            )
+
+    def test_the_bundle_check_is_one_of_them(self, release):
+        assert BUNDLE_CHECK in self._scripts_run_by(release)
 
 
 class TestTheBundleIsCheckedBeforeAnythingIsUploaded:
