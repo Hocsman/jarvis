@@ -15,6 +15,7 @@ from pathlib import Path
 from desktop_app.updater import (
     CHECKSUMS_ASSET_NAME,
     CHECKSUMS_MAX_BYTES,
+    DOWNLOAD_CHUNK_BYTES,
     DownloadSignals,
     DownloadWorker,
     UpdateIntegrityError,
@@ -1500,10 +1501,11 @@ def _checksums_for(name: str, data: bytes) -> bytes:
 class _FakeResponse:
     """The slice of ``requests.Response`` the updater reads."""
 
-    def __init__(self, body: bytes, status: int = 200):
+    def __init__(self, body: bytes, status: int = 200, then_raise: Exception | None = None):
         self._body = body
         self.status_code = status
         self.headers = {"content-length": str(len(body))}
+        self._then_raise = then_raise
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -1515,6 +1517,8 @@ class _FakeResponse:
     def iter_content(self, chunk_size=1):
         for start in range(0, len(self._body), chunk_size):
             yield self._body[start:start + chunk_size]
+        if self._then_raise is not None:
+            raise self._then_raise
 
     def __enter__(self):
         return self
@@ -1523,11 +1527,22 @@ class _FakeResponse:
         return False
 
 
+class _DropsMidStream:
+    """Served in place of a body: ``delivered`` arrives, then the connection
+    fails with ``error``, which is how a download cut off partway looks to
+    ``requests``."""
+
+    def __init__(self, delivered: bytes, error: Exception):
+        self.delivered = delivered
+        self.error = error
+
+
 class _FakeGitHub:
     """Serves release assets by URL and remembers every URL it was asked for.
 
     A value that is an exception is raised instead of served, which is how a
-    host that is down looks to ``requests``. An unknown URL is a 404.
+    host that is down looks to ``requests``. A ``_DropsMidStream`` is served up
+    to the point where its connection fails. An unknown URL is a 404.
     """
 
     def __init__(self, files):
@@ -1539,6 +1554,8 @@ class _FakeGitHub:
         served = self.files.get(url)
         if isinstance(served, Exception):
             raise served
+        if isinstance(served, _DropsMidStream):
+            return _FakeResponse(served.delivered, then_raise=served.error)
         if served is None:
             return _FakeResponse(b"", status=404)
         return _FakeResponse(served)
@@ -1560,13 +1577,24 @@ def _release(*, checksums_url=CHECKSUMS_URL, asset_name=INSTALLER_NAME) -> Relea
     )
 
 
-def _download(github, dest, release=None):
-    """Run the download the way the update dialog does; report what the worker said."""
+def _download(github, dest, release=None, on_progress=None):
+    """Run the download the way the update dialog does; report what the worker said.
+
+    ``on_progress(worker, downloaded_bytes)`` runs on every progress report,
+    which is the moment a user could press Cancel.
+    """
     signals = DownloadSignals()
-    said = {"completed": [], "errors": []}
+    said = {"completed": [], "errors": [], "progress": []}
     signals.completed.connect(lambda path, digest: said["completed"].append((path, digest)))
     signals.error.connect(lambda message: said["errors"].append(message))
     worker = DownloadWorker(release or _release(), dest, signals)
+
+    def progressed(downloaded, _total):
+        said["progress"].append(downloaded)
+        if on_progress:
+            on_progress(worker, downloaded)
+
+    signals.progress.connect(progressed)
     with patch("requests.get", side_effect=github.get):
         worker.run()
     return said
@@ -1654,7 +1682,6 @@ class TestDownloadIsVerifiedBeforeAnythingRuns:
         pytest.param(b"", id="empty"),
         pytest.param(b"not a checksum file at all\n", id="garbage"),
         pytest.param(b"\xff\xfe\x00 not text", id="not-text"),
-        pytest.param(b"0" * (CHECKSUMS_MAX_BYTES + 1), id="oversized"),
     ])
     def test_a_checksum_file_that_cannot_be_read_refuses_the_update(self, qapp, tmp_path, served):
         github = _FakeGitHub({INSTALLER_URL: b"installer", CHECKSUMS_URL: served})
@@ -1664,6 +1691,25 @@ class TestDownloadIsVerifiedBeforeAnythingRuns:
 
         assert said["completed"] == []
         assert len(said["errors"]) == 1
+        assert INSTALLER_URL not in github.requested
+        assert not dest.exists()
+
+    @pytest.mark.unit
+    def test_a_checksum_file_past_the_size_cap_is_refused_even_though_it_lists_the_installer(
+        self, qapp, tmp_path
+    ):
+        installer = b"genuine installer bytes"
+        # The installer's line is there and its digest is right. Only the size
+        # of the file is wrong, so the cap is the one thing that can refuse it.
+        oversized = _checksums_for(INSTALLER_NAME, installer) + b"#" * (CHECKSUMS_MAX_BYTES + 1)
+        github = _FakeGitHub({INSTALLER_URL: installer, CHECKSUMS_URL: oversized})
+        dest = tmp_path / INSTALLER_NAME
+
+        said = _download(github, dest)
+
+        assert said["completed"] == []
+        assert len(said["errors"]) == 1
+        assert "far larger than a checksum file" in said["errors"][0]
         assert INSTALLER_URL not in github.requested
         assert not dest.exists()
 
@@ -1719,6 +1765,59 @@ class TestDownloadIsVerifiedBeforeAnythingRuns:
 
         assert said["errors"] == []
         assert said["completed"] == [(str(dest), _sha256(installer))]
+
+
+class TestDownloadThatStopsEarlyLeavesNoInstaller:
+    """A download that ends before its last byte, because the user cancelled
+    or because the connection dropped, leaves nothing on disk."""
+
+    @pytest.mark.unit
+    def test_a_cancelled_download_is_deleted_and_reports_neither_success_nor_failure(self, qapp, tmp_path):
+        installer = b"x" * (DOWNLOAD_CHUNK_BYTES * 4)
+        github = _FakeGitHub({
+            INSTALLER_URL: installer,
+            CHECKSUMS_URL: _checksums_for(INSTALLER_NAME, installer),
+        })
+        dest = tmp_path / INSTALLER_NAME
+        on_disk_at_cancel = []
+
+        def press_cancel(worker, _downloaded):
+            on_disk_at_cancel.append(dest.exists())
+            worker.cancel()
+
+        said = _download(github, dest, on_progress=press_cancel)
+
+        # It stopped partway, with a partial file on disk when the user pressed Cancel.
+        assert on_disk_at_cancel == [True]
+        assert said["progress"][-1] < len(installer)
+        assert said["completed"] == []
+        assert said["errors"] == []
+        assert not dest.exists()
+
+    @pytest.mark.unit
+    def test_a_connection_lost_after_bytes_were_written_deletes_the_partial_file_and_reports_one_error(
+        self, qapp, tmp_path
+    ):
+        installer = b"x" * (DOWNLOAD_CHUNK_BYTES * 4)
+        arrived = installer[:DOWNLOAD_CHUNK_BYTES]
+        github = _FakeGitHub({
+            INSTALLER_URL: _DropsMidStream(arrived, requests.ConnectionError("connection reset")),
+            CHECKSUMS_URL: _checksums_for(INSTALLER_NAME, installer),
+        })
+        dest = tmp_path / INSTALLER_NAME
+        on_disk_when_written = []
+
+        said = _download(
+            github, dest, on_progress=lambda _worker, _downloaded: on_disk_when_written.append(dest.exists())
+        )
+
+        # The bytes that arrived were written, then the connection failed.
+        assert said["progress"] == [len(arrived)]
+        assert on_disk_when_written == [True]
+        assert said["completed"] == []
+        assert len(said["errors"]) == 1
+        assert "connection reset" in said["errors"][0]
+        assert not dest.exists()
 
 
 class TestInstallRechecksTheArchive:
