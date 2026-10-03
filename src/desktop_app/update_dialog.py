@@ -619,6 +619,8 @@ class UpdateProgressDialog(QDialog):
         try:
             installed = install_update(download_path, sha256)
         except UpdateIntegrityError as e:
+            from jarvis.debug import debug_log
+            debug_log(f"Install refused: {e}", "updater")
             self._on_error(str(e))
             return
         if installed:

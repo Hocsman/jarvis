@@ -14,6 +14,7 @@ from pathlib import Path
 
 from desktop_app.updater import (
     CHECKSUMS_ASSET_NAME,
+    CHECKSUMS_MAX_BYTES,
     DownloadSignals,
     DownloadWorker,
     UpdateIntegrityError,
@@ -1653,7 +1654,7 @@ class TestDownloadIsVerifiedBeforeAnythingRuns:
         pytest.param(b"", id="empty"),
         pytest.param(b"not a checksum file at all\n", id="garbage"),
         pytest.param(b"\xff\xfe\x00 not text", id="not-text"),
-        pytest.param(b"0" * (1024 * 1024), id="oversized"),
+        pytest.param(b"0" * (CHECKSUMS_MAX_BYTES + 1), id="oversized"),
     ])
     def test_a_checksum_file_that_cannot_be_read_refuses_the_update(self, qapp, tmp_path, served):
         github = _FakeGitHub({INSTALLER_URL: b"installer", CHECKSUMS_URL: served})
@@ -1840,11 +1841,38 @@ class TestUpdateDialogRefusesWhatItCannotVerify:
         def swap_the_archive(dialog):
             dialog.download_path.write_bytes(b"swapped while the session was saved")
 
-        dialog, temp_dir, _ = self._run_dialog(qapp, monkeypatch, github, pre_install=swap_the_archive)
+        dialog, temp_dir, session_saved = self._run_dialog(
+            qapp, monkeypatch, github, pre_install=swap_the_archive
+        )
 
         assert dialog.title_label.text() == "Update Failed"
         assert not temp_dir.exists()
         assert platform_installers == []
+        # Only this refusal comes after the session was saved: the second hash
+        # runs once the pre-install callback has returned.
+        assert session_saved == [True]
+
+    @pytest.mark.unit
+    def test_an_install_time_refusal_is_written_to_the_debug_log(self, qapp, monkeypatch, platform_installers):
+        installer = b"genuine bytes"
+        github = _FakeGitHub({
+            INSTALLER_URL: installer,
+            CHECKSUMS_URL: _checksums_for(INSTALLER_NAME, installer),
+        })
+        logged = []
+        monkeypatch.setattr(
+            "jarvis.debug.debug_log",
+            lambda message, category="debug": logged.append((category, message)),
+        )
+
+        def swap_the_archive(dialog):
+            dialog.download_path.write_bytes(b"swapped while the session was saved")
+
+        dialog, _, _ = self._run_dialog(qapp, monkeypatch, github, pre_install=swap_the_archive)
+
+        shown_to_the_user = dialog.status_label.text().removeprefix("Error: ")
+        assert shown_to_the_user
+        assert any(category == "updater" and shown_to_the_user in message for category, message in logged)
 
 
 class TestChecksumFileIsDiscovered:
@@ -1963,6 +1991,29 @@ class TestAutomaticCheckOptOut:
         _write_config(tmp_path, monkeypatch, {"update_check_enabled": written})
 
         _, github = self._check(automatic=True)
+
+        assert len(github.requested) == 1
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("failure", [OSError("config.json is locked"), ValueError("not valid JSON")])
+    def test_an_unreadable_setting_counts_as_off(self, monkeypatch, failure):
+        def unreadable():
+            raise failure
+
+        monkeypatch.setattr("desktop_app.updater.load_settings", unreadable)
+
+        _, github = self._check(automatic=True)
+
+        assert github.requested == []
+
+    @pytest.mark.unit
+    def test_an_unreadable_setting_does_not_stop_a_check_the_user_asked_for(self, monkeypatch):
+        def unreadable():
+            raise OSError("config.json is locked")
+
+        monkeypatch.setattr("desktop_app.updater.load_settings", unreadable)
+
+        _, github = self._check()
 
         assert len(github.requested) == 1
 
