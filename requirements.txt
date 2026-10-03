@@ -26,6 +26,18 @@ piper-tts>=1.3.0
 pygame>=2.1.0
 faiss-cpu>=1.7.4
 
+# ONNX Runtime arrives through faster-whisper and piper-tts, whose ranges are
+# wide, so it is held here: CI, the frozen build and developer machines all run
+# one inference runtime. 1.29.0 is the release on which Piper synthesis is
+# verified. Intel macOS has no wheel after 1.23.2, so it holds that release.
+# The two markers are complements, so exactly one line applies on any platform
+# (tests/test_requirements_pins.py checks it).
+#
+# Moving the pins: only after checking that Piper synthesises in a frozen
+# Windows build, since onnxruntime shares the process with Qt there.
+onnxruntime==1.29.0; sys_platform != "darwin" or platform_machine == "arm64"
+onnxruntime==1.23.2; sys_platform == "darwin" and platform_machine != "arm64"
+
 # NVIDIA CUDA libraries for GPU-accelerated speech recognition on Windows
 nvidia-cublas-cu12>=12.8.0; sys_platform == "win32"
 nvidia-cudnn-cu12>=9.0.0; sys_platform == "win32"
