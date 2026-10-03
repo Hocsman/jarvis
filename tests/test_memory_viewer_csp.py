@@ -10,9 +10,12 @@ one that still holds on the day an escape is missed:
 - a page that is therefore built to need no inline script: its one script
   is served from its own route, the token travels in a ``<meta>`` tag, and
   no element carries an event-handler attribute;
-- handlers that are never strings with an id interpolated into them: a
-  control carries a ``data-action`` name the script registers, or is wired
-  by ``addEventListener`` on the element itself;
+- handlers that are never strings with an id interpolated into them: every
+  click on markup the script builds goes through one route, a
+  ``data-action`` name the script registers and one delegated listener
+  dispatches (a modal's backdrop included, through an attribute that same
+  listener recognises); only the page's own static controls, wired once at
+  boot, listen for themselves, and they are an explicit allowlist;
 - server-provided values reaching attributes through the DOM (``dataset``,
   properties), never through a template literal, so the quoting of an
   escaper is not what stands between a value and the markup.
@@ -344,6 +347,158 @@ class TestActionsAreWiredToRegisteredHandlers:
 
         assert "document.addEventListener('click'" in script
         assert "closest('[data-action]')" in script
+
+
+# The script's top-level declarations sit at this indentation, and so does
+# the brace that closes one; a nested function is indented further.
+_TOP_LEVEL_FUNCTION_RE = re.compile(
+    r"^ {8}(?:async )?function (\w+)\(", re.MULTILINE,
+)
+
+
+def _top_level_functions(script: str) -> dict[str, str]:
+    """Each top-level function of the script, by name, with its body."""
+    return {
+        mark.group(1): script[mark.start(): script.index("\n        }\n", mark.start())]
+        for mark in _TOP_LEVEL_FUNCTION_RE.finditer(script)
+    }
+
+
+def _delegated_listener(script: str) -> str:
+    """The text of the one delegated click listener."""
+    start = script.index("document.addEventListener('click'")
+    return script[start: script.index("\n        });", start)]
+
+
+class TestEveryClickOnScriptBuiltMarkupIsDelegated:
+    """Markup the script builds is rebuilt on every load, so a listener
+    wired onto each element is a listener to remember to wire again, with
+    a closure holding whatever the element stood for. One delegated route
+    leaves nothing to forget: the element carries its action name and what
+    it acts on, and a new control that needs a listener of its own is a
+    failing test, not a quiet divergence."""
+
+    CLICK_WIRING_RE = re.compile(
+        r"""^[ \t]*(?P<receiver>.*?)\.addEventListener\(\s*(['"`])click\2""",
+        re.MULTILINE,
+    )
+    ANY_LISTENER_RE = re.compile(r"""\.addEventListener\(\s*(?!['"])""")
+    PROPERTY_HANDLER_RE = re.compile(r"""\.on(?:click|auxclick|dblclick|pointerup|mouseup)\s*=""")
+
+    # Who may listen for clicks, and why. Everything else is markup the
+    # script builds and takes the delegated route.
+    ALLOWED_CLICK_LISTENERS = {
+        "document": "the one delegated listener every data-action name and every modal backdrop goes through",
+        "tab": "the tab bar is static markup in the page template, wired once at boot",
+        "document.getElementById('btn-scrub-deflections')": "static button in the Diary sidebar, wired once at boot",
+        "document.getElementById('btn-optimise-topics')": "static button in the Diary sidebar, wired once at boot",
+        "document.getElementById('btn-clear-activity')": "static button in the Activity tab, wired once at boot",
+        "document.getElementById('btn-rappel-add')": "static button of the Rappels form, wired once at boot",
+        "document.getElementById('btn-zoom-in')": "static graph toolbar button, wired once with the canvas",
+        "document.getElementById('btn-zoom-out')": "static graph toolbar button, wired once with the canvas",
+        "document.getElementById('btn-fit')": "static graph toolbar button, wired once with the canvas",
+        "document.getElementById('btn-add-node')": "static graph toolbar button, wired once with the canvas",
+        "document.getElementById('btn-import-diary')": "static graph toolbar button, wired once with the canvas",
+        "document.getElementById('btn-consolidate-all')": "static graph toolbar button, wired once with the canvas",
+    }
+
+    def _receivers(self, viewer) -> list[str]:
+        return [m.group("receiver") for m in self.CLICK_WIRING_RE.finditer(_script(viewer))]
+
+    def test_there_are_listeners_to_check(self, viewer):
+        """Guards the extraction: an empty list would make the allowlist
+        check pass over nothing."""
+        assert "document" in self._receivers(viewer)
+
+    def test_the_click_listeners_are_exactly_the_allowlist(self, viewer):
+        receivers = self._receivers(viewer)
+
+        assert sorted(receivers) == sorted(self.ALLOWED_CLICK_LISTENERS), (
+            "a click listener on markup the script builds belongs on the "
+            "delegated route (a data-action name and registerAction); only "
+            "a static control of the page template is allowlisted"
+        )
+
+    def test_every_allowlisted_control_is_static_markup_of_the_page(self, viewer):
+        page = _page(viewer)
+
+        for receiver in self.ALLOWED_CLICK_LISTENERS:
+            by_id = re.fullmatch(r"document\.getElementById\('([^']+)'\)", receiver)
+            if by_id:
+                assert f'id="{by_id.group(1)}"' in page, receiver
+            elif receiver == "tab":
+                assert 'data-tab="' in page
+            else:
+                assert receiver == "document"
+
+    def test_no_click_is_wired_by_property_or_by_a_name_built_at_run_time(self, viewer):
+        """The scan above reads ``addEventListener('click'``: this keeps
+        that the only spelling, so it sees every click listener."""
+        script = _script(viewer)
+
+        assert self.PROPERTY_HANDLER_RE.search(script) is None
+        assert self.ANY_LISTENER_RE.search(script) is None
+
+
+class TestAClickOnAModalBackdropIsDelegatedToo:
+    """Clicking beside a modal closes it, unless its work is in flight.
+    The overlay says so with an attribute and the one delegated listener
+    acts on it, with the semantics a per-overlay listener had: only a
+    click on the overlay itself, never one on anything inside it."""
+
+    def test_the_delegated_listener_recognises_the_overlay_attribute(self, viewer):
+        listener = _delegated_listener(_script(viewer))
+
+        assert "data-backdrop-dismiss" in listener
+
+    def test_only_a_click_on_the_overlay_itself_closes_it(self, viewer):
+        """The test is on the target, not on the closest match: a click
+        inside the modal must not reach the overlay's rule."""
+        listener = _delegated_listener(_script(viewer))
+
+        assert re.search(r"\btarget\.(?:matches|hasAttribute)\(\s*'\[?data-backdrop-dismiss", listener)
+        assert "closest('[data-backdrop-dismiss" not in listener
+
+    def test_a_modal_whose_work_is_in_flight_ignores_the_backdrop(self, viewer):
+        listener = _delegated_listener(_script(viewer))
+
+        assert re.search(r"\bbusy\b", listener)
+
+    def test_every_overlay_is_built_by_the_one_helper(self, viewer):
+        functions = _top_level_functions(_script(viewer))
+        modals = {name: body for name, body in functions.items() if re.fullmatch(r"show\w*Modal", name)}
+
+        assert modals, "no modal function found"
+        for name, body in modals.items():
+            assert "openModal(" in body, name
+            assert "modal-overlay" not in body, name
+
+    def test_the_helper_stamps_the_attribute_on_the_overlay_it_builds(self, viewer):
+        script = _script(viewer)
+        helper = _top_level_functions(script)["openModal"]
+
+        assert "'modal-overlay'" in helper
+        assert re.search(r"dataset\.backdropDismiss|data-backdrop-dismiss", helper)
+        # The one place an overlay is made: nothing else may build one
+        # and so skip the attribute.
+        assert len(re.findall(r"className\s*=\s*'modal-overlay'", script)) == 1
+
+    def test_no_overlay_in_the_page_template_lacks_the_attribute(self, viewer):
+        class Overlays(HTMLParser):
+            def __init__(self) -> None:
+                super().__init__()
+                self.found: list[dict] = []
+
+            def handle_starttag(self, tag, attrs):
+                attributes = dict(attrs)
+                if "modal-overlay" in (attributes.get("class") or "").split():
+                    self.found.append(attributes)
+
+        scan = Overlays()
+        scan.feed(_page(viewer))
+
+        for attributes in scan.found:
+            assert "data-backdrop-dismiss" in attributes
 
 
 class TestServerValuesReachAttributesThroughTheDom:
