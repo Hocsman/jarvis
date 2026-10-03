@@ -216,7 +216,7 @@ class Settings:
     hot_window_seconds: float
     low_power_mode: bool
     # Whether the desktop app asks GitHub for a newer release a few seconds
-    # after it opens. Off, it contacts nobody on its own; the tray's
+    # after it opens. Off, it sends no update check on its own; the tray's
     # "Check for Updates" still goes out when the user asks.
     update_check_enabled: bool
 
@@ -801,7 +801,7 @@ def get_default_config() -> Dict[str, Any]:
         "hot_window_seconds": 3.0,
         "low_power_mode": False,
         # The bundled desktop app asks GitHub for a newer release shortly
-        # after it opens. False and it contacts nobody on its own.
+        # after it opens. False and it sends no update check on its own.
         "update_check_enabled": True,
         "echo_energy_threshold": 2.0,
         "echo_tolerance": 0.3,  # Time tolerance for echo detection timing

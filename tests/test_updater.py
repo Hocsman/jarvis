@@ -1937,7 +1937,7 @@ def _write_config(tmp_path, monkeypatch, values):
 
 
 class TestAutomaticCheckOptOut:
-    """With ``update_check_enabled`` off the app contacts nobody on its own.
+    """With ``update_check_enabled`` off the app sends no update check on its own.
     A check the user asks for from the tray is theirs, and always goes out."""
 
     def _check(self, **kwargs):
@@ -1950,7 +1950,7 @@ class TestAutomaticCheckOptOut:
         return status, github
 
     @pytest.mark.unit
-    def test_a_disabled_automatic_check_contacts_nobody(self, tmp_path, monkeypatch):
+    def test_a_disabled_automatic_check_sends_no_request(self, tmp_path, monkeypatch):
         _write_config(tmp_path, monkeypatch, {"update_check_enabled": False})
 
         status, github = self._check(automatic=True)

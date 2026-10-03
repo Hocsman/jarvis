@@ -226,7 +226,7 @@ Updates are only available in bundled mode (PyInstaller builds).
 
 ### Automatic check and its opt-out
 
-Five seconds after launch the tray runs one check by itself. The `update_check_enabled` setting (default `true`; Settings, Features, "Check for Updates at Startup") switches it off: the check then returns without sending a request, so the app contacts nobody on its own. A check the user asks for with the tray's "Check for Updates" action is theirs and always goes out, whatever the setting says. An unreadable setting counts as off.
+Five seconds after launch the tray runs one check by itself. The `update_check_enabled` setting (default `true`; Settings, Features, "Check for Updates at Startup") switches it off: the check then returns without sending a request, so the app sends no update check on its own. The setting governs the update check and nothing else: weather, speech-model and voice downloads are other features with their own triggers. A check the user asks for with the tray's "Check for Updates" action is theirs and always goes out, whatever the setting says. An unreadable setting counts as off.
 
 The check lists the releases of `Hocsman/jarvis` on `api.github.com` and sends no identifier of the user or of the install. Downloads come from the asset URLs that listing returns.
 

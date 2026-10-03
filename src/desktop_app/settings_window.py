@@ -381,7 +381,7 @@ def _build_field_metadata() -> List[FieldMeta]:
       "features", "bool")
     f("update_check_enabled", "Check for Updates at Startup",
       "Ask GitHub for a newer release a few seconds after the app opens. "
-      "Off, the app contacts nobody on its own; Check for Updates in the tray "
+      "Off, the app does not check for updates on its own; Check for Updates in the tray "
       "menu still works when you ask",
       "features", "bool")
     f("dictation_enabled", "Dictation Mode",

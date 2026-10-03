@@ -302,7 +302,7 @@ def check_for_updates(
     Args:
         channel: Update channel to check. If None, uses current app's channel.
         automatic: True for the check the app runs by itself at startup. It
-            honours ``update_check_enabled`` and contacts nobody when that is
+            honours ``update_check_enabled`` and sends no request when that is
             off. A check the user asked for is never suppressed.
 
     Returns:
