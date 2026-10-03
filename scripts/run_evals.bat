@@ -211,9 +211,9 @@ if "!RUN_MULTI!"=="true" (
     rmdir /s /q "!TEMP_DIR!" >nul 2>&1
 ) else (
     REM Single model mode. Defaults to the small tier, matching
-    REM evals/helpers.py: two field regressions once slipped past CI because
-    REM the evals only ran against the larger model, so the canary is the
-    REM default and the upper tier is the opt-in.
+    REM evals/helpers.py: the smallest supported model is where field
+    REM failures show first, so it is the default and the upper tier is
+    REM the opt-in.
     if not defined EVAL_JUDGE_MODEL set "EVAL_JUDGE_MODEL=!MODEL_SMALL!"
     set "EVAL_REPORT_PATH=!PROJECT_ROOT!\EVALS.md"
     call :run_evals_for_model "!EVAL_JUDGE_MODEL!" ""
