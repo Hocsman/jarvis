@@ -41,7 +41,8 @@ ENVIRONMENT_LABEL = "Generated on"
 NOT_DECLARED = "not declared in the package metadata"
 NOT_INSTALLED = "not read: the package is not installed where this file was generated"
 
-# What an entry says when the package is one the project asks for by name.
+# The file the project's top-level requirements are read from, and the label a
+# package listed in it carries under "Required by".
 REQUIREMENTS_FILE = "requirements.txt"
 
 # Present in every frozen build whatever the requirements say: PyInstaller's
@@ -160,7 +161,7 @@ def bundled_requirements(
     import_names: Callable[[str], Set[str]] = installed_import_names,
 ) -> List[Requirement]:
     """The top-level requirements the PyInstaller build carries."""
-    reqs = parse_requirements((project_root / "requirements.txt").read_text(encoding="utf-8"))
+    reqs = parse_requirements((project_root / REQUIREMENTS_FILE).read_text(encoding="utf-8"))
     hidden, excludes = _spec_facts(project_root / "jarvis_desktop.spec")
     imported = _source_imports(project_root / "src") | hidden
     fetched = _installer_fetched(project_root)
