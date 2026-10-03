@@ -286,16 +286,21 @@ class TestPiperTTSWithMocking:
             tts._voice.config = MagicMock()
             tts._voice.config.sample_rate = 16000
 
-            def do_interrupt():
-                tts.interrupt()
+            def interrupt_as_the_stream_ends():
+                # The interrupt lands while the stream is starting and the
+                # stream reports itself finished before the wait loop first
+                # reads it. No timer: whether the interrupt arrives before or
+                # after the stream opens must not depend on how fast the
+                # machine gets there. ``interrupt()`` itself is not called
+                # here, it takes the audio lock the engine holds around
+                # ``start()``.
+                tts._should_interrupt.set()
                 mock_stream.active = False
 
-            timer = threading.Timer(0.01, do_interrupt)
-            timer.start()
+            mock_stream.start.side_effect = interrupt_as_the_stream_ends
 
             tts._completion_callback = on_complete
             tts._speak_once("Hello test")
-            timer.join()
 
         assert output_stream.called, "the utterance never reached the speakers"
         assert callback_called[0] is False
