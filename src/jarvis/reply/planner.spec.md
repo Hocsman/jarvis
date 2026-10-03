@@ -6,8 +6,8 @@ Small chat models (gemma4:e2b class) don't reliably decompose multi-step
 queries turn-by-turn. They stop after one tool call when a second is
 needed, echo the raw user utterance into tool arguments, or skip tools
 entirely and confabulate from training. The planner fixes this by
-running a single cheap classification-shaped LLM pass **at the very
-front of the reply flow** that emits a short ordered list of sub-tasks.
+running a single cheap classification-shaped LLM pass **ahead of memory
+search** that emits a short ordered list of sub-tasks.
 
 The planner runs **after the tool router** and **before memory search**.
 The router narrows the catalogue first so the planner's tool steps reference
@@ -48,7 +48,7 @@ integration in `src/jarvis/reply/engine.py`.
 - Only when the query is at least `MIN_QUERY_CHARS` long (default 4).
   Pure noise like "hi" / "ok" still short-circuits.
 - Only when `cfg.planner_enabled` is True (default).
-- Only when an `ollama_base_url` and a resolvable model are available.
+- Only when a planner model resolves (see Model resolution).
 
 ### Model resolution
 
