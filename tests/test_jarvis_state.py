@@ -154,7 +154,10 @@ class TestConcurrentPublishersLeaveTheLatestState:
         first.join(timeout=5)
         second.join(timeout=5)
 
+        assert not first.is_alive() and not second.is_alive(), "a publish never finished"
         assert manager.state == JarvisState.IDLE
+        os.remove(state_file)
+        assert manager.state == JarvisState.IDLE, "the memory value and the file disagree"
 
 
 class TestPublishingNeedsNoDesktop:

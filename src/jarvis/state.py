@@ -84,9 +84,10 @@ class JarvisStateManager:
     def set_state(self, state: JarvisState) -> None:
         """Publish a new state (thread-safe, visible to other processes).
 
-        Publishes are ordered: the memory value and the file are updated as
-        one step, so the publish that started last is the one both end up
-        holding. Readers are not held up by a publish in progress.
+        Publishes are ordered within a process: the memory value and the
+        file are updated as one step, so publishes land in the order they
+        are admitted and both end up holding the last one. Readers are not
+        held up by a publish in progress.
 
         Never raises on a file that cannot be written: publishing is a side
         channel of the voice pipeline and must not interrupt it.
