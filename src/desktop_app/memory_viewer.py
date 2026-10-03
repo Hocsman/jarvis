@@ -4791,11 +4791,11 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
                 childrenList.innerHTML = '<div style="color: var(--text-muted); font-size: 0.85rem;">No children</div>';
             }
 
-            bindActionsToNode(sidebar, node.id);
+            stampNodeIdOnActions(sidebar, node.id);
         }
 
         // The buttons under a node's details all act on that node.
-        function bindActionsToNode(root, nodeId) {
+        function stampNodeIdOnActions(root, nodeId) {
             root.querySelectorAll('.detail-actions [data-action]').forEach(button => {
                 button.dataset.nodeId = nodeId;
             });
@@ -4826,7 +4826,7 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
                 </div>
             `;
             document.getElementById('edit-name').value = node.name;
-            bindActionsToNode(sidebar, nodeId);
+            stampNodeIdOnActions(sidebar, nodeId);
         }
 
         async function saveNodeEdit(nodeId) {
