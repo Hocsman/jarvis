@@ -9,6 +9,7 @@ Tests exercise VoiceListener._process_transcript with mocked TTS and intent judg
 but use real StateManager and EchoDetector instances to avoid coupling to internals.
 """
 
+import threading
 import time
 from unittest.mock import patch, MagicMock
 
@@ -1612,26 +1613,32 @@ class TestHotWindowLengthIsMeasuredFromActivation:
         from unittest.mock import MagicMock
 
         listener, _ = _create_listener(echo_tolerance=0.02, hot_window_seconds=0.05)
+        announcement_over = threading.Event()
 
         announcing = []
 
         def slow_publish():
             announcing.append(time.time())
-            time.sleep(0.6)
+            # The announcement's cost. The test ends it as soon as it has its
+            # answer, so the timer threads still announcing do not outlive it.
+            announcement_over.wait(0.6)
             return MagicMock()
 
-        with patch("jarvis.listening.state_manager.get_jarvis_state", side_effect=slow_publish):
-            listener.echo_detector.track_tts_start("Short answer.")
-            _simulate_tts_finish(listener)
-            assert _wait_for_hot_window_active(listener)
-            opened_at = time.time()
+        try:
+            with patch("jarvis.listening.state_manager.get_jarvis_state", side_effect=slow_publish):
+                listener.echo_detector.track_tts_start("Short answer.")
+                _simulate_tts_finish(listener)
+                assert _wait_for_hot_window_active(listener)
+                opened_at = time.time()
 
-            # Six times the window, a tenth of the announcement.
-            assert _wait_for_hot_window_expiry(listener, timeout=0.3), (
-                f"still open {time.time() - opened_at:.2f}s after a 0.05s window"
-            )
-            assert announcing, "the activation never reached the slow state update"
-        listener.state_manager.stop()
+                # Six times the window, a tenth of the announcement.
+                assert _wait_for_hot_window_expiry(listener, timeout=0.3), (
+                    f"still open {time.time() - opened_at:.2f}s after a 0.05s window"
+                )
+                assert announcing, "the activation never reached the slow state update"
+        finally:
+            announcement_over.set()
+            listener.state_manager.stop()
 
 
 # ---------------------------------------------------------------------------

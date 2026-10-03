@@ -383,6 +383,10 @@ The Knowledge tab hides the `user` and `directives` branches once they are empty
 
 *macOS bundled apps cannot show a QtWebEngine view (sandbox issues): the memory viewer opens in the system browser and the floating orb replaces the dashboard.
 
+### Qt on Windows
+
+Windows holds Qt at the release the suite is green on, because later releases fail to load `Qt6Core.dll` (loader status `0xc0000139`); the other platforms take the newest. The pin moves on evidence: `scripts/check_qt_pin.py` imports `QtCore`, `QtWidgets`, `QtSvg` and `QtWebEngineWidgets` of a candidate install in a child process each (a loader failure can end the process that triggers it, and one module failing must not hide the others), prints the runtime Qt and PyQt versions, exits non-zero if any module fails, and names the loader failure with what to try next. The procedure (when to re-test, what to run, what to update) sits beside the pin in `requirements.txt`.
+
 ## File Locations
 
 | File | macOS | Windows | Linux |

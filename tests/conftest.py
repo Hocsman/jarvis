@@ -8,6 +8,11 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
+# The autouse guard that fails a test which leaves a thread running behind it.
+# It lives in its own module so the test that holds it to its word can run it
+# in a session of its own.
+from thread_guard import _no_thread_outlives_its_test  # noqa: F401
+
 # Robustly locate repository root (directory containing src/jarvis)
 _this_file = Path(__file__).resolve()
 ROOT = None
@@ -724,14 +729,17 @@ class ViewerClient:
 
 
 # Listeners created by test helpers across modules (test_hot_window_input's
-# factory is imported by other suites). The autouse drainer below stops
-# each one's thinking tune after every test, wherever it was created.
+# factory is imported by other suites). The autouse drainer below stops what
+# each one left running after every test, wherever it was created.
 _created_listeners: List[Any] = []
 
 
 @pytest.fixture(autouse=True)
-def _stop_lingering_tunes():
-    """Stop every thinking tune a test started, after the test.
+def _stop_what_listeners_started(_no_thread_outlives_its_test):
+    """Stop what every listener a test created left running, after the test.
+
+    Depending on the thread guard is what orders the two: the guard is set up
+    first and torn down last, so it looks for survivors once these are stopped.
 
     A test that enables the tune and gets a query accepted leaves the
     listener's TunePlayer running: on a machine without audio output
@@ -739,11 +747,19 @@ def _stop_lingering_tunes():
     in a loop for the rest of the session. It pollutes any process-wide
     time.sleep patch a later test sets up (its 0.2s entries land in the
     recorder) and interleaves its prints with their captured output.
+
+    A test that opens a hot window leaves the state manager's timers
+    pending: the expiry timer sleeps for the whole window, so the thread
+    outlives the test by seconds unless the state manager is stopped.
     """
     yield
     while _created_listeners:
         listener = _created_listeners.pop()
-        try:
-            listener._stop_thinking_tune()
-        except Exception:
-            pass
+        for stop in (
+            lambda: listener._stop_thinking_tune(),
+            lambda: listener.state_manager.stop(),
+        ):
+            try:
+                stop()
+            except Exception:
+                pass

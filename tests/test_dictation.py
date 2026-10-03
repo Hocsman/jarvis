@@ -8,6 +8,8 @@ from unittest.mock import patch, MagicMock, PropertyMock
 
 import pytest
 
+import thread_guard
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -278,6 +280,7 @@ class TestRecordingStateMachine:
             whisper_backend_ref=lambda: "mlx",
             mlx_repo_ref=lambda: "mlx-community/whisper-small-mlx",
         )
+        before = thread_guard.snapshot()
         with patch("src.jarvis.dictation.dictation_engine.sd") as mock_sd, \
              patch("src.jarvis.dictation.dictation_engine._play_beep"):
             mock_stream = MagicMock()
@@ -286,6 +289,8 @@ class TestRecordingStateMachine:
             assert engine._recording is True
             # Cleanup
             engine._stop_recording(discard=True)
+            # The start worker uses the patched audio, so it ends while they hold.
+            thread_guard.wait_for_workers(before)
 
     def test_stop_recording_discard_clears_frames(self):
         engine = _make_engine()
@@ -323,24 +328,24 @@ class TestRecordingStateMachine:
         # Short (< 0.3 s) audio so transcribe_and_paste exits quickly.
         engine._audio_frames = [np.zeros(1600, dtype=np.float32)]
 
+        before = thread_guard.snapshot()
         with patch("src.jarvis.dictation.dictation_engine._play_beep"):
             t0 = time.time()
             engine._stop_recording()
             elapsed = time.time() - t0
 
-        # The caller (simulating the pynput hook) must return quickly.
-        # 200 ms is generous headroom vs. the ~5 s Windows LowLevelHooksTimeout
-        # — the method should actually return in microseconds, since it just
-        # flips a bool and spawns a daemon thread.
-        assert elapsed < 0.2, (
-            f"_stop_recording blocked for {elapsed:.2f}s in the listener "
-            "thread — stream.close() must be off the hot path"
-        )
+            # The caller (simulating the pynput hook) must return quickly.
+            # 200 ms is generous headroom vs. the ~5 s Windows LowLevelHooksTimeout
+            # — the method should actually return in microseconds, since it just
+            # flips a bool and spawns a daemon thread.
+            assert elapsed < 0.2, (
+                f"_stop_recording blocked for {elapsed:.2f}s in the listener "
+                "thread — stream.close() must be off the hot path"
+            )
 
-        # The stream must still be closed eventually, off-thread.
-        deadline = time.time() + 5.0
-        while time.time() < deadline and not slow_stream.close.called:
-            time.sleep(0.05)
+            # The stream must still be closed eventually, off-thread. The
+            # finalise worker uses the patched beep, so it ends while that holds.
+            thread_guard.wait_for_workers(before, timeout=10.0)
         assert slow_stream.close.called, "stream.close() never ran"
 
     def test_stop_recording_idempotent_under_concurrent_calls(self):
@@ -357,6 +362,7 @@ class TestRecordingStateMachine:
         engine._stream = stream_mock
         engine._audio_frames = [np.zeros(1600, dtype=np.float32)]
 
+        before = thread_guard.snapshot()
         with patch("src.jarvis.dictation.dictation_engine._play_beep"):
             # Two near-simultaneous calls from the listener.
             t1 = threading.Thread(target=engine._stop_recording)
@@ -366,10 +372,9 @@ class TestRecordingStateMachine:
             t1.join()
             t2.join()
 
-        # Wait for the spawned teardown thread to run close().
-        deadline = time.time() + 5.0
-        while time.time() < deadline and not stream_mock.close.called:
-            time.sleep(0.05)
+            # Wait for the spawned teardown thread to run close(), under the
+            # patched beep it uses.
+            thread_guard.wait_for_workers(before)
         # Only one of the two calls should have reached the stream.
         assert stream_mock.close.call_count == 1
 
@@ -438,6 +443,7 @@ class TestRecordingStateMachine:
             on_dictation_end=lambda: end_called.set(),
         )
 
+        before = thread_guard.snapshot()
         with patch("src.jarvis.dictation.dictation_engine.sd") as mock_sd, \
              patch("src.jarvis.dictation.dictation_engine._play_beep"):
             mock_stream = MagicMock()
@@ -447,6 +453,7 @@ class TestRecordingStateMachine:
 
             engine._stop_recording(discard=True)
             assert end_called.is_set()
+            thread_guard.wait_for_workers(before)
 
 
 # ---------------------------------------------------------------------------
