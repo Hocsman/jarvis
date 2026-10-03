@@ -35,6 +35,9 @@ ArchitecturesAllowed=x64compatible
 UninstallDisplayIcon={app}\{#MyAppExeName}
 PrivilegesRequired=admin
 SetupIconFile=..\..\src\desktop_app\desktop_assets\icon_idle.ico
+; Shown on its own page before anything is installed. Silent runs (the updater
+; passes /SILENT) skip the wizard pages, so updates are not interrupted by it.
+LicenseFile=..\..\LICENSE
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -48,6 +51,10 @@ Name: "cudalibs"; Description: "Download NVIDIA CUDA libraries for GPU-accelerat
 Source: "..\..\dist\Jarvis\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; Bundle the CUDA installer script (PowerShell — no Python needed)
 Source: "install_cuda.ps1"; DestDir: "{app}"; Flags: ignoreversion
+; The licence texts, next to the executable where a user looks for them
+; (the bundle carries a copy under _internal as well)
+Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\THIRD_PARTY_NOTICES.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

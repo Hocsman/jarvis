@@ -27,6 +27,7 @@ src/desktop_app/
 ├── diary_dialog.py      # End-of-session diary update dialog
 ├── chat_window.py       # Text chat interface (see chat_window.spec.md)
 ├── memory_viewer.py     # Flask-based memory browser
+├── dashboard/           # The dashboard window's bridge and page (the page ships as data, see Packaging)
 ├── updater.py           # Update checking logic
 ├── update_dialog.py     # Update notification dialogs
 └── desktop_assets/      # Icons and images
@@ -298,6 +299,28 @@ sequenceDiagram
 - **Visible Windows install progress**: The Inno Setup installer runs with `/SILENT` (not `/VERYSILENT`) so its own progress window is visible while the install runs — bridging the gap between the download dialog closing and the new app launching, which would otherwise look like a hang
 - **Quarantine stripping (macOS)**: The shell script runs `xattr -dr com.apple.quarantine` on the newly-installed bundle. Builds are unsigned (ad-hoc signing breaks Qt WebEngine's symlinks — see `release.yml`), so without this step Gatekeeper may re-trigger the "unidentified developer" prompt on every update
 - **One-generation rollback (macOS, Linux)**: The previous `.app` / directory is moved aside to `<name>.backup` rather than deleted outright, so a user can restore the prior version manually if the new one fails to launch. The backup from the previous update is cleared before creating a new one, so at most one backup exists on disk at a time. This is a simplified version of Squirrel's versioned-folder rollback — enough safety for a single-bundle install, without the architectural overhead
+
+## Packaging
+
+The desktop app ships as a PyInstaller build described by `jarvis_desktop.spec`: a onedir folder on Windows and Linux (`dist/Jarvis/Jarvis.exe` or `dist/Jarvis/Jarvis`, next to an `_internal` folder that holds the data files), and a `Jarvis.app` bundle on macOS. Windows wraps the folder in an Inno Setup installer (`installer/windows/jarvis_setup.iss`).
+
+### Data files
+
+PyInstaller follows imports and nothing else, so every file the app opens through `Path(__file__)` is listed in the spec's `datas`. A module inside a package resolves such a file against its package folder, so the file lands at the path it has under `src/`. Today that is the dashboard page (`desktop_app/dashboard/index.html`, opened by `dashboard_window.py`) and the tray icons (`desktop_app/desktop_assets/*.png`). Python modules are never listed as data, they reach the build through import analysis. The `.ico` icons are embedded in the executable at build time and are not data.
+
+The entry script is the one module that does not resolve against its package folder: PyInstaller places it at the root of the data tree, so its `Path(__file__).parent` is that root (`_internal` in a onedir build) and not `desktop_app/`. `app.py` is the entry script, and its tray-icon lookup (`get_icon_path`) builds `desktop_assets/<icon>` from that parent. In a frozen build it therefore looks for the icons next to the root, while they ship under `desktop_app/desktop_assets`, and the tray shows its drawn fallback icon. A lookup that resolves against the package folder (`sys._MEIPASS/desktop_app` when frozen) finds them where they ship.
+
+The rule is enforced from the tree, not from a list kept by hand. `tests/test_pyinstaller_spec.py` runs the spec once per platform with PyInstaller's names stubbed, expands `datas` the way PyInstaller does, and fails when a runtime data file under `src/` is not bundled or lands somewhere else than the mirror of its place in the tree. That is the placement package modules look for; the check does not cover what the entry script opens itself. A file whose kind is unknown fails it too, until its suffix is classified in `scripts/check_bundle_layout.py`: guessing is how a file goes missing.
+
+### Licence texts
+
+`LICENSE` and `THIRD_PARTY_NOTICES.txt` ship at the top of the bundle's data tree on every platform. The Windows installer also copies both next to `Jarvis.exe`, and shows `LICENSE` on a wizard page before installing; a silent run, which is how the updater invokes it (`/SILENT`), skips the page.
+
+`THIRD_PARTY_NOTICES.txt` is generated, not written by hand. `scripts/generate_third_party_notices.py` reads, offline, the licence each package declares in the metadata installed in the build environment. It covers the requirements the build bundles and the dependencies those declare. A requirement is bundled when the source or the spec's `hiddenimports` import it, unless the spec's `excludes` list it or the installer downloads it on request (the CUDA libraries); this is derived from the repository, not listed in the script. Packages that declare a GPL, LGPL or AGPL licence are marked as such, in an opening section and in their own entry. The file records what the metadata declares and makes no statement about how those licences relate to each other or to the project's `LICENSE`. It also records the platform and Python version it was generated on (`Generated on: ...`), because a build on another platform can carry other package versions, and a package installed for one platform only (`mlx-whisper`, macOS arm64) reads as not installed in an inventory generated elsewhere. It is regenerated, in the environment the build uses, whenever `requirements.txt` changes: `tests/test_third_party_notices.py` fails when a bundled requirement has no entry or a copyleft licence is not marked.
+
+### Checking a build
+
+`scripts/test_bundled_app.bat` and `scripts/test_bundled_app.sh` build, run `scripts/check_bundle_layout.py` on the result, and only then launch the app. The check looks for the executable the platform's build produces and for every runtime data file and licence text at the place the bundle's layout gives it (`_internal` on Windows and Linux, `Contents/Resources` or `Contents/Frameworks` on macOS), and names each one that is missing. The Windows batch file asks for plain ASCII output.
 
 ## Memory Viewer
 
