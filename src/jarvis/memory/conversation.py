@@ -1179,14 +1179,6 @@ class DialogueMemory:
             cutoff = time.time() - self.RECENT_WINDOW_SEC
             return any(ts >= cutoff for ts, _, _ in self._messages)
 
-    # Compatibility and diary functionality
-    def add_interaction(self, user_text: str, assistant_text: str) -> None:
-        """Compatibility method - use add_message() instead."""
-        if user_text.strip():
-            self.add_message("user", user_text.strip())
-        if assistant_text.strip():
-            self.add_message("assistant", assistant_text.strip())
-
     def get_pending_chunks(self) -> List[str]:
         """Get unsaved messages as formatted chunks for diary update.
 
@@ -1313,19 +1305,6 @@ class DialogueMemory:
             (ts, role, content) for ts, role, content in self._messages
             if ts >= cutoff or ts > self._last_saved_timestamp
         ]
-
-    def clear_pending_updates(self) -> None:
-        """Mark all current messages as saved. Thread-safe.
-
-        DEPRECATED: Use mark_saved_up_to() instead for proper timestamp tracking.
-        Kept for backward compatibility.
-        """
-        with self._lock:
-            if self._messages:
-                # Mark all current messages as saved
-                max_ts = max(ts for ts, _, _ in self._messages)
-                self._last_saved_timestamp = max_ts
-            self._cleanup_old_messages()
 
 
 def generate_conversation_summary(
