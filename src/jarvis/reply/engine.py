@@ -3028,15 +3028,12 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                     if mcp_tools:
                         _valid_names.update(mcp_tools.keys())
                     for line in (result.reply_text or "").splitlines():
-                        # Lines look like "toolName: one-line description"; fall
-                        # back to splitting on em dash for backwards compat.
+                        # Lines look like "toolName: one-line description",
+                        # or a bare "toolName" when the tool has no description.
                         raw = line.strip()
                         if not raw:
                             continue
-                        for sep in (":", "—"):
-                            if sep in raw:
-                                raw = raw.split(sep, 1)[0]
-                                break
+                        raw = raw.split(":", 1)[0]
                         name_part = raw.lstrip("-* \t").strip()
                         if not name_part or name_part in allowed_tools:
                             continue
