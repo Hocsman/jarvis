@@ -50,6 +50,8 @@ def _project(tmp_path: Path) -> Path:
     _touch(src / "pkg" / "page" / "index.html", "<html></html>")
     _touch(src / "pkg" / "page" / "style.css", "body {}")
     _touch(src / "pkg" / "assets" / "logo.png", "png")
+    for name in checker.LICENCE_FILES:
+        _touch(root / name, "licence")
     return root
 
 
@@ -63,7 +65,7 @@ RUNTIME = {
 def _fake_build(root: Path, platform: str, *, data_dir: str | None = None) -> Path:
     """Lay out a build the way PyInstaller does for ``platform``."""
     dist = root / "dist"
-    wanted = sorted(RUNTIME)
+    wanted = sorted(RUNTIME) + list(checker.LICENCE_FILES)
     if platform == "darwin":
         bundle = dist / "Jarvis.app" / "Contents"
         _touch(bundle / "MacOS" / "Jarvis")
@@ -134,6 +136,16 @@ class TestCheckBundle:
         problems = checker.check_bundle(dist, root, platform)
         assert len(problems) == 1
         assert missing in problems[0]
+
+    @pytest.mark.parametrize("licence", ["LICENSE", "THIRD_PARTY_NOTICES.txt"])
+    def test_a_missing_licence_text_is_named(self, tmp_path, platform, licence):
+        root = _project(tmp_path)
+        dist = _fake_build(root, platform)
+        for candidate in dist.rglob(licence):
+            candidate.unlink()
+        problems = checker.check_bundle(dist, root, platform)
+        assert len(problems) == 1
+        assert licence in problems[0]
 
     def test_a_missing_executable_is_reported(self, tmp_path, platform):
         root = _project(tmp_path)

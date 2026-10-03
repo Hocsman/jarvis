@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import shutil
 import sys
 import types
@@ -25,6 +26,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 SPEC = ROOT / "jarvis_desktop.spec"
+INSTALLER = ROOT / "installer" / "windows" / "jarvis_setup.iss"
 PLATFORMS = ["win32", "darwin", "linux"]
 
 
@@ -32,6 +34,7 @@ def _load_module(name: str):
     path = ROOT / "scripts" / f"{name}.py"
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module  # dataclasses resolve their annotations through sys.modules
     spec.loader.exec_module(module)
     return module
 
@@ -188,6 +191,63 @@ class TestRuntimeDataFilesShip:
     def test_every_file_under_src_is_classified(self):
         """A file of an unknown kind is reported, so it cannot be skipped by accident."""
         assert layout.unclassified_files(SRC) == []
+
+
+class TestLicenceTextsShip:
+    """The project licence and the third-party inventory travel with every binary."""
+
+    @pytest.mark.parametrize("name", layout.LICENCE_FILES)
+    def test_the_file_exists_in_the_repository(self, name):
+        assert (ROOT / name).is_file()
+
+    @pytest.mark.parametrize("name", layout.LICENCE_FILES)
+    def test_the_bundle_carries_it(self, datas, name):
+        shipped, _ = resolve(datas)
+        assert shipped.get(name) == ROOT / name
+
+    def test_the_inventory_the_generator_writes_is_one_of_them(self):
+        generator = _load_module("generate_third_party_notices")
+        assert generator.NOTICES_NAME in layout.LICENCE_FILES
+
+
+class TestInstallerShipsTheLicenceTexts:
+    """Inno Setup copies ``dist\\Jarvis`` wholesale; the licence texts are also placed where a user looks."""
+
+    @staticmethod
+    def _section(header: str) -> list[str]:
+        lines, inside = [], False
+        for line in INSTALLER.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("["):
+                inside = stripped.lower() == f"[{header.lower()}]"
+                continue
+            if inside and stripped and not stripped.startswith(";"):
+                lines.append(stripped)
+        return lines
+
+    def _sources(self) -> list[Path]:
+        found = []
+        for line in self._section("Files"):
+            match = re.match(r'Source:\s*"([^"]+)"', line)
+            if match:
+                found.append((INSTALLER.parent / match.group(1).replace("\\", "/")).resolve())
+        return found
+
+    @pytest.mark.parametrize("name", layout.LICENCE_FILES)
+    def test_the_installer_copies_it_next_to_the_executable(self, name):
+        assert (ROOT / name).resolve() in self._sources()
+        destinations = [
+            line for line in self._section("Files") if name in line and 'DestDir: "{app}"' in line
+        ]
+        assert destinations, f"{name} is not copied into {{app}}"
+
+    def test_the_installer_shows_the_licence_before_installing(self):
+        match = None
+        for line in self._section("Setup"):
+            match = match or re.match(r"LicenseFile=(.+)$", line)
+        assert match, "the [Setup] section names no LicenseFile"
+        shown = (INSTALLER.parent / match.group(1).strip().replace("\\", "/")).resolve()
+        assert shown == (ROOT / "LICENSE").resolve()
 
 
 class TestTheResolverMatchesPyInstaller:

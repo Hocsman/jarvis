@@ -38,6 +38,10 @@ Plugins = PyQt6/Qt6/plugins
 datas = [
     (str(src_path / 'desktop_app' / 'desktop_assets' / '*.png'), 'desktop_app/desktop_assets'),
     (str(src_path / 'desktop_app' / 'dashboard' / 'index.html'), 'desktop_app/dashboard'),
+    # The licence texts travel with every binary: the project's own and the
+    # inventory of the bundled third-party packages (scripts/generate_third_party_notices.py).
+    (str(project_root / 'LICENSE'), '.'),
+    (str(project_root / 'THIRD_PARTY_NOTICES.txt'), '.'),
 ]
 
 # Collect Piper TTS data files (espeak-ng-data is required for phonemization)

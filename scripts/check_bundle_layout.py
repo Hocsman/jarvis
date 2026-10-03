@@ -22,6 +22,10 @@ from typing import Iterable, List, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+# Files that ship so the licence texts travel with the binaries. They sit at
+# the project root and land at the top of the bundle's data tree.
+LICENCE_FILES = ("LICENSE", "THIRD_PARTY_NOTICES.txt")
+
 # Kinds of file the app opens at runtime. A file under src/ with a suffix in
 # this set must reach the build.
 RUNTIME_SUFFIXES = frozenset({
@@ -96,7 +100,9 @@ def _data_roots(dist_dir: Path, platform: str) -> List[Path]:
 
 def expected_bundle_files(project_root: Path) -> List[PurePosixPath]:
     """Every file the build must carry, as a path inside its data tree."""
-    return runtime_data_files(project_root / "src")
+    files = list(runtime_data_files(project_root / "src"))
+    files.extend(PurePosixPath(name) for name in LICENCE_FILES)
+    return files
 
 
 def check_bundle(dist_dir: Path, project_root: Path, platform: Optional[str] = None) -> List[str]:

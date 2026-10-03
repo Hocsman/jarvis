@@ -274,9 +274,15 @@ PyInstaller follows imports and nothing else, so every file the app opens throug
 
 The rule is enforced from the tree, not from a list kept by hand. `tests/test_pyinstaller_spec.py` runs the spec once per platform with PyInstaller's names stubbed, expands `datas` the way PyInstaller does, and fails when a runtime data file under `src/` is not bundled or lands somewhere else. A file whose kind is unknown fails it too, until its suffix is classified in `scripts/check_bundle_layout.py`: guessing is how a file goes missing.
 
+### Licence texts
+
+`LICENSE` and `THIRD_PARTY_NOTICES.txt` ship at the top of the bundle's data tree on every platform. The Windows installer also copies both next to `Jarvis.exe`, and shows `LICENSE` on a wizard page before installing; a silent run, which is how the updater invokes it (`/SILENT`), skips the page.
+
+`THIRD_PARTY_NOTICES.txt` is generated, not written by hand. `scripts/generate_third_party_notices.py` reads, offline, the licence each package declares in the metadata installed in the build environment. It covers the requirements the build bundles and the dependencies those declare. A requirement is bundled when the source or the spec's `hiddenimports` import it, unless the spec's `excludes` list it or the installer downloads it on request (the CUDA libraries); this is derived from the repository, not listed in the script. Packages that declare a GPL, LGPL or AGPL licence are marked as such, in an opening section and in their own entry. The file records what the metadata declares and makes no statement about how those licences relate to each other or to the project's `LICENSE`. It is regenerated, in the environment the build uses, whenever `requirements.txt` changes: `tests/test_third_party_notices.py` fails when a bundled requirement has no entry or a copyleft licence is not marked.
+
 ### Checking a build
 
-`scripts/test_bundled_app.bat` and `scripts/test_bundled_app.sh` build, run `scripts/check_bundle_layout.py` on the result, and only then launch the app. The check looks for the executable the platform's build produces and for every runtime data file where the frozen app resolves it (`_internal` on Windows and Linux, `Contents/Resources` or `Contents/Frameworks` on macOS), and names each one that is missing. The Windows batch file asks for plain ASCII output.
+`scripts/test_bundled_app.bat` and `scripts/test_bundled_app.sh` build, run `scripts/check_bundle_layout.py` on the result, and only then launch the app. The check looks for the executable the platform's build produces and for every runtime data file and licence text where the frozen app resolves it (`_internal` on Windows and Linux, `Contents/Resources` or `Contents/Frameworks` on macOS), and names each one that is missing. The Windows batch file asks for plain ASCII output.
 
 ## Memory Viewer
 
