@@ -217,8 +217,11 @@ class TestPiperTTSWithMocking:
 
         tts = PiperTTS(enabled=True, model_path="/fake/model.onnx")
 
-        # Don't actually start the thread
-        tts.speak("Hello world")
+        # speak() starts its worker on first use. The worker here does nothing
+        # and ends at once, so nothing takes the text off the queue and no
+        # thread is left running.
+        with patch("src.jarvis.output.tts.PiperTTS._run", lambda self: None):
+            tts.speak("Hello world")
 
         # Text should be in queue (may have been preprocessed)
         assert not tts._q.empty()
@@ -574,19 +577,21 @@ class TestPiperTTSThreadSafety:
 
         tts = PiperTTS(enabled=True, model_path="/fake/model.onnx")
 
-        # Don't start the actual worker thread
         def speak_text():
             for _ in range(10):
                 tts.speak("Hello world")
 
-        threads = [threading.Thread(target=speak_text) for _ in range(3)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+        # The workers speak() starts do nothing and end at once, so nothing
+        # takes text off the queue and no thread is left running.
+        with patch("src.jarvis.output.tts.PiperTTS._run", lambda self: None):
+            threads = [threading.Thread(target=speak_text) for _ in range(3)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
 
-        # Should not crash, queue should have items
-        # (actual number depends on timing)
+        # Should not crash, and no text is lost between the callers
+        assert tts._q.qsize() == 30
 
 
 class TestPiperVoiceDownloadRetry:
