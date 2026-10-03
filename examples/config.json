@@ -41,6 +41,7 @@
   "tts_chatterbox_exaggeration": 0.5,
   "tts_chatterbox_cfg_weight": 0.5,
   "tts_piper_model_path": null,
+  "tts_piper_voices": {},
   "tts_piper_speaker": null,
   "tts_piper_length_scale": 0.65,
   "tts_piper_noise_scale": 0.8,
