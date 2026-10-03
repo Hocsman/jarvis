@@ -34,6 +34,7 @@ The end of speech publishes nothing. What follows it (a hot window, so `LISTENIN
 - **Readers read the file every time**, so a reader in one process sees what a writer in another published. The in-memory value is the fallback when the file is missing, unreadable or holds a value no release defines, and the only copy on a machine with no usable temp directory.
 - **A new holder always starts `ASLEEP`** and writes that to the file. The file carries state across processes during a session, not across launches, so a value left by a previous session never shows.
 - **Publishing never raises.** A file that cannot be written costs the viewer its view of the state, never the user their answer, so publishers call `set_state` bare and do not wrap it. The failure is logged through `debug_log`.
+- **Publishes are ordered.** Timer threads, the reply thread and the speech threads publish concurrently. The memory value and the file are updated as one step, so the publish that started last is the one both end up holding, and a publish held up on the disk cannot land over a later one. Readers are not held up by a publish in progress.
 
 ## Readers
 

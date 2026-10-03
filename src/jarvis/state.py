@@ -57,6 +57,7 @@ class JarvisStateManager:
     def __init__(self, state_file: Optional[str] = None):
         self._state = JarvisState.ASLEEP
         self._state_lock = threading.Lock()
+        self._publish_lock = threading.Lock()
         self._state_file: Optional[str] = state_file
         if self._state_file is None:
             try:
@@ -83,12 +84,17 @@ class JarvisStateManager:
     def set_state(self, state: JarvisState) -> None:
         """Publish a new state (thread-safe, visible to other processes).
 
+        Publishes are ordered: the memory value and the file are updated as
+        one step, so the publish that started last is the one both end up
+        holding. Readers are not held up by a publish in progress.
+
         Never raises on a file that cannot be written: publishing is a side
         channel of the voice pipeline and must not interrupt it.
         """
-        with self._state_lock:
-            self._state = state
-        self._write_state(state)
+        with self._publish_lock:
+            with self._state_lock:
+                self._state = state
+            self._write_state(state)
 
     def _write_state(self, state: JarvisState) -> None:
         if self._state_file is None:

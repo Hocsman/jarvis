@@ -120,6 +120,43 @@ class TestTheSharedState:
         assert get_jarvis_state().state == JarvisState.LISTENING
 
 
+class TestConcurrentPublishersLeaveTheLatestState:
+    """The pipeline publishes from timer threads, the reply thread and the
+    speech threads. Whichever publish started last is what a viewer must end
+    up reading, however the threads interleave on the way to the disk."""
+
+    @pytest.mark.unit
+    def test_a_publish_held_up_mid_write_cannot_overwrite_a_later_one(self, state_file):
+        import threading
+        import time
+
+        manager = JarvisStateManager(state_file)
+        real_write = manager._write_state
+        reached_the_disk = threading.Event()
+        let_it_through = threading.Event()
+
+        def held_up_write(state):
+            if state == JarvisState.LISTENING:
+                reached_the_disk.set()
+                let_it_through.wait(timeout=5)
+            real_write(state)
+
+        manager._write_state = held_up_write
+
+        first = threading.Thread(target=manager.set_state, args=(JarvisState.LISTENING,))
+        first.start()
+        assert reached_the_disk.wait(timeout=5), "the first publish never reached the disk"
+
+        second = threading.Thread(target=manager.set_state, args=(JarvisState.IDLE,))
+        second.start()
+        time.sleep(0.1)  # the second publish is under way while the first is held up
+        let_it_through.set()
+        first.join(timeout=5)
+        second.join(timeout=5)
+
+        assert manager.state == JarvisState.IDLE
+
+
 class TestPublishingNeedsNoDesktop:
     """The headless guarantee, checked in a clean interpreter: nothing the
     voice pipeline imports to publish its state may drag in Qt or the desktop
