@@ -11,8 +11,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Nothing below runs unless the suite is green. Every other job needs this
+  # one, directly or through a job that does. A job whose `if` uses
+  # `always()` (it has to, to run after a skipped semantic-release on
+  # develop) would otherwise start with the suite red, so it also checks
+  # `needs.tests.result` itself.
+  tests:
+    name: Tests
+    uses: ./.github/workflows/tests.yml
+
   # Semantic versioning analysis (main only)
   semantic-release:
+    needs: [tests]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:
@@ -45,8 +55,21 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Run semantic-release and capture output
-          npx semantic-release --debug > release_output.log 2>&1 || true
+          # Run semantic-release and capture output. The exit status is kept:
+          # a failure here fails the job, so the builds never start and a
+          # broken release is not mistaken for "nothing to release".
+          set +e
+          npx semantic-release --debug > release_output.log 2>&1
+          status=$?
+          set -e
+
+          # Show the full log for debugging
+          cat release_output.log
+
+          if [ "$status" -ne 0 ]; then
+            echo "❌ semantic-release failed (exit $status)"
+            exit "$status"
+          fi
 
           # Check if a release was created
           if grep -q "Published release" release_output.log; then
@@ -61,14 +84,11 @@ jobs:
             echo "ℹ️ No release created (no releasable changes found)"
           fi
 
-          # Show the full log for debugging
-          cat release_output.log
-
   # Build desktop apps for all platforms
   build-windows:
     runs-on: windows-latest
-    needs: [semantic-release]
-    if: always() && (needs.semantic-release.result == 'success' || needs.semantic-release.result == 'skipped')
+    needs: [tests, semantic-release]
+    if: always() && needs.tests.result == 'success' && (needs.semantic-release.result == 'success' || needs.semantic-release.result == 'skipped')
 
     steps:
       - name: 📥 Checkout code
@@ -118,6 +138,13 @@ jobs:
         run: |
           pyinstaller jarvis_desktop.spec
 
+      # A bundle that builds but does not open must not reach an installer.
+      # The timeout keeps an app that never exits from holding the runner.
+      - name: 🧪 Check the bundled app
+        timeout-minutes: 15
+        shell: cmd
+        run: call scripts\test_bundled_app.bat
+
       - name: 🛠️ Install Inno Setup
         run: |
           choco install innosetup -y
@@ -141,8 +168,8 @@ jobs:
 
   build-macos:
     runs-on: ${{ matrix.os }}
-    needs: [semantic-release]
-    if: always() && (needs.semantic-release.result == 'success' || needs.semantic-release.result == 'skipped')
+    needs: [tests, semantic-release]
+    if: always() && needs.tests.result == 'success' && (needs.semantic-release.result == 'success' || needs.semantic-release.result == 'skipped')
     strategy:
       fail-fast: false
       matrix:
@@ -200,6 +227,12 @@ jobs:
         run: |
           pyinstaller jarvis_desktop.spec
 
+      # A bundle that builds but does not open must not be packaged.
+      # The timeout keeps an app that never exits from holding the runner.
+      - name: 🧪 Check the bundled app
+        timeout-minutes: 15
+        run: bash scripts/test_bundled_app.sh
+
       # Note: Ad-hoc code signing is intentionally skipped
       # codesign --force --deep breaks Qt WebEngine's symlink structure
       # causing crashes when QWebEngineView is shown.
@@ -223,8 +256,8 @@ jobs:
 
   build-linux:
     runs-on: ubuntu-latest
-    needs: [semantic-release]
-    if: always() && (needs.semantic-release.result == 'success' || needs.semantic-release.result == 'skipped')
+    needs: [tests, semantic-release]
+    if: always() && needs.tests.result == 'success' && (needs.semantic-release.result == 'success' || needs.semantic-release.result == 'skipped')
 
     steps:
       - name: 🧹 Free up disk space
@@ -250,7 +283,7 @@ jobs:
       - name: 📦 Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxcb-cursor0 libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 portaudio19-dev binutils
+          sudo apt-get install -y libxcb-cursor0 libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 portaudio19-dev binutils xvfb
 
       - name: 📝 Generate version file
         run: |
@@ -284,6 +317,13 @@ jobs:
         run: |
           pyinstaller jarvis_desktop.spec
 
+      # A bundle that builds but does not open must not be packaged. The
+      # runner has no display, hence xvfb; the timeout keeps an app that
+      # never exits from holding the runner.
+      - name: 🧪 Check the bundled app
+        timeout-minutes: 15
+        run: xvfb-run -a bash scripts/test_bundled_app.sh
+
       - name: 📦 Package Linux build
         run: |
           cd dist
@@ -300,13 +340,19 @@ jobs:
   release-main:
     needs: [semantic-release, build-windows, build-macos, build-linux]
     runs-on: ubuntu-latest
-    # Run even if some builds failed - upload whatever succeeded
-    if: always() && needs.semantic-release.result == 'success' && needs.semantic-release.outputs.new_release_published == 'true'
+    # No `always()`: the release is attached to and published only when every
+    # build has succeeded, so a failed build leaves the draft that
+    # semantic-release created unpublished, with no assets and no audience.
+    # Re-running the failed jobs completes it.
+    if: needs.semantic-release.outputs.new_release_published == 'true'
 
     permissions:
       contents: write
 
     steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v5
+
       - name: 📥 Download all artifacts
         uses: actions/download-artifact@v8
         with:
@@ -317,15 +363,21 @@ jobs:
           echo "Available artifacts:"
           find artifacts -type f \( -name "*.zip" -o -name "*.tar.gz" \) | sort
 
+      - name: 🔐 Write checksums
+        run: bash scripts/release_checksums.sh artifacts
+
+      # The release is still a draft here (see .releaserc.json), which
+      # softprops finds among all releases only when `draft` is set.
       - name: 📎 Attach binaries to release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.semantic-release.outputs.new_release_git_tag }}
-          # Use glob to upload only artifacts that exist
+          draft: true
           files: |
             artifacts/**/*.zip
             artifacts/**/*.tar.gz
-          fail_on_unmatched_files: false
+            artifacts/SHA256SUMS.txt
+          fail_on_unmatched_files: true
           append_body: true
           body: |
 
@@ -341,15 +393,33 @@ jobs:
             | **macOS (Apple Silicon)** | `Jarvis-macOS-arm64.zip` | Extract → Move to Applications → Right-click → Open |
             | **macOS (Intel)** | `Jarvis-macOS-x64.zip` | Extract → Move to Applications → Right-click → Open |
             | **Linux** | `Jarvis-Linux-x64.tar.gz` | `tar -xzf` → Run `./Jarvis/Jarvis` |
+
+            `SHA256SUMS.txt` lists the SHA-256 of each file above. The in-app updater checks every download against it before running anything.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Everything is attached: only now does the release become visible.
+      - name: 🚀 Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.semantic-release.outputs.new_release_git_tag }}
+        run: |
+          ids=$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate --jq ".[] | select(.tag_name == \"${TAG}\") | .id")
+          if [ -z "$ids" ] || [ "$(echo "$ids" | wc -l)" -ne 1 ]; then
+            echo "❌ Expected exactly one release for ${TAG}, found: ${ids:-none}"
+            exit 1
+          fi
+          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${ids}" -F draft=false
+          echo "✅ ${TAG} published"
 
   # Create/update latest pre-release (develop only)
   release-develop:
     needs: [build-windows, build-macos, build-linux]
     runs-on: ubuntu-latest
-    # Run even if some builds failed - upload whatever succeeded
-    if: always() && github.ref == 'refs/heads/develop'
+    # No `always()`: the rolling release is rewritten only when every build
+    # has succeeded, so its assets always belong to the commit it names and a
+    # failed build leaves the previous one untouched.
+    if: github.ref == 'refs/heads/develop'
 
     permissions:
       contents: write
@@ -448,16 +518,19 @@ jobs:
           echo "Available artifacts:"
           find artifacts -type f \( -name "*.zip" -o -name "*.tar.gz" \) | sort
 
+      - name: 🔐 Write checksums
+        run: bash scripts/release_checksums.sh artifacts
+
       - name: 📝 Create/Update Latest Release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: latest
           name: Latest Development Build
-          # Use glob to upload only artifacts that exist
           files: |
             artifacts/**/*.zip
             artifacts/**/*.tar.gz
-          fail_on_unmatched_files: false
+            artifacts/SHA256SUMS.txt
+          fail_on_unmatched_files: true
           draft: false
           prerelease: true
           body: |
@@ -480,6 +553,8 @@ jobs:
             | **macOS (Apple Silicon)** | `Jarvis-macOS-arm64.zip` | Extract → Move to Applications → Right-click → Open |
             | **macOS (Intel)** | `Jarvis-macOS-x64.zip` | Extract → Move to Applications → Right-click → Open |
             | **Linux** | `Jarvis-Linux-x64.tar.gz` | `tar -xzf` → Run `./Jarvis/Jarvis` |
+
+            `SHA256SUMS.txt` lists the SHA-256 of each file above. The in-app updater checks every download against it before running anything.
 
             **Branch**: develop
             **Commit**: ${{ github.sha }}
