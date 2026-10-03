@@ -315,6 +315,22 @@ def test_an_empty_configured_language_is_auto(vide):
 
 
 @pytest.mark.unit
+def test_a_language_outside_the_table_is_keyed_by_its_iso_code():
+    """Whisper reports `ja`, not "Japanese". A language the built-in table
+    does not list has no names to recognise, so only its ISO 639-1 code (or
+    a regional variant of it) meets what the recogniser reports."""
+    fallback = "/v/en.onnx"
+
+    by_name = select_tts_voice({"Japanese": "/v/ja.onnx"}, fallback, detected_language="ja")
+    by_code = select_tts_voice({"ja": "/v/ja.onnx"}, fallback, detected_language="ja")
+    by_variant = select_tts_voice({"ja-JP": "/v/ja.onnx"}, fallback, detected_language="ja")
+
+    assert by_name == fallback
+    assert by_code == "/v/ja.onnx"
+    assert by_variant == "/v/ja.onnx"
+
+
+@pytest.mark.unit
 def test_a_bare_voice_name_is_a_file_in_the_models_directory(world):
     """A path in a config file is a chore to type and to move between
     machines. A bare name is what Piper calls the voice, and it keeps
