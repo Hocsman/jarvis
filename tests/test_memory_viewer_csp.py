@@ -10,8 +10,9 @@ one that still holds on the day an escape is missed:
 - a page that is therefore built to need no inline script: its one script
   is served from its own route, the token travels in a ``<meta>`` tag, and
   no element carries an event-handler attribute;
-- clicks routed through ``data-action`` names the script registers, never
-  through handler strings with an id interpolated into them;
+- handlers that are never strings with an id interpolated into them: a
+  control carries a ``data-action`` name the script registers, or is wired
+  by ``addEventListener`` on the element itself;
 - server-provided values reaching attributes through the DOM (``dataset``,
   properties), never through a template literal, so the quoting of an
   escaper is not what stands between a value and the markup.
@@ -294,10 +295,10 @@ class TestNoHandlerStringsInTheScript:
 
 
 class TestActionsAreWiredToRegisteredHandlers:
-    """Clicks on page and script-built markup are routed by the
-    ``data-action`` name on the element. A name nobody registered is a
-    button that does nothing; a registration nobody uses is dead code
-    that a future template could trigger by accident."""
+    """A ``data-action`` name on an element selects the handler registered
+    under it. A name nobody registered is a button that does nothing; a
+    registration nobody uses is dead code that a future template could
+    trigger by accident."""
 
     ACTION_ATTRIBUTE_RE = re.compile(r'data-action="([^"]*)"')
     ACTION_PROPERTY_RE = re.compile(r"""dataset\.action\s*=\s*(['"])([^'"]*)\1""")
@@ -337,8 +338,8 @@ class TestActionsAreWiredToRegisteredHandlers:
         assert re.search(r"""setAttribute\(\s*['"]data-action['"]""", text) is None
 
     def test_one_listener_dispatches_them(self, viewer):
-        """Delegation: handlers do not accumulate on elements that are
-        rebuilt on every render."""
+        """One listener dispatches every ``data-action`` name; a control
+        that carries one needs no listener of its own."""
         script = _script(viewer)
 
         assert "document.addEventListener('click'" in script

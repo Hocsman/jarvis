@@ -3252,8 +3252,12 @@ def index() -> str:
 # therefore carries no inline script and no event-handler attribute:
 #
 # - the launch token is read from the page's <meta> tag;
-# - clicks on script-built markup are routed by a `data-action` name that
-#   `registerAction` has registered, through one delegated listener;
+# - no handler is ever a string in the markup. A control either carries a
+#   `data-action` name that `registerAction` has registered, which one
+#   delegated listener dispatches, or it is wired with `addEventListener`
+#   on the element the script has just built (on the page's own static
+#   controls, once at boot). Either way, what a handler acts on reaches it
+#   through the element's `dataset`, an enclosing element or a closure;
 # - a value the server supplied reaches an attribute through the DOM
 #   (`dataset`, a property), never by being spliced into a template, so no
 #   quoting has to hold for it to stay inside its attribute.
@@ -3331,10 +3335,14 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
             container.replaceChildren(fragment);
         }
 
-        // Clicks on script-built markup are routed by the element's
-        // data-action name to the handler registered under it. The page has
-        // no inline handler, so there is no string an id could be spliced
-        // into: the handler reads the id from the element's dataset.
+        // A control that carries a data-action name is dispatched here:
+        // the one delegated listener below looks the name up among the
+        // handlers registered under it, and the handler reads what it acts
+        // on from the element's dataset or from the element that encloses
+        // it. Only the controls whose name is registered take this route;
+        // every other control is wired with addEventListener on the markup
+        // the script has just built. Neither route has an inline handler,
+        // so there is no string an id could be spliced into.
         const ACTIONS = new Map();
 
         function registerAction(name, handler) {
@@ -4783,11 +4791,11 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
                 childrenList.innerHTML = '<div style="color: var(--text-muted); font-size: 0.85rem;">No children</div>';
             }
 
-            bindActionsToNode(sidebar, node.id);
+            stampNodeIdOnActions(sidebar, node.id);
         }
 
         // The buttons under a node's details all act on that node.
-        function bindActionsToNode(root, nodeId) {
+        function stampNodeIdOnActions(root, nodeId) {
             root.querySelectorAll('.detail-actions [data-action]').forEach(button => {
                 button.dataset.nodeId = nodeId;
             });
@@ -4818,7 +4826,7 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
                 </div>
             `;
             document.getElementById('edit-name').value = node.name;
-            bindActionsToNode(sidebar, nodeId);
+            stampNodeIdOnActions(sidebar, nodeId);
         }
 
         async function saveNodeEdit(nodeId) {
