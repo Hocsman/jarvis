@@ -579,6 +579,10 @@ class VoiceListener(threading.Thread):
         # reply, and reset there so a turn that never streamed behaves
         # exactly as before.
         self._streamed_chars = 0
+        # The language the user was heard in when the streamed reply began.
+        # Every part of that reply carries it, the tail included, so one
+        # reply is never spoken in two voices.
+        self._streamed_language: Optional[str] = None
         self._capture = UtteranceCapture.from_env()
         self._capture.announce()
 
@@ -673,12 +677,16 @@ class VoiceListener(threading.Thread):
 
         decoupeur = SentenceStreamer()
         self._streamed_chars = 0
+        # Fixed before the first sentence: a transcript landing mid-reply
+        # moves `_last_detected_language`, and the rest of this reply must
+        # not change voice because of it.
+        self._streamed_language = langue = self._last_detected_language
 
         def _sur_jeton(delta: str) -> None:
             try:
                 for phrase in decoupeur.feed(delta):
                     self.track_tts_start(phrase, continues=self._streamed_chars > 0)
-                    self.tts.speak(phrase)
+                    self.tts.speak(phrase, language=langue)
                     self._streamed_chars += len(phrase) + 1
             except Exception as e:
                 # Never let delivery break generation: the buffered path
@@ -1538,7 +1546,8 @@ class VoiceListener(threading.Thread):
                 if reste:
                     self.track_tts_start(reste, continues=True)
                 self.tts.speak(reste, completion_callback=_on_tts_complete,
-                               duration_callback=_on_duration_known)
+                               duration_callback=_on_duration_known,
+                               language=self._streamed_language)
                 return
 
             # Track TTS start for echo detection with actual text
@@ -1546,7 +1555,8 @@ class VoiceListener(threading.Thread):
             debug_log(f"starting TTS for reply ({len(reply)} chars)", "voice")
 
             self.tts.speak(reply, completion_callback=_on_tts_complete,
-                          duration_callback=_on_duration_known)
+                          duration_callback=_on_duration_known,
+                          language=self._last_detected_language)
         else:
             debug_log(f"no TTS output: reply={bool(reply)}, tts={bool(self.tts)}, enabled={getattr(self.tts, 'enabled', False) if self.tts else False}", "voice")
             # Stop thinking tune if no TTS response
@@ -1591,13 +1601,13 @@ class VoiceListener(threading.Thread):
     def drain_reply_queue(self) -> None:
         """Say at most one queued reply. This thread only.
 
-        One at a time, and only while nothing is already being said.
-        ``TTS.speak`` keeps its completion callback in a single
-        engine-level slot (output/tts.py:369, set at :469, cleared at
-        :579), so a second call before the first finishes overwrites the
-        first's callback — and that callback is what reopens the
-        listening window. Whatever is left waits for the next pass, which
-        is at most one audio frame away.
+        One at a time, and only while nothing is already being said. The
+        echo detector holds the record of one reply (its text, its start
+        and its exact duration), so a second reply started while the
+        first is still audible would replace it, and the rest of the
+        first would be compared against the wrong sentence. Whatever is
+        left waits for the next pass, which is at most one audio frame
+        away.
         """
         q = getattr(self, "_reply_queue", None)
         if q is None:

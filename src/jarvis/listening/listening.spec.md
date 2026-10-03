@@ -481,11 +481,21 @@ answer gets deleted as an echo.
 frame every `vad_frame_ms`, so on a live microphone the queue is never
 empty and an idle-only drain never runs at all.
 
-**One reply per pass, and none while she is already speaking.** `TTS.speak`
-holds its completion callback in a single engine-level slot, so a second
-call before the first finishes overwrites the first's callback — and that
-callback is what reopens the listening window. Anything still queued
-waits for the next pass, at most one frame away.
+**The language is the one last heard.** A reply from elsewhere has no
+utterance behind it, so it is spoken with the language the user was last
+heard in, and the engine's configured `response_language` outranks that
+(`tts.spec.md`, "Which language wins"). A reply of her own carries the
+language heard for it, fixed when the reply begins and shared by every
+sentence of it.
+
+**One reply per pass, and none while she is already speaking.** The echo
+detector holds the record of one reply at a time: the text she is
+saying, when she began, and its exact duration. Starting a second reply
+while the first is still audible would replace that record with the
+second's, and the rest of the first would be compared against the wrong
+sentence. Completion callbacks are not the constraint, since they travel
+with their own queue item (`tts.spec.md`, "The queue"). Anything still
+queued waits for the next pass, at most one frame away.
 
 ## Fallback Behaviour
 
