@@ -430,6 +430,7 @@ To have the voice follow the language of each reply, list a voice per language (
 - With `response_language` empty, the voice follows the language she heard you speak, on the assumption that she answers in it.
 - With `response_language` set, that language decides the voice, whatever you spoke.
 - A language you did not list is read with `tts_piper_model_path`, or the built-in voice when that is empty.
+- A key is a language: its ISO 639-1 code (`fr`) works for every language, a regional variant (`fr-FR`) counts as its base language, and for the eleven languages named above the language's name (`français`, `French`) works too. Any other language has to be keyed by its ISO 639-1 code (`ja`, `sv`), which is what the speech recogniser reports: with `response_language` empty, a name such as `Japanese` is not recognised.
 - Known limitation: the voice is chosen from the language she is expected to answer in, not from the words she writes, and with Piper her instructions also say "Always respond in English". A model that obeys that line answers in English, and the voice you mapped to your language then reads English with its accent. The voice map only helps when the model answers in the mapped language anyway.
 
 **Kokoro** - more natural neural voice (Kokoro-82M), still real-time on CPU:

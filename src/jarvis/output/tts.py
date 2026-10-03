@@ -57,22 +57,6 @@ _PIPER_VOICES: tuple[tuple[tuple[str, ...], str], ...] = (
     (("zh", "中文", "chinese", "mandarin"), "zh_CN-huayan-medium"),
 )
 
-# Keyed on the normalised form, so a name may be written here the way its
-# speakers write it: "türkçe" and "türkçe" typed without the cedilla meet on
-# the same key, and so do "Français" and "francais".
-PIPER_VOICE_BY_LANGUAGE = {
-    _normalise_language(nom): voix for spellings, voix in _PIPER_VOICES for nom in spellings
-}
-
-
-def _piper_voice_for_language(language: Optional[str]) -> str:
-    """The voice that speaks ``language``, or the fallback when unlisted."""
-    if not language or not language.strip():
-        return PIPER_FALLBACK_VOICE
-    return PIPER_VOICE_BY_LANGUAGE.get(
-        _normalise_language(language), PIPER_FALLBACK_VOICE
-    )
-
 
 def _get_piper_models_dir() -> Path:
     """Where Piper voice models are kept.
@@ -85,10 +69,14 @@ def _get_piper_models_dir() -> Path:
 
 # One language, one key. The first spelling of each row above is its ISO 639-1
 # code, which is what Whisper reports, so every spelling a user might write
-# reduces to the code the detector produces.
+# reduces to the code the detector produces. Keyed on the normalised form, so a
+# name may be written in the table the way its speakers write it: "türkçe" and
+# "turkce" meet on the same key, and so do "Français" and "francais".
 _LANGUAGE_CODES = {
     _normalise_language(nom): spellings[0] for spellings, _ in _PIPER_VOICES for nom in spellings
 }
+
+_VOICE_BY_CODE = {spellings[0]: voix for spellings, voix in _PIPER_VOICES}
 
 
 def _language_code(value: str) -> str:
@@ -103,6 +91,17 @@ def _language_code(value: str) -> str:
         return _LANGUAGE_CODES[key]
     base = re.split(r"[-_]", key, maxsplit=1)[0]
     return _LANGUAGE_CODES.get(base, base)
+
+
+def _piper_voice_for_language(language: Optional[str]) -> str:
+    """The voice that speaks ``language``, or the fallback when unlisted.
+
+    The language is reduced through ``_language_code``, the same reduction a
+    ``tts_piper_voices`` key goes through, so ``fr-FR`` is French to both.
+    """
+    if not language or not language.strip():
+        return PIPER_FALLBACK_VOICE
+    return _VOICE_BY_CODE.get(_language_code(language), PIPER_FALLBACK_VOICE)
 
 
 def _voice_model_path(value: str) -> str:

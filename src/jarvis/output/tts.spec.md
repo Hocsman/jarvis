@@ -125,10 +125,11 @@ fires without playing anything; it has no audio to play.
 in seconds, computed from the synthesised samples, after synthesis and
 before playback starts. It does not fire when nothing was synthesised.
 
-**The orb.** When an item starts, the engine sets the SPEAKING state on
-the shared state holder if that holder can be imported, and ignores the
-failure if it cannot. Speech never depends on it. Nothing in this module
-clears the state when speech ends; whoever owns the transitions does.
+**Speaking state.** When an item starts, the engine publishes SPEAKING
+through the shared state (`state.spec.md`). Publishing never raises, so
+the engine calls it bare and speech never depends on it. Nothing in this
+module clears the state when speech ends; whoever owns the transitions
+does.
 
 ## Interrupting
 
@@ -232,9 +233,13 @@ An item is spoken by the first of these that applies:
    Whisper reports (`fr`), the language's own name (`français`) or its
    English name (`French`), compared without case or accents, and a
    regional variant (`fr-FR`, `pt_BR`) counts as its base language. A
-   language nobody listed in the table below may still be a key. A value
-   is the path of a `.onnx` model, or a bare voice name, which is a file
-   in the models directory and so is fetched by name on first use.
+   language nobody listed in the table below may still be a key, but it
+   has to be keyed by its ISO 639-1 code (`ja`), because only the table
+   knows a language's names: with `response_language` empty the language
+   arrives as the code the recogniser reports, and a key such as
+   `Japanese` never matches it. A value is the path of a `.onnx` model,
+   or a bare voice name, which is a file in the models directory and so is
+   fetched by name on first use.
 2. The default voice, loaded when the engine starts so the wait happens
    at launch rather than at the first word:
    1. A `tts_piper_model_path` the user set. Naming a voice is a choice,
@@ -245,7 +250,10 @@ An item is spoken by the first of these that applies:
       Italian, Dutch, Portuguese, Polish, Russian, Turkish, Chinese).
       Each language lists the spellings a user might write: its own name,
       its English name and its ISO 639-1 code, compared without case or
-      accents, so `français`, `Francais` and `fr` meet.
+      accents, so `français`, `Francais` and `fr` meet. A regional variant
+      (`fr-FR`, `pt_BR`) counts as its base language here exactly as it
+      does for a map key, so one `response_language` is never French to
+      the map and unknown to the default voice.
    3. Otherwise, for an empty or unlisted language, the fallback voice
       (`PIPER_FALLBACK_VOICE`). A language nobody listed speaks with it
       rather than falling silent.
@@ -343,7 +351,7 @@ language.
 | `tts_engine` | all | `piper`, `kokoro` or `chatterbox` |
 | `tts_voice`, `tts_rate` | all | Interface compatibility; `tts_rate` also feeds the echo detector's timing estimate |
 | `response_language` | Piper | The language of every reply when set, and so the voice's; chooses the default voice when no model path is pinned |
-| `tts_piper_voices` | Piper | Language to voice (path or bare name), chosen per reply. A language it does not name speaks with the default voice |
+| `tts_piper_voices` | Piper | Language to voice (path or bare name), chosen per reply. A language of the built-in table may be keyed in any of its spellings; any other language is keyed by its ISO 639-1 code. A language it does not name speaks with the default voice |
 | `tts_piper_model_path` | Piper | Pins the default voice; fetched by basename if absent |
 | `tts_piper_speaker` | Piper | Speaker index for multi-speaker models |
 | `tts_piper_length_scale` | Piper | Pace: below 1.0 is faster |
@@ -370,6 +378,13 @@ language.
   there is nothing to fall back to.
 - Each listed language gets a voice trained for it, in any spelling, and
   an unlisted one gets the fallback.
+- A regional variant (`fr-FR`, `fr_FR`, `pt_BR`) chooses the same default
+  voice as its base language, and a variant of an unlisted language still
+  gets the fallback. The map and the default voice read one value as the
+  same language.
+- A language outside the table is matched by its ISO code: a key `ja`
+  (or `ja-JP`) matches the language heard as `ja`, a key `Japanese` does
+  not.
 - A pinned model path beats the configured language, and is the voice for
   every language `tts_piper_voices` leaves out.
 - A French reply picks the French voice, an unmapped language picks the

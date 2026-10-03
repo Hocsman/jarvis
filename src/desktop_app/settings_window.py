@@ -252,7 +252,11 @@ def _build_field_metadata() -> List[FieldMeta]:
       "Which Piper voice speaks which language, one 'language -> voice' per row. "
       "The voice follows the language of each reply: the language she is set to "
       "answer in, or the one she heard when that is left on auto. A voice is a "
-      "path to a .onnx model or a Piper voice name, downloaded on first use.",
+      "path to a .onnx model or a Piper voice name, downloaded on first use. "
+      "A language outside French, English, Spanish, German, Italian, Dutch, "
+      "Portuguese, Polish, Russian, Turkish and Chinese must be written as its "
+      "ISO 639-1 code (ja, sv), the code the speech recogniser reports: a name "
+      "such as Japanese is not recognised on auto.",
       "piper", "map", example="fr -> fr_FR-siwis-medium")
     f("tts_piper_speaker", "Speaker ID",
       "Speaker index for multi-speaker models",
