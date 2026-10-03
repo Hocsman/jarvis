@@ -1,10 +1,9 @@
-"""`examples/config.json` is what the generator writes from today's defaults.
+"""`examples/config.json` is what the generator writes from the current defaults.
 
 The file is written by `scripts/generate_config_examples.py` from
-`export_example_config()`, and nothing ran the generator: the committed copy
-carried about half of the defaults, a key that no longer exists, and old
-values for the ones it did have. A reader copying from it was copying a
-configuration the app has not had for months.
+`export_example_config()`. A reader copying from it copies a configuration the
+app actually has, so it must hold every default, no key that is not a setting,
+and the value the app uses for each.
 
 The test below fails the moment the file and the defaults part ways, and says
 how to put them back. It pins the mechanism (the file equals the generator's
@@ -55,7 +54,7 @@ def test_the_committed_example_is_what_the_generator_writes():
 
     assert not (missing or stale or changed), (
         "examples/config.json is out of step with the defaults. "
-        f"Missing: {missing}. Not a setting any more: {stale}. "
+        f"Missing: {missing}. Not a setting: {stale}. "
         f"Different value: {changed}. "
         "Regenerate it with: python scripts/generate_config_examples.py")
     # Same order and layout too, so a regeneration leaves a diff of only what

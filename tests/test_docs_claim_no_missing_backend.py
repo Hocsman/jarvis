@@ -1,9 +1,9 @@
 """Nothing the repository says about LLM providers outruns the factory.
 
-A registry row, a spec, a docstring and a config comment each told the reader
-that Anthropic-compatible servers are supported. The factory only builds
-Ollama and OpenAI-compatible backends, so someone who set up the third one
-would have found out at request time, in a log line.
+A registry row, a spec, a docstring or a config comment that told the reader
+Anthropic-compatible servers are supported would be wrong. The factory only
+builds Ollama and OpenAI-compatible backends, so someone who set up the third
+one would find out at request time, in a log line.
 
 The rule is about the claim, not the word: an Anthropic model used as an
 example is fine. What must not appear is Anthropic named as a *backend* the

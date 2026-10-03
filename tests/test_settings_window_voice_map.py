@@ -1,10 +1,10 @@
 """The settings window can edit a mapping, and uses it for the Piper voices.
 
 Every other field in the metadata is a scalar or a list of strings, so a
-language-to-voice map had nothing to be edited with. The `map` field type
+language-to-voice map needs a field type of its own. The `map` field type
 edits a dict as one `key -> value` row per entry, the same shape the
-custom dictionary already uses, and stores it in `config.json` as the
-object the engine reads.
+custom dictionary uses, and stores it in `config.json` as the object the
+engine reads.
 
 Nothing here opens a window: the conversions are plain functions, and value
 extraction is exercised through stand-ins for the Qt list widget.

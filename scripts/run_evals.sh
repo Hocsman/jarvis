@@ -208,9 +208,9 @@ if [ "$MULTI_MODEL" = true ] && [ "$OLLAMA_AVAILABLE" = true ]; then
     rm -rf "$TEMP_DIR"
 else
     # Single model mode. Defaults to the small tier, matching
-    # evals/helpers.py: two field regressions once slipped past CI because
-    # the evals only ran against the larger model, so the canary is the
-    # default and the upper tier is the opt-in.
+    # evals/helpers.py: the smallest supported model is where field
+    # failures show first, so it is the default and the upper tier is
+    # the opt-in.
     export EVAL_JUDGE_MODEL="${EVAL_JUDGE_MODEL:-$MODEL_SMALL}"
     export EVAL_REPORT_PATH="${PROJECT_ROOT}/EVALS.md"
     run_evals_for_model "$EVAL_JUDGE_MODEL" "" || FINAL_EXIT_CODE=$?
