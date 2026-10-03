@@ -157,8 +157,9 @@ def _should_emit_as_log(line: str) -> bool:
 def _chat_event_line(event_type: str, data) -> str:
     """A ``__CHAT__:`` line as the daemon would print it.
 
-    Bundled mode has no stdout bus, so a daemon callback that must reach
-    the chat window is fed through the same parser as a subprocess line.
+    Bundled mode has no stdout bus, so a daemon callback that must reach a
+    window (the chat window, the dashboard) is fed through the same parser
+    as a subprocess line.
     """
     import json as _json
     from jarvis.daemon import CHAT_IPC_PREFIX
@@ -1693,7 +1694,7 @@ class JarvisSystemTray:
         self.face_window = FaceWindow()
 
         # Floating orb, always on top, built at startup and shown on
-        # demand (at launch only when WebEngine is unavailable). It reads
+        # demand (at launch only when the dashboard is unavailable). It reads
         # the shared JarvisState (idle/listening/thinking/speaking) and
         # follows it, so it is the live visual of the assistant during
         # voice without opening the chat window. The chat window embeds
@@ -1722,17 +1723,7 @@ class JarvisSystemTray:
         self._dashboard_submit_fn = None
         self._daemon_stop_expected = False
 
-        # Main-thread signal bridge for chat IPC. The log reader thread emits
-        # ``line_received`` (a queued connection) so the chat window is created
-        # and the IPC line is parsed on the Qt main thread, never on the
-        # worker thread (Qt widgets must be created on the GUI thread).
-        from desktop_app.chat_window import ChatIpcSignals
-        self._chat_ipc_signals = ChatIpcSignals()
-        self._chat_ipc_signals.line_received.connect(self._on_chat_ipc_line)
-        # The same marshalling for a bundled daemon's answers to the
-        # dashboard, which reach the dashboard alone.
-        self._dashboard_chat_signals = ChatIpcSignals()
-        self._dashboard_chat_signals.line_received.connect(self._on_dashboard_chat_line)
+        self._wire_chat_signals()
 
         # Log reader threads
         self.log_reader_threads = []
@@ -1777,6 +1768,23 @@ class JarvisSystemTray:
         QTimer.singleShot(5000, self.check_for_updates)
 
         debug_log("desktop app initialized", "desktop")
+
+    def _wire_chat_signals(self) -> None:
+        """Create the main-thread bridges for chat events.
+
+        The daemon answers from worker threads (the log reader in subprocess
+        mode, the reply worker in bundled mode), and a widget must be created
+        and touched on the Qt main thread. Each bridge's ``line_received``
+        signal is a queued connection, so its handler runs on the main thread.
+        ``_chat_ipc_signals`` feeds the chat window; ``_dashboard_chat_signals``
+        carries a bundled daemon's answers to the dashboard alone.
+        """
+        from desktop_app.chat_window import ChatIpcSignals
+
+        self._chat_ipc_signals = ChatIpcSignals()
+        self._chat_ipc_signals.line_received.connect(self._on_chat_ipc_line)
+        self._dashboard_chat_signals = ChatIpcSignals()
+        self._dashboard_chat_signals.line_received.connect(self._on_dashboard_chat_line)
 
     def _show_primary_window(self) -> None:
         """Open the window the app starts with: the dashboard where a web view

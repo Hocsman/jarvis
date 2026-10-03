@@ -146,14 +146,16 @@ def engine(monkeypatch, qapp):
 def tray(qapp, monkeypatch):
     """A bundled-mode tray with the parts that need a desktop stubbed.
 
-    Everything the chat path runs through is real: the submit hook, the
-    signals that carry the daemon's answers onto the main thread,
-    ``show_dashboard``, ``show_chat``, ``start_daemon`` and ``stop_daemon``.
+    The chat path itself runs for real: the submit hook, the signals that
+    carry the daemon's answers onto the main thread (wired by the tray's own
+    method), ``show_dashboard``, ``show_chat``, ``start_daemon`` and
+    ``stop_daemon``. The tray's ``__init__`` is the one part not run, since
+    it kills stray daemon processes and builds a dozen windows; the call to
+    that wiring method from it is therefore not covered here.
     """
     from PyQt6.QtWidgets import QWidget
 
     import desktop_app.app as app_mod
-    from desktop_app.chat_window import ChatIpcSignals
     from desktop_app.face_widget import JarvisState, get_jarvis_state
 
     class _StandInPage:
@@ -199,10 +201,10 @@ def tray(qapp, monkeypatch):
     t._confirm_signals = MagicMock()
     t.update_icon = lambda: None
     t._connect_dictation_history = lambda *args, **kwargs: None
-    t._chat_ipc_signals = ChatIpcSignals()
-    t._chat_ipc_signals.line_received.connect(t._on_chat_ipc_line)
-    t._dashboard_chat_signals = ChatIpcSignals()
-    t._dashboard_chat_signals.line_received.connect(t._on_dashboard_chat_line)
+    # The tray's own wiring of the signals that carry the daemon's events
+    # onto the main thread, not a copy of it: dropping a connection there
+    # silences the page.
+    t._wire_chat_signals()
     yield t
     for window in (t.dashboard_window, t.chat_window):
         if window is not None:
@@ -396,89 +398,94 @@ class TestDashboardChatInSubprocessMode:
 # ── A frozen macOS build cannot show a web view ───────────────────────
 
 
+class _Orb:
+    """The floating orb's stand-in: all the tray asks of it is to be shown."""
+
+    def __init__(self):
+        self.visible = False
+
+    def show_orb(self):
+        self.visible = True
+
+
+# The builds that cannot show a web view are the frozen macOS ones, and only
+# those. Each is a (sys.platform, sys.frozen) pair.
+_MACOS_BUNDLE = ("darwin", True)
+_BUILDS_THAT_CAN_SHOW_ONE = [
+    ("win32", True), ("win32", False), ("linux", True), ("darwin", False),
+]
+
+
+@pytest.fixture
+def build(monkeypatch):
+    """Make the process look like a given build of the app."""
+
+    def _as(platform, frozen):
+        monkeypatch.setattr(sys, "platform", platform)
+        monkeypatch.setattr(sys, "frozen", frozen, raising=False)
+
+    return _as
+
+
 class TestFrozenMacOSBuild:
     """QtWebEngine crashes the app when a view is shown inside a frozen
     macOS bundle, which is why the memory viewer opens the system browser
     there. The dashboard is a web view too, and it is shown at launch."""
 
-    @pytest.mark.parametrize(
-        "platform, frozen, expected",
-        [
-            ("darwin", True, True),
-            ("darwin", False, False),
-            ("win32", True, False),
-            ("linux", True, False),
-        ],
-    )
-    def test_only_a_frozen_macos_build_is_a_macos_bundle(
-        self, monkeypatch, platform, frozen, expected,
-    ):
-        import desktop_app.app as app_mod
-
-        monkeypatch.setattr(sys, "platform", platform)
-        monkeypatch.setattr(sys, "frozen", frozen, raising=False)
-
-        assert app_mod._is_macos_bundle() is expected
-
-    @pytest.mark.parametrize(
-        "has_webengine, macos_bundle, expected",
-        [(True, False, True), (True, True, False), (False, False, False)],
-    )
-    def test_the_dashboard_needs_a_web_view_that_can_be_shown(
-        self, monkeypatch, has_webengine, macos_bundle, expected,
-    ):
-        import desktop_app.app as app_mod
-
-        monkeypatch.setattr(app_mod, "HAS_WEBENGINE", has_webengine)
-        monkeypatch.setattr(app_mod, "_is_macos_bundle", lambda: macos_bundle)
-
-        assert app_mod._dashboard_available() is expected
-
-    def test_no_dashboard_is_built_there(self, qapp, tray, monkeypatch):
-        import desktop_app.app as app_mod
-
+    def test_no_web_view_is_built_there(self, qapp, tray, build, monkeypatch):
         class _MustNotBeBuilt:
             def __init__(self, *args, **kwargs):
                 raise AssertionError("a QWebEngineView was built in a frozen macOS bundle")
 
-        monkeypatch.setattr(app_mod, "_is_macos_bundle", lambda: True)
-        monkeypatch.setattr("desktop_app.dashboard_window.DashboardWindow", _MustNotBeBuilt)
+        monkeypatch.setattr("desktop_app.dashboard_window.QWebEngineView", _MustNotBeBuilt)
+        build(*_MACOS_BUNDLE)
 
         tray.show_dashboard()
 
         assert tray.dashboard_window is None
 
+    @pytest.mark.parametrize("platform, frozen", _BUILDS_THAT_CAN_SHOW_ONE)
+    def test_everywhere_else_the_dashboard_opens(self, qapp, tray, build, platform, frozen):
+        build(platform, frozen)
+
+        tray.show_dashboard()
+
+        assert tray.dashboard_window is not None
+        assert tray.dashboard_window.isVisible()
+
     @pytest.mark.parametrize(
-        "macos_bundle, has_webengine, opens",
-        [(False, True, "dashboard"), (True, True, "orb"), (False, False, "orb")],
+        "platform, frozen, has_webengine, opens",
+        [(*b, True, "dashboard") for b in _BUILDS_THAT_CAN_SHOW_ONE]
+        + [(*_MACOS_BUNDLE, True, "orb"), ("win32", True, False, "orb")],
     )
     def test_launch_opens_the_dashboard_or_else_the_floating_orb(
-        self, tray, monkeypatch, macos_bundle, has_webengine, opens,
+        self, qapp, tray, build, monkeypatch, platform, frozen, has_webengine, opens,
     ):
         import desktop_app.app as app_mod
 
         monkeypatch.setattr(app_mod, "HAS_WEBENGINE", has_webengine)
-        monkeypatch.setattr(app_mod, "_is_macos_bundle", lambda: macos_bundle)
-        shown = []
-        tray.show_dashboard = lambda: shown.append("dashboard")
-        tray.show_orb_window = lambda: shown.append("orb")
+        build(platform, frozen)
+        tray.orb_window = _Orb()
 
         tray._show_primary_window()
 
-        assert shown == [opens]
+        dashboard_opened = tray.dashboard_window is not None and tray.dashboard_window.isVisible()
+        assert (dashboard_opened, tray.orb_window.visible) == (opens == "dashboard", opens == "orb")
 
-    @pytest.mark.parametrize("macos_bundle", [False, True])
+    @pytest.mark.parametrize(
+        "platform, frozen, offered",
+        [(*b, True) for b in _BUILDS_THAT_CAN_SHOW_ONE] + [(*_MACOS_BUNDLE, False)],
+    )
     def test_the_tray_menu_offers_the_dashboard_only_where_it_can_open(
-        self, qapp, tray, monkeypatch, macos_bundle,
+        self, qapp, tray, build, monkeypatch, platform, frozen, offered,
     ):
         import desktop_app.app as app_mod
 
         monkeypatch.setattr(app_mod, "HAS_WEBENGINE", True)
-        monkeypatch.setattr(app_mod, "_is_macos_bundle", lambda: macos_bundle)
+        build(platform, frozen)
         tray.orb_window = None
         tray._pending_confirmation = None
 
         tray.create_menu()
 
-        offered = getattr(tray, "dashboard_action", None) in tray.menu.actions()
-        assert offered is (not macos_bundle)
+        assert (getattr(tray, "dashboard_action", None) in tray.menu.actions()) is offered

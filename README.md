@@ -38,6 +38,7 @@
 - No mobile apps ([#17](https://github.com/isair/jarvis/issues/17))
 - "Stop" commands during speech sometimes get filtered as echo ([#24](https://github.com/isair/jarvis/issues/24))
 - Dictation is not available on macOS 26+ (Tahoe) due to a pynput incompatibility ([#172](https://github.com/isair/jarvis/issues/172))
+- The packaged macOS app starts with the floating orb instead of the dashboard, because Qt WebEngine cannot be shown from that bundle (the memory viewer opens in your browser)
 
 <details>
 <summary><strong>See it in action</strong> (example conversations)</summary>
