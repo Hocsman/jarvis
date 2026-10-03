@@ -814,37 +814,37 @@ class TestConfigIntegration:
 
 
 # ---------------------------------------------------------------------------
-# Face widget DICTATING state
+# Shared assistant state while dictating
 # ---------------------------------------------------------------------------
 
-class TestFaceWidgetDictatingState:
-    """Tests that the DICTATING state exists and is handled."""
+class TestDictationStates:
+    """Tests that the states dictation publishes exist and round-trip."""
 
     def test_jarvis_state_has_dictating(self):
-        from src.desktop_app.face_widget import JarvisState
+        from src.jarvis.state import JarvisState
         assert hasattr(JarvisState, "DICTATING")
         assert JarvisState.DICTATING.value == "dictating"
 
     def test_dictating_state_round_trips(self):
-        """State manager should accept DICTATING state."""
-        from src.desktop_app.face_widget import JarvisState
+        """The shared state accepts DICTATING."""
+        from src.jarvis.state import JarvisState
         state = JarvisState("dictating")
         assert state == JarvisState.DICTATING
 
     def test_jarvis_state_has_dictation_processing(self):
-        from src.desktop_app.face_widget import JarvisState
+        from src.jarvis.state import JarvisState
         assert hasattr(JarvisState, "DICTATION_PROCESSING")
         assert JarvisState.DICTATION_PROCESSING.value == "dictation_processing"
 
     def test_dictation_processing_state_round_trips(self):
-        from src.desktop_app.face_widget import JarvisState
+        from src.jarvis.state import JarvisState
         state = JarvisState("dictation_processing")
         assert state == JarvisState.DICTATION_PROCESSING
 
 
 class TestDictationProcessingCallback:
     """Verifies the processing callback fires between recording stop and
-    transcription, so the face can switch to a distinct 'processing' state
+    transcription, so the UI can switch to a distinct 'processing' state
     once the user's voice input has been accepted."""
 
     def test_processing_callback_fires_before_end_callback(self):

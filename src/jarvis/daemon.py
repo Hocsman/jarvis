@@ -30,6 +30,7 @@ from .memory.conversation import DialogueMemory, update_diary_from_dialogue_memo
 from .output.tts import create_tts_engine
 from .tools.registry import initialize_mcp_tools
 from .debug import debug_log
+from .state import JarvisState, get_jarvis_state
 from .listening.listener import VoiceListener
 from .utils.location import get_location_context, is_location_available
 
@@ -1395,28 +1396,16 @@ def main() -> None:
 
             def _on_dictation_start():
                 voice_thread._dictation_active = True
-                try:
-                    from desktop_app.face_widget import JarvisState, get_jarvis_state
-                    get_jarvis_state().set_state(JarvisState.DICTATING)
-                except Exception:
-                    pass
+                get_jarvis_state().set_state(JarvisState.DICTATING)
                 debug_log("dictation started — listener paused", "dictation")
 
             def _on_dictation_processing_start():
-                try:
-                    from desktop_app.face_widget import JarvisState, get_jarvis_state
-                    get_jarvis_state().set_state(JarvisState.DICTATION_PROCESSING)
-                except Exception:
-                    pass
+                get_jarvis_state().set_state(JarvisState.DICTATION_PROCESSING)
                 debug_log("dictation processing started — transcribing captured audio", "dictation")
 
             def _on_dictation_end():
                 voice_thread._dictation_active = False
-                try:
-                    from desktop_app.face_widget import JarvisState, get_jarvis_state
-                    get_jarvis_state().set_state(JarvisState.IDLE)
-                except Exception:
-                    pass
+                get_jarvis_state().set_state(JarvisState.IDLE)
                 debug_log("dictation ended — listener resumed", "dictation")
 
             dictation = _DE(

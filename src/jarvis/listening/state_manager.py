@@ -7,6 +7,7 @@ from enum import Enum
 from datetime import datetime
 
 from ..debug import debug_log
+from ..state import JarvisState, get_jarvis_state
 
 
 class ListeningState(Enum):
@@ -87,16 +88,8 @@ class StateManager:
         start_time_str = datetime.fromtimestamp(self._collect_start_time).strftime('%H:%M:%S.%f')[:-3]
         debug_log(f"collection started at {start_time_str}: '{initial_text}'", "state")
 
-        # Set face state to LISTENING
-        try:
-            from desktop_app.face_widget import get_jarvis_state, JarvisState
-            face_state_manager = get_jarvis_state()
-            face_state_manager.set_state(JarvisState.LISTENING)
-            debug_log("face state set to LISTENING (collection started)", "state")
-        except ImportError:
-            pass
-        except Exception as e:
-            debug_log(f"failed to set face state to LISTENING: {e}", "state")
+        get_jarvis_state().set_state(JarvisState.LISTENING)
+        debug_log("state set to LISTENING (collection started)", "state")
 
     def add_to_collection(self, text: str) -> None:
         """
@@ -142,7 +135,7 @@ class StateManager:
         else:
             debug_log(f"collection cleared: '{query}'", "state")
 
-        # Note: Don't set face state here - it will be set to THINKING or ASLEEP by caller
+        # Note: Don't set the published state here - it will be set to THINKING or ASLEEP by caller
 
         return query
 
@@ -305,17 +298,8 @@ class StateManager:
             expiry_time_str = datetime.fromtimestamp(expiry_time).strftime('%H:%M:%S.%f')[:-3]
             debug_log(f"hot window expired (timer) at {expiry_time_str} after {duration:.2f}s", "state")
 
-            # Set face state to IDLE
-            try:
-                from desktop_app.face_widget import get_jarvis_state, JarvisState
-                face_state_manager = get_jarvis_state()
-                face_state_manager.set_state(JarvisState.IDLE)
-                debug_log("face state set to IDLE (hot window timer expiry)", "state")
-            except ImportError:
-                # Desktop app not available (headless mode)
-                pass
-            except Exception as e:
-                debug_log(f"failed to set face state to IDLE: {e}", "state")
+            get_jarvis_state().set_state(JarvisState.IDLE)
+            debug_log("state set to IDLE (hot window timer expiry)", "state")
 
             # Always show user-facing output
             try:
@@ -371,32 +355,23 @@ class StateManager:
                 self._state = ListeningState.HOT_WINDOW
                 self._hot_window_start_time = time.time()
 
-            # The window is measured from this instant. Telling the face and
-            # the console comes after, and the first time in a process that
-            # imports the desktop widget: a clock started after that work
-            # would make the window longer on a cold process than on a warm
-            # one.
+            # The window is measured from this instant. Publishing the state
+            # and telling the console come after: a clock started after that
+            # work would make the window as long as the work is slow (a state
+            # file on a slow disk, a console that blocks).
             self._schedule_hot_window_expiry()
 
             activation_time_str = datetime.fromtimestamp(self._hot_window_start_time).strftime('%H:%M:%S.%f')[:-3]
             debug_log(f"hot window activated at {activation_time_str} for {self.hot_window_seconds}s (after {self.echo_tolerance}s echo delay)", "state")
 
             # A window shorter than the announcement below can close before
-            # the announcement is made; the face and the console then keep
-            # what the expiry told them.
+            # the announcement is made; the published state and the console
+            # then keep what the expiry told them.
             if self.get_state() != ListeningState.HOT_WINDOW:
                 return
 
-            # Set face state to LISTENING
-            try:
-                from desktop_app.face_widget import get_jarvis_state, JarvisState
-                face_state_manager = get_jarvis_state()
-                face_state_manager.set_state(JarvisState.LISTENING)
-                debug_log("face state set to LISTENING (hot window activated)", "state")
-            except ImportError:
-                pass
-            except Exception as e:
-                debug_log(f"failed to set face state to LISTENING: {e}", "state")
+            get_jarvis_state().set_state(JarvisState.LISTENING)
+            debug_log("state set to LISTENING (hot window activated)", "state")
 
             # Always show user-facing output
             try:
@@ -447,16 +422,9 @@ class StateManager:
 
             debug_log("hot window expired (poll)", "state")
 
-            # Set face state to IDLE (awake and ready, waiting for wake word)
-            try:
-                from desktop_app.face_widget import get_jarvis_state, JarvisState
-                face_state_manager = get_jarvis_state()
-                face_state_manager.set_state(JarvisState.IDLE)
-                debug_log("face state set to IDLE (hot window poll expiry)", "state")
-            except ImportError:
-                pass
-            except Exception as e:
-                debug_log(f"failed to set face state to IDLE: {e}", "state")
+            # Awake and ready, waiting for the wake word
+            get_jarvis_state().set_state(JarvisState.IDLE)
+            debug_log("state set to IDLE (hot window poll expiry)", "state")
 
             # Always show user-facing output
             try:
@@ -484,16 +452,9 @@ class StateManager:
 
             debug_log("hot window manually expired", "state")
 
-            # Set face state to IDLE (awake and ready, waiting for wake word)
-            try:
-                from desktop_app.face_widget import get_jarvis_state, JarvisState
-                face_state_manager = get_jarvis_state()
-                face_state_manager.set_state(JarvisState.IDLE)
-                debug_log("face state set to IDLE (hot window manually expired)", "state")
-            except ImportError:
-                pass
-            except Exception as e:
-                debug_log(f"failed to set face state to IDLE: {e}", "state")
+            # Awake and ready, waiting for the wake word
+            get_jarvis_state().set_state(JarvisState.IDLE)
+            debug_log("state set to IDLE (hot window manually expired)", "state")
 
             # Always show user-facing output
             try:

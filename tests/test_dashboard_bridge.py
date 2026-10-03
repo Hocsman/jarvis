@@ -101,7 +101,7 @@ class TestStateMapping:
 
     @pytest.mark.unit
     def test_voice_state_maps_to_accent(self, _qapp) -> None:
-        from desktop_app.face_widget import get_jarvis_state, JarvisState
+        from jarvis.state import get_jarvis_state, JarvisState
         b = _make_bridge()
         states = []
         b.stateChanged.connect(states.append)

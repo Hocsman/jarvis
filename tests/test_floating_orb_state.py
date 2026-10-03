@@ -35,7 +35,7 @@ class TestJarvisToOrbMapping:
         """No JarvisState value may fall through unmapped — each must
         resolve to a defined OrbState so the orb is never visually
         stranded by a state the pipeline actually emits."""
-        from desktop_app.face_widget import JarvisState
+        from jarvis.state import JarvisState
         from desktop_app.orb.state_controller import _JARVIS_TO_ORB, map_jarvis_to_orb, OrbState
 
         for js in JarvisState:
@@ -68,7 +68,7 @@ class TestProviderDrivenTracking:
 
     @pytest.mark.unit
     def test_controller_follows_jarvis_state(self, _qapp) -> None:
-        from desktop_app.face_widget import get_jarvis_state, JarvisState
+        from jarvis.state import get_jarvis_state, JarvisState
         from desktop_app.orb.state_controller import StateController, OrbState
 
         ctrl = StateController(jarvis_state_provider=lambda: get_jarvis_state().state)
