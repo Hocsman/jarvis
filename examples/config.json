@@ -92,6 +92,7 @@
   "hot_window_enabled": true,
   "hot_window_seconds": 3.0,
   "low_power_mode": false,
+  "update_check_enabled": true,
   "echo_energy_threshold": 2.0,
   "echo_tolerance": 0.3,
   "reminders_enabled": true,
