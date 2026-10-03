@@ -13,6 +13,7 @@ from __future__ import annotations
 import email
 import importlib
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -354,6 +355,9 @@ class TestDependencyClosure:
 
 # ── the file ────────────────────────────────────────────────────────────────
 
+ENVIRONMENT = "testos, Python 9.9"
+
+
 def _entry(name, version="1.0", licence="MIT", required_by=(), home=None, installed=True):
     return gen.Entry(
         name=name, version=version, licence=licence,
@@ -371,37 +375,45 @@ class TestRenderedNotices:
         ]
 
     def test_every_entry_survives_a_round_trip(self):
-        parsed = gen.parse_notices(gen.render(self._entries()))
+        parsed = gen.parse_notices(gen.render(self._entries(), ENVIRONMENT))
         assert set(parsed) == {"alpha", "beta", "delta"}
         assert (parsed["alpha"].version, parsed["alpha"].licence) == ("1.0", "GPL-3.0-or-later")
         assert parsed["alpha"].home == "https://example.invalid/alpha"
 
     def test_copyleft_entries_are_marked_in_their_own_entry(self):
-        parsed = gen.parse_notices(gen.render(self._entries()))
+        parsed = gen.parse_notices(gen.render(self._entries(), ENVIRONMENT))
         assert parsed["alpha"].copyleft == ("GPL",)
         assert parsed["delta"].copyleft == ("LGPL",)
         assert parsed["beta"].copyleft == ()
 
     def test_copyleft_entries_are_gathered_up_front_too(self):
-        text = gen.render(self._entries())
+        text = gen.render(self._entries(), ENVIRONMENT)
         head = text.split(gen.ALL_COMPONENTS_HEADING)[0]
         assert "alpha" in head and "delta" in head
         assert "beta" not in head
 
     def test_the_output_does_not_depend_on_the_order_of_the_input(self):
         entries = self._entries()
-        assert gen.render(entries) == gen.render(list(reversed(entries)))
+        assert gen.render(entries, ENVIRONMENT) == gen.render(list(reversed(entries)), ENVIRONMENT)
 
     def test_nothing_in_it_changes_from_one_run_to_the_next(self):
-        assert gen.render(self._entries()) == gen.render(self._entries())
+        assert gen.render(self._entries(), ENVIRONMENT) == gen.render(self._entries(), ENVIRONMENT)
 
     def test_the_text_states_no_licensing_conclusion(self):
-        head = gen.render(self._entries()).split(gen.ALL_COMPONENTS_HEADING)[0].lower()
+        head = gen.render(self._entries(), ENVIRONMENT).split(gen.ALL_COMPONENTS_HEADING)[0].lower()
         for claim in ("compatible", "incompatible", "permitted", "you may", "we grant", "legal advice"):
             assert claim not in head
 
+    def test_the_text_names_the_environment_the_inventory_was_read_from(self):
+        text = gen.render(self._entries(), ENVIRONMENT)
+        assert gen.parse_environment(text) == ENVIRONMENT
+
+    def test_the_text_says_other_platforms_can_differ(self):
+        head = gen.render(self._entries(), ENVIRONMENT).split(gen.ALL_COMPONENTS_HEADING)[0].lower()
+        assert "other platform" in head
+
     def test_an_absent_package_is_listed_as_not_read(self):
-        text = gen.render([_entry("ghost", licence=gen.NOT_INSTALLED, installed=False)])
+        text = gen.render([_entry("ghost", licence=gen.NOT_INSTALLED, installed=False)], ENVIRONMENT)
         assert gen.NOT_INSTALLED in text
 
 
@@ -446,6 +458,18 @@ class TestGenerate:
         first = capsys.readouterr().out.splitlines()[0]
         assert not first.isascii(), "user-facing output leads with an emoji"
 
+    def test_main_records_the_platform_and_python_it_ran_on(self, site):
+        _install(site, "zzalpha", licence="MIT")
+        root = _project(
+            site, requirements="zzalpha\n", spec=SPEC, sources={"app.py": "import zzalpha\n"}
+        )
+        out = site / "out" / gen.NOTICES_NAME
+        gen.main(["--project-root", str(root), "--output", str(out)])
+        recorded = gen.parse_environment(out.read_text(encoding="utf-8"))
+        assert recorded == gen.current_environment()
+        assert sys.platform in recorded
+        assert f"{sys.version_info.major}.{sys.version_info.minor}" in recorded
+
 
 # ── the committed file ──────────────────────────────────────────────────────
 
@@ -473,6 +497,12 @@ class TestCommittedNotices:
             if gen.copyleft_marks(entry.licence) != entry.copyleft
         ]
         assert not unmarked
+
+    def test_the_file_says_which_platform_and_python_it_describes(self):
+        text = (ROOT / gen.NOTICES_NAME).read_text(encoding="utf-8")
+        recorded = gen.parse_environment(text)
+        assert recorded, "the file does not name the environment it was generated in"
+        assert re.search(r"\d+\.\d+", recorded), "no Python version recorded"
 
     def test_the_marked_entries_are_gathered_in_the_opening_section(self):
         text = (ROOT / gen.NOTICES_NAME).read_text(encoding="utf-8")
