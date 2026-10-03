@@ -19,7 +19,7 @@ Any code change must either adhere to our spec files perfectly or you should ask
 | `src/jarvis/output/streaming.spec.md` | Speaking each sentence as it closes, before the reply is finished: segmentation, the echo reference, the failure path | Echo detection keeps seeing the whole reply; one reply is one turn, so the hot window opens once; `stop` drops every queued chunk; a backend that does not stream falls back to speaking the whole reply |
 | `src/jarvis/reply/reply.spec.md` | LLM reply generation, tool use, profiles | Tools return raw data; profiles handle formatting |
 | `src/jarvis/reply/evaluator.spec.md` | **Deprecated** — evaluator no longer runs in the reply engine; preserved for reference | Replaced by the planner; see planner.spec.md |
-| `src/jarvis/reply/planner.spec.md` | Task-list planner: pre-loop query decomposition + direct-exec step resolver for small models | Fail-open; rides warm small model chain; advisory for large models, direct-exec for small |
+| `src/jarvis/reply/planner.spec.md` | Task-list planner: pre-loop query decomposition + direct-exec step resolver for small models | Fail-open; tracks the chat model (only the router rides the warm small model); advisory for large models, direct-exec for small |
 | `src/jarvis/tools/policy.spec.md` | Risk vocabulary, verdicts, `yuba/outils.md`, the gate at the tool funnel, the action ledger | Unclassified is destructive; the file is generated once then belongs to the user; refusing is not failing; the ledger records what was done, never what was seen |
 | `src/jarvis/objectifs/objectifs.spec.md` | Multi-step goals: the `objectifs.md` page, the four tools, the completion judge (LLM #18), the prompt line, the tab | Nothing is written by deduction: every line carries its source, the judge's vocabulary cannot say "finished", and its verdict has no writer. No schedule and no envelope in this slice — a goal is remembered, never run |
 | `src/jarvis/appris/appris.spec.md` | Propositions issues du journal : la page `appris.md`, `reviewLearnings`, la récolte à la coche, le contexte LLM #19, le mot `confirmé`, l'axe `reads_his_life` | Une proposition n'est pas une croyance et n'atteint aucun prompt ; la coche n'a pas de valeur par défaut et le temps n'est pas un acteur ; aucun modèle sur le chemin d'écriture ; ce qui part est la ligne telle qu'il l'a réécrite ; un refus est aussi durable qu'un accord |
@@ -34,9 +34,9 @@ Any code change must either adhere to our spec files perfectly or you should ask
 | `src/jarvis/tools/builtin/time_tool.spec.md` | getTime tool: time and date lookup across cities and timezones | Deterministic; LLM-free; no network calls for bare IANA zones or local time |
 | `src/jarvis/utils/location.spec.md` | GeoIP location detection | Privacy-first; local GeoLite2 DB only |
 | `src/jarvis/memory/core.spec.md` | The two files the user owns: `profil.md`, `regles.md`, their grammar, the source on every line, retiring by strikethrough | Written only when he asks or corrects, never by deduction; the file is his and hand edits win |
-| `src/jarvis/memory/graph.spec.md` | Node graph memory (v2), self-organising tree, UI explorer | Dynamic structure; access-aware; auto-split/merge (future) |
+| `src/jarvis/memory/graph.spec.md` | Node graph memory (v2), self-organising tree, UI explorer | Dynamic structure; access-aware; auto-split on write is built, auto-merge and housekeeping are not |
 | `src/jarvis/memory/provenance.spec.md` | Where a world fact came from: the `web`/`outil`/`inconnu` vocabulary, the tool-bearing window, the gate on extraction | Provenance is a property of the transcript, not a judgement about the prose; a window with no tool holds no lookup, so it yields nothing and the model is not asked; there is no word for "the model said it" because such a fact is not written; `inconnu` exists so the migration never lies |
-| `src/jarvis/memory/summariser.spec.md` | Diary summariser prompt contract, hygiene rules (deflection, attribution, topic separation), post-process scrub, and bulk-sweep clean button | Two-layer defence: prompt + deterministic scrub; corrupted summaries poison every downstream consumer |
+| `src/jarvis/memory/summariser.spec.md` | Diary summariser prompt contract, hygiene rules (deflection, attribution, topic separation), and bulk-sweep clean button | The prompt is the only write-time defence, with no post-process scrub; corrupted summaries poison every downstream consumer |
 | `src/jarvis/memory/recall_gate.spec.md` | Deterministic skip-enrichment heuristic when the hot window covers a follow-up | Fail-open; language-agnostic via `\w{3,}` + `re.UNICODE`; planner intent always wins |
 | `src/jarvis/llm/llm.spec.md` | Pluggable LLM backend abstraction: `LLMBackend` ABC, `OllamaBackend`, `OpenAICompatibleBackend`, factory dispatch on `llm_provider`, `get_embedding_backend` override, v2 config migration, function-style helpers | Provider-agnostic interface so Jarvis can run on Ollama or on an OpenAI-compatible server (LM Studio / oMLX / llama.cpp / vLLM / LocalAI); `llm_provider` accepts those two values only; every call site resolves its backend through the factory; backends fail soft; private contexts go to local Ollama whenever a model is pinned |
 
@@ -79,7 +79,7 @@ Sync local `develop` with `fork/develop` first so you ship the real head. Releas
 The project uses a micromamba environment at `.mamba_env/`. Always activate it before running builds, tests, or the app:
 
 ```bash
-eval "$(micromamba.exe shell hook --shell bash)" && micromamba activate "C:/Users/baris/projects/jarvis/.mamba_env"
+eval "$(micromamba.exe shell hook --shell bash)" && micromamba activate "$(git rev-parse --show-toplevel)/.mamba_env"
 ```
 
 ## README Maintenance
