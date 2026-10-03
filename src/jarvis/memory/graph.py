@@ -3,8 +3,8 @@
 
 A self-organising node graph that stores the assistant's accumulated world
 knowledge — anything learned during conversations that it wouldn't already know.
-Three fast-access entry points (recent nodes, top nodes, root node) ensure the
-most relevant knowledge is always reachable without exhaustive search.
+Placement descends greedily from a fixed branch root; recent nodes and top
+nodes stay available as ranked queries.
 
 See graph.spec.md for the full specification.
 """
@@ -287,8 +287,8 @@ class GraphMemoryStore:
     """
     Self-organising node graph for persistent memory.
 
-    Backed by SQLite with thread-safe access. Provides three entry points
-    for fast retrieval: recent nodes, top nodes, and the root node.
+    Backed by SQLite with thread-safe access. Answers ranked queries (recent
+    nodes, top nodes) and tree queries (children, subtree, ancestors).
     """
 
     def __init__(self, db_path: str) -> None:
@@ -705,7 +705,7 @@ class GraphMemoryStore:
             )
             self.conn.commit()
 
-    # ── Entry points ────────────────────────────────────────────────────
+    # ── Ranked queries ──────────────────────────────────────────────────
 
     def get_recent_nodes(self, limit: int = RECENT_NODES_COUNT) -> list[MemoryNode]:
         """Get the most recently accessed nodes."""
