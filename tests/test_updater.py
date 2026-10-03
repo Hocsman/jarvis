@@ -1,16 +1,25 @@
 """Tests for auto-update functionality."""
 
+import hashlib
+import json
 import os
 import shutil
 import subprocess
 import sys
 import pytest
+import requests
 from unittest.mock import patch, MagicMock
 
 from pathlib import Path
 
 from desktop_app.updater import (
+    CHECKSUMS_ASSET_NAME,
+    CHECKSUMS_MAX_BYTES,
+    DownloadSignals,
+    DownloadWorker,
+    UpdateIntegrityError,
     check_for_updates,
+    install_update,
     parse_version,
     get_platform_asset_name,
     get_last_installed_asset_id,
@@ -1468,3 +1477,592 @@ class TestPathEscaping:
         path = Path('/opt/Jarvis/Jarvis')
         escaped = _escape_shell_path(path)
         assert escaped == "'/opt/Jarvis/Jarvis'"
+
+
+# ---------------------------------------------------------------------------
+# What gets installed is what the release published
+# ---------------------------------------------------------------------------
+
+INSTALLER_NAME = "Jarvis-Windows-x64.zip"
+RELEASE_BASE = "https://github.com/Hocsman/jarvis/releases/download/v9.9.9"
+INSTALLER_URL = f"{RELEASE_BASE}/{INSTALLER_NAME}"
+CHECKSUMS_URL = f"{RELEASE_BASE}/{CHECKSUMS_ASSET_NAME}"
+
+
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _checksums_for(name: str, data: bytes) -> bytes:
+    return f"{_sha256(data)}  {name}\n".encode()
+
+
+class _FakeResponse:
+    """The slice of ``requests.Response`` the updater reads."""
+
+    def __init__(self, body: bytes, status: int = 200):
+        self._body = body
+        self.status_code = status
+        self.headers = {"content-length": str(len(body))}
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.HTTPError(f"HTTP {self.status_code}")
+
+    def json(self):
+        return json.loads(self._body)
+
+    def iter_content(self, chunk_size=1):
+        for start in range(0, len(self._body), chunk_size):
+            yield self._body[start:start + chunk_size]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _FakeGitHub:
+    """Serves release assets by URL and remembers every URL it was asked for.
+
+    A value that is an exception is raised instead of served, which is how a
+    host that is down looks to ``requests``. An unknown URL is a 404.
+    """
+
+    def __init__(self, files):
+        self.files = files
+        self.requested = []
+
+    def get(self, url, **kwargs):
+        self.requested.append(url)
+        served = self.files.get(url)
+        if isinstance(served, Exception):
+            raise served
+        if served is None:
+            return _FakeResponse(b"", status=404)
+        return _FakeResponse(served)
+
+
+def _release(*, checksums_url=CHECKSUMS_URL, asset_name=INSTALLER_NAME) -> ReleaseInfo:
+    return ReleaseInfo(
+        asset_id=1,
+        tag_name="v9.9.9",
+        version="9.9.9",
+        name="v9.9.9",
+        prerelease=False,
+        html_url="https://github.com/Hocsman/jarvis/releases/tag/v9.9.9",
+        download_url=f"{RELEASE_BASE}/{asset_name}",
+        asset_name=asset_name,
+        asset_size=0,
+        release_notes="",
+        checksums_url=checksums_url,
+    )
+
+
+def _download(github, dest, release=None):
+    """Run the download the way the update dialog does; report what the worker said."""
+    signals = DownloadSignals()
+    said = {"completed": [], "errors": []}
+    signals.completed.connect(lambda path, digest: said["completed"].append((path, digest)))
+    signals.error.connect(lambda message: said["errors"].append(message))
+    worker = DownloadWorker(release or _release(), dest, signals)
+    with patch("requests.get", side_effect=github.get):
+        worker.run()
+    return said
+
+
+def _wait_until(predicate, timeout=15.0):
+    from PyQt6.QtTest import QTest
+
+    waited = 0.0
+    while not predicate() and waited < timeout:
+        QTest.qWait(20)
+        waited += 0.02
+    return predicate()
+
+
+@pytest.fixture
+def platform_installers(monkeypatch):
+    """Stand in for the three platform installers and record each archive handed to one.
+
+    They are what ``install_update`` dispatches to, and each one ends by
+    running something the archive contained, so an archive that never
+    reaches them never runs.
+    """
+    handed_over = []
+    for name in ("install_update_macos", "install_update_windows", "install_update_linux"):
+        monkeypatch.setattr(
+            f"desktop_app.updater.{name}",
+            lambda path: handed_over.append(path) or True,
+        )
+    return handed_over
+
+
+class TestDownloadIsVerifiedBeforeAnythingRuns:
+    """The worker emits ``completed`` only for bytes that match the checksum
+    the release published; every other outcome is a refusal that leaves no
+    installer on disk."""
+
+    @pytest.mark.unit
+    def test_a_download_matching_its_published_checksum_completes(self, qapp, tmp_path):
+        installer = b"genuine installer bytes " * 4096
+        github = _FakeGitHub({
+            INSTALLER_URL: installer,
+            CHECKSUMS_URL: _checksums_for(INSTALLER_NAME, installer),
+        })
+        dest = tmp_path / INSTALLER_NAME
+
+        said = _download(github, dest)
+
+        assert said["errors"] == []
+        assert said["completed"] == [(str(dest), _sha256(installer))]
+        assert dest.read_bytes() == installer
+
+    @pytest.mark.unit
+    def test_a_download_that_differs_from_its_checksum_is_refused_and_deleted(self, qapp, tmp_path):
+        published = b"the installer the release published"
+        github = _FakeGitHub({
+            INSTALLER_URL: b"something else that arrived instead",
+            CHECKSUMS_URL: _checksums_for(INSTALLER_NAME, published),
+        })
+        dest = tmp_path / INSTALLER_NAME
+
+        said = _download(github, dest)
+
+        assert said["completed"] == []
+        assert len(said["errors"]) == 1 and said["errors"][0]
+        assert not dest.exists()
+
+    @pytest.mark.unit
+    def test_a_release_without_a_checksum_file_is_refused_before_anything_is_downloaded(self, qapp, tmp_path):
+        github = _FakeGitHub({INSTALLER_URL: b"an installer nobody can vouch for"})
+        dest = tmp_path / INSTALLER_NAME
+
+        said = _download(github, dest, _release(checksums_url=None))
+
+        assert said["completed"] == []
+        assert len(said["errors"]) == 1
+        assert CHECKSUMS_ASSET_NAME in said["errors"][0]
+        assert INSTALLER_URL not in github.requested
+        assert not dest.exists()
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("served", [
+        pytest.param(requests.ConnectionError("host unreachable"), id="unreachable"),
+        pytest.param(None, id="not-found"),
+        pytest.param(b"", id="empty"),
+        pytest.param(b"not a checksum file at all\n", id="garbage"),
+        pytest.param(b"\xff\xfe\x00 not text", id="not-text"),
+        pytest.param(b"0" * (CHECKSUMS_MAX_BYTES + 1), id="oversized"),
+    ])
+    def test_a_checksum_file_that_cannot_be_read_refuses_the_update(self, qapp, tmp_path, served):
+        github = _FakeGitHub({INSTALLER_URL: b"installer", CHECKSUMS_URL: served})
+        dest = tmp_path / INSTALLER_NAME
+
+        said = _download(github, dest)
+
+        assert said["completed"] == []
+        assert len(said["errors"]) == 1
+        assert INSTALLER_URL not in github.requested
+        assert not dest.exists()
+
+    @pytest.mark.unit
+    def test_a_checksum_file_that_lists_other_files_only_refuses_the_update(self, qapp, tmp_path):
+        installer = b"installer"
+        github = _FakeGitHub({
+            INSTALLER_URL: installer,
+            CHECKSUMS_URL: _checksums_for("Jarvis-Linux-x64.tar.gz", installer),
+        })
+        dest = tmp_path / INSTALLER_NAME
+
+        said = _download(github, dest)
+
+        assert said["completed"] == []
+        assert CHECKSUMS_ASSET_NAME in said["errors"][0]
+        assert not dest.exists()
+
+    @pytest.mark.unit
+    def test_a_checksum_file_that_contradicts_itself_refuses_the_update(self, qapp, tmp_path):
+        installer = b"installer"
+        listing = (
+            f"{_sha256(installer)}  {INSTALLER_NAME}\n"
+            f"{_sha256(b'another file')}  {INSTALLER_NAME}\n"
+        ).encode()
+        github = _FakeGitHub({INSTALLER_URL: installer, CHECKSUMS_URL: listing})
+        dest = tmp_path / INSTALLER_NAME
+
+        said = _download(github, dest)
+
+        assert said["completed"] == []
+        assert CHECKSUMS_ASSET_NAME in said["errors"][0]
+        assert INSTALLER_URL not in github.requested
+        assert not dest.exists()
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("render", [
+        pytest.param(lambda d, n: f"{d}  {n}\n", id="text-mode"),
+        pytest.param(lambda d, n: f"{d} *{n}\n", id="binary-mode"),
+        pytest.param(lambda d, n: f"{d.upper()}  {n}\n", id="capitals"),
+        pytest.param(lambda d, n: f"{d}  {n}\r\n", id="crlf"),
+        pytest.param(lambda d, n: f"{d}  {n}", id="no-final-newline"),
+        pytest.param(lambda d, n: f"{'a' * 64}  Jarvis-Linux-x64.tar.gz\n{d}  {n}\n", id="among-other-files"),
+        pytest.param(lambda d, n: f"﻿{d}  {n}\n", id="byte-order-mark"),
+    ])
+    def test_the_formats_sha256sum_writes_are_all_read(self, qapp, tmp_path, render):
+        installer = b"installer bytes"
+        listing = render(_sha256(installer), INSTALLER_NAME).encode("utf-8")
+        github = _FakeGitHub({INSTALLER_URL: installer, CHECKSUMS_URL: listing})
+        dest = tmp_path / INSTALLER_NAME
+
+        said = _download(github, dest)
+
+        assert said["errors"] == []
+        assert said["completed"] == [(str(dest), _sha256(installer))]
+
+
+class TestInstallRechecksTheArchive:
+    """``install_update`` is the one place that hands an archive to something
+    that runs it, so it checks the archive again at that moment: the file sits
+    on disk while the session is saved, and what was verified earlier is not
+    what is about to run unless the bytes are still the same."""
+
+    @pytest.mark.unit
+    def test_an_archive_matching_its_digest_is_handed_to_the_platform_installer(self, tmp_path, platform_installers):
+        archive = tmp_path / "update.zip"
+        archive.write_bytes(b"verified bytes")
+
+        assert install_update(archive, _sha256(b"verified bytes")) is True
+        assert platform_installers == [archive]
+
+    @pytest.mark.unit
+    def test_an_archive_that_changed_after_it_was_verified_is_never_launched(self, tmp_path, platform_installers):
+        archive = tmp_path / "update.zip"
+        archive.write_bytes(b"verified bytes")
+        digest = _sha256(b"verified bytes")
+        archive.write_bytes(b"swapped after the check")
+
+        with pytest.raises(UpdateIntegrityError):
+            install_update(archive, digest)
+
+        assert platform_installers == []
+
+    @pytest.mark.unit
+    def test_a_missing_archive_is_never_launched(self, tmp_path, platform_installers):
+        with pytest.raises(UpdateIntegrityError):
+            install_update(tmp_path / "gone.zip", _sha256(b"anything"))
+
+        assert platform_installers == []
+
+    @pytest.mark.unit
+    def test_the_digest_may_be_written_in_capitals(self, tmp_path, platform_installers):
+        archive = tmp_path / "update.zip"
+        archive.write_bytes(b"verified bytes")
+
+        assert install_update(archive, _sha256(b"verified bytes").upper()) is True
+
+
+class TestUpdateDialogRefusesWhatItCannotVerify:
+    """Through the dialog the user sees: a refusal is announced, the download
+    is gone from disk, and the session is not stopped to install it."""
+
+    def _run_dialog(self, qapp, monkeypatch, github, pre_install=None):
+        from types import SimpleNamespace
+
+        from desktop_app.update_dialog import UpdateProgressDialog
+
+        monkeypatch.setattr("desktop_app.update_dialog.save_installed_asset_id", lambda _id: None)
+        # The dialog waits half a second before installing and a second and a
+        # half before closing, for the user's benefit. A timer still pending
+        # when the test ends would fire on a dialog Qt has already deleted,
+        # which aborts the whole process, so the delays run out at once.
+        monkeypatch.setattr(
+            "desktop_app.update_dialog.QTimer",
+            SimpleNamespace(singleShot=lambda _ms, callback: callback()),
+        )
+        session_saved = []
+
+        def save_session():
+            session_saved.append(True)
+            if pre_install:
+                pre_install(dialog)
+
+        dialog = UpdateProgressDialog(_release(), pre_install_callback=save_session)
+        with patch("requests.get", side_effect=github.get):
+            dialog.start_download()
+            temp_dir = dialog._temp_dir
+            finished = _wait_until(
+                lambda: dialog.title_label.text() in ("Update Failed", "Update Complete")
+            )
+            dialog.download_worker.wait(5000)
+        assert finished, "the dialog never settled"
+        return dialog, temp_dir, session_saved
+
+    @pytest.mark.unit
+    def test_a_download_that_does_not_match_is_announced_deleted_and_never_installed(
+        self, qapp, monkeypatch, platform_installers
+    ):
+        github = _FakeGitHub({
+            INSTALLER_URL: b"tampered bytes",
+            CHECKSUMS_URL: _checksums_for(INSTALLER_NAME, b"the real bytes"),
+        })
+
+        dialog, temp_dir, session_saved = self._run_dialog(qapp, monkeypatch, github)
+
+        assert dialog.title_label.text() == "Update Failed"
+        assert not temp_dir.exists()
+        assert platform_installers == []
+        assert session_saved == []
+
+    @pytest.mark.unit
+    def test_a_download_that_matches_is_installed(self, qapp, monkeypatch, platform_installers):
+        installer = b"genuine bytes"
+        github = _FakeGitHub({
+            INSTALLER_URL: installer,
+            CHECKSUMS_URL: _checksums_for(INSTALLER_NAME, installer),
+        })
+
+        dialog, temp_dir, session_saved = self._run_dialog(qapp, monkeypatch, github)
+
+        assert dialog.title_label.text() == "Update Complete"
+        assert [path.name for path in platform_installers] == [INSTALLER_NAME]
+        assert session_saved == [True]
+
+    @pytest.mark.unit
+    def test_an_archive_swapped_between_download_and_install_is_announced_and_deleted(
+        self, qapp, monkeypatch, platform_installers
+    ):
+        installer = b"genuine bytes"
+        github = _FakeGitHub({
+            INSTALLER_URL: installer,
+            CHECKSUMS_URL: _checksums_for(INSTALLER_NAME, installer),
+        })
+
+        def swap_the_archive(dialog):
+            dialog.download_path.write_bytes(b"swapped while the session was saved")
+
+        dialog, temp_dir, session_saved = self._run_dialog(
+            qapp, monkeypatch, github, pre_install=swap_the_archive
+        )
+
+        assert dialog.title_label.text() == "Update Failed"
+        assert not temp_dir.exists()
+        assert platform_installers == []
+        # Only this refusal comes after the session was saved: the second hash
+        # runs once the pre-install callback has returned.
+        assert session_saved == [True]
+
+    @pytest.mark.unit
+    def test_an_install_time_refusal_is_written_to_the_debug_log(self, qapp, monkeypatch, platform_installers):
+        installer = b"genuine bytes"
+        github = _FakeGitHub({
+            INSTALLER_URL: installer,
+            CHECKSUMS_URL: _checksums_for(INSTALLER_NAME, installer),
+        })
+        logged = []
+        monkeypatch.setattr(
+            "jarvis.debug.debug_log",
+            lambda message, category="debug": logged.append((category, message)),
+        )
+
+        def swap_the_archive(dialog):
+            dialog.download_path.write_bytes(b"swapped while the session was saved")
+
+        dialog, _, _ = self._run_dialog(qapp, monkeypatch, github, pre_install=swap_the_archive)
+
+        shown_to_the_user = dialog.status_label.text().removeprefix("Error: ")
+        assert shown_to_the_user
+        assert any(category == "updater" and shown_to_the_user in message for category, message in logged)
+
+
+class TestChecksumFileIsDiscovered:
+    """``check_for_updates`` hands the download its checksum file: the asset
+    named ``SHA256SUMS.txt`` in the same release as the installer."""
+
+    def _release_json(self, tag, assets, prerelease=False):
+        return {
+            "id": 1, "tag_name": tag, "name": tag, "draft": False,
+            "prerelease": prerelease,
+            "html_url": f"https://github.com/Hocsman/jarvis/releases/tag/{tag}",
+            "body": "notes", "assets": assets,
+        }
+
+    def _assets(self, with_checksums):
+        assets = [{"id": 10, "name": INSTALLER_NAME, "browser_download_url": INSTALLER_URL, "size": 1000}]
+        if with_checksums:
+            assets.append({"id": 11, "name": CHECKSUMS_ASSET_NAME,
+                           "browser_download_url": CHECKSUMS_URL, "size": 100})
+        return assets
+
+    def _check(self, releases, version, channel):
+        from desktop_app.updater import GITHUB_API_URL
+
+        github = _FakeGitHub({GITHUB_API_URL: json.dumps(releases).encode()})
+        with patch("desktop_app.updater.get_version", return_value=(version, channel)), \
+             patch("desktop_app.updater.get_platform_asset_name", return_value=INSTALLER_NAME), \
+             patch("requests.get", side_effect=github.get):
+            return check_for_updates()
+
+    @pytest.mark.unit
+    def test_a_stable_release_hands_over_its_checksum_file(self):
+        status = self._check([self._release_json("v9.9.9", self._assets(True))], "1.0.0", "stable")
+
+        assert status.latest_release.download_url == INSTALLER_URL
+        assert status.latest_release.checksums_url == CHECKSUMS_URL
+
+    @pytest.mark.unit
+    def test_the_rolling_develop_release_hands_over_its_checksum_file(self):
+        releases = [self._release_json("latest", self._assets(True), prerelease=True)]
+
+        status = self._check(releases, "dev-1234567", "develop")
+
+        assert status.latest_release.checksums_url == CHECKSUMS_URL
+
+    @pytest.mark.unit
+    def test_a_release_that_publishes_no_checksum_file_has_none_to_hand_over(self):
+        status = self._check([self._release_json("v9.9.9", self._assets(False))], "1.0.0", "stable")
+
+        assert status.update_available is True
+        assert status.latest_release.checksums_url is None
+
+
+# ---------------------------------------------------------------------------
+# The automatic check can be switched off
+# ---------------------------------------------------------------------------
+
+def _write_config(tmp_path, monkeypatch, values):
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(values), encoding="utf-8")
+    monkeypatch.setenv("JARVIS_CONFIG_PATH", str(path))
+
+
+class TestAutomaticCheckOptOut:
+    """With ``update_check_enabled`` off the app sends no update check on its own.
+    A check the user asks for from the tray is theirs, and always goes out."""
+
+    def _check(self, **kwargs):
+        from desktop_app.updater import GITHUB_API_URL
+
+        github = _FakeGitHub({GITHUB_API_URL: b"[]"})
+        with patch("desktop_app.updater.get_version", return_value=("1.0.0", "stable")), \
+             patch("requests.get", side_effect=github.get):
+            status = check_for_updates(**kwargs)
+        return status, github
+
+    @pytest.mark.unit
+    def test_a_disabled_automatic_check_sends_no_request(self, tmp_path, monkeypatch):
+        _write_config(tmp_path, monkeypatch, {"update_check_enabled": False})
+
+        status, github = self._check(automatic=True)
+
+        assert github.requested == []
+        assert status.update_available is False
+        assert status.error is None
+        assert status.current_version == "1.0.0"
+
+    @pytest.mark.unit
+    def test_the_automatic_check_goes_out_by_default(self, tmp_path, monkeypatch):
+        _write_config(tmp_path, monkeypatch, {})
+
+        _, github = self._check(automatic=True)
+
+        assert len(github.requested) == 1
+
+    @pytest.mark.unit
+    def test_a_check_the_user_asked_for_ignores_the_opt_out(self, tmp_path, monkeypatch):
+        _write_config(tmp_path, monkeypatch, {"update_check_enabled": False})
+
+        _, github = self._check()
+
+        assert len(github.requested) == 1
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("written", [False, "false", "False", "0", "no", "off", 0])
+    def test_every_way_of_writing_off_turns_it_off(self, tmp_path, monkeypatch, written):
+        _write_config(tmp_path, monkeypatch, {"update_check_enabled": written})
+
+        _, github = self._check(automatic=True)
+
+        assert github.requested == []
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("written", [True, "true", "yes", 1])
+    def test_every_way_of_writing_on_leaves_it_on(self, tmp_path, monkeypatch, written):
+        _write_config(tmp_path, monkeypatch, {"update_check_enabled": written})
+
+        _, github = self._check(automatic=True)
+
+        assert len(github.requested) == 1
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("failure", [OSError("config.json is locked"), ValueError("not valid JSON")])
+    def test_an_unreadable_setting_counts_as_off(self, monkeypatch, failure):
+        def unreadable():
+            raise failure
+
+        monkeypatch.setattr("desktop_app.updater.load_settings", unreadable)
+
+        _, github = self._check(automatic=True)
+
+        assert github.requested == []
+
+    @pytest.mark.unit
+    def test_an_unreadable_setting_does_not_stop_a_check_the_user_asked_for(self, monkeypatch):
+        def unreadable():
+            raise OSError("config.json is locked")
+
+        monkeypatch.setattr("desktop_app.updater.load_settings", unreadable)
+
+        _, github = self._check()
+
+        assert len(github.requested) == 1
+
+    @pytest.mark.unit
+    def test_the_tray_startup_check_honours_the_opt_out(self, tmp_path, monkeypatch):
+        """The tray's own check runs with no dialog to show only at startup;
+        the menu action passes the flag that asks for feedback."""
+        from types import SimpleNamespace
+
+        from desktop_app.app import JarvisSystemTray
+        from desktop_app.updater import GITHUB_API_URL
+
+        _write_config(tmp_path, monkeypatch, {"update_check_enabled": False})
+        github = _FakeGitHub({GITHUB_API_URL: b"[]"})
+        monkeypatch.setattr("desktop_app.update_dialog.show_no_update_dialog", lambda *_a, **_k: None)
+
+        with patch("desktop_app.updater.get_version", return_value=("1.0.0", "stable")), \
+             patch("desktop_app.updater.is_frozen", return_value=True), \
+             patch("requests.get", side_effect=github.get):
+            JarvisSystemTray.check_for_updates(SimpleNamespace(), show_no_update_dialog=False)
+            assert github.requested == []
+
+            JarvisSystemTray.check_for_updates(SimpleNamespace(), show_no_update_dialog=True)
+            assert len(github.requested) == 1
+
+
+class TestUpdateCheckSetting:
+    @pytest.mark.unit
+    def test_it_is_on_by_default(self, tmp_path, monkeypatch):
+        from jarvis.config import get_default_config, load_settings
+
+        _write_config(tmp_path, monkeypatch, {})
+
+        assert get_default_config()["update_check_enabled"] is True
+        assert load_settings().update_check_enabled is True
+
+    @pytest.mark.unit
+    def test_what_he_writes_is_what_he_gets(self, tmp_path, monkeypatch):
+        from jarvis.config import load_settings
+
+        _write_config(tmp_path, monkeypatch, {"update_check_enabled": False})
+
+        assert load_settings().update_check_enabled is False
+
+    @pytest.mark.unit
+    def test_the_settings_window_offers_it_as_a_switch(self):
+        from desktop_app.settings_window import FIELD_METADATA
+
+        offered = [field for field in FIELD_METADATA if field.key == "update_check_enabled"]
+
+        assert len(offered) == 1
+        assert offered[0].field_type == "bool"

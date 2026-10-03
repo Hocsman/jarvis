@@ -4,6 +4,9 @@ on:
   pull_request:
   push:
     branches: [ main, develop ]
+  # The release workflow calls this one as its gate: nothing is built or
+  # published until both jobs pass.
+  workflow_call:
 
 jobs:
   unit:
@@ -34,6 +37,16 @@ jobs:
           EVAL_LLM_BASE_URL: ""
         run: |
           python -m pytest -q evals/test_evals_keep_the_core_out_of_the_repository.py
+      # Imports every eval without running one, so an eval broken at import
+      # time (a renamed helper, a moved module) fails here. It says nothing
+      # about the evals' behaviour: running them takes a model.
+      - name: Collect the evals (import check, no model)
+        env:
+          EVAL_LLM_PROVIDER: ollama
+          EVAL_LLM_BASE_URL: ""
+          EVAL_JUDGE_BASE_URL: http://127.0.0.1:9
+        run: |
+          python -m pytest evals --collect-only -q
 
   windows:
     name: Tests (Windows, Python 3.11)
@@ -61,3 +74,10 @@ jobs:
           EVAL_LLM_BASE_URL: ""
         run: |
           python -m pytest -q evals/test_evals_keep_the_core_out_of_the_repository.py
+      - name: Collect the evals (import check, no model)
+        env:
+          EVAL_LLM_PROVIDER: ollama
+          EVAL_LLM_BASE_URL: ""
+          EVAL_JUDGE_BASE_URL: http://127.0.0.1:9
+        run: |
+          python -m pytest evals --collect-only -q

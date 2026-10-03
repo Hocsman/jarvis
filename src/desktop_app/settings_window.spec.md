@@ -64,7 +64,7 @@ The settings window uses a sidebar navigation pattern: a fixed-width `QListWidge
 11. Timing & Windows
 12. Memory & Dialogue
 13. Location
-14. Features (includes web search, Wikipedia fallback, low-power mode, startup tune, and dictation toggles)
+14. Features (includes web search, Wikipedia fallback, low-power mode, startup tune, the startup update check, and dictation toggles)
 15. 🙋 Permissions
 16. ⏰ Rappels
 17. 🌅 Routines
@@ -135,6 +135,7 @@ dedicated page:
 - `wikipedia_fallback_enabled`
 - `low_power_mode`
 - `tune_enabled`
+- `update_check_enabled`
 - `dictation_enabled`
 - `dictation_hotkey`
 - `dictation_filler_removal`
@@ -144,6 +145,10 @@ dedicated page:
 LLM startup warmup and the Ollama keep-alive windows used by warmup and the
 intent judge are short. The setting is saved only when it differs from the
 default, like every other metadata-managed field.
+
+`update_check_enabled` is a boolean toggle, on by default. Off, the bundled app
+sends no update check by itself at startup; the tray's "Check for Updates" still
+works when the user asks (see "Update System" in `desktop_app.spec.md`).
 
 ## Hardware Device Selection
 
