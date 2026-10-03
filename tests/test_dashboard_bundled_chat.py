@@ -83,7 +83,8 @@ class _ScriptedEngine:
             on_token(chunk)
         # The real engine stores the turn, which is what the voice path and
         # a chat window opened later read back.
-        dialogue_memory.add_interaction(text, self.reply)
+        dialogue_memory.add_message("user", text)
+        dialogue_memory.add_message("assistant", self.reply)
         return self.reply
 
 
