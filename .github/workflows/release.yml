@@ -10,8 +10,10 @@ name: Release
 #   semantic-release would find the tag already there and release nothing.
 # - Every platform must build for anything to publish, so one failed runner
 #   holds back all of them until its job is re-run.
-# - A push to main or develop also triggers tests.yml on its own, so the suite
-#   runs twice for that commit; the copy called below is the one that gates.
+# - tests.yml has no push trigger: the copy called below is the only run of the
+#   suite for a push to main or develop, and it is the one that gates. A newer
+#   push cancels it with the rest of the run (see `concurrency`), so the older
+#   commit then has no suite result.
 
 on:
   push:
