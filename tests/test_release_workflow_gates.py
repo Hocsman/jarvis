@@ -30,6 +30,11 @@ ROOT = Path(__file__).resolve().parent.parent
 WORKFLOWS = ROOT / ".github" / "workflows"
 BRANCH_REFS = ("refs/heads/main", "refs/heads/develop")
 
+# The check that runs on a finished build. It reads the frozen layout and
+# launches nothing, so it ends on every runner and fails with a non-zero exit
+# when the build lacks a file the app opens at runtime.
+BUNDLE_CHECK = "scripts/check_bundle_layout.py"
+
 pytestmark = pytest.mark.unit
 
 
@@ -67,11 +72,9 @@ def _is_build(job: dict) -> bool:
     return any("pyinstaller" in _run_text(step).lower() for step in _steps(job))
 
 
-def _publishes(job: dict) -> bool:
-    return any(
-        _uses(step).startswith("softprops/action-gh-release") or "semantic-release" in _run_text(step)
-        for step in _steps(job)
-    )
+def _checks_the_bundle(step: dict) -> bool:
+    """Whether a step runs the check that the build holds what the app reads."""
+    return BUNDLE_CHECK in _run_text(step).replace("\\", "/")
 
 
 def _gate_job_name(jobs: dict) -> str:
@@ -413,7 +416,7 @@ class TestAFailedBuildPublishesNothing:
     def test_semantic_release_failure_is_not_swallowed(self, release):
         steps = [s for s in _steps(release["jobs"]["semantic-release"]) if "npx semantic-release" in _run_text(s)]
 
-        assert steps, "the job no longer runs semantic-release"
+        assert steps, "the job has no step that runs semantic-release"
         for step in steps:
             assert "|| true" not in _run_text(step), "a failing semantic-release would read as 'no release'"
 
@@ -471,7 +474,7 @@ class TestTheBundleIsCheckedBeforeAnythingIsUploaded:
         for name, job in builds.items():
             steps = _steps(job)
             built = [i for i, s in enumerate(steps) if "pyinstaller jarvis_desktop.spec" in _run_text(s)]
-            checked = [i for i, s in enumerate(steps) if "test_bundled_app" in _run_text(s)]
+            checked = [i for i, s in enumerate(steps) if _checks_the_bundle(s)]
             uploaded = [i for i, s in enumerate(steps) if _uses(s).startswith("actions/upload-artifact")]
 
             assert built and checked and uploaded, f"{name} is missing its build, its bundle check or its upload"
@@ -479,10 +482,39 @@ class TestTheBundleIsCheckedBeforeAnythingIsUploaded:
             assert max(checked) < min(uploaded), f"{name} uploads before the bundle has been checked"
 
     def test_the_check_cannot_hang_the_job_for_hours(self, release):
+        checks = 0
         for name, job in release["jobs"].items():
             for step in _steps(job):
-                if "test_bundled_app" in _run_text(step):
-                    assert step.get("timeout-minutes"), f"{name}: an app that never exits would hold the runner"
+                if _checks_the_bundle(step):
+                    checks += 1
+                    assert step.get("timeout-minutes"), f"{name}: a check that never ends would hold the runner"
+        assert checks, "no step checks the bundle"
+
+    def test_a_failing_check_fails_the_step_and_the_job(self, release):
+        for name, job in release["jobs"].items():
+            for step in _steps(job):
+                if _checks_the_bundle(step):
+                    assert not step.get("continue-on-error"), f"{name}: a failed bundle check would not stop the build"
+                    assert "|| true" not in _run_text(step), f"{name}: a failed bundle check would read as a pass"
+
+
+class TestNothingOnTheGatePathIsAllowedToFail:
+    """``continue-on-error`` turns a failed step into a pass for everything
+    downstream, which is how a red suite or a broken build gets published."""
+
+    def test_no_job_in_either_workflow_may_fail_silently(self, release, tests_workflow):
+        for label, workflow in (("release.yml", release), ("tests.yml", tests_workflow)):
+            for name, job in workflow["jobs"].items():
+                assert not job.get("continue-on-error"), f"{label}: job {name} fails silently"
+
+    def test_no_test_build_or_check_step_may_fail_silently(self, release, tests_workflow):
+        gated = ("pytest", "pyinstaller", BUNDLE_CHECK)
+        for label, workflow in (("release.yml", release), ("tests.yml", tests_workflow)):
+            for name, job in workflow["jobs"].items():
+                for step in _steps(job):
+                    text = _run_text(step).replace("\\", "/").lower()
+                    if any(word in text for word in gated):
+                        assert not step.get("continue-on-error"), f"{label}: {name}: {step.get('name')} fails silently"
 
 
 # ---------------------------------------------------------------------------
@@ -499,18 +531,22 @@ class TestTheChecksumFileIsPublishedWithTheInstallers:
             assert wrote and attached, name
             assert max(wrote) < min(attached), f"{name} attaches assets before the checksums exist"
 
-    def test_both_release_jobs_attach_it(self, release):
+    def test_both_release_jobs_attach_the_file_the_updater_looks_for(self, release):
+        from desktop_app.updater import CHECKSUMS_ASSET_NAME
+
         for name in ("release-main", "release-develop"):
             attach = [s for s in _steps(release["jobs"][name]) if _uses(s).startswith("softprops/action-gh-release")]
 
             assert attach
             for step in attach:
-                assert "SHA256SUMS.txt" in step["with"]["files"], f"{name} publishes installers with no checksum file"
+                assert CHECKSUMS_ASSET_NAME in step["with"]["files"], f"{name} publishes installers with no checksum file"
 
-    def test_the_updater_looks_for_the_file_the_workflow_publishes(self):
+    def test_the_script_writes_the_file_the_updater_looks_for(self):
         from desktop_app.updater import CHECKSUMS_ASSET_NAME
 
-        assert CHECKSUMS_ASSET_NAME == "SHA256SUMS.txt"
+        script = (ROOT / "scripts" / "release_checksums.sh").read_text(encoding="utf-8")
+
+        assert CHECKSUMS_ASSET_NAME in script
 
     @pytest.mark.skipif(os.name != "posix" or not shutil.which("bash"), reason="the script is bash")
     def test_what_the_script_writes_is_what_the_updater_verifies_against(self, tmp_path):

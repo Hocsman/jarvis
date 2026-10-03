@@ -1,5 +1,18 @@
 name: Release
 
+# What to know when a release run does not finish:
+#
+# - A versioned release starts as a draft (see .releaserc.json) and release-main
+#   makes it public only after every asset is attached. When a build fails, or
+#   a newer push cancels the run after semantic-release has tagged (see
+#   `concurrency`), the draft and its tag stay with no assets and no audience.
+#   Re-run the failed jobs of that run. Do not re-run the whole run:
+#   semantic-release would find the tag already there and release nothing.
+# - Every platform must build for anything to publish, so one failed runner
+#   holds back all of them until its job is re-run.
+# - A push to main or develop also triggers tests.yml on its own, so the suite
+#   runs twice for that commit; the copy called below is the one that gates.
+
 on:
   push:
     branches:
@@ -138,12 +151,12 @@ jobs:
         run: |
           pyinstaller jarvis_desktop.spec
 
-      # A bundle that builds but does not open must not reach an installer.
-      # The timeout keeps an app that never exits from holding the runner.
+      # A bundle that lacks a file the app opens at runtime must not reach an
+      # installer. The check reads the build and launches nothing; the timeout
+      # keeps a stuck process from holding the runner.
       - name: 🧪 Check the bundled app
-        timeout-minutes: 15
-        shell: cmd
-        run: call scripts\test_bundled_app.bat
+        timeout-minutes: 5
+        run: python scripts/check_bundle_layout.py --dist dist --plain
 
       - name: 🛠️ Install Inno Setup
         run: |
@@ -227,11 +240,12 @@ jobs:
         run: |
           pyinstaller jarvis_desktop.spec
 
-      # A bundle that builds but does not open must not be packaged.
-      # The timeout keeps an app that never exits from holding the runner.
+      # A bundle that lacks a file the app opens at runtime must not be
+      # packaged. The check reads the build and launches nothing; the timeout
+      # keeps a stuck process from holding the runner.
       - name: 🧪 Check the bundled app
-        timeout-minutes: 15
-        run: bash scripts/test_bundled_app.sh
+        timeout-minutes: 5
+        run: python scripts/check_bundle_layout.py --dist dist
 
       # Note: Ad-hoc code signing is intentionally skipped
       # codesign --force --deep breaks Qt WebEngine's symlink structure
@@ -283,7 +297,7 @@ jobs:
       - name: 📦 Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxcb-cursor0 libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 portaudio19-dev binutils xvfb
+          sudo apt-get install -y libxcb-cursor0 libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 portaudio19-dev binutils
 
       - name: 📝 Generate version file
         run: |
@@ -317,12 +331,12 @@ jobs:
         run: |
           pyinstaller jarvis_desktop.spec
 
-      # A bundle that builds but does not open must not be packaged. The
-      # runner has no display, hence xvfb; the timeout keeps an app that
-      # never exits from holding the runner.
+      # A bundle that lacks a file the app opens at runtime must not be
+      # packaged. The check reads the build and launches nothing, so it needs
+      # no display; the timeout keeps a stuck process from holding the runner.
       - name: 🧪 Check the bundled app
-        timeout-minutes: 15
-        run: xvfb-run -a bash scripts/test_bundled_app.sh
+        timeout-minutes: 5
+        run: python scripts/check_bundle_layout.py --dist dist
 
       - name: 📦 Package Linux build
         run: |
