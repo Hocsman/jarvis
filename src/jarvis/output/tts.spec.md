@@ -52,7 +52,7 @@ The three engines are interchangeable to the listener. Each exposes:
 | `enabled` | Whether the engine speaks at all |
 | `start()` | Create the worker thread. Idempotent |
 | `stop()` | Interrupt, end the worker, wait up to two seconds for it |
-| `speak(text, completion_callback=None, duration_callback=None)` | Queue one item (see below) |
+| `speak(text, completion_callback=None, duration_callback=None, language=None)` | Queue one item (see below). `language` is the language the user was heard in. Piper chooses its voice from it; Kokoro and Chatterbox accept it and ignore it |
 | `interrupt()` | Stop talking (see Interrupting) |
 | `is_speaking()` | Whether an item is being synthesised or played |
 | `get_last_spoken_text()` | The processed text of the item most recently started |
@@ -70,7 +70,10 @@ loader. Chatterbox loads its model on `start`.
 
 One worker thread per engine takes items from a FIFO queue and speaks
 them one at a time. An item is `(text, completion_callback,
-duration_callback)`.
+duration_callback)`, and for Piper a fourth field, the language. The
+language belongs to the item, not to the engine: sentences of two
+replies in two languages can wait in the queue together, each spoken in
+its own voice.
 
 **Text is processed when it is queued.** `_preprocess_for_speech`
 replaces links with a spoken description of the domain and strips
@@ -190,25 +193,70 @@ closing a stream all happen under `portaudio_lock`
 
 ## Piper voices
 
+### Which language wins
+
+The voice follows the language the reply is written in. The engine knows
+two candidates for it, and they can disagree:
+
+- `response_language`, when set. The persona prompt makes the model write
+  in it whatever language it is spoken to, so it is the language of the
+  reply. It outranks detection: a user who set `français` and asks a
+  question in English is answered in French, and the voice has to read
+  French.
+- The language the user was heard in, which the listener passes as
+  `language`. With `response_language` empty (auto) the persona pins no
+  language, so unless the reply engine's English-only instruction applies
+  (`reply.spec.md`, "System message composition") she answers in the
+  language she was spoken to, and that is the one to follow.
+
+When neither is known, as before the first transcription or for a line
+spoken with no utterance behind it, no language is claimed and the
+default voice speaks.
+
 ### Which voice
 
-The voice an engine loads is decided once, at initialisation:
+An item is spoken by the first of these that applies:
 
-1. A `tts_piper_model_path` the user set wins outright. Naming a voice is
-   a choice, and neither the language nor a failed download overrides
-   it.
-2. Otherwise the voice for `response_language`, from a table of eleven
-   languages (French, English, Spanish, German, Italian, Dutch,
-   Portuguese, Polish, Russian, Turkish, Chinese). Each language lists
-   the spellings a user might write: its own name, its English name and
-   its ISO 639-1 code, compared without case or accents, so `français`,
-   `Francais` and `fr` meet.
-3. Otherwise, for an empty or unlisted language, the fallback voice
-   (`PIPER_FALLBACK_VOICE`). A language nobody listed speaks with it
-   rather than falling silent.
+1. `tts_piper_voices`, when it names the language of the reply. Keys are
+   languages in any spelling a user might write: the ISO 639-1 code
+   Whisper reports (`fr`), the language's own name (`français`) or its
+   English name (`French`), compared without case or accents, and a
+   regional variant (`fr-FR`, `pt_BR`) counts as its base language. A
+   language nobody listed in the table below may still be a key. A value
+   is the path of a `.onnx` model, or a bare voice name, which is a file
+   in the models directory and so is fetched by name on first use.
+2. The default voice, loaded when the engine starts so the wait happens
+   at launch rather than at the first word:
+   1. A `tts_piper_model_path` the user set. Naming a voice is a choice,
+      and neither the language nor a failed download overrides it. It is
+      also the voice for every language the map does not name.
+   2. Otherwise the voice for the configured `response_language`, from a
+      table of eleven languages (French, English, Spanish, German,
+      Italian, Dutch, Portuguese, Polish, Russian, Turkish, Chinese).
+      Each language lists the spellings a user might write: its own name,
+      its English name and its ISO 639-1 code, compared without case or
+      accents, so `français`, `Francais` and `fr` meet.
+   3. Otherwise, for an empty or unlisted language, the fallback voice
+      (`PIPER_FALLBACK_VOICE`). A language nobody listed speaks with it
+      rather than falling silent.
 
-Supporting another language is one row in the table. The table pairs a
+The built-in table serves the configured language only. A language that
+was merely heard never selects a built-in voice: that would download a
+voice nobody asked for, mid-conversation, on the strength of a detector's
+guess. To have the voice follow what was heard, the user lists the voices
+in `tts_piper_voices`.
+
+Supporting another language in the table is one row. The table pairs a
 language with a voice trained for it, and a test holds each row to that.
+
+A mapped voice is loaded the first time a reply needs it, then kept, and
+is played at its own sample rate. If it cannot be loaded (no file, no
+network) the default voice speaks the item instead, and the path is not
+tried again for the life of the engine. A reply in the wrong accent is
+worse than one in the right voice and better than silence.
+
+The choice is logged at debug level: the language, the voice file, and
+whether it came from the map or is the fallback.
 
 ### Fetching
 
@@ -237,9 +285,10 @@ substituted: initialisation fails, the reason is kept in `_init_error`,
 and each item prints it and speaks nothing. A missing `piper` package or
 a model that fails to load fails the same way.
 
-Initialisation is attempted once per engine. Whatever its outcome is
-kept for the life of the engine, so a failed fetch is not retried on the
-next sentence.
+Initialisation of the default voice is attempted once per engine, and
+each mapped voice once per path. Whatever the outcome is kept for the
+life of the engine, so a failed fetch is not retried on the next
+sentence.
 
 ## Kokoro and Chatterbox
 
@@ -257,9 +306,11 @@ are missing it warns and every item is skipped.
 
 ## Language
 
-Piper's voice follows `response_language` (see "Which voice") and is
-fixed for the life of the engine. Nothing in this module looks at the
-language of a reply.
+Piper is the only engine whose voice follows a language. Which language,
+and which wins when the configured one and the one heard disagree, is
+decided under "Piper voices". Kokoro and Chatterbox accept the language
+`speak` is given and ignore it: Kokoro's voice and language are set by
+hand, and Chatterbox speaks English.
 
 ## Configuration
 
@@ -268,8 +319,9 @@ language of a reply.
 | `tts_enabled` | all | Whether she speaks |
 | `tts_engine` | all | `piper`, `kokoro` or `chatterbox` |
 | `tts_voice`, `tts_rate` | all | Interface compatibility; `tts_rate` also feeds the echo detector's timing estimate |
-| `response_language` | Piper | Chooses the voice when no model path is pinned |
-| `tts_piper_model_path` | Piper | Pins a voice; fetched by basename if absent |
+| `response_language` | Piper | The language of every reply when set, and so the voice's; chooses the default voice when no model path is pinned |
+| `tts_piper_voices` | Piper | Language to voice (path or bare name), chosen per reply. A language it does not name speaks with the default voice |
+| `tts_piper_model_path` | Piper | Pins the default voice; fetched by basename if absent |
 | `tts_piper_speaker` | Piper | Speaker index for multi-speaker models |
 | `tts_piper_length_scale` | Piper | Pace: below 1.0 is faster |
 | `tts_piper_noise_scale`, `tts_piper_noise_w` | Piper | Expressiveness and rhythm |
@@ -295,5 +347,14 @@ language of a reply.
   there is nothing to fall back to.
 - Each listed language gets a voice trained for it, in any spelling, and
   an unlisted one gets the fallback.
-- A pinned model path beats the language.
+- A pinned model path beats the configured language, and is the voice for
+  every language `tts_piper_voices` leaves out.
+- A French reply picks the French voice, an unmapped language picks the
+  default voice, and with `response_language` empty the voice follows the
+  language heard. When `response_language` is set it outranks the
+  language heard.
+- A mapped voice that cannot be loaded leaves the reply spoken in the
+  default voice, and is not fetched again on the next sentence.
+- Every voice is played at its own sample rate.
+- The language passed to `speak` travels with its item to the worker.
 - Markdown and links are stripped before speech.

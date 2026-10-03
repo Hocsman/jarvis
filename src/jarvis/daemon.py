@@ -1317,6 +1317,7 @@ def main() -> None:
         piper_noise_w=cfg.tts_piper_noise_w,
         piper_sentence_silence=cfg.tts_piper_sentence_silence,
         response_language=cfg.response_language,
+        piper_voices=cfg.tts_piper_voices,
         # Kokoro parameters
         kokoro_voice=cfg.tts_kokoro_voice,
         kokoro_lang_code=cfg.tts_kokoro_lang_code,

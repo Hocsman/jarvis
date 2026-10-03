@@ -46,6 +46,7 @@ def listener():
     # Nothing was streamed, so `_speak_reply` says the whole reply — the
     # path every one of these tests is about.
     obj._streamed_chars = 0
+    obj._last_detected_language = None
     obj.state_manager = MagicMock()
     obj._recent_audio_energy = []
     obj.tts.is_speaking.return_value = False

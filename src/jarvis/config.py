@@ -163,7 +163,8 @@ class Settings:
     tts_chatterbox_cfg_weight: float  # CFG weight for quality/speed trade-off
 
     # Piper TTS
-    tts_piper_model_path: str | None  # Path to .onnx voice model
+    tts_piper_model_path: str | None  # Path to .onnx voice model; the voice for every language not in tts_piper_voices
+    tts_piper_voices: dict[str, str]  # Language code -> voice (.onnx path or voice name), chosen per reply
     tts_piper_speaker: int | None  # Speaker ID for multi-speaker models
     tts_piper_length_scale: float  # Speed: <1.0 faster, >1.0 slower
     tts_piper_noise_scale: float  # Audio variation
@@ -734,6 +735,7 @@ def get_default_config() -> Dict[str, Any]:
 
         # Piper TTS
         "tts_piper_model_path": None,  # Path to .onnx voice model
+        "tts_piper_voices": {},  # Language code -> voice (.onnx path or voice name), e.g. {"fr": "fr_FR-siwis-medium"}
         "tts_piper_speaker": None,  # Speaker ID for multi-speaker models
         "tts_piper_length_scale": 0.65,  # Speed: <1.0 faster, >1.0 slower (0.65 = ~30% faster)
         "tts_piper_noise_scale": 0.8,  # Audio variation (higher = more expressive)
@@ -1065,6 +1067,16 @@ def load_settings() -> Settings:
         if tts_piper_model_path_val not in (None, "", "null")
         else None
     )
+    tts_piper_voices_val = merged.get("tts_piper_voices")
+    tts_piper_voices = (
+        {
+            key.strip(): voice.strip()
+            for key, voice in tts_piper_voices_val.items()
+            if isinstance(key, str) and isinstance(voice, str) and key.strip() and voice.strip()
+        }
+        if isinstance(tts_piper_voices_val, dict)
+        else {}
+    )
     tts_piper_speaker_val = merged.get("tts_piper_speaker")
     try:
         tts_piper_speaker = None if tts_piper_speaker_val in (None, "", "null") else int(tts_piper_speaker_val)
@@ -1324,6 +1336,7 @@ def load_settings() -> Settings:
 
         # Piper TTS
         tts_piper_model_path=tts_piper_model_path,
+        tts_piper_voices=tts_piper_voices,
         tts_piper_speaker=tts_piper_speaker,
         tts_piper_length_scale=tts_piper_length_scale,
         tts_piper_noise_scale=tts_piper_noise_scale,

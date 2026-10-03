@@ -11,8 +11,9 @@ She would open the window in the middle of her own reply and take her
 next sentence for a follow-up — which is the failure that three separate
 guards were written for on 2026-08-16.
 
-So the queue carries `(text, completion_callback, duration_callback)`,
-and the worker installs them as it dequeues. Only the worker thread ever
+So the queue carries `(text, completion_callback, duration_callback)`
+first, whatever an engine adds behind them (Piper adds the language), and
+the worker installs them as it dequeues. Only the worker thread ever
 writes them, and only for the item it is about to speak.
 """
 
@@ -50,7 +51,7 @@ def _draine(moteur):
                 item = moteur._q.get_nowait()
             except queue.Empty:
                 return
-            texte, cb, dur = item
+            texte, cb, dur = item[:3]
             if not texte:
                 continue
             moteur._completion_callback = cb
@@ -141,8 +142,8 @@ def test_a_callback_with_no_text_fires_once_everything_queued_has_been_said(nom)
     while not moteur._q.empty():
         items.append(moteur._q.get_nowait())
 
-    assert [t for t, _, _ in items] == ["Première phrase ici.",
-                                        "Dernière phrase.", ""]
+    assert [item[0] for item in items] == ["Première phrase ici.",
+                                           "Dernière phrase.", ""]
     assert items[-1][1] is fin
 
 

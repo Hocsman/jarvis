@@ -68,6 +68,14 @@ next sentence in as a follow-up.
 queued chunks as well as the one playing, and cancels what has not been
 synthesised yet.
 
+**One reply is spoken in one voice.** The language the user was heard in
+is read when the stream begins, and every chunk, the tail and the
+end-of-reply marker carries that same language to the engine (see
+`tts.spec.md`, "Which voice"). A transcript of something else landing
+mid-reply moves the detected language, and must not move the voice of the
+sentences still to come: a reply that changes voice halfway reads as two
+speakers, and the echo reference would no longer match what was said.
+
 **The printed reply is unchanged.** What appears in the transcript and
 what is stored in dialogue memory is the whole text, assembled, exactly
 as today. Streaming is a delivery detail; it must not become a difference
@@ -90,6 +98,8 @@ than a lost answer.
   and an echo of the first is still recognised.
 - The hot window opens once, after the last chunk.
 - A stop during chunk one leaves chunks two and three unspoken.
+- Every chunk and the tail of a reply carry the same language, even when
+  another language is heard while it is being spoken.
 - The assembled text equals the non-streamed text, character for
   character.
 - The control: a backend without streaming still produces a spoken reply.

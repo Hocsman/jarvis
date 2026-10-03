@@ -481,6 +481,13 @@ answer gets deleted as an echo.
 frame every `vad_frame_ms`, so on a live microphone the queue is never
 empty and an idle-only drain never runs at all.
 
+**The language is the one last heard.** A reply from elsewhere has no
+utterance behind it, so it is spoken with the language the user was last
+heard in, and the engine's configured `response_language` outranks that
+(`tts.spec.md`, "Which language wins"). A reply of her own carries the
+language heard for it, fixed when the reply begins and shared by every
+sentence of it.
+
 **One reply per pass, and none while she is already speaking.** `TTS.speak`
 holds its completion callback in a single engine-level slot, so a second
 call before the first finishes overwrites the first's callback — and that

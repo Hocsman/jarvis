@@ -35,6 +35,7 @@ def _listener():
     obj.state_manager = MagicMock()
     obj._recent_audio_energy = []
     obj._streamed_chars = 0
+    obj._last_detected_language = None
     obj._reply_queue = None
     obj.dialogue_memory = None
     obj.tts.is_speaking.return_value = False
