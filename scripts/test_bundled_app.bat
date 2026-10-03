@@ -43,7 +43,7 @@ if not exist "dist\Jarvis\Jarvis.exe" (
     exit /b 1
 )
 
-REM Check the data files are where the frozen app will look for them
+REM Check the bundle carries every data file and licence text where it belongs
 echo Checking the build layout...
 "%MAMBA_ENV%\python.exe" scripts\check_bundle_layout.py --dist dist --plain
 if errorlevel 1 (

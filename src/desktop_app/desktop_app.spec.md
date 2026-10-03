@@ -270,9 +270,11 @@ The desktop app ships as a PyInstaller build described by `jarvis_desktop.spec`:
 
 ### Data files
 
-PyInstaller follows imports and nothing else, so every file the app opens through `Path(__file__)` is listed in the spec's `datas`, and lands at the path it has under `src/`, because the code resolves such files against its own package folder. Today that is the dashboard page (`desktop_app/dashboard/index.html`) and the tray icons (`desktop_app/desktop_assets/*.png`). Python modules are never listed as data, they reach the build through import analysis. The `.ico` icons are embedded in the executable at build time and are not data.
+PyInstaller follows imports and nothing else, so every file the app opens through `Path(__file__)` is listed in the spec's `datas`. A module inside a package resolves such a file against its package folder, so the file lands at the path it has under `src/`. Today that is the dashboard page (`desktop_app/dashboard/index.html`, opened by `dashboard_window.py`) and the tray icons (`desktop_app/desktop_assets/*.png`). Python modules are never listed as data, they reach the build through import analysis. The `.ico` icons are embedded in the executable at build time and are not data.
 
-The rule is enforced from the tree, not from a list kept by hand. `tests/test_pyinstaller_spec.py` runs the spec once per platform with PyInstaller's names stubbed, expands `datas` the way PyInstaller does, and fails when a runtime data file under `src/` is not bundled or lands somewhere else. A file whose kind is unknown fails it too, until its suffix is classified in `scripts/check_bundle_layout.py`: guessing is how a file goes missing.
+The entry script is the one module that does not resolve against its package folder: PyInstaller places it at the root of the data tree, so its `Path(__file__).parent` is that root (`_internal` in a onedir build) and not `desktop_app/`. `app.py` is the entry script, and its tray-icon lookup (`get_icon_path`) builds `desktop_assets/<icon>` from that parent. In a frozen build it therefore looks for the icons next to the root, while they ship under `desktop_app/desktop_assets`, and the tray shows its drawn fallback icon. A lookup that resolves against the package folder (`sys._MEIPASS/desktop_app` when frozen) finds them where they ship.
+
+The rule is enforced from the tree, not from a list kept by hand. `tests/test_pyinstaller_spec.py` runs the spec once per platform with PyInstaller's names stubbed, expands `datas` the way PyInstaller does, and fails when a runtime data file under `src/` is not bundled or lands somewhere else than the mirror of its place in the tree. That is the placement package modules look for; the check does not cover what the entry script opens itself. A file whose kind is unknown fails it too, until its suffix is classified in `scripts/check_bundle_layout.py`: guessing is how a file goes missing.
 
 ### Licence texts
 
@@ -282,7 +284,7 @@ The rule is enforced from the tree, not from a list kept by hand. `tests/test_py
 
 ### Checking a build
 
-`scripts/test_bundled_app.bat` and `scripts/test_bundled_app.sh` build, run `scripts/check_bundle_layout.py` on the result, and only then launch the app. The check looks for the executable the platform's build produces and for every runtime data file and licence text where the frozen app resolves it (`_internal` on Windows and Linux, `Contents/Resources` or `Contents/Frameworks` on macOS), and names each one that is missing. The Windows batch file asks for plain ASCII output.
+`scripts/test_bundled_app.bat` and `scripts/test_bundled_app.sh` build, run `scripts/check_bundle_layout.py` on the result, and only then launch the app. The check looks for the executable the platform's build produces and for every runtime data file and licence text at the place the bundle's layout gives it (`_internal` on Windows and Linux, `Contents/Resources` or `Contents/Frameworks` on macOS), and names each one that is missing. The Windows batch file asks for plain ASCII output.
 
 ## Memory Viewer
 

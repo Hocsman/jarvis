@@ -2,8 +2,7 @@
 
 PyInstaller follows imports and nothing else: a data file opened through
 ``Path(__file__)`` is absent from a frozen build unless ``jarvis_desktop.spec``
-lists it. The dashboard page was missing from every packaged build that way,
-and the primary window opened empty.
+lists it, and the window or icon that needs it then comes up empty.
 
 The spec is a Python script that PyInstaller executes, so it is executed here
 too, with PyInstaller's own names stubbed, once per platform. The files that
@@ -164,7 +163,12 @@ class TestRuntimeDataFilesShip:
         assert not missing, f"jarvis_desktop.spec does not bundle: {missing}"
 
     def test_each_file_lands_where_its_package_looks_for_it(self, datas):
-        """The app resolves data from ``Path(__file__).parent``, so the bundle mirrors ``src/``."""
+        """A module resolves its data against its own package folder, so the bundle mirrors ``src/``.
+
+        The entry script is the exception: PyInstaller puts it at the root of
+        the data tree, so what it opens through ``Path(__file__)`` resolves
+        there, and this test does not speak for it.
+        """
         shipped, _ = resolve(datas)
         for rel in layout.runtime_data_files(SRC):
             assert shipped[rel.as_posix()] == SRC / rel

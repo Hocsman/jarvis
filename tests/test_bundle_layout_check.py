@@ -3,8 +3,8 @@
 ``scripts/check_bundle_layout.py`` is what ``test_bundled_app.bat`` and
 ``test_bundled_app.sh`` run on a fresh build. It derives the data files
 the app reads at runtime from the source tree (nothing is listed by
-hand), looks for each of them where the frozen app will look, and names
-every one that is absent. These tests build small fake projects and fake
+hand), looks for each of them at the place the bundle's layout gives it,
+and names every one that is absent. These tests build small fake projects and fake
 builds, so they pin the mechanism and not today's file list.
 """
 

@@ -38,7 +38,7 @@ if [ ! -f "$EXECUTABLE" ]; then
     exit 1
 fi
 
-# Check the data files are where the frozen app will look for them
+# Check the bundle carries every data file and licence text where it belongs
 echo "🔍 Checking the build layout..."
 if ! python scripts/check_bundle_layout.py --dist dist; then
     echo ""

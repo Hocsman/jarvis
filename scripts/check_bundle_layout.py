@@ -5,7 +5,9 @@ PyInstaller bundles Python code on its own and nothing else: a data file the
 app opens through ``Path(__file__)`` is absent from the build unless the spec
 lists it, and the app then fails quietly (an empty window, a missing icon).
 This script derives the runtime data files from the source tree, looks for each
-one where the frozen app will look, and names every one that is absent.
+one at the place the bundle's layout gives it (the place a package's modules
+resolve it, which is not the place the entry script does), and names every
+one that is absent.
 
 Usage:
     python scripts/check_bundle_layout.py [--dist DIR] [--plain]
@@ -91,7 +93,7 @@ def executable_path(dist_dir: Path, platform: str) -> Path:
 
 
 def _data_roots(dist_dir: Path, platform: str) -> List[Path]:
-    """Folders the frozen app resolves its data files from."""
+    """Folders the bundle's data files are placed under."""
     if platform == "darwin":
         contents = dist_dir / "Jarvis.app" / "Contents"
         return [contents / "Resources", contents / "Frameworks"]

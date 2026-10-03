@@ -28,11 +28,14 @@ Plugins = PyQt6/Qt6/plugins
 # Manual collection can conflict with hooks and cause crashes
 #
 # PyInstaller follows imports and nothing else, so every file the app opens
-# through Path(__file__) has to be listed here, under the path it has in src/
-# (the package folder is what the code resolves against). Name the page, not
-# its folder: the folder also holds Python modules, which reach the build
-# through import analysis and must not be copied again as data. The .ico icons
-# are only read at build time (icon= below) and stay out.
+# through Path(__file__) has to be listed here. A module inside a package
+# resolves such a file against its package folder, so it is listed under the
+# path it has in src/. The entry script (src/desktop_app/app.py) is the
+# exception: PyInstaller puts it at the root of the data tree, so it resolves
+# against that root instead. Name the page, not its folder: the folder also
+# holds Python modules, which reach the build through import analysis and must
+# not be copied again as data. The .ico icons are only read at build time
+# (icon= below) and stay out.
 # tests/test_pyinstaller_spec.py derives the files that must ship from the
 # tree and fails when one is missing from this list.
 datas = [
