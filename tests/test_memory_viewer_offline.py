@@ -60,11 +60,12 @@ def viewer(tmp_path, monkeypatch):
 
 
 def _served_html(viewer) -> str:
-    from conftest import ViewerClient
+    """The page and every script it runs: the promise covers all of it."""
+    from conftest import ViewerClient, viewer_page_with_scripts
 
-    resp = ViewerClient(viewer.mv).get("/")
-    assert resp.status_code == 200
-    return resp.get_data(as_text=True)
+    client = ViewerClient(viewer.mv)
+    assert client.get("/").status_code == 200
+    return viewer_page_with_scripts(client)
 
 
 @pytest.mark.unit

@@ -24,6 +24,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from conftest import viewer_page_with_scripts
+
 try:
     import flask  # noqa: F401
 
@@ -211,18 +213,18 @@ class TestSweepRenderersEscapeServerStrings:
     cannot be broken out of)."""
 
     def test_the_consolidate_log_escapes_the_node_name(self, viewer):
-        html = viewer.client.get("/").get_data(as_text=True)
+        html = viewer_page_with_scripts(viewer.client)
 
         assert "${escapeHtml(msg.node)}" in html
 
     def test_the_import_log_escapes_the_date_and_detail(self, viewer):
-        html = viewer.client.get("/").get_data(as_text=True)
+        html = viewer_page_with_scripts(viewer.client)
 
         assert "${escapeHtml(msg.date)}" in html
         assert "escapeHtml(detail)" in html
 
     def test_the_meal_card_escapes_the_description(self, viewer):
-        html = viewer.client.get("/").get_data(as_text=True)
+        html = viewer_page_with_scripts(viewer.client)
 
         assert "${escapeHtml(meal.description)}" in html
         assert "<h3>${meal.description}</h3>" not in html
@@ -231,13 +233,13 @@ class TestSweepRenderersEscapeServerStrings:
         """One ``escapeHtml``, the quote-aware one: a second, weaker
         declaration in the same script would shadow it for every call
         site and silently un-defuse the attribute sinks."""
-        html = viewer.client.get("/").get_data(as_text=True)
+        html = viewer_page_with_scripts(viewer.client)
 
         assert html.count("function escapeHtml(") == 1
         assert ".replace(/\"/g, '&quot;')" in html
 
     def test_no_sweep_log_line_interpolates_raw_server_strings(self, viewer):
-        html = viewer.client.get("/").get_data(as_text=True)
+        html = viewer_page_with_scripts(viewer.client)
 
         assert "`<div>${arrow} ${msg.node}" not in html
         assert "`<div>${icon} ${msg.date}" not in html

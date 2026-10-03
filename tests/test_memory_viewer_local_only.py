@@ -281,10 +281,13 @@ class TestTokenGate:
         assert len(viewer.token) >= 32
 
     def test_the_served_page_carries_the_token_and_the_header_name(self, viewer):
+        from conftest import viewer_scripts
+
         html = viewer.client.get("/").get_data(as_text=True)
+        script = " ".join(viewer_scripts(viewer.client))
 
         assert viewer.token in html
-        assert "X-Jarvis-Token" in html
+        assert "X-Jarvis-Token" in script
 
 
 @pytest.mark.unit

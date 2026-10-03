@@ -692,6 +692,35 @@ class ViewerClient:
         return self._client.__exit__(*exc_info)
 
 
+def viewer_scripts(client) -> List[str]:
+    """Every script the viewer's page runs, as the browser would get it.
+
+    The page names its scripts and the server serves them from its own
+    origin. This fetches the index, takes each inline body (the page has
+    none, and ``tests/test_memory_viewer_csp.py`` insists on it) and each
+    ``src`` the page points at, and returns their source texts. Suites
+    that pin something about the page's behaviour read it here, so they
+    follow the script wherever it is served from.
+    """
+    import re
+
+    page = client.get("/").get_data(as_text=True)
+    sources = [
+        body
+        for attrs, body in re.findall(r"<script([^>]*)>(.*?)</script>", page, re.DOTALL)
+        if "src=" not in attrs and body.strip()
+    ]
+    for src in re.findall(r'<script[^>]*\ssrc="([^"]+)"', page):
+        sources.append(client.get(src).get_data(as_text=True))
+    return sources
+
+
+def viewer_page_with_scripts(client) -> str:
+    """The index page followed by every script it runs, as one text."""
+    page = client.get("/").get_data(as_text=True)
+    return "\n".join([page, *viewer_scripts(client)])
+
+
 # Listeners created by test helpers across modules (test_hot_window_input's
 # factory is imported by other suites). The autouse drainer below stops
 # each one's thinking tune after every test, wherever it was created.
