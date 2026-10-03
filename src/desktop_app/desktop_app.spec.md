@@ -392,6 +392,10 @@ The Knowledge tab hides the `user` and `directives` branches once they are empty
 
 Windows holds Qt at the release the suite is green on, because later releases fail to load `Qt6Core.dll` (loader status `0xc0000139`); the other platforms take the newest. The pin moves on evidence: `scripts/check_qt_pin.py` imports `QtCore`, `QtWidgets`, `QtSvg` and `QtWebEngineWidgets` of a candidate install in a child process each (a loader failure can end the process that triggers it, and one module failing must not hide the others), prints the runtime Qt and PyQt versions, exits non-zero if any module fails, and names the loader failure with what to try next. The procedure (when to re-test, what to run, what to update) sits beside the pin in `requirements.txt`.
 
+### ONNX Runtime
+
+`faster-whisper` and `piper-tts` both need `onnxruntime` and accept a wide range of it, so `requirements.txt` holds it with an exact pin per platform: the CI runners, the frozen build and developer machines run one inference runtime. Intel macOS has no wheel after 1.23.2 and holds that release; every other platform holds the release on which Piper synthesis is verified. The two environment markers are complements, so exactly one line applies wherever the file is installed. `tests/test_requirements_pins.py` checks that, that the line is an exact pin, and that it sits inside the range `faster-whisper` and `piper-tts` declare. The pins move only after checking that Piper synthesises in a frozen Windows build, because onnxruntime shares the process with Qt there; the rule sits beside the pins in `requirements.txt`.
+
 ## File Locations
 
 | File | macOS | Windows | Linux |
