@@ -246,7 +246,10 @@ An item is spoken by the first of these that applies:
       Italian, Dutch, Portuguese, Polish, Russian, Turkish, Chinese).
       Each language lists the spellings a user might write: its own name,
       its English name and its ISO 639-1 code, compared without case or
-      accents, so `français`, `Francais` and `fr` meet.
+      accents, so `français`, `Francais` and `fr` meet. A regional variant
+      (`fr-FR`, `pt_BR`) counts as its base language here exactly as it
+      does for a map key, so one `response_language` is never French to
+      the map and unknown to the default voice.
    3. Otherwise, for an empty or unlisted language, the fallback voice
       (`PIPER_FALLBACK_VOICE`). A language nobody listed speaks with it
       rather than falling silent.
@@ -371,6 +374,10 @@ language.
   there is nothing to fall back to.
 - Each listed language gets a voice trained for it, in any spelling, and
   an unlisted one gets the fallback.
+- A regional variant (`fr-FR`, `fr_FR`, `pt_BR`) chooses the same default
+  voice as its base language, and a variant of an unlisted language still
+  gets the fallback. The map and the default voice read one value as the
+  same language.
 - A pinned model path beats the configured language, and is the voice for
   every language `tts_piper_voices` leaves out.
 - A French reply picks the French voice, an unmapped language picks the

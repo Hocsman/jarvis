@@ -427,15 +427,15 @@ class TestPiperTTSAutoDownload:
         from another one, since that mismatch is inaudible in the table and
         obvious to whoever is spoken to.
         """
-        from src.jarvis.output.tts import PIPER_VOICE_BY_LANGUAGE, PIPER_FALLBACK_VOICE
+        from src.jarvis.output.tts import _PIPER_VOICES, PIPER_FALLBACK_VOICE
 
-        for code, voice in PIPER_VOICE_BY_LANGUAGE.items():
+        for spellings, voice in _PIPER_VOICES:
             locale = voice.split("-")[0]
             assert "_" in locale, f"{voice} is not a Piper locale-speaker name"
-            if code.isascii() and len(code) == 2:  # an ISO code says which locale to expect
-                assert locale.lower().startswith(code), (
-                    f"{code!r} answers with {voice}, trained for {locale}"
-                )
+            code = spellings[0]  # the row's first spelling is its ISO 639-1 code
+            assert locale.lower().startswith(code), (
+                f"{code!r} answers with {voice}, trained for {locale}"
+            )
 
         # The fallback has to be a name the downloader can resolve: three
         # dash-separated parts, the first of which is a locale.
