@@ -83,7 +83,7 @@ The central controller that manages:
 - **System tray icon** with context menu
 - **Daemon lifecycle** (start/stop the Jarvis voice assistant)
 - **Window management** (log viewer, memory viewer, face window)
-- **Update checking** on startup and on-demand
+- **Update checking** on startup (switchable off with `update_check_enabled`) and on-demand
 - **Runtime diagnostics** (`🩺 Runtime Status`): shows whether the assistant is listening, the daemon mode/PID, whether Low Power Mode is active, whether Ollama is needed/running, whether Jarvis owns the current Ollama runtime, active chat/embedding models, and configured MCP server count. The dialog is informational and never starts or stops services.
 - **Fast stop** (`⚡ Stop Now (Skip Diary)`): available only while the daemon is running. It stops the voice daemon without the final shutdown diary LLM pass so local model resources are released quickly. Normal `⏸️ Stop Listening` still performs the shutdown diary save.
 
@@ -219,10 +219,31 @@ The desktop app includes an auto-update mechanism:
 
 1. **Check**: Queries GitHub releases API for newer versions
 2. **Notify**: Shows dialog with changelog and download option
-3. **Download**: Downloads new installer with progress bar
+3. **Download**: Downloads new installer with progress bar and verifies it against the release's checksum file (see "Integrity of what is installed")
 4. **Install**: Platform-specific installation (see below)
 
 Updates are only available in bundled mode (PyInstaller builds).
+
+### Automatic check and its opt-out
+
+Five seconds after launch the tray runs one check by itself. The `update_check_enabled` setting (default `true`; Settings, Features, "Check for Updates at Startup") switches it off: the check then returns without sending a request, so the app contacts nobody on its own. A check the user asks for with the tray's "Check for Updates" action is theirs and always goes out, whatever the setting says. An unreadable setting counts as off.
+
+The check lists the releases of `Hocsman/jarvis` on `api.github.com` and sends no identifier of the user or of the install. Downloads come from the asset URLs that listing returns.
+
+### Integrity of what is installed
+
+Every release publishes a `SHA256SUMS.txt` next to its installers, in the format `sha256sum` writes (`<64 hex digits>  <file name>`, binary-mode `*` marker accepted). `scripts/release_checksums.sh` writes it from the built archives and both release jobs attach it. The updater runs nothing it has not verified against it:
+
+- **Before the download**: the checksum file of the same release is fetched (10 s timeout, at most 64 KiB) and the line for the installer's asset name is read. The installer is hashed as it streams to disk, and `completed` is emitted only when its SHA-256 equals that line.
+- **Before the install**: `install_update` hashes the archive again, immediately before extracting it, because it sat on disk while the session was saved. It takes the verified digest as an argument, so no caller can install without one.
+- **Fail closed**: each of these refuses the update, tells the user in the progress dialog, deletes the download, and leaves the running session alone (the session is saved only after the download has verified): the release publishes no checksum file (nothing is downloaded); the file cannot be fetched, is not text, exceeds the size cap, lists the installer nowhere, or lists it with two different digests; the digest differs; the archive changed between download and install. The user can still update by hand from the release page.
+- A client that downloads while the assets of the rolling `latest` release are being replaced sees a mismatch and refuses; retrying once the upload has finished succeeds.
+
+What this proves and what it does not. The checksum file comes from the same release, over the same TLS connection to the same account, as the installer. It proves **integrity**: the bytes that run are the bytes the release lists, so a truncated or corrupted download, a proxy or cache altering one file, and an asset replaced without its checksum line are all caught. It does not prove **authenticity**: whoever can change a release (a compromised account, token or workflow) can change the installer and its checksum together, and the digest then matches. The trust root stays TLS to GitHub plus control of the `Hocsman/jarvis` releases. Authenticity needs a signature made with a key held outside GitHub (Authenticode on the Windows installer, Apple Developer ID notarisation, or a detached signature checked against a key pinned in the app). Builds are unsigned, and signing needs certificates or key custody this project does not have. The install remains the user's decision (the Update dialog) and the Windows installer asks for elevation.
+
+### Release assets
+
+A release is complete when it carries the installer of every platform (`Jarvis-Windows-x64.zip`, `Jarvis-macOS-arm64.zip`, `Jarvis-macOS-x64.zip`, `Jarvis-Linux-x64.tar.gz`) and `SHA256SUMS.txt`. The release workflow publishes a versioned release only after every platform has built, passed the bundled-app check and uploaded, and the rolling `latest` release is rewritten only under the same condition. The updater ignores a release that lacks the installer for its platform and refuses one that lacks the checksum file.
 
 ### Platform-Specific Update Installation
 
@@ -240,9 +261,10 @@ sequenceDiagram
     participant Batch as Batch Script
     participant New as New App
 
-    App->>App: Download update zip
+    App->>App: Download update zip, hashing as it streams
+    App->>App: Compare with the release's SHA256SUMS.txt (refuse and delete on mismatch)
     App->>App: Save diary (pre-install callback)
-    App->>App: Extract to temp dir
+    App->>App: Hash the zip again, then extract to temp dir
     App->>App: Create batch script (with current PID)
     App->>App: Save asset ID to track update
     App->>Batch: Launch batch script

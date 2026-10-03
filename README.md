@@ -666,9 +666,12 @@ Running from source enables Chatterbox TTS (AI voice with emotion/cloning). Pipe
   "mcps": {},
   "location_auto_detect": false,
   "location_cgnat_resolve_public_ip": false,
-  "location_enabled": false
+  "location_enabled": false,
+  "update_check_enabled": false
 }
 ```
+
+`update_check_enabled` stops the installed desktop app from asking GitHub for new releases when it starts (**⚙️ Settings → ✨ Features → Check for Updates at Startup**). **Check for Updates** in the tray menu still works when you ask. When you do update, the installer is checked against the release's `SHA256SUMS.txt` before it runs and is discarded if it does not match.
 
 Verify: `sudo lsof -i -n -P | grep jarvis` (should only show 127.0.0.1 to Ollama)
 

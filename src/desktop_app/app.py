@@ -2064,6 +2064,9 @@ class JarvisSystemTray:
 
         Args:
             show_no_update_dialog: If True, shows a dialog even when no update is available.
+                That is the user asking from the tray menu; a check with no dialog to
+                show is the automatic one at startup, which ``update_check_enabled`` can
+                switch off.
         """
         from desktop_app.updater import check_for_updates, is_frozen
         from desktop_app.update_dialog import (
@@ -2087,7 +2090,7 @@ class JarvisSystemTray:
             return
 
         try:
-            status = check_for_updates()
+            status = check_for_updates(automatic=not show_no_update_dialog)
 
             if status.error:
                 debug_log(f"Update check failed: {status.error}", "desktop")

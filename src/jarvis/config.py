@@ -215,6 +215,10 @@ class Settings:
     hot_window_enabled: bool
     hot_window_seconds: float
     low_power_mode: bool
+    # Whether the desktop app asks GitHub for a newer release a few seconds
+    # after it opens. Off, it contacts nobody on its own; the tray's
+    # "Check for Updates" still goes out when the user asks.
+    update_check_enabled: bool
 
     # Echo Detection
     echo_energy_threshold: float
@@ -655,6 +659,17 @@ def _ensure_list(value: Any) -> list[str]:
     return [str(value)]
 
 
+def _as_bool(value: Any) -> bool:
+    """A config flag as a bool.
+
+    ``bool("false")`` is True, so a flag edited by hand as text would stay on
+    whatever it was meant to say. The usual spellings of off read as off.
+    """
+    if isinstance(value, str):
+        return value.strip().lower() not in {"false", "0", "no", "off"}
+    return bool(value)
+
+
 def _ensure_dict(value: Any) -> Dict[str, Any]:
     if isinstance(value, dict):
         return value
@@ -785,6 +800,9 @@ def get_default_config() -> Dict[str, Any]:
         "hot_window_enabled": True,
         "hot_window_seconds": 3.0,
         "low_power_mode": False,
+        # The bundled desktop app asks GitHub for a newer release shortly
+        # after it opens. False and it contacts nobody on its own.
+        "update_check_enabled": True,
         "echo_energy_threshold": 2.0,
         "echo_tolerance": 0.3,  # Time tolerance for echo detection timing
 
@@ -1113,6 +1131,7 @@ def load_settings() -> Settings:
     hot_window_enabled = bool(merged.get("hot_window_enabled", True))
     hot_window_seconds = float(merged.get("hot_window_seconds", 3.0))
     low_power_mode = bool(merged.get("low_power_mode", False))
+    update_check_enabled = _as_bool(merged.get("update_check_enabled", True))
     echo_energy_threshold = float(merged.get("echo_energy_threshold", 2.0))
     echo_tolerance = float(merged.get("echo_tolerance", 0.3))
 
@@ -1255,17 +1274,13 @@ def load_settings() -> Settings:
     weather_city = str(merged.get("weather_city", "") or "").strip()
 
     # Parse ui subsection. ``orb_particles_enabled`` defaults to True;
-    # coerced via bool()/string rules so a hand-edited config that
-    # writes "false"/0/"no" still resolves sensibly. A missing or
-    # non-dict ``ui`` block falls back to the default.
+    # coerced via `_as_bool` so a hand-edited config that writes
+    # "false"/0/"no" still resolves sensibly. A missing or non-dict
+    # ``ui`` block falls back to the default.
     raw_ui = merged.get("ui", {})
     if not isinstance(raw_ui, dict):
         raw_ui = {}
-    raw_particles = raw_ui.get("orb_particles_enabled", True)
-    if isinstance(raw_particles, str):
-        orb_particles_enabled = raw_particles.strip().lower() not in {"false", "0", "no", "off"}
-    else:
-        orb_particles_enabled = bool(raw_particles)
+    orb_particles_enabled = _as_bool(raw_ui.get("orb_particles_enabled", True))
     ui = UISettings(orb_particles_enabled=orb_particles_enabled)
 
     whisper_min_confidence = float(merged.get("whisper_min_confidence", 0.4))
@@ -1373,6 +1388,7 @@ def load_settings() -> Settings:
         hot_window_enabled=hot_window_enabled,
         hot_window_seconds=hot_window_seconds,
         low_power_mode=low_power_mode,
+        update_check_enabled=update_check_enabled,
         echo_energy_threshold=echo_energy_threshold,
         echo_tolerance=echo_tolerance,
         # Reminders

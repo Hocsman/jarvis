@@ -33,6 +33,7 @@ from .updater import (
     DownloadSignals,
     DownloadWorker,
     ReleaseInfo,
+    UpdateIntegrityError,
     UpdateStatus,
     install_update,
     save_installed_asset_id,
@@ -567,7 +568,7 @@ class UpdateProgressDialog(QDialog):
         self.download_path = self._temp_dir / self.release.asset_name
 
         self.download_worker = DownloadWorker(
-            self.release.download_url,
+            self.release,
             self.download_path,
             self.download_signals,
         )
@@ -591,7 +592,7 @@ class UpdateProgressDialog(QDialog):
                 f"Downloading: {downloaded_mb:.1f} / {total_mb:.1f} MB"
             )
 
-    def _on_completed(self, path: str):
+    def _on_completed(self, path: str, sha256: str):
         self.cancel_btn.setEnabled(False)
 
         if self._pre_install_callback:
@@ -612,10 +613,15 @@ class UpdateProgressDialog(QDialog):
         self.status_label.setText("Installing update...")
         self.progress_bar.setRange(0, 0)
 
-        QTimer.singleShot(500, lambda: self._install(Path(path)))
+        QTimer.singleShot(500, lambda: self._install(Path(path), sha256))
 
-    def _install(self, download_path: Path):
-        if install_update(download_path):
+    def _install(self, download_path: Path, sha256: str):
+        try:
+            installed = install_update(download_path, sha256)
+        except UpdateIntegrityError as e:
+            self._on_error(str(e))
+            return
+        if installed:
             save_installed_asset_id(self.release.asset_id)
 
             self.title_label.setText("Update Complete")
