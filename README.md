@@ -419,6 +419,18 @@ To pick a voice yourself, browse [HuggingFace](https://huggingface.co/rhasspy/pi
 }
 ```
 
+To have the voice follow the language of each reply, list a voice per language (also under Settings, Piper TTS, Voice per Language). A voice is a Piper voice name or the path of a `.onnx` file, downloaded on first use:
+```json
+{
+  "tts_piper_voices": { "fr": "fr_FR-siwis-medium", "de": "de_DE-thorsten-medium" },
+  "tts_piper_model_path": "~/.local/share/jarvis/models/piper/en_GB-alan-medium.onnx"
+}
+```
+- With `response_language` empty, the voice follows the language she heard you speak.
+- With `response_language` set, that language decides the voice, whatever you spoke.
+- A language you did not list is read with `tts_piper_model_path`, or the built-in voice when that is empty.
+- The voice reads what she writes. If she answers in another language than the one you spoke, set `response_language` so the reply and its voice agree.
+
 **Kokoro** - more natural neural voice (Kokoro-82M), still real-time on CPU:
 ```json
 { "tts_engine": "kokoro", "tts_kokoro_voice": "ff_siwis", "tts_kokoro_lang_code": "f" }

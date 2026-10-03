@@ -205,9 +205,8 @@ two candidates for it, and they can disagree:
   French.
 - The language the user was heard in, which the listener passes as
   `language`. With `response_language` empty (auto) the persona pins no
-  language, so unless the reply engine's English-only instruction applies
-  (`reply.spec.md`, "System message composition") she answers in the
-  language she was spoken to, and that is the one to follow.
+  language and she answers in the language she was spoken to, so that is
+  the one to follow.
 
 When neither is known, as before the first transcription or for a line
 spoken with no utterance behind it, no language is claimed and the
@@ -311,6 +310,12 @@ and which wins when the configured one and the one heard disagree, is
 decided under "Piper voices". Kokoro and Chatterbox accept the language
 `speak` is given and ignore it: Kokoro's voice and language are set by
 hand, and Chatterbox speaks English.
+
+The voices only read what the model writes. The reply engine separately
+tells the model to answer in English whenever the engine is Piper or
+Chatterbox, whatever `response_language` and `tts_piper_voices` say. A
+model that obeys that instruction never writes in a language the voices
+could follow.
 
 ## Configuration
 
