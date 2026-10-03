@@ -4,9 +4,9 @@ Small models emit tool calls in several shapes that the native Ollama
 tool_calls API doesn't recognise. The engine's ``_extract_text_tool_call``
 must parse these so the model's compliance succeeds regardless of shape.
 
-The gemma-native ``tool_code`` branch was removed in the evaluator-driven
-loop refactor — the model is now responsible for producing a valid tool
-call, and the evaluator / toolSearchTool path replaces the safety net.
+The parser has no gemma-native ``tool_code`` branch: the model is
+responsible for producing a valid tool call, and a leaked ``tool_code``
+block is caught by the malformed-output guard instead.
 """
 
 import pytest

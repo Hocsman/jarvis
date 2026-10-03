@@ -60,8 +60,6 @@ def _openai_cfg() -> _Cfg:
         # Reply path
         ("src.jarvis.reply.planner", "call_llm_direct", _ollama_cfg, "ollama"),
         ("src.jarvis.reply.planner", "call_llm_direct", _openai_cfg, "openai_compatible"),
-        ("src.jarvis.reply.evaluator", "call_llm_direct", _ollama_cfg, "ollama"),
-        ("src.jarvis.reply.evaluator", "call_llm_direct", _openai_cfg, "openai_compatible"),
         ("src.jarvis.reply.enrichment", "call_llm_direct", _ollama_cfg, "ollama"),
         ("src.jarvis.reply.enrichment", "call_llm_direct", _openai_cfg, "openai_compatible"),
         # Memory path

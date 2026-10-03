@@ -286,25 +286,15 @@ class Settings:
     # When `tool_selection_strategy == "llm"`, this model does the routing.
     # Empty string means "reuse ``llm_chat_model``" (the default).
     tool_router_model: str
-    # Optional override for the post-turn evaluator LLM. Empty string means
-    # "fall back to intent_judge_model, then ``llm_chat_model``" (the default).
-    evaluator_model: str
-    # None = auto (on for SMALL models, off for LARGE). Explicit true/false forces.
-    evaluator_enabled: Optional[bool]
     # Upper bound on toolSearchTool invocations per reply turn. The cap
     # prevents a small model from churning through the escape hatch forever
     # when no tool really fits.
     tool_search_max_calls: int
-    # Upper bound on evaluator-driven nudges per reply. Each time the
-    # evaluator says "continue" with a nudge, the nudge is injected into
-    # the next turn's system message. This cap stops nudge ping-pong when
-    # the model keeps producing prose despite the nudge.
-    evaluator_nudge_max: int
     # Optional override for the pre-loop task-list planner model. Empty
     # string means "fall back to tool_router_model → intent_judge_model →
     # ``llm_chat_model``" (the default). The planner is a small
     # classification-shaped pass so it rides the same small-model chain
-    # as the router and the evaluator.
+    # as the router.
     planner_model: str
     # Whether the pre-loop planner is enabled. True = planner always runs;
     # False = planner never runs, and the compound-query split drives the
@@ -599,9 +589,9 @@ def _cloud_safe_model(value: str, field: str, provider: str,
     """Keep auxiliary model names valid for the endpoint actually in use.
 
     Jarvis runs several small LLM tasks (intent judge, tool router,
-    evaluator, planner) on their own configured model. A remote cloud
-    endpoint namespaces its model IDs as ``vendor/model`` and answers
-    HTTP 400 ("X is not a valid model ID") to a bare local tag like
+    planner) on their own configured model. A remote cloud endpoint
+    namespaces its model IDs as ``vendor/model`` and answers HTTP 400
+    ("X is not a valid model ID") to a bare local tag like
     ``gemma4:e2b``, so the auxiliary task dies for no gain: those get the
     chat model instead when no local Ollama instance is reachable.
 
@@ -613,7 +603,7 @@ def _cloud_safe_model(value: str, field: str, provider: str,
     the only shape it accepts, and the pin is the whole reason the user
     set a small model for a small task. So the endpoint decides rather
     than the provider name, and a discarded pin is announced: nothing
-    downstream ever shows the effective value, and three of these four
+    downstream ever shows the effective value, and two of these three
     fields have no field in the settings window at all.
     """
     if not value:
@@ -882,16 +872,8 @@ def get_default_config() -> Dict[str, Any]:
         # judge model isn't set. Override to decouple routing from both —
         # useful when you want routing on a dedicated smaller model.
         "tool_router_model": "",
-        # Empty string = reuse intent_judge_model, falling through to
-        # ollama_chat_model only if the judge isn't set. Override to pin the
-        # evaluator to a dedicated small/fast model.
-        "evaluator_model": "",
-        # None = auto (on for small models, off for large). Set true/false to force.
-        "evaluator_enabled": None,
         # Cap the number of toolSearchTool invocations per reply.
         "tool_search_max_calls": 3,
-        # Cap the number of evaluator-driven nudges per reply.
-        "evaluator_nudge_max": 2,
         # Task-list planner (see src/jarvis/reply/planner.spec.md). Empty
         # model string = reuse tool_router_model → intent_judge_model →
         # ollama_chat_model.
@@ -1190,16 +1172,6 @@ def load_settings() -> Settings:
     tool_router_model = _cloud_safe_model(
         tool_router_model, "tool_router_model", llm_provider, llm_base_url, llm_chat_model,
         ollama_base_url=ollama_base_url)
-    evaluator_model = str(merged.get("evaluator_model", "") or "").strip()
-    evaluator_model = _cloud_safe_model(
-        evaluator_model, "evaluator_model", llm_provider, llm_base_url, llm_chat_model,
-        ollama_base_url=ollama_base_url)
-    _eval_raw = merged.get("evaluator_enabled", None)
-    evaluator_enabled: Optional[bool]
-    if _eval_raw is None:
-        evaluator_enabled = None
-    else:
-        evaluator_enabled = bool(_eval_raw)
     planner_model = str(merged.get("planner_model", "") or "").strip()
     planner_model = _cloud_safe_model(
         planner_model, "planner_model", llm_provider, llm_base_url, llm_chat_model,
@@ -1215,12 +1187,6 @@ def load_settings() -> Settings:
         tool_search_max_calls = 3
     if tool_search_max_calls < 0:
         tool_search_max_calls = 0
-    try:
-        evaluator_nudge_max = int(merged.get("evaluator_nudge_max", 2))
-    except (TypeError, ValueError):
-        evaluator_nudge_max = 2
-    if evaluator_nudge_max < 0:
-        evaluator_nudge_max = 0
     location_enabled = bool(merged.get("location_enabled", True))
     location_cache_minutes = int(merged.get("location_cache_minutes", 60))
     location_ip_address_val = merged.get("location_ip_address")
@@ -1415,10 +1381,7 @@ def load_settings() -> Settings:
         agentic_max_turns=agentic_max_turns,
         tool_selection_strategy=tool_selection_strategy,
         tool_router_model=tool_router_model,
-        evaluator_model=evaluator_model,
-        evaluator_enabled=evaluator_enabled,
         tool_search_max_calls=tool_search_max_calls,
-        evaluator_nudge_max=evaluator_nudge_max,
         planner_model=planner_model,
         planner_enabled=planner_enabled,
         planner_timeout_sec=planner_timeout_sec,

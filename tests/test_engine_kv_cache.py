@@ -66,7 +66,6 @@ def test_context_block_at_tail_of_system_message(mock_config, db, dialogue_memor
     from jarvis.reply import engine as engine_mod
 
     mock_config.llm_chat_model = "gpt-oss:20b"  # LARGE -> native tools
-    mock_config.evaluator_enabled = False
 
     captured: list[str] = []
 
@@ -98,7 +97,6 @@ def test_context_computed_once_per_reply_and_identical_across_loop_calls(
     from jarvis.reply import engine as engine_mod
 
     mock_config.llm_chat_model = "gpt-oss:20b"  # LARGE -> native tools
-    mock_config.evaluator_enabled = False
 
     captured: list[str] = []
     context_fetches: list[int] = []
@@ -152,7 +150,6 @@ def test_context_restored_after_native_to_text_fallback(
     from jarvis.reply import engine as engine_mod
 
     mock_config.llm_chat_model = "gpt-oss:20b"
-    mock_config.evaluator_enabled = False
 
     captured: list[str] = []
 
@@ -192,7 +189,6 @@ def test_small_model_starts_in_text_tools_mode_and_memoises_across_turns(
     from jarvis.reply import engine as engine_mod
 
     mock_config.llm_chat_model = "gemma4:e2b"  # SMALL -> text tools from Turn 1
-    mock_config.evaluator_enabled = False
 
     captured: list[str] = []
 
@@ -245,7 +241,6 @@ def test_tool_search_widening_reinjects_context_cleanly(
     from jarvis.reply import engine as engine_mod
 
     mock_config.llm_chat_model = "gemma4:e2b"
-    mock_config.evaluator_enabled = False
 
     captured: list[str] = []
 

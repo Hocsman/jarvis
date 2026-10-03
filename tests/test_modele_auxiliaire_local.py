@@ -5,8 +5,8 @@ as the way to reach LM Studio, oMLX, `llama-server`, vLLM and LocalAI —
 all of them local, all of them taking bare model names. The rewrite that
 rescues a stale Ollama tag from a remote endpoint's HTTP 400 read the
 provider name and concluded "remote", so it threw away every pin on a
-local server too, and quietly ran the intent judge, the router, the
-planner and the evaluator on the big chat model.
+local server too, and quietly ran the intent judge, the router and the
+planner on the big chat model.
 
 What separates the two is the host, which the function was never given.
 And when the pin genuinely has to go, it is now said out loud: a setting
@@ -35,7 +35,7 @@ def _settings_from(tmp_path, monkeypatch, values: dict):
     return load_settings()
 
 
-_PINS = ("intent_judge_model", "tool_router_model", "evaluator_model", "planner_model")
+_PINS = ("intent_judge_model", "tool_router_model", "planner_model")
 
 
 def _config_locale(url: str) -> dict:
@@ -106,7 +106,7 @@ def test_a_remote_endpoint_still_rescues_a_stale_local_tag(tmp_path, monkeypatch
 
 def test_a_discarded_pin_is_announced(tmp_path, monkeypatch, capsys):
     """Nothing downstream shows the effective value: the settings window
-    reads the raw JSON off disk, and three of these four fields have no
+    reads the raw JSON off disk, and two of these three fields have no
     field there at all."""
     import src.jarvis.config as config
     monkeypatch.setattr(config, "is_ollama_reachable", lambda *args, **kwargs: False)

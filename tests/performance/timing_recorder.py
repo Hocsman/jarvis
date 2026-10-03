@@ -2,15 +2,15 @@
 
 Monkey-patches the three entry points in ``jarvis.llm`` (``call_llm_direct``,
 ``call_llm_streaming``, ``chat_with_messages``) to record per-call timings
-grouped by the context that issued the call (evaluator, intent judge, tool
-router, etc.). The context is inferred from the caller's ``__qualname__`` on
+grouped by the context that issued the call (intent judge, tool router,
+etc.). The context is inferred from the caller's ``__qualname__`` on
 the Python call stack, so no instrumentation is needed at the call site.
 
 Usage:
     with TimingRecorder() as rec:
         run_reply_engine(...)
     rec.print_report()
-    assert rec.p95("evaluator") < rec.p95("main_chat_turn")  # shape check
+    assert rec.p95("tool_router") < rec.p95("main_chat_turn")  # shape check
 """
 
 from __future__ import annotations
@@ -39,8 +39,6 @@ _CALLER_TO_CONTEXT: dict[str, str] = {
     # Context 2 — intent judge (calls via internal helper)
     "IntentJudge.evaluate": "intent_judge",
     "IntentJudge._call_llm": "intent_judge",
-    # Context 3 — evaluator
-    "evaluate_turn": "evaluator",
     # Context 4 — memory enrichment extractor
     "extract_search_params_for_memory": "enrichment_extract",
     # Context 5 — memory digest (per batch)

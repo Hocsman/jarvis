@@ -1,6 +1,6 @@
 # LLM Backend Specification
 
-The `jarvis.llm` package owns every LLM HTTP call Jarvis makes and lets the same reply engine, planner, intent judge, evaluator, memory pipeline, and tools run against any local runtime: Ollama, an OpenAI-compatible server (LM Studio, oMLX, llama.cpp's `llama-server`, vLLM, LocalAI), or an Anthropic-compatible server.
+The `jarvis.llm` package owns every LLM HTTP call Jarvis makes and lets the same reply engine, planner, intent judge, memory pipeline, and tools run against any local runtime: Ollama, an OpenAI-compatible server (LM Studio, oMLX, llama.cpp's `llama-server`, vLLM, LocalAI), or an Anthropic-compatible server.
 
 ## Goals
 
@@ -43,7 +43,7 @@ Two interchangeable styles dispatch to the same backend:
 | `list_models(*, timeout_sec)` | `List[str]` | Names of models the runtime has available. Returns `[]` on error. |
 | `warm_up(model, *, timeout_sec, keep_alive)` | `bool` | Page `model` into resident memory ahead of the first real request. Default impl returns `True` (no-op for runtimes without per-call unloading). Ollama overrides this to issue a minimal `/api/generate` ping with the caller-provided `keep_alive` duration, defaulting to `"30m"`. |
 
-`direct()` and `streaming()` are convenience methods over `chat()`: they construct the `[system, user]` messages array internally so callers running classification-shaped passes (planner, intent judge, evaluator, enrichment extractor) do not have to. `chat()` is the low-level primitive for arbitrary message arrays — multi-turn dialogue, native tool calls, and anything that needs custom roles.
+`direct()` and `streaming()` are convenience methods over `chat()`: they construct the `[system, user]` messages array internally so callers running classification-shaped passes (planner, intent judge, enrichment extractor) do not have to. `chat()` is the low-level primitive for arbitrary message arrays — multi-turn dialogue, native tool calls, and anything that needs custom roles.
 
 ### Tool calling
 
@@ -80,7 +80,7 @@ The `ollama_base_url` / `ollama_chat_model` / `ollama_embed_model` keys hold the
 
 ### Splitting roles across models
 
-`intent_judge_model` / `tool_router_model` / `planner_model` / `evaluator_model` exist so the classification-shaped calls can run on a different model from the reply. On a cloud provider this is not a micro-optimisation — it dominates latency.
+`intent_judge_model` / `tool_router_model` / `planner_model` exist so the classification-shaped calls can run on a different model from the reply. On a cloud provider this is not a micro-optimisation — it dominates latency.
 
 Measured on the memory extractor (same prompt, same query, OpenRouter):
 
@@ -144,7 +144,6 @@ Each migrated module exposes a single intercept point so tests can patch one sym
 
 - `jarvis.reply.engine.chat_with_messages(cfg, messages, ...)` — agentic-loop chat boundary.
 - `jarvis.reply.planner.call_llm_direct(*, cfg, chat_model, ...)` — planner + step resolver.
-- `jarvis.reply.evaluator.call_llm_direct(*, cfg, chat_model, ...)` — terminal evaluator.
 - `jarvis.reply.enrichment.call_llm_direct(*, cfg, chat_model, ...)` — memory enrichment extractor + digest passes.
 - `jarvis.memory.graph_ops.call_llm_direct(*, cfg, chat_model, ...)` — knowledge graph extraction, best-child picker, node merge.
 - `jarvis.memory.conversation._direct_llm(cfg, system_prompt, user_content, ...)` — diary summary, deflection rewrite, topic optimisation.

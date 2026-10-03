@@ -100,10 +100,10 @@ sans vérifier que quoi que ce soit le lisait. Rien ne l'aurait signalé.
 
 Les clés de modèles que le code reconnaît sont `llm_chat_model`,
 `intent_judge_model`, `tool_router_model`, `planner_model`,
-`evaluator_model`, `appris_model`, `confirmation_model`,
-`reminder_model`, `embedding_model`, `ollama_chat_model`,
-`ollama_embed_model` et `whisper_model`. Celles qu'on ne met pas
-retombent sur leurs valeurs par défaut.
+`appris_model`, `confirmation_model`, `reminder_model`,
+`embedding_model`, `ollama_chat_model`, `ollama_embed_model` et
+`whisper_model`. Celles qu'on ne met pas retombent sur leurs valeurs par
+défaut.
 
 **À laisser tomber au premier lancement** : tout ce qui commence par
 `tts_piper_` (chemins macOS), `location_ip_address` (l'IP d'ici), et

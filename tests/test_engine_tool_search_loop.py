@@ -306,44 +306,6 @@ def test_tool_search_max_calls_cap(mock_config, db, dialogue_memory):
     )
 
 
-def test_validate_tool_args_catches_unknown_keys():
-    """Unit test for the schema validator — unknown arg key is the exact
-    failure mode the field log hit."""
-    from jarvis.reply.engine import _validate_tool_args_against_schema
-
-    err = _validate_tool_args_against_schema(
-        "webSearch",
-        {"query": "tube strikes today"},
-        mcp_tools=None,
-    )
-    assert err is not None
-    assert "unknown argument" in err.lower()
-    assert "search_query" in err
-
-
-def test_validate_tool_args_passes_correct_keys():
-    from jarvis.reply.engine import _validate_tool_args_against_schema
-
-    err = _validate_tool_args_against_schema(
-        "webSearch",
-        {"search_query": "tube strikes today"},
-        mcp_tools=None,
-    )
-    assert err is None
-
-
-def test_validate_tool_args_catches_missing_required():
-    from jarvis.reply.engine import _validate_tool_args_against_schema
-
-    err = _validate_tool_args_against_schema(
-        "webSearch",
-        {},
-        mcp_tools=None,
-    )
-    assert err is not None
-    assert "missing required" in err.lower()
-
-
 def test_max_turns_produces_digest(mock_config, db, dialogue_memory):
     """When the loop hits ``agentic_max_turns`` via a pure tool-call loop
     (no content turn), the engine runs ``digest_loop_for_max_turns`` and
