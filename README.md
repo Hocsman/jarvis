@@ -34,10 +34,10 @@
 
 **📊 Transparent progress** - We track what works (and what doesn't) with automated evals. [See the suite →](evals/)
 
-**🚧 Known limitations:** Jarvis is under active development. Primary development happens on macOS. Windows/Linux support may lag behind. On Windows, Qt is held at 6.9: 6.10 and later fail to load `Qt6Core.dll`, so upgrading PyQt6 by hand breaks the app. We're building in the open, [issues](https://github.com/isair/jarvis/issues) and [contributions](https://github.com/isair/jarvis/pulls) welcome!
-- No mobile apps ([#17](https://github.com/isair/jarvis/issues/17))
-- "Stop" commands during speech sometimes get filtered as echo ([#24](https://github.com/isair/jarvis/issues/24))
-- Dictation is not available on macOS 26+ (Tahoe) due to a pynput incompatibility ([#172](https://github.com/isair/jarvis/issues/172))
+**🚧 Known limitations:** Jarvis is under active development. Primary development happens on macOS. Windows/Linux support may lag behind. On Windows, Qt is held at 6.9: 6.10 and later fail to load `Qt6Core.dll`, so upgrading PyQt6 by hand breaks the app. We're building in the open, [issues](https://github.com/Hocsman/jarvis/issues) and [contributions](https://github.com/Hocsman/jarvis/pulls) welcome!
+- No mobile apps ([upstream #17](https://github.com/isair/jarvis/issues/17))
+- "Stop" commands during speech sometimes get filtered as echo ([upstream #24](https://github.com/isair/jarvis/issues/24))
+- Dictation is not available on macOS 26+ (Tahoe) due to a pynput incompatibility ([upstream #172](https://github.com/isair/jarvis/issues/172))
 
 <details>
 <summary><strong>See it in action</strong> (example conversations)</summary>
@@ -135,7 +135,7 @@ I have opened YouTube for you.
 
 ### 2. Download Jarvis
 
-Get the latest from [GitHub Releases](https://github.com/isair/jarvis/releases):
+Get the latest from [GitHub Releases](https://github.com/Hocsman/jarvis/releases):
 
 | Platform | Download | Run |
 |----------|----------|-----|
@@ -638,7 +638,7 @@ Get API key at [composio.dev](https://composio.dev)
 <summary><strong>Running from source</strong></summary>
 
 ```bash
-git clone https://github.com/isair/jarvis.git
+git clone https://github.com/Hocsman/jarvis.git
 cd jarvis
 
 # macOS
@@ -707,7 +707,8 @@ provider can't run out the voice-assistant latency budget.
 
 - **Personal use**: Free forever
 - **Commercial use**: [Contact us](mailto:baris@writeme.com)
+- **Origin**: a fork of [isair/jarvis](https://github.com/isair/jarvis) by Baris Sencan, under the same licence (see [LICENSE](LICENSE))
 
 ## Support
 
-[Report issues](https://github.com/isair/jarvis/issues) · [Discussions](https://github.com/isair/jarvis/discussions) · [Sponsor](https://github.com/sponsors/isair)
+[Report issues](https://github.com/Hocsman/jarvis/issues) · [Sponsor](https://github.com/sponsors/isair)

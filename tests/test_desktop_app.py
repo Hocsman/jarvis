@@ -690,6 +690,8 @@ class TestLogViewerReportIssue:
         """Report issue should generate correct GitHub issue URL with redacted content."""
         import urllib.parse
         import webbrowser
+        from desktop_app.app import _new_issue_url
+        from desktop_app.updater import GITHUB_REPO
         from jarvis import get_version
         from jarvis.utils.redact import redact
 
@@ -738,15 +740,10 @@ class TestLogViewerReportIssue:
 ### Additional Context
 (Any other relevant information)
 """
-        params = urllib.parse.urlencode({
-            'title': title,
-            'body': body,
-            'labels': 'bug'
-        })
-        url = f"https://github.com/isair/jarvis/issues/new?{params}"
+        url = _new_issue_url(title, body, 'bug')
 
         # Parse and verify
-        assert url.startswith("https://github.com/isair/jarvis/issues/new?")
+        assert url.startswith(f"https://github.com/{GITHUB_REPO}/issues/new?")
         parsed = urllib.parse.urlparse(url)
         params_parsed = urllib.parse.parse_qs(parsed.query)
 

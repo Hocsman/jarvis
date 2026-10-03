@@ -146,6 +146,7 @@ The Inno Setup script also runs a `VerifyCudaInstall` hook after the CUDA downlo
   - Logs in collapsible `<details>` section
   - Version and platform info
   - Log truncation preserves the init section (everything up to the last `─`×50 separator) + recent tail (most useful for debugging); middle lines are truncated
+  - Targets `GITHUB_REPO`, the repository the updater reads releases from; `_new_issue_url` builds the URL for this button and for the crash dialog, so a report and an update check always address the same project
 
 ### Splash Screen
 
@@ -229,7 +230,7 @@ Components use `JARVIS_THEME_STYLESHEET` for consistent styling across all dialo
 
 The desktop app includes an auto-update mechanism:
 
-1. **Check**: Queries GitHub releases API for newer versions
+1. **Check**: Queries the GitHub releases API of `GITHUB_REPO` (`updater.py`) for newer versions
 2. **Notify**: Shows dialog with changelog and download option
 3. **Download**: Downloads new installer with progress bar
 4. **Install**: Platform-specific installation (see below)
@@ -299,7 +300,7 @@ The Knowledge tab hides the `user` and `directives` branches once they are empty
 1. On startup, creates a `.crash_marker` file
 2. On clean exit, removes the marker
 3. On next startup, if marker exists → previous session crashed
-4. Offers to submit crash report to GitHub Issues
+4. Offers to submit crash report to the issue tracker of `GITHUB_REPO`
 
 ### Fallbacks
 

@@ -1,6 +1,6 @@
 # LLM Backend Specification
 
-The `jarvis.llm` package owns every LLM HTTP call Jarvis makes and lets the same reply engine, planner, intent judge, memory pipeline, and tools run against any local runtime: Ollama, an OpenAI-compatible server (LM Studio, oMLX, llama.cpp's `llama-server`, vLLM, LocalAI), or an Anthropic-compatible server.
+The `jarvis.llm` package owns every LLM HTTP call Jarvis makes and lets the same reply engine, planner, intent judge, memory pipeline, and tools run against Ollama or an OpenAI-compatible server (LM Studio, oMLX, llama.cpp's `llama-server`, vLLM, LocalAI, or a hosted endpoint). Those are the two providers the factory builds.
 
 ## Goals
 
@@ -47,13 +47,13 @@ Two interchangeable styles dispatch to the same backend:
 
 ### Tool calling
 
-The `tools` parameter accepts the OpenAI-compatible JSON-schema format produced by `jarvis.tools.registry.generate_tools_json_schema()`. Ollama 0.4+ adopts that exact format, so no translation layer is needed for the Ollama backend; OpenAI-compatible and Anthropic-compatible backends translate inside their `chat()` methods so the reply engine sees a single shape.
+The `tools` parameter accepts the OpenAI-compatible JSON-schema format produced by `jarvis.tools.registry.generate_tools_json_schema()`. Ollama 0.4+ adopts that exact format, so no translation layer is needed for the Ollama backend; the OpenAI-compatible backend normalises responses inside its `chat()` method so the reply engine sees a single shape.
 
 When a model rejects the `tools` parameter (Ollama returns HTTP 400 in that case), the backend raises `ToolsNotSupportedError`. The reply engine catches it and falls back to text-based tool calling for the rest of the session.
 
 ### Streaming
 
-Each backend parses its own stream format internally (Ollama JSONL, OpenAI SSE, Anthropic SSE event blocks). The public `on_token(str)` contract is identical across backends.
+Each backend parses its own stream format internally (Ollama JSON lines, OpenAI-compatible SSE). The public `on_token(str)` contract is identical across backends.
 
 ### Embeddings
 

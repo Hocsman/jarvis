@@ -925,9 +925,23 @@ def get_default_config() -> Dict[str, Any]:
     }
 
 
+# Defaults whose value depends on the platform reading them (the dictation
+# hotkey differs between Windows and the rest). An example file written on one
+# machine would hand that machine's value to every reader, so the example
+# leaves them out and each reader keeps the default of their own platform.
+_HOST_DEPENDENT_DEFAULTS = ("dictation_hotkey",)
+
+
 def export_example_config(include_db_path: bool = False) -> Dict[str, Any]:
-    """Returns example config suitable for JSON export (with adjusted db_path)."""
+    """Returns example config suitable for JSON export.
+
+    With ``include_db_path=False`` the result is the same whichever machine
+    builds it: host-dependent defaults are left out and ``db_path`` is
+    replaced with a friendly path.
+    """
     config = get_default_config().copy()
+    for key in _HOST_DEPENDENT_DEFAULTS:
+        config.pop(key, None)
     if not include_db_path:
         # Use a user-friendly path for examples
         config["db_path"] = "~/.local/share/jarvis/jarvis.db"

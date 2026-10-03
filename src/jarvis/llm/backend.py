@@ -1,8 +1,7 @@
 """Provider-agnostic LLM backend interface.
 
-Every supported local LLM runtime (Ollama today; OpenAI-compatible
-servers like LM Studio / oMLX, and Anthropic-compatible servers in
-later PRs) implements this ABC. Callers obtain an instance via
+Every supported LLM runtime (Ollama, and OpenAI-compatible servers like
+LM Studio / oMLX) implements this ABC. Callers obtain an instance via
 ``jarvis.llm.get_llm_backend(settings)`` and never construct backends
 directly so the chosen runtime can swap based on user config.
 
@@ -76,8 +75,8 @@ class LLMBackend(ABC):
 
     Implementations are responsible for translating the calls below
     into their native HTTP shape (Ollama ``/api/chat``, OpenAI
-    ``/chat/completions``, Anthropic ``/v1/messages``, etc.) and for
-    normalising responses into the formats described per-method.
+    ``/chat/completions``) and for normalising responses into the
+    formats described per-method.
     """
 
     @abstractmethod

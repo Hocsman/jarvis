@@ -66,6 +66,7 @@ from jarvis.config import default_config_path, _default_db_path, SUPPORTED_CHAT_
 from jarvis.state import JarvisState, get_jarvis_state
 from desktop_app.diary_dialog import DiaryUpdateDialog
 from desktop_app.themes import JARVIS_THEME_STYLESHEET
+from desktop_app.updater import GITHUB_REPO
 from desktop_app.face_widget import FaceWindow
 
 
@@ -406,6 +407,20 @@ def _snap_to_line_boundary(text: str) -> str:
     return text
 
 
+def _new_issue_url(title: str, body: str, labels: str) -> str:
+    """GitHub's new-issue form on this project's tracker, prefilled.
+
+    Built from the repository the updater reads releases from, so a bug
+    report and an update check always address the same project.
+    """
+    params = urllib.parse.urlencode({
+        'title': title,
+        'body': body,
+        'labels': labels,
+    })
+    return f"https://github.com/{GITHUB_REPO}/issues/new?{params}"
+
+
 def _truncate_logs_for_report(logs: str, max_len: int) -> str:
     """Truncate logs keeping init section + recent tail.
 
@@ -726,13 +741,7 @@ def show_crash_report_dialog(crash_content: str) -> None:
 ### Additional Context
 (Any other relevant information)
 """
-                # URL encode
-                params = urllib.parse.urlencode({
-                    'title': title,
-                    'body': body,
-                    'labels': 'bug,crash'
-                })
-                url = f"https://github.com/isair/jarvis/issues/new?{params}"
+                url = _new_issue_url(title, body, 'bug,crash')
 
                 webbrowser.open(url)
                 self.accept()
@@ -1189,12 +1198,7 @@ class LogViewerWindow(QMainWindow):
 ### Additional Context
 (Any other relevant information)
 """
-        params = urllib.parse.urlencode({
-            'title': title,
-            'body': body,
-            'labels': 'bug'
-        })
-        url = f"https://github.com/isair/jarvis/issues/new?{params}"
+        url = _new_issue_url(title, body, 'bug')
 
         webbrowser.open(url)
 
