@@ -2795,9 +2795,9 @@ class JarvisSystemTray:
             self.update_icon()
             self._set_chat_daemon_status("running")
 
-            # The log viewer no longer pops up on start — it's a debug
-            # surface, available on demand via the "📝 View Logs" tray
-            # action. The dashboard is the primary window.
+            # The log viewer is a debug surface, available on demand via
+            # the "📝 View Logs" tray action. The dashboard is the primary
+            # window.
 
             self.tray_icon.showMessage(
                 "Jarvis Started",

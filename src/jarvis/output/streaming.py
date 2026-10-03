@@ -1,7 +1,7 @@
 """Cutting a stream of tokens into sentences worth speaking.
 
-She used to write the whole reply before saying a word of it. This is the
-piece that decides where a chunk ends, so the first sentence can leave
+She does not wait for the whole reply before saying a word of it. This is
+the piece that decides where a chunk ends, so the first sentence can leave
 while the model is still writing the second.
 
 See ``streaming.spec.md`` for what this must not break — chiefly that the

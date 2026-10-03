@@ -1940,11 +1940,11 @@ def update_diary_from_dialogue_memory(
                     )
                     stored = result.stored
                     skipped = result.skipped
-                    # Print whenever extraction produced anything — including
-                    # all-duplicate flushes. Without the skipped count this
-                    # line went silent after #282's dedupe (cumulative diary
-                    # re-extracts the same facts on every flush), making it
-                    # look like the memory pipeline had stopped working.
+                    # Print whenever extraction produced anything, including
+                    # all-duplicate flushes: the cumulative diary re-extracts
+                    # the same facts on every flush, and a line that went
+                    # silent on those would make the memory pipeline look as
+                    # if it had stopped working.
                     if stored or skipped:
                         dup_suffix = (
                             f"{skipped} duplicate{'' if skipped == 1 else 's'} skipped"

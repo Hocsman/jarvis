@@ -453,7 +453,7 @@ def _migrate_config(cfg_path: Path, cfg_json: Dict[str, Any]) -> Dict[str, Any]:
     migration_version = cfg_json.get("_config_version", 0)
 
     # Migration v1: tts_engine "system" -> "piper"
-    # Piper is now the default TTS with auto-download support.
+    # Piper is the default TTS, with auto-download support.
     if migration_version < 1:
         if cfg_json.get("tts_engine") == "system":
             cfg_json["tts_engine"] = "piper"

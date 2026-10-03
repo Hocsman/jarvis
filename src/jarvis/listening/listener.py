@@ -412,7 +412,7 @@ def _predownload_whisper_snapshot(model_name: str) -> None:
     """Best-effort visible download of the faster-whisper snapshot.
 
     faster-whisper silences huggingface_hub's progress bars, and the desktop
-    app never shows a TTY, so a multi-GB first-run download used to print
+    app never shows a TTY, so a multi-GB first-run download would print
     nothing for minutes. This surfaces progress. Failures are deliberately
     swallowed: WhisperModel's own cache/429/offline paths handle them.
     """
@@ -818,8 +818,7 @@ class VoiceListener(threading.Thread):
                         # remainder is only speech if it carries words she
                         # did not say. Left as "whatever is left over", a
                         # decimated tail of her own sentence rides through
-                        # as a query — the same absence-of-proof-for-proof
-                        # trade the echo override used to make.
+                        # as a query.
                         min_words = self.echo_detector.min_salvage_words
                         if (salvaged != text_lower
                                 and len(salvaged.split()) >= min_words
@@ -1826,14 +1825,12 @@ class VoiceListener(threading.Thread):
     def _transcription_announcement(self, text: str) -> str:
         """The console line for one transcription — heard, or thrown away.
 
-        The announcement used to print before the guards ran, and the
-        rejection only reached the debug log, which is off by default. On
-        2026-08-17 the console filled with a hundred and ten repetitions
-        of "I" being announced as Heard, over and over, while the guard
-        was catching every one of them. The system was behaving and the
-        only surface he reads said otherwise — the day's motif inverted,
-        a success wearing the face of a failure, and just as expensive: a
-        log that cannot be trusted is a log nobody judges by.
+        The repetition guard picks the line, so a transcription it rejects
+        is announced as discarded and never as heard. The rejection would
+        otherwise reach only the debug log, which is off by default, and
+        a console that reports "Heard" while the guard is catching every
+        repetition says the opposite of what the system is doing: a log
+        that cannot be trusted is a log nobody judges by.
 
         What is discarded says so, briefly, with its reason. Repeating
         the garbage under a different emoji would fix nothing.

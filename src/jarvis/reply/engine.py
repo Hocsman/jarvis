@@ -501,16 +501,15 @@ def _unavailable_tool_message(tool_name: str, allowed_tools: list[str]) -> str:
 def _graph_context_block(graph_parts: list) -> str:
     """Introduce the graph hits to the model, claiming only what they say.
 
-    The block used to open with "Things you looked up in earlier
-    conversations", which is a provenance claim made over every line at
-    once — including lines written before provenance was recorded, and
+    The block does not open with "Things you looked up in earlier
+    conversations": that is a provenance claim made over every line at
+    once, including lines written before provenance was recorded, and
     lines read off a page the assistant does not vouch for.
 
     Each line already ends with what it rests on, because that is how it
-    is stored (see ``provenance.spec.md``). What was missing is that the
-    model had no idea those words meant anything. Only the words actually
-    present are explained: a block of trusted-tool lines should not spend
-    prompt on `web`.
+    is stored (see ``provenance.spec.md``). The block tells the model what
+    those words mean. Only the words actually present are explained: a
+    block of trusted-tool lines should not spend prompt on `web`.
     """
     from ..memory.provenance import SOURCE_TOOL, SOURCE_UNKNOWN, SOURCE_WEB
 
@@ -1255,7 +1254,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
     # New conversation reset: when the previous session lapsed past the
     # inactivity window, drop the conversation-scoped cache and any
     # tool-carryover from the previous session. This is what bounds the
-    # cache lifetime now that individual entries no longer expire by age.
+    # cache lifetime: individual entries do not expire by age.
     if is_new_conversation and dialogue_memory is not None:
         if hasattr(dialogue_memory, "clear_hot_cache"):
             try:
@@ -1371,8 +1370,8 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
     #     separate tool-router LLM call.
     #
     # Fail-open: if the planner returns ``[]`` (short query, disabled,
-    # LLM timeout, empty response), we fall through to the legacy safe
-    # defaults — run the memory extractor and the tool router as before.
+    # LLM timeout, empty response), we fall through to the safe
+    # defaults: run the memory extractor and the tool router.
     # A positive single-step ``["Reply to the user."]`` plan is NOT the
     # same as ``[]``: it's the planner deciding no memory or tools are
     # needed. Both cases are preserved for the engine to distinguish.
@@ -1701,8 +1700,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
     # Extract keywords and implicit questions only when the planner asked
     # for a memory search (or the planner failed and we're falling open).
     # For queries the planner classified as reply-only ("what are you
-    # thinking", a greeting, a pure opinion) this skips an LLM call we'd
-    # have paid unconditionally in the old flow.
+    # thinking", a greeting, a pure opinion) this skips the LLM call.
     if needs_memory:
         try:
             _extractor_query = redacted

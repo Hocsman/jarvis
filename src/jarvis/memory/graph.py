@@ -118,19 +118,17 @@ DECAY_HALF_LIFE_DAYS = 14    # days until a node's access score halves
 # ── Fixed top-level branches ────────────────────────────────────────────────
 #
 # The root is seeded with three fixed children on first run. The graph
-# is still self-organising below these — auto-split/merge runs within
-# each branch — but the top level is purpose-shaped, not content-shaped,
-# so the extractor can route each new fact into the right semantic slot.
+# is still self-organising below these (auto-split runs within each
+# branch) but the top level is purpose-shaped, not content-shaped.
 #
-# - USER: everything about the person the assistant serves (identity,
-#   tastes, preferences, plans, opinions). Warm-loaded into the system
-#   prompt on every turn.
-# - DIRECTIVES: imperatives the user issued at the assistant about its
-#   own behaviour ("be concise", "use British English", "stop apologising").
-#   Verbatim rules, never summarised. Warm-loaded on every turn.
-# - WORLD: external facts with attribution (current graph content —
-#   films, businesses, recipes, techniques). Unbounded. Not warm-loaded;
-#   retrieved on demand via searchMemory.
+# - WORLD: external facts with attribution (films, businesses, recipes,
+#   techniques). Unbounded. Extraction writes here and nowhere else. Not
+#   warm-loaded; retrieved on demand by query-driven enrichment.
+# - USER and DIRECTIVES: retained so the nodes already in them stay
+#   visible in the memory viewer and readable by the hand-over into the
+#   core (see graph.spec.md). Nothing new is written to them and nothing
+#   in them reaches the prompt: what the assistant knows about the user
+#   lives in the core.
 #
 # The IDs are stable strings so re-opening an existing graph is
 # idempotent — no duplicate branches get seeded if the store already
@@ -429,8 +427,8 @@ class GraphMemoryStore:
             # root, from before the taxonomy, can never be reached by
             # branch-pinned traversal — carrying it is dead weight. That
             # justifies deleting those nodes. It does not justify deleting
-            # the table, which is what used to happen: one stray child, and
-            # every correctly-filed fact he had looked up went with it.
+            # the table: one stray child must not take every correctly-filed
+            # fact he had looked up along with it.
             enleves: list = []
             for ligne in self.conn.execute(
                 "SELECT id, name FROM memory_nodes "

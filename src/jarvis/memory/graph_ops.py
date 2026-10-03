@@ -618,9 +618,8 @@ def merge_node_data(
 
     existing_lines = _split_data_lines(node.data)
     # Re-join from the parsed lines so the prompt body and the line
-    # count agree byte-for-byte — `existing` was previously a separate
-    # `.strip()` of the raw blob, which could disagree with the parsed
-    # list on edge whitespace.
+    # count agree byte-for-byte; a separate `.strip()` of the raw blob
+    # could disagree with the parsed list on edge whitespace.
     existing = "\n".join(existing_lines)
     sanitised_new: list[str] = [f.strip() for f in new_facts if f and f.strip()]
 
@@ -855,10 +854,10 @@ class GraphUpdateResult(NamedTuple):
 
     ``stored`` lists newly-appended facts so the CLI can show *what* was
     learned. ``skipped`` counts facts the picker routed to a node that
-    already contained them — surfacing this lets callers print a status
-    line on every flush, even when the cumulative diary re-extraction
-    produces only duplicates (#282 dedupe would otherwise silence the
-    "knowledge graph: learned N facts" log).
+    already contained them. It lets callers print a status line on every
+    flush, even when the cumulative diary re-extraction produces only
+    duplicates, so the "knowledge graph: learned N facts" log does not
+    go silent.
     """
 
     stored: "list[tuple[str, str]]"
@@ -885,9 +884,9 @@ def update_graph_from_dialogue(
 
     Returns a ``GraphUpdateResult`` with a ``stored`` list of
     ``(fact, node_name)`` tuples for each newly-appended fact and a
-    ``skipped`` count of duplicates the picker landed on. Callers must
-    unpack via ``result.stored`` / ``result.skipped`` (or tuple
-    destructuring) — the NamedTuple does not masquerade as the old list.
+    ``skipped`` count of duplicates the picker landed on. Callers read
+    ``result.stored`` / ``result.skipped`` (or destructure the tuple);
+    the result is not a list.
     """
     # Step 1: Extract discrete branch-tagged facts from the summary
     facts = extract_graph_memories(
