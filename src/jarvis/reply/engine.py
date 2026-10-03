@@ -2166,9 +2166,14 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         # Add model-size-appropriate prompt components
         guidance.extend(prompts.to_list())
 
-        # Both current TTS engines (Piper, Chatterbox) only support English.
-        # Responding in another language would produce garbled audio.
-        # Remove this constraint when a multilingual TTS engine is added.
+        # Chatterbox speaks English only, and Piper speaks the language of
+        # its voice: English unless response_language or tts_piper_voices
+        # names another (see output/tts.spec.md). A reply in a language the
+        # voice does not speak comes out with the wrong phonetics, so both
+        # engines are told to answer in English.
+        # The line does not look at the voice map: lifting it for a mapped
+        # language is a prompt change that needs an eval on a model that
+        # obeys it.
         tts_engine = getattr(cfg, 'tts_engine', 'piper')
         if tts_engine in ('piper', 'chatterbox'):
             guidance.append(
