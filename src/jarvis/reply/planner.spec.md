@@ -17,8 +17,10 @@ concrete chosen names; the planner then **gates memory enrichment** and
 The engine uses the plan for three things:
 1. **Gate memory enrichment** — the planner emits an explicit
    `searchMemory topic='<topic>'` directive on queries that need past
-   user context; we skip the keyword-extraction LLM call, the diary
-   / graph lookup, and the memory-digest LLM call otherwise.
+   user context; otherwise we skip the keyword-extraction LLM call and
+   the keyword-driven diary / graph lookups. The graph is still read on
+   the arguments of the plan's own tool steps, and the memory-digest LLM
+   call runs only when the diary or graph produced text.
 2. **Confirm the tool allow-list** — the router's picks are
    authoritative; the tool names the planner references are unioned
    in as a safety net. Feeding the planner the narrowed catalogue
@@ -103,12 +105,14 @@ The planner prompt instructs the model to emit:
 - The planner does not filter out 1-step plans. A single
   `["Reply to the user."]` plan is the planner's *positive* decision
   that no memory or tools are needed — the engine uses that to skip
-  the memory extractor, the tool router, and the direct-exec path
-  entirely. A single-step tool plan (e.g. `["webSearch query='...'"]`)
-  preserves its executable tool step so the direct-exec path dispatches
-  it directly on turn 1. Only an **empty** list means "planner failed / disabled;
-  fall open to safe defaults" (run memory enrichment + tool
-  router). These states stay distinguishable.
+  the memory extractor, the diary / graph / digest lookups, and the
+  direct-exec path entirely. The router has already run by then, so its
+  allow-list still stands. A single-step tool plan (e.g.
+  `["webSearch query='...'"]`) preserves its executable tool step so the
+  direct-exec path dispatches it directly on turn 1. Only an **empty**
+  list means "planner failed / disabled": the engine runs memory
+  enrichment (subject to the recall gate) and keeps the router's
+  allow-list as it is. These states stay distinguishable.
 
 ### Engine integration
 
@@ -125,9 +129,10 @@ The engine consumes the plan in two phases.
   subject better than the utterance does; the engine uses them to ask the
   graph whether this lookup has already been made.
 - `plan_requires_memory(plan)` — true iff any step is a `searchMemory`
-  directive. The engine uses it to gate the entire memory-enrichment
-  block (keyword extractor LLM call, diary / graph lookups, digest
-  LLM call). Optional `memory_topic_of(step)` extracts the directive's
+  directive. The engine uses it to gate the memory-enrichment block
+  (keyword extractor LLM call and the keyword-driven diary / graph
+  lookups; the digest LLM call follows only when they found text).
+  Optional `memory_topic_of(step)` extracts the directive's
   `topic='...'` hint, threaded into the keyword extractor so it
   anchors on what the planner wanted to look up rather than
   re-deriving from the raw utterance.
