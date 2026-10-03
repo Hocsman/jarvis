@@ -174,12 +174,11 @@ compatibility only.
 `TunePlayer` is not an engine. It loops a synthesised pad while the
 reply is being prepared and is owned by the listener, which starts it
 when a query is dispatched (never while she is already speaking) and
-stops it when speech begins or when there is nothing to say. It opens its
-output stream through the same `sounddevice` API and under the same
-process-wide `portaudio_lock` as the engines, so stopping it releases the
-device in milliseconds and the voice can open it straight away. The tune
-and the voice must not overlap: the tune is stopped no later than the
-first spoken chunk.
+stops it when the finished reply is handed over for speaking, or when
+there is nothing to say. It opens its output stream through the same
+`sounddevice` API and under the same process-wide `portaudio_lock` as the
+engines, so stopping it releases the device in milliseconds and the voice
+can open it straight away.
 
 ## Audio output
 
@@ -195,18 +194,24 @@ closing a stream all happen under `portaudio_lock`
 
 ### Which language wins
 
-The voice follows the language the reply is written in. The engine knows
-two candidates for it, and they can disagree:
+The voice should follow the language the reply is written in. The engine
+never reads the reply to find out; it holds two candidates for it, and
+they can disagree:
 
-- `response_language`, when set. The persona prompt makes the model write
-  in it whatever language it is spoken to, so it is the language of the
-  reply. It outranks detection: a user who set `français` and asks a
-  question in English is answered in French, and the voice has to read
-  French.
+- `response_language`, when set. The persona prompt asks the model to
+  write in it whatever language it is spoken to, so the engine assumes
+  the reply is in it. It outranks detection: a user who set `français`
+  and asks a question in English is expected to be answered in French,
+  and the voice has to read French.
 - The language the user was heard in, which the listener passes as
   `language`. With `response_language` empty (auto) the persona pins no
-  language and she answers in the language she was spoken to, so that is
-  the one to follow.
+  language, so the engine assumes she answers in the language she was
+  spoken to and follows that.
+
+Both are assumptions about what the model writes. When the model writes
+in another language, the voice chosen for the assumed one reads that text
+with its own accent (see "Language" for the case the engine itself
+provokes).
 
 When neither is known, as before the first transcription or for a line
 spoken with no utterance behind it, no language is claimed and the
@@ -311,11 +316,17 @@ decided under "Piper voices". Kokoro and Chatterbox accept the language
 `speak` is given and ignore it: Kokoro's voice and language are set by
 hand, and Chatterbox speaks English.
 
-The voices only read what the model writes. The reply engine separately
-tells the model to answer in English whenever the engine is Piper or
-Chatterbox, whatever `response_language` and `tts_piper_voices` say. A
-model that obeys that instruction never writes in a language the voices
-could follow.
+The voices only read what the model writes, and the voice is chosen from
+the language the engine expects, not from the text. The reply engine
+separately appends "Always respond in English regardless of the language
+the user speaks in" to the system message whenever the engine is Piper or
+Chatterbox, whatever `response_language` and `tts_piper_voices` say. It
+contradicts a configured `response_language`, and which of the two the
+model follows is up to the model. A model that obeys the English line
+writes English, and the voice mapped to the language the user spoke (or to
+`response_language`) then reads English text with that voice's accent.
+The voice map therefore helps only when the model writes in the mapped
+language.
 
 ## Configuration
 

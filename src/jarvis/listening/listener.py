@@ -1619,13 +1619,13 @@ class VoiceListener(threading.Thread):
     def drain_reply_queue(self) -> None:
         """Say at most one queued reply. This thread only.
 
-        One at a time, and only while nothing is already being said.
-        ``TTS.speak`` keeps its completion callback in a single
-        engine-level slot (output/tts.py:369, set at :469, cleared at
-        :579), so a second call before the first finishes overwrites the
-        first's callback — and that callback is what reopens the
-        listening window. Whatever is left waits for the next pass, which
-        is at most one audio frame away.
+        One at a time, and only while nothing is already being said. The
+        echo detector holds the record of one reply (its text, its start
+        and its exact duration), so a second reply started while the
+        first is still audible would replace it, and the rest of the
+        first would be compared against the wrong sentence. Whatever is
+        left waits for the next pass, which is at most one audio frame
+        away.
         """
         q = getattr(self, "_reply_queue", None)
         if q is None:

@@ -4,14 +4,15 @@ The engine picks a voice per queued item, so the listener decides what each
 item says about its language. Two things have to hold.
 
 The language handed over is the one Whisper heard the user speak, because
-that is the language she answers in when `response_language` is empty. The
-engine, which knows the configured language, decides which of the two wins.
+that is the language she is assumed to answer in when `response_language`
+is empty. The engine, which knows the configured language, decides which of
+the two wins.
 
 And one reply carries one language. A reply is spoken sentence by sentence
 while the microphone is still open, so a transcript of something else can
 land mid-reply and move the detected language. Sentence two in another
-voice than sentence one is the failure; it is also an echo reference that
-no longer matches what was said.
+voice than sentence one is the failure: the reply would read as two
+speakers.
 """
 
 from __future__ import annotations

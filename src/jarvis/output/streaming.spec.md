@@ -74,7 +74,7 @@ end-of-reply marker carries that same language to the engine (see
 `tts.spec.md`, "Which voice"). A transcript of something else landing
 mid-reply moves the detected language, and must not move the voice of the
 sentences still to come: a reply that changes voice halfway reads as two
-speakers, and the echo reference would no longer match what was said.
+speakers.
 
 **The printed reply is unchanged.** What appears in the transcript and
 what is stored in dialogue memory is the whole text, assembled, exactly
