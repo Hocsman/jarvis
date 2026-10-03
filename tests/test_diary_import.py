@@ -273,9 +273,9 @@ class TestImportDialogueDismissal:
         from src.desktop_app.memory_viewer import app
 
         app.config["TESTING"] = True
-        client = app.test_client()
-        resp = client.get("/")
-        html = resp.data.decode("utf-8")
+        from conftest import viewer_page_with_scripts
+
+        html = viewer_page_with_scripts(app.test_client())
 
         # The flag must be declared
         assert "let diaryImportDone = false;" in html
