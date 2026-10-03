@@ -38,7 +38,6 @@ _global_dialogue_memory: Optional[DialogueMemory] = None
 _global_stop_requested: bool = False
 _global_skip_shutdown_diary_update: bool = False
 _warm_profile_core_listener = None  # registered callback, kept for shutdown unregister
-_global_tts_engine = None  # TTS engine reference for face animation polling
 _global_dictation_engine = None  # Dictation engine reference for history UI
 # Config + DB booted by main(). Shared by the voice listener and the text-chat
 # submission path so voice and text are one conversation against one store.
@@ -160,20 +159,6 @@ def set_diary_update_callbacks(
     _diary_update_callbacks["on_status"] = on_status
     _diary_update_callbacks["on_chunks"] = on_chunks
     _diary_update_callbacks["on_complete"] = on_complete
-
-
-def get_pending_diary_chunks() -> list:
-    """Get pending conversation chunks from dialogue memory (for UI display only).
-
-    Uses ``get_pending_chunks()`` which discards the atomic snapshot timestamp.
-    Do not use the result of this function to drive diary saves — the actual
-    save path goes through ``update_diary_from_dialogue_memory``, which calls
-    ``get_pending_chunks_with_snapshot()`` internally.
-    """
-    global _global_dialogue_memory
-    if _global_dialogue_memory is None:
-        return []
-    return _global_dialogue_memory.get_pending_chunks()
 
 
 def get_hot_window_messages() -> list:
@@ -931,11 +916,6 @@ def is_stop_requested() -> bool:
     return _global_stop_requested
 
 
-def get_tts_engine():
-    """Get the global TTS engine for speaking state polling (used by face widget)."""
-    return _global_tts_engine
-
-
 def get_dictation_engine():
     """Get the global dictation engine (used by desktop app for history window)."""
     return _global_dictation_engine
@@ -1108,7 +1088,7 @@ def _apply_ledger_retention(db) -> None:
 
 def main() -> None:
     """Main daemon entry point."""
-    global _global_dialogue_memory, _global_stop_requested, _global_tts_engine, _global_dictation_engine, _global_listener
+    global _global_dialogue_memory, _global_stop_requested, _global_dictation_engine, _global_listener
     global _warm_profile_core_listener
     global _global_skip_shutdown_diary_update
 
@@ -1322,7 +1302,6 @@ def main() -> None:
         kokoro_lang_code=cfg.tts_kokoro_lang_code,
         kokoro_speed=cfg.tts_kokoro_speed,
     )
-    _global_tts_engine = tts  # Expose for face widget speaking animation
     if tts.enabled:
         tts.start()
         print("✓ TTS engine started", flush=True)

@@ -377,37 +377,6 @@ def _validate_tool_args_against_schema(
     return None
 
 
-def _format_tool_schema_hint(
-    tool_name: Optional[str],
-    mcp_tools: Optional[dict] = None,
-) -> str:
-    """Render ``toolName(param: type required, ...)`` for nudge injection."""
-    if not tool_name:
-        return ""
-    schema = _get_tool_input_schema(tool_name, mcp_tools)
-    if not schema:
-        return f"{tool_name}()"
-    props = schema.get("properties")
-    if not isinstance(props, dict) or not props:
-        return f"{tool_name}()"
-    required = set()
-    req_raw = schema.get("required")
-    if isinstance(req_raw, list):
-        required = {str(r) for r in req_raw if isinstance(r, str)}
-    parts = []
-    for key, spec in props.items():
-        type_hint = ""
-        if isinstance(spec, dict):
-            t = spec.get("type")
-            if isinstance(t, str):
-                type_hint = t
-        marker = " required" if key in required else ""
-        parts.append(
-            f"{key}: {type_hint}{marker}" if type_hint else f"{key}{marker}"
-        )
-    return f"{tool_name}(" + ", ".join(parts) + ")"
-
-
 def resolve_tool_router_model(cfg) -> str:
     """Pick the LLM model for tool routing.
 

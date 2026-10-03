@@ -1551,10 +1551,3 @@ def create_tts_engine(
             sentence_silence=piper_sentence_silence,
             response_language=response_language,
         )
-
-
-def json_escape_ps(s: str) -> str:
-    # For PowerShell, use double quotes and escape internal double quotes
-    # This avoids issues with apostrophes in contractions like "you're"
-    escaped = s.replace('"', '""')
-    return '"' + escaped + '"'

@@ -2339,10 +2339,6 @@ class JarvisSystemTray:
         self.dashboard_window.raise_()
         self.dashboard_window.activateWindow()
 
-    def _set_chat_daemon_available(self, available: bool) -> None:
-        """Update an existing chat window when the daemon starts or stops."""
-        self._set_chat_daemon_status("running" if available else "stopped")
-
     def _set_chat_daemon_status(self, status: str) -> None:
         """Update an existing chat window with daemon lifecycle state."""
         # Keep the dashboard's submit callable in sync too — it routes

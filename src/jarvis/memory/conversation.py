@@ -752,8 +752,6 @@ class DialogueMemory:
         # Messages with timestamp <= this value have been processed
         self._last_saved_timestamp: float = 0.0
         self._lock = threading.RLock()  # Reentrant lock for thread safety
-        # Track the last profile used for follow-up detection
-        self._last_profile: Optional[str] = None
         # The one action waiting on the user's say-so, and the turn
         # counter that bounds how long a spoken answer stays valid. Held
         # here because this is the object voice and text already share.
@@ -932,11 +930,6 @@ class DialogueMemory:
             timestamp = self._next_ts()
             self._messages.append((timestamp, role.strip(), content.strip()))
             self._last_activity_time = timestamp
-
-    def get_recent_context(self) -> List[str]:
-        """Get recent messages formatted as context strings."""
-        messages = self.get_recent_messages()
-        return [f"{msg['role'].title()}: {msg['content']}" for msg in messages]
 
     def get_recent_messages(self) -> List[dict]:
         """
@@ -1185,20 +1178,6 @@ class DialogueMemory:
         with self._lock:
             cutoff = time.time() - self.RECENT_WINDOW_SEC
             return any(ts >= cutoff for ts, _, _ in self._messages)
-
-    def set_last_profile(self, profile: str) -> None:
-        """Track the last profile used for follow-up detection."""
-        with self._lock:
-            self._last_profile = profile
-
-    def get_last_profile(self) -> Optional[str]:
-        """Get the last profile used, if within the recent window."""
-        with self._lock:
-            # Only return profile if we have recent messages
-            cutoff = time.time() - self.RECENT_WINDOW_SEC
-            if any(ts >= cutoff for ts, _, _ in self._messages):
-                return self._last_profile
-            return None
 
     # Compatibility and diary functionality
     def add_interaction(self, user_text: str, assistant_text: str) -> None:
@@ -1867,29 +1846,6 @@ def search_conversation_memory(
 
     except Exception:
         return contexts[:max_results] if contexts else []
-
-
-def get_relevant_conversation_context(
-    db: Database,
-    query: str,
-    cfg,
-    *,
-    timeout_sec: float = 60.0,
-    max_results: int = 15,
-) -> List[str]:
-    """Return conversation summaries semantically relevant to ``query``.
-
-    Thin wrapper around :func:`search_conversation_memory` for callers
-    that only need the simple "give me the top N matches" path.
-    """
-    return search_conversation_memory(
-        db=db,
-        cfg=cfg,
-        search_query=query,
-        timeout_sec=timeout_sec,
-        voice_debug=False,
-        max_results=max_results,
-    )
 
 
 def update_diary_from_dialogue_memory(

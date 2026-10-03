@@ -1,11 +1,6 @@
 from __future__ import annotations
 import re
-from typing import List, Tuple, Optional
-try:
-    from rapidfuzz import fuzz, process
-    RAPIDFUZZ_AVAILABLE = True
-except ImportError:
-    RAPIDFUZZ_AVAILABLE = False
+from typing import List
 
 
 def generate_flexible_fts_query(query: str, field_names: List[str] = None) -> str:
@@ -90,52 +85,3 @@ def generate_flexible_fts_query(query: str, field_names: List[str] = None) -> st
             query_parts.append(f"({primary_and}) AND ({secondary_or})")
     
     return " OR ".join(query_parts) if query_parts else ""
-
-
-def fuzzy_match_results(query: str, candidates: List[Tuple[any, str]], threshold: int = 60) -> List[Tuple[any, str, int]]:
-    """
-    Post-process search results with fuzzy matching to catch partial matches.
-    
-    Args:
-        query: Original search query
-        candidates: List of (id/data, text) tuples to match against
-        threshold: Minimum fuzzy match score (0-100)
-    
-    Returns:
-        List of (id/data, text, fuzzy_score) tuples sorted by fuzzy score
-    """
-    if not RAPIDFUZZ_AVAILABLE or not query.strip() or not candidates:
-        # Fallback: return candidates with score 100 (exact match assumed)
-        return [(item[0], item[1], 100) for item in candidates]
-    
-    query_lower = query.lower().strip()
-    scored_results = []
-    
-    for item_data, text in candidates:
-        text_lower = text.lower()
-        
-        # Try different fuzzy matching strategies
-        scores = []
-        
-        # 1. Partial ratio (good for substring matches)
-        scores.append(fuzz.partial_ratio(query_lower, text_lower))
-        
-        # 2. Token sort ratio (good for word order differences)
-        scores.append(fuzz.token_sort_ratio(query_lower, text_lower))
-        
-        # 3. Token set ratio (good for subset matches)
-        scores.append(fuzz.token_set_ratio(query_lower, text_lower))
-        
-        # 4. WRatio (weighted combination)
-        scores.append(fuzz.WRatio(query_lower, text_lower))
-        
-        # Use the best score
-        best_score = max(scores)
-        
-        if best_score >= threshold:
-            scored_results.append((item_data, text, best_score))
-    
-    # Sort by fuzzy score (descending)
-    scored_results.sort(key=lambda x: x[2], reverse=True)
-    return scored_results
-
