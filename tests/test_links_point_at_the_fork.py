@@ -1,10 +1,9 @@
 """Every link a user follows from this project leads to this project.
 
-The updater already reads releases from `GITHUB_REPO`, but the README sent
-people to upstream's releases (builds without this fork's features), the clone
-command fetched upstream's source, and both "report an issue" buttons in the
-app opened a prefilled form on upstream's tracker, for features upstream does
-not have.
+The updater reads releases from `GITHUB_REPO`, so the README's download link,
+its clone command and both "report an issue" buttons in the app (which open a
+prefilled form) must lead to the same repository: this fork has builds, source
+and features that upstream does not.
 
 The tests tie every such link to `GITHUB_REPO`, the one constant the updater
 uses, so renaming or moving the fork changes one line. What stays pointed at
@@ -114,4 +113,4 @@ def test_the_readme_credits_the_project_it_forks():
         url for _number, url, rest, _text in _upstream_references(text) if rest == ""
     ]
 
-    assert roots, "README.md no longer links the upstream repository it is a fork of."
+    assert roots, "README.md does not link the upstream repository it is a fork of."

@@ -1,7 +1,7 @@
-"""Config keys that no longer exist, still sitting in a user's config.json.
+"""Config keys that have no setting, sitting in a user's config.json.
 
-A config file is written by one release and read by the next, so the keys of
-a feature that has been removed outlive it on disk. The loader has to take
+A config file is written by one release and read by the next, so a file can
+carry keys the running release has no setting for. The loader has to take
 such a file without complaint, ignore the keys, and never be the one that
 writes them. The settings window preserves keys it does not manage, so a
 retired key the user typed stays exactly as he typed it until he deletes it
@@ -19,7 +19,8 @@ import pytest
 
 from jarvis.config import Settings, get_default_config, load_settings
 
-# Keys of the per-turn reply evaluator, which has been removed from the engine.
+# Keys of a per-turn reply evaluator. The engine has no such evaluator, so these
+# keys have no setting and the loader ignores them.
 RETIRED_KEYS = {
     "evaluator_model": "pinned-judge:1b",
     "evaluator_enabled": True,
@@ -91,8 +92,8 @@ class TestTheLoaderIgnoresRetiredKeys:
     def test_a_retired_model_pin_does_not_steer_the_max_turn_digest(
         self, tmp_path, monkeypatch
     ):
-        """The pin used to name the model of the max-turn digest. With the
-        key retired, the digest follows the intent judge like any other
+        """The key has no setting, so it cannot name the model of the
+        max-turn digest: the digest follows the intent judge like any other
         small classification-shaped pass."""
         from jarvis.reply.enrichment import digest_loop_for_max_turns
 
