@@ -233,87 +233,75 @@ class TestLLMPickBestChild:
 
 @pytest.mark.unit
 class TestFindBestNode:
-    """Tests for the three-entry-point traversal."""
+    """Placement descends from a fixed branch root and never leaves it."""
 
-    @patch("src.jarvis.memory.graph_ops._llm_pick_best_child")
-    def test_matches_recent_node_first(self, mock_pick, populated_store):
-
-        children = populated_store.get_children("root")
-        music_node = [c for c in children if c.name == "Music"][0]
-        # Touch Music so it appears in recent nodes
-        populated_store.touch_node(music_node.id)
-
-        # First call (recent nodes): return the music node
-        mock_pick.return_value = music_node.id
-
-        result = find_best_node(populated_store, "Likes jazz", "http://localhost", "model")
-        assert result == music_node.id
-        # Should only call once (matched on recent nodes)
-        assert mock_pick.call_count == 1
-
-    @patch("src.jarvis.memory.graph_ops._llm_pick_best_child")
-    def test_falls_through_to_top_nodes(self, mock_pick, populated_store):
-
-        children = populated_store.get_children("root")
-        work_node = [c for c in children if c.name == "Work"][0]
-        # Touch Work many times so it appears in top nodes
-        for _ in range(5):
-            populated_store.touch_node(work_node.id)
-
-        # First call (recent): None. Second call (top): match work.
-        mock_pick.side_effect = [None, work_node.id]
-
-        result = find_best_node(populated_store, "Uses TypeScript", "http://localhost", "model")
-        assert result == work_node.id
-
-    @patch("src.jarvis.memory.graph_ops._llm_pick_best_child")
-    def test_falls_through_to_root_traversal(self, mock_pick, populated_store):
-
-        children = populated_store.get_children("root")
-        health_node = [c for c in children if c.name == "Health"][0]
-
-        # Recent: None, Top: skipped (all recent_ids overlap), Root children: pick Health
-        mock_pick.side_effect = [None, health_node.id]
-
-        result = find_best_node(populated_store, "Allergic to peanuts", "http://localhost", "model")
-        assert result == health_node.id
-
-    @patch("src.jarvis.memory.graph_ops._llm_pick_best_child")
-    def test_writes_to_root_when_nothing_matches(self, mock_pick, populated_store):
-
-        # Everything returns None — no match anywhere
-        mock_pick.return_value = None
-
-        result = find_best_node(populated_store, "Completely unrelated fact", "http://localhost", "model")
-        assert result == "root"
-
-    @patch("src.jarvis.memory.graph_ops._llm_pick_best_child")
-    def test_empty_graph_writes_to_root(self, mock_pick, store):
-        """With seeded branches under root but nothing else, an
-        unclassified fact with no branch pin will try to pick among
-        the seeded branches. If the picker declines all of them
-        (returns None), traversal halts at root."""
-        # Picker declines at every level so traversal breaks at root.
-        mock_pick.return_value = None
-        result = find_best_node(store, "First ever fact", "http://localhost", "model")
-        assert result == "root"
-
-    @patch("src.jarvis.memory.graph_ops._llm_pick_best_child")
-    def test_branch_pin_skips_shortcut_entry_points(self, mock_pick, store):
-        """When a branch is pinned, the recent / top shortcut entry
-        points are skipped entirely — the fact descends only through
-        the pinned branch's subtree. With an empty branch, that means
-        the branch root itself is the write target, and the picker is
-        never consulted."""
-        mock_pick.return_value = None
-        result = find_best_node(
-            store, "Likes jazz music", "http://localhost", "model",
-            branch_root_id="user",
+    @staticmethod
+    def _place(store, branch=BRANCH_WORLD, fragment="Likes jazz music"):
+        return find_best_node(
+            store, fragment, "http://localhost", "model",
+            branch_root_id=branch,
         )
-        assert result == "user"
-        # The picker was never called because the User branch has no
-        # children yet; descent terminated immediately at the branch root.
+
+    @patch("src.jarvis.memory.graph_ops._llm_pick_best_child")
+    def test_an_empty_branch_is_the_write_target(self, mock_pick, store):
+        """With no children under the branch, descent ends at the branch
+        root itself and the picker is never consulted."""
+        mock_pick.return_value = None
+        assert self._place(store, BRANCH_USER) == BRANCH_USER
         mock_pick.assert_not_called()
+
+    @patch("src.jarvis.memory.graph_ops._llm_pick_best_child")
+    def test_descends_into_the_child_the_picker_chooses(self, mock_pick, store):
+        store.create_node(
+            name="Music", description="Listening habits", data="",
+            parent_id=BRANCH_WORLD,
+        )
+        work = store.create_node(
+            name="Work", description="Projects", data="", parent_id=BRANCH_WORLD,
+        )
+        mock_pick.return_value = work.id
+
+        assert self._place(store) == work.id
+
+    @patch("src.jarvis.memory.graph_ops._llm_pick_best_child")
+    def test_descends_level_by_level_to_a_leaf(self, mock_pick, store):
+        cinema = store.create_node(
+            name="Cinema", description="Films", data="", parent_id=BRANCH_WORLD,
+        )
+        horror = store.create_node(
+            name="Horror", description="Scary films", data="", parent_id=cinema.id,
+        )
+        mock_pick.side_effect = [cinema.id, horror.id]
+
+        assert self._place(store) == horror.id
+
+    @patch("src.jarvis.memory.graph_ops._llm_pick_best_child")
+    def test_stops_at_the_branch_root_when_no_child_fits(self, mock_pick, store):
+        store.create_node(
+            name="Cinema", description="Films", data="", parent_id=BRANCH_WORLD,
+        )
+        mock_pick.return_value = None
+
+        assert self._place(store) == BRANCH_WORLD
+
+    @patch("src.jarvis.memory.graph_ops._llm_pick_best_child")
+    def test_a_busy_node_in_another_branch_is_never_a_target(self, mock_pick, store):
+        """A node touched often in the User branch must not pull a World
+        fact into it: the picker only ever sees the pinned branch."""
+        busy = store.create_node(
+            name="Tastes", description="Likes", data="Jazz", parent_id=BRANCH_USER,
+        )
+        for _ in range(5):
+            store.touch_node(busy.id)
+        store.create_node(
+            name="Cinema", description="Films", data="", parent_id=BRANCH_WORLD,
+        )
+        mock_pick.return_value = None
+
+        assert self._place(store) == BRANCH_WORLD
+        world_children = {c.id for c in store.get_children(BRANCH_WORLD)}
+        offered = {n.id for call in mock_pick.call_args_list for n in call.args[1]}
+        assert offered <= world_children
 
 
 # ── auto_split_node ────────────────────────────────────────────────────

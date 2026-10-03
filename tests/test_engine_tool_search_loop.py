@@ -32,8 +32,17 @@ def _assistant_content(text: str):
     return {"message": {"role": "assistant", "content": text}}
 
 
+@pytest.mark.parametrize(
+    "surfaced",
+    [
+        "getWeather: Report current weather.",
+        "getWeather",
+        "- getWeather: Report current weather.",
+    ],
+    ids=["name-and-description", "bare-name", "bulleted"],
+)
 def test_loop_merges_toolsearchtool_results_into_allowlist(
-    mock_config, db, dialogue_memory
+    mock_config, db, dialogue_memory, surfaced
 ):
     from jarvis.reply import engine as engine_mod
     from jarvis.tools.types import ToolExecutionResult
@@ -50,7 +59,7 @@ def test_loop_merges_toolsearchtool_results_into_allowlist(
             # Returns a newly-routed tool that was NOT in the initial pick.
             return ToolExecutionResult(
                 success=True,
-                reply_text="getWeather: Report current weather.",
+                reply_text=surfaced,
                 error_message=None,
             )
         if tool_name == "getWeather":
@@ -304,44 +313,6 @@ def test_tool_search_max_calls_cap(mock_config, db, dialogue_memory):
         f"Expected cap to limit dispatch to 2; got "
         f"{dispatch_count['toolSearchTool']}"
     )
-
-
-def test_validate_tool_args_catches_unknown_keys():
-    """Unit test for the schema validator — unknown arg key is the exact
-    failure mode the field log hit."""
-    from jarvis.reply.engine import _validate_tool_args_against_schema
-
-    err = _validate_tool_args_against_schema(
-        "webSearch",
-        {"query": "tube strikes today"},
-        mcp_tools=None,
-    )
-    assert err is not None
-    assert "unknown argument" in err.lower()
-    assert "search_query" in err
-
-
-def test_validate_tool_args_passes_correct_keys():
-    from jarvis.reply.engine import _validate_tool_args_against_schema
-
-    err = _validate_tool_args_against_schema(
-        "webSearch",
-        {"search_query": "tube strikes today"},
-        mcp_tools=None,
-    )
-    assert err is None
-
-
-def test_validate_tool_args_catches_missing_required():
-    from jarvis.reply.engine import _validate_tool_args_against_schema
-
-    err = _validate_tool_args_against_schema(
-        "webSearch",
-        {},
-        mcp_tools=None,
-    )
-    assert err is not None
-    assert "missing required" in err.lower()
 
 
 def test_max_turns_produces_digest(mock_config, db, dialogue_memory):

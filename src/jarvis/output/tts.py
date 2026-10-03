@@ -13,10 +13,11 @@ import time
 import unicodedata
 import warnings
 from pathlib import Path
-from typing import Optional, Callable
+from typing import Any, Callable, Mapping, Optional
 from urllib.parse import urlparse
 
 from ..debug import debug_log
+from ..state import JarvisState, get_jarvis_state
 from ..utils.audio_lock import portaudio_lock
 
 
@@ -56,22 +57,6 @@ _PIPER_VOICES: tuple[tuple[tuple[str, ...], str], ...] = (
     (("zh", "中文", "chinese", "mandarin"), "zh_CN-huayan-medium"),
 )
 
-# Keyed on the normalised form, so a name may be written here the way its
-# speakers write it: "türkçe" and "türkçe" typed without the cedilla meet on
-# the same key, and so do "Français" and "francais".
-PIPER_VOICE_BY_LANGUAGE = {
-    _normalise_language(nom): voix for spellings, voix in _PIPER_VOICES for nom in spellings
-}
-
-
-def _piper_voice_for_language(language: Optional[str]) -> str:
-    """The voice that speaks ``language``, or the fallback when unlisted."""
-    if not language or not language.strip():
-        return PIPER_FALLBACK_VOICE
-    return PIPER_VOICE_BY_LANGUAGE.get(
-        _normalise_language(language), PIPER_FALLBACK_VOICE
-    )
-
 
 def _get_piper_models_dir() -> Path:
     """Where Piper voice models are kept.
@@ -80,6 +65,94 @@ def _get_piper_models_dir() -> Path:
     creates the directory itself.
     """
     return Path.home() / ".local" / "share" / "jarvis" / "models" / "piper"
+
+
+# One language, one key. The first spelling of each row above is its ISO 639-1
+# code, which is what Whisper reports, so every spelling a user might write
+# reduces to the code the detector produces. Keyed on the normalised form, so a
+# name may be written in the table the way its speakers write it: "türkçe" and
+# "turkce" meet on the same key, and so do "Français" and "francais".
+_LANGUAGE_CODES = {
+    _normalise_language(nom): spellings[0] for spellings, _ in _PIPER_VOICES for nom in spellings
+}
+
+_VOICE_BY_CODE = {spellings[0]: voix for spellings, voix in _PIPER_VOICES}
+
+
+def _language_code(value: str) -> str:
+    """The key a language is compared under.
+
+    A listed language reduces to its ISO code. A regional variant
+    (``fr-FR``, ``pt_BR``) reduces to its base language. A language nobody
+    listed is its own normalised spelling, so a map may still name it.
+    """
+    key = _normalise_language(value)
+    if key in _LANGUAGE_CODES:
+        return _LANGUAGE_CODES[key]
+    base = re.split(r"[-_]", key, maxsplit=1)[0]
+    return _LANGUAGE_CODES.get(base, base)
+
+
+def _piper_voice_for_language(language: Optional[str]) -> str:
+    """The voice that speaks ``language``, or the fallback when unlisted.
+
+    The language is reduced through ``_language_code``, the same reduction a
+    ``tts_piper_voices`` key goes through, so ``fr-FR`` is French to both.
+    """
+    if not language or not language.strip():
+        return PIPER_FALLBACK_VOICE
+    return _VOICE_BY_CODE.get(_language_code(language), PIPER_FALLBACK_VOICE)
+
+
+def _voice_model_path(value: str) -> str:
+    """The model file a voice setting names.
+
+    A path is taken as written. A bare name, which is how Piper calls its
+    voices, is a file in the models directory, so the name alone is enough
+    for the engine to fetch it on first use.
+    """
+    value = value.strip()
+    if value.lower().endswith(".onnx") or "/" in value or "\\" in value or value.startswith("~"):
+        return value
+    return str(_get_piper_models_dir() / f"{value}.onnx")
+
+
+def _reply_language_code(
+    response_language: Optional[str], detected_language: Optional[str]
+) -> str:
+    """The language a reply is expected to be written in, as a key.
+
+    The configured language wins because the persona prompt asks the model
+    to write in it whatever was spoken to her. When it is empty the reply is
+    expected in the language she heard. Empty when neither is known.
+    """
+    language = response_language if (response_language or "").strip() else detected_language
+    return _language_code(language) if (language or "").strip() else ""
+
+
+def select_tts_voice(
+    voices: Optional[Mapping[str, str]],
+    fallback: str,
+    response_language: Optional[str] = None,
+    detected_language: Optional[str] = None,
+) -> str:
+    """The voice model that speaks a reply.
+
+    ``response_language`` is the language the assistant is asked to write
+    in, so when it is set it is taken as the language of the reply whatever
+    was spoken to her. When it is empty she is expected to answer in the
+    language she heard, and ``detected_language`` is the one to follow.
+
+    ``voices`` maps a language to a voice. A language it does not name, or
+    no known language at all, speaks with ``fallback``.
+    """
+    code = _reply_language_code(response_language, detected_language)
+    if not voices or not code:
+        return fallback
+    for key, voice in voices.items():
+        if _language_code(key) == code:
+            return _voice_model_path(voice)
+    return fallback
 
 
 def _get_default_piper_model_path(language: Optional[str] = None) -> str:
@@ -514,7 +587,10 @@ class ChatterboxTTS:
         self._stop.clear()
 
     def speak(self, text: str, completion_callback: Optional[Callable[[], None]] = None,
-              duration_callback: Optional[Callable[[float], None]] = None) -> None:
+              duration_callback: Optional[Callable[[float], None]] = None,
+              language: Optional[str] = None) -> None:
+        # One voice, whatever the language: accepted so the listener can hand
+        # every engine the same call, and ignored.
         if not self.enabled:
             return
         if not text.strip() and completion_callback is None:
@@ -580,7 +656,7 @@ class ChatterboxTTS:
         # stays owed until the speech has finished.
         spoken = False
         
-        # Signal speaking state to face widget
+        # Publish the speaking state
         self._notify_speaking_state(True)
 
         try:
@@ -651,7 +727,7 @@ class ChatterboxTTS:
         finally:
             self._is_speaking.clear()
             
-            # Signal speaking stopped to face widget
+            # Speech ended (nothing is published: the daemon manages what follows)
             self._notify_speaking_state(False)
             
             # Call completion callback if set and not interrupted
@@ -663,25 +739,14 @@ class ChatterboxTTS:
                 self._completion_callback = None
     
     def _notify_speaking_state(self, is_speaking: bool) -> None:
-        """Notify the face widget of speaking state changes.
+        """Publish SPEAKING when speech starts.
 
-        Uses file-based approach to work across processes:
-        - Dev mode runs daemon as subprocess (different process)
-        - File-based state works across process boundaries
+        When speaking ends the state is left alone: the daemon manages the
+        transition out of SPEAKING.
         """
-        # Import here to avoid circular dependencies
-        try:
-            from desktop_app.face_widget import get_jarvis_state, JarvisState
-            state_manager = get_jarvis_state()
-            if is_speaking:
-                debug_log("setting face state to SPEAKING (chatterbox)", "tts")
-                state_manager.set_state(JarvisState.SPEAKING)
-            # Note: When speaking ends, we don't change state here - let daemon manage transitions
-        except ImportError:
-            debug_log("face widget not available (ImportError) (chatterbox)", "tts")
-        except Exception as e:
-            # Don't let face widget errors affect TTS
-            debug_log(f"failed to set face state to SPEAKING (chatterbox): {e}", "tts")
+        if is_speaking:
+            debug_log("setting state to SPEAKING (chatterbox)", "tts")
+            get_jarvis_state().set_state(JarvisState.SPEAKING)
 
     # Loopback guard helpers (same interface as TextToSpeech)
     def is_speaking(self) -> bool:
@@ -711,12 +776,16 @@ class PiperTTS:
         noise_w: float = 0.8,
         sentence_silence: float = 0.2,
         response_language: Optional[str] = None,
+        voices: Optional[Mapping[str, str]] = None,
     ) -> None:
         self.enabled = enabled
         self.voice = voice  # Not used in Piper, kept for interface compatibility
         self.rate = rate    # Not directly supported, use length_scale instead
         self.model_path = model_path
         self.response_language = response_language
+        # Language to voice. A language it does not name speaks with the
+        # voice `_resolved_model_path` picks.
+        self.voices: dict[str, str] = dict(voices or {})
         self.speaker = speaker
         self.length_scale = length_scale
         self.noise_scale = noise_scale
@@ -739,6 +808,16 @@ class PiperTTS:
         self._initialized = False
         self._init_lock = threading.Lock()
         self._init_error: Optional[str] = None
+
+        # Voices the map asked for, loaded on first use and kept, keyed by
+        # model path. A path that could not be loaded is remembered too, so a
+        # voice that cannot be fetched is not retried on every sentence.
+        self._mapped_voices: dict[str, tuple[Any, int]] = {}
+        self._unloadable_voices: set[str] = set()
+        self._mapped_lock = threading.Lock()
+        # The last choice named in the debug log, so a reply of many
+        # sentences names its voice once and a change of voice names it again.
+        self._last_voice_logged: Optional[tuple[str, str]] = None
 
         # Audio stream for interruption
         self._audio_stream = None
@@ -768,11 +847,89 @@ class PiperTTS:
         """
         return self.model_path or _get_default_piper_model_path(self.response_language)
 
-    def _ensure_initialized(self) -> bool:
-        """Initialize Piper voice model. Returns True if successful.
+    def _load_voice_file(
+        self, model_path: str, may_fall_back: bool
+    ) -> tuple[Optional[Any], int, Optional[str]]:
+        """Load the voice at ``model_path``, fetching it first when absent.
 
-        If no model is configured, the voice for the configured language is
-        downloaded automatically.
+        Returns ``(voice, sample_rate, error)``. ``voice`` is None when the
+        voice could not be loaded, and ``error`` says why.
+
+        When the fetch fails and ``may_fall_back`` allows it, a fallback
+        voice already on disk speaks in its place.
+        """
+        try:
+            # Expand user path (e.g., ~/models/voice.onnx)
+            model_path = os.path.expanduser(model_path)
+            config_path = model_path + ".json"
+
+            # Auto-download if model doesn't exist
+            if not os.path.exists(model_path) or not os.path.exists(config_path):
+                # Extract voice name from path for download
+                voice_name = os.path.basename(model_path).replace(".onnx", "")
+
+                print(f"🔊 Downloading Piper voice: {voice_name}", file=sys.stderr, flush=True)
+                print("   This is a one-time download (~60MB)...", file=sys.stderr, flush=True)
+
+                def progress(msg):
+                    print(msg, file=sys.stderr, flush=True)
+
+                downloaded_path = _download_piper_voice(voice_name, progress_callback=progress)
+
+                if not downloaded_path:
+                    secours = self._cached_fallback_voice() if may_fall_back else None
+                    if secours is None:
+                        error = f"Failed to download voice: {voice_name}"
+                        debug_log(f"Piper TTS init failed: {error}", "tts")
+                        return None, 0, error
+                    model_path, config_path = secours
+                    repli = os.path.basename(model_path).replace(".onnx", "")
+                    debug_log(
+                        f"{voice_name} unavailable, speaking with {repli}", "tts"
+                    )
+                    print(
+                        f"⚠️  Voice {voice_name} unavailable, speaking with {repli}",
+                        file=sys.stderr, flush=True,
+                    )
+                else:
+                    model_path = downloaded_path
+                    config_path = model_path + ".json"
+                    print("✓ Voice downloaded successfully!", file=sys.stderr, flush=True)
+
+            # Final check that files exist
+            if not os.path.exists(model_path):
+                error = f"Model file not found: {model_path}"
+                debug_log(f"Piper TTS init failed: {error}", "tts")
+                return None, 0, error
+
+            if not os.path.exists(config_path):
+                error = f"Model config not found: {config_path}"
+                debug_log(f"Piper TTS init failed: {error}", "tts")
+                return None, 0, error
+
+            debug_log(f"Piper TTS loading model: {model_path}", "tts")
+
+            # Import piper and load model
+            from piper.voice import PiperVoice
+
+            voice = PiperVoice.load(model_path, config_path)
+            sample_rate = voice.config.sample_rate
+            debug_log(f"Piper TTS voice loaded: sample_rate={sample_rate}", "tts")
+            return voice, sample_rate, None
+
+        except ImportError as e:
+            error = f"piper-tts not installed: {e}"
+        except Exception as e:
+            error = f"Failed to load Piper model: {e}"
+        debug_log(f"Piper TTS init failed: {error}", "tts")
+        return None, 0, error
+
+    def _ensure_initialized(self) -> bool:
+        """Initialise the default Piper voice. Returns True if successful.
+
+        The default voice is the one every language the map does not name
+        speaks with: the pinned model, else the voice for the configured
+        language. If it is not on disk it is downloaded automatically.
         """
         if self._initialized:
             return self._voice is not None
@@ -783,84 +940,87 @@ class PiperTTS:
             if self._initialized:
                 return self._voice is not None
 
-            try:
-                model_path = self._resolved_model_path()
-                if not self.model_path:
-                    debug_log(
-                        f"No model configured, voice for {self.response_language!r}: {model_path}",
-                        "tts",
-                    )
+            model_path = self._resolved_model_path()
+            if not self.model_path:
+                debug_log(
+                    f"No model configured, voice for {self.response_language!r}: {model_path}",
+                    "tts",
+                )
 
-                # Expand user path (e.g., ~/models/voice.onnx)
-                model_path = os.path.expanduser(model_path)
-                config_path = model_path + ".json"
-
-                # Auto-download if model doesn't exist
-                if not os.path.exists(model_path) or not os.path.exists(config_path):
-                    # Extract voice name from path for download
-                    voice_name = os.path.basename(model_path).replace(".onnx", "")
-
-                    print(f"🔊 Downloading Piper voice: {voice_name}", file=sys.stderr, flush=True)
-                    print("   This is a one-time download (~60MB)...", file=sys.stderr, flush=True)
-
-                    def progress(msg):
-                        print(msg, file=sys.stderr, flush=True)
-
-                    downloaded_path = _download_piper_voice(voice_name, progress_callback=progress)
-
-                    if not downloaded_path:
-                        secours = self._cached_fallback_voice()
-                        if secours is None:
-                            self._init_error = f"Failed to download voice: {voice_name}"
-                            debug_log(f"Piper TTS init failed: {self._init_error}", "tts")
-                            self._initialized = True
-                            return False
-                        model_path, config_path = secours
-                        repli = os.path.basename(model_path).replace(".onnx", "")
-                        debug_log(
-                            f"{voice_name} unavailable, speaking with {repli}", "tts"
-                        )
-                        print(
-                            f"⚠️  Voice {voice_name} unavailable, speaking with {repli}",
-                            file=sys.stderr, flush=True,
-                        )
-                    else:
-                        model_path = downloaded_path
-                        config_path = model_path + ".json"
-                        print("✓ Voice downloaded successfully!", file=sys.stderr, flush=True)
-
-                # Final check that files exist
-                if not os.path.exists(model_path):
-                    self._init_error = f"Model file not found: {model_path}"
-                    debug_log(f"Piper TTS init failed: {self._init_error}", "tts")
-                    self._initialized = True
-                    return False
-
-                if not os.path.exists(config_path):
-                    self._init_error = f"Model config not found: {config_path}"
-                    debug_log(f"Piper TTS init failed: {self._init_error}", "tts")
-                    self._initialized = True
-                    return False
-
-                debug_log(f"Piper TTS loading model: {model_path}", "tts")
-
-                # Import piper and load model
-                from piper.voice import PiperVoice
-
-                self._voice = PiperVoice.load(model_path, config_path)
-                self._sample_rate = self._voice.config.sample_rate
-
-                debug_log(f"Piper TTS initialized: sample_rate={self._sample_rate}", "tts")
-
-            except ImportError as e:
-                self._init_error = f"piper-tts not installed: {e}"
-                debug_log(f"Piper TTS init failed: {self._init_error}", "tts")
-            except Exception as e:
-                self._init_error = f"Failed to load Piper model: {e}"
-                debug_log(f"Piper TTS init failed: {self._init_error}", "tts")
+            voice, sample_rate, error = self._load_voice_file(
+                model_path, may_fall_back=not self.model_path
+            )
+            if voice is not None:
+                self._voice = voice
+                self._sample_rate = sample_rate
+            else:
+                self._init_error = error
 
             self._initialized = True
             return self._voice is not None
+
+    def _load_mapped_voice(self, model_path: str) -> Optional[tuple[Any, int]]:
+        """A voice the map names, loaded on first use and kept.
+
+        None when it cannot be loaded, and then it is not tried again: a
+        fetch that fails retries a rate-limited server for half a minute,
+        which would hold every later sentence in that language hostage.
+        """
+        with self._mapped_lock:
+            if model_path in self._mapped_voices:
+                return self._mapped_voices[model_path]
+            if model_path in self._unloadable_voices:
+                return None
+            voice, sample_rate, error = self._load_voice_file(model_path, may_fall_back=False)
+            if voice is None:
+                self._unloadable_voices.add(model_path)
+                debug_log(f"Piper TTS voice unavailable, using the default: {error}", "tts")
+                return None
+            self._mapped_voices[model_path] = (voice, sample_rate)
+            return voice, sample_rate
+
+    def _name_the_choice(self, language: str, voice_path: str, source: str) -> None:
+        """Say in the debug log which voice speaks, when that is news.
+
+        A streamed reply reaches the engine a sentence at a time, so naming
+        the voice for each one would bury the log. It is named when the
+        language or the voice differs from the last item's.
+        """
+        choice = (language, voice_path)
+        if choice == self._last_voice_logged:
+            return
+        self._last_voice_logged = choice
+        debug_log(
+            f"voice for {language or 'an unknown language'}: "
+            f"{os.path.basename(voice_path)} ({source})",
+            "tts",
+        )
+
+    def _voice_for(self, detected_language: Optional[str]) -> Optional[tuple[Any, int]]:
+        """The loaded voice that speaks a reply, with its sample rate.
+
+        None when there is no voice at all, which is when the default voice
+        itself could not be loaded.
+        """
+        default_path = self._resolved_model_path()
+        chosen = select_tts_voice(
+            self.voices, default_path,
+            response_language=self.response_language,
+            detected_language=detected_language,
+        )
+        is_default = os.path.expanduser(chosen) == os.path.expanduser(default_path)
+        self._name_the_choice(
+            _reply_language_code(self.response_language, detected_language),
+            chosen,
+            "default" if is_default else "mapped",
+        )
+        if not is_default:
+            mapped = self._load_mapped_voice(chosen)
+            if mapped is not None:
+                return mapped
+        if not self._ensure_initialized():
+            return None
+        return self._voice, self._sample_rate
 
     def start(self) -> None:
         if not self.enabled or self._thread is not None:
@@ -880,7 +1040,7 @@ class PiperTTS:
             pass
         self._stop.set()
         try:
-            self._q.put_nowait(("", None, None))
+            self._q.put_nowait(("", None, None, None))
         except Exception:
             pass
         self._thread.join(timeout=2.0)
@@ -888,7 +1048,15 @@ class PiperTTS:
         self._stop.clear()
 
     def speak(self, text: str, completion_callback: Optional[Callable[[], None]] = None,
-              duration_callback: Optional[Callable[[float], None]] = None) -> None:
+              duration_callback: Optional[Callable[[float], None]] = None,
+              language: Optional[str] = None) -> None:
+        """Queue ``text`` to be spoken.
+
+        ``language`` is the language the user was heard in. It travels with
+        the item, and the voice is chosen from it when the item is spoken:
+        sentences of two replies in two languages can wait in the queue
+        together. The configured ``response_language`` outranks it.
+        """
         if not self.enabled:
             return
         if not text.strip() and completion_callback is None:
@@ -910,7 +1078,7 @@ class PiperTTS:
         # Preprocess text for speech
         processed_text = _preprocess_for_speech(text)
         try:
-            self._q.put_nowait((processed_text, *_callbacks))
+            self._q.put_nowait((processed_text, *_callbacks, language))
         except Exception:
             pass
 
@@ -928,7 +1096,7 @@ class PiperTTS:
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                texte, _fin, _duree = self._q.get(timeout=0.5)
+                texte, _fin, _duree, _langue = self._q.get(timeout=0.5)
             except queue.Empty:
                 continue
             if not texte:
@@ -942,12 +1110,12 @@ class PiperTTS:
             self._duration_callback = _duree
             text = texte
             try:
-                self._speak_once(text)
+                self._speak_once(text, _langue)
             except Exception as e:
                 debug_log(f"Piper TTS error in _speak_once: {e}", "tts")
                 continue
 
-    def _speak_once(self, text: str) -> None:
+    def _speak_once(self, text: str, language: Optional[str] = None) -> None:
         self._is_speaking.set()
         self._last_spoken_text = text
         self._should_interrupt.clear()
@@ -962,15 +1130,18 @@ class PiperTTS:
         # stays owed until the speech has finished.
         spoken = False
 
-        # Signal speaking state to face widget
+        # Publish the speaking state
         self._notify_speaking_state(True)
 
         try:
-            # Initialize on first use
-            if not self._ensure_initialized():
+            # The voice is chosen per item, from the language of the reply,
+            # and loaded on first use.
+            chosen = self._voice_for(language)
+            if chosen is None:
                 if self._init_error:
                     print(f"  ⚠️ Piper TTS: {self._init_error}", flush=True)
                 return
+            piper_voice, sample_rate = chosen
 
             import sounddevice as sd
             import numpy as np
@@ -993,7 +1164,7 @@ class PiperTTS:
                 noise_w_scale=self.noise_w,
             )
             audio_chunks = []
-            for chunk in self._voice.synthesize(text, syn_config):
+            for chunk in piper_voice.synthesize(text, syn_config):
                 if self._should_interrupt.is_set():
                     debug_log("Piper TTS interrupted during synthesis", "tts")
                     return
@@ -1016,7 +1187,7 @@ class PiperTTS:
                 return
 
             # Calculate exact duration from actual samples
-            exact_duration = len(full_audio) / self._sample_rate
+            exact_duration = len(full_audio) / sample_rate
             debug_log(f"Piper TTS synthesis complete: {exact_duration:.2f}s, {len(full_audio)} samples", "tts")
 
             # Notify listener of exact duration for precise echo detection
@@ -1052,7 +1223,7 @@ class PiperTTS:
                 with self._audio_lock:
                     with portaudio_lock:
                         self._audio_stream = sd.OutputStream(
-                            samplerate=self._sample_rate,
+                            samplerate=sample_rate,
                             channels=1,
                             dtype='int16',
                             blocksize=blocksize,
@@ -1104,17 +1275,10 @@ class PiperTTS:
                 self._completion_callback = None
 
     def _notify_speaking_state(self, is_speaking: bool) -> None:
-        """Notify the face widget of speaking state changes."""
-        try:
-            from desktop_app.face_widget import get_jarvis_state, JarvisState
-            state_manager = get_jarvis_state()
-            if is_speaking:
-                debug_log("setting face state to SPEAKING (piper)", "tts")
-                state_manager.set_state(JarvisState.SPEAKING)
-        except ImportError:
-            debug_log("face widget not available (ImportError) (piper)", "tts")
-        except Exception as e:
-            debug_log(f"failed to set face state to SPEAKING (piper): {e}", "tts")
+        """Publish SPEAKING when speech starts."""
+        if is_speaking:
+            debug_log("setting state to SPEAKING (piper)", "tts")
+            get_jarvis_state().set_state(JarvisState.SPEAKING)
 
     # Loopback guard helpers (same interface as TextToSpeech)
     def is_speaking(self) -> bool:
@@ -1277,7 +1441,10 @@ class KokoroTTS:
         self._stop.clear()
 
     def speak(self, text: str, completion_callback: Optional[Callable[[], None]] = None,
-              duration_callback: Optional[Callable[[float], None]] = None) -> None:
+              duration_callback: Optional[Callable[[float], None]] = None,
+              language: Optional[str] = None) -> None:
+        # One voice, whatever the language: accepted so the listener can hand
+        # every engine the same call, and ignored.
         if not self.enabled:
             return
         if not text.strip() and completion_callback is None:
@@ -1467,17 +1634,10 @@ class KokoroTTS:
                 self._completion_callback = None
 
     def _notify_speaking_state(self, is_speaking: bool) -> None:
-        """Notify the face/orb widget of speaking state changes."""
-        try:
-            from desktop_app.face_widget import get_jarvis_state, JarvisState
-            state_manager = get_jarvis_state()
-            if is_speaking:
-                debug_log("setting face state to SPEAKING (kokoro)", "tts")
-                state_manager.set_state(JarvisState.SPEAKING)
-        except ImportError:
-            debug_log("face widget not available (ImportError) (kokoro)", "tts")
-        except Exception as e:
-            debug_log(f"failed to set face state to SPEAKING (kokoro): {e}", "tts")
+        """Publish SPEAKING when speech starts."""
+        if is_speaking:
+            debug_log("setting state to SPEAKING (kokoro)", "tts")
+            get_jarvis_state().set_state(JarvisState.SPEAKING)
 
     # Loopback guard helpers (same interface as the other engines).
     def is_speaking(self) -> bool:
@@ -1505,10 +1665,13 @@ def create_tts_engine(
     piper_noise_w: float = 0.8,
     piper_sentence_silence: float = 0.2,
     response_language: Optional[str] = None,
-    # Kokoro parameters. ``response_language`` governs the Piper voice
-    # only: Kokoro takes its voice from ``kokoro_voice`` and its language
-    # from ``kokoro_lang_code``, and Chatterbox has no notion of one, so
-    # both need their voice set by hand.
+    # Language to Piper voice. With ``response_language`` empty the voice
+    # follows the language the reply is spoken in; see ``select_tts_voice``.
+    piper_voices: Optional[Mapping[str, str]] = None,
+    # Kokoro parameters. ``response_language`` and ``piper_voices`` govern
+    # the Piper voice only: Kokoro takes its voice from ``kokoro_voice`` and
+    # its language from ``kokoro_lang_code``, and Chatterbox has no notion
+    # of one, so both need their voice set by hand.
     kokoro_voice: str = "ff_siwis",
     kokoro_lang_code: str = "f",
     kokoro_speed: float = 1.0,
@@ -1550,11 +1713,5 @@ def create_tts_engine(
             noise_w=piper_noise_w,
             sentence_silence=piper_sentence_silence,
             response_language=response_language,
+            voices=piper_voices,
         )
-
-
-def json_escape_ps(s: str) -> str:
-    # For PowerShell, use double quotes and escape internal double quotes
-    # This avoids issues with apostrophes in contractions like "you're"
-    escaped = s.replace('"', '""')
-    return '"' + escaped + '"'

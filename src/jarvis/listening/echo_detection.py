@@ -47,8 +47,6 @@ class EchoDetector:
         # his own words 34-52. Set between them, leaning high because
         # over-cutting destroys and under-cutting only leaves noise.
         self.echo_prefix_threshold: int = 55
-        # Backwards-compat alias — older callers used the overlap name.
-        self._min_overlap_accept_words: int = self.min_salvage_words
         
         # Utterance timing
         self._utterance_start_time: float = 0.0
@@ -313,14 +311,14 @@ class EchoDetector:
         # Always try to find the longest overlap at TTS end, not just timing-based segment
         # This handles timing drift and finds cases where entire heard text is TTS
         limit = min(len(tts_clean), len(heard_clean))
-        for i in range(limit, max(max_overlap, self._min_overlap_accept_words - 1), -1):
+        for i in range(limit, max(max_overlap, self.min_salvage_words - 1), -1):
             if tts_clean[-i:] == heard_clean[:i]:
                 if i > max_overlap:
                     debug_log(f"salvage: found longer match at TTS end ({i} vs {max_overlap} words)", "echo")
                     max_overlap = i
                 break
 
-        if 0 < max_overlap < len(heard_words) and max_overlap >= self._min_overlap_accept_words:
+        if 0 < max_overlap < len(heard_words) and max_overlap >= self.min_salvage_words:
             cleaned_text = " ".join(heard_words[max_overlap:])
             overlap_text = " ".join(heard_words[:max_overlap])
             debug_log(f"cleaned leading echo during TTS. Overlap: '{overlap_text}'. Cleaned: '{cleaned_text}'", "echo")
@@ -329,7 +327,7 @@ class EchoDetector:
         # Phase 3: Fuzzy matching fallback for transcription differences
         # When exact word matching fails (e.g., "cuppa" vs "cup"), try fuzzy matching
         # on prefixes of heard text against the TTS TAIL (not full TTS)
-        if len(heard_words) > self._min_overlap_accept_words:
+        if len(heard_words) > self.min_salvage_words:
             # Get the tail of TTS (last ~50% of words) - this is what would be echoed
             # when mic picks up the end of TTS playback
             tts_words_list = self._last_tts_text.lower().strip().split()
@@ -339,7 +337,7 @@ class EchoDetector:
 
             # Try different split points in the heard text
             # Start from around 70% of words (likely some echo) and work down to min overlap
-            min_prefix_words = self._min_overlap_accept_words
+            min_prefix_words = self.min_salvage_words
             max_prefix_words = min(len(heard_words) - 2, int(len(heard_words) * 0.85))
 
             for prefix_len in range(max_prefix_words, min_prefix_words - 1, -1):

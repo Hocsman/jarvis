@@ -1,6 +1,6 @@
 """Tests for auxiliary LLM backend dispatch.
 
-Auxiliary tasks (intent judge, tool router, evaluator) can run on a local
+Auxiliary tasks (intent judge, tool router, planner) can run on a local
 Ollama model even when the main chat provider is a remote OpenAI-compatible
 server (e.g. OpenRouter). A bare model name without a slash indicates a local
 model tag and is routed to Ollama, while a namespaced tag (vendor/model) or a
@@ -148,18 +148,6 @@ def test_graph_ops_shim_routes_a_bare_model_to_local_ollama(direct_calls):
     from src.jarvis.memory import graph_ops
 
     result = graph_ops.call_llm_direct(
-        cfg=_remote_provider_settings(), chat_model="qwen2.5:3b",
-        system_prompt="s", user_content="u",
-    )
-
-    assert result == "ok"
-    assert direct_calls == [("ollama", "qwen2.5:3b")]
-
-
-def test_evaluator_shim_routes_a_bare_model_to_local_ollama(direct_calls):
-    from src.jarvis.reply import evaluator
-
-    result = evaluator.call_llm_direct(
         cfg=_remote_provider_settings(), chat_model="qwen2.5:3b",
         system_prompt="s", user_content="u",
     )

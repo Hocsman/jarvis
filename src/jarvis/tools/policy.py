@@ -148,7 +148,7 @@ def resolve_risk(name: str, tool: Any, args: Optional[Dict[str, Any]]) -> str:
 
     # MCP servers ship this in a standard field. Reading it is the whole
     # point: the servers already tell us which of their tools destroy
-    # things, and the catalogue used to throw that away.
+    # things, so the catalogue keeps that.
     annotations = getattr(tool, "annotations", None)
     if isinstance(annotations, dict) and annotations:
         if annotations.get("destructiveHint") is True:

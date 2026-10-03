@@ -1,11 +1,14 @@
 """
 Auto-update functionality for Jarvis Desktop App.
 
-Checks GitHub Releases for new versions and handles the update process.
+Checks GitHub Releases for new versions and handles the update process. An
+installer is run only after its SHA-256 matches the ``SHA256SUMS.txt`` the
+same release publishes (see "Update System" in ``desktop_app.spec.md``).
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import platform
@@ -23,11 +26,23 @@ import requests
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
 from jarvis import get_version
+from jarvis.config import load_settings
 from jarvis.debug import debug_log
 
 from .paths import get_log_dir
 
 GITHUB_REPO = "Hocsman/jarvis"
+# The release asset that lists the SHA-256 of every installer the release
+# publishes, in the format `sha256sum` writes.
+CHECKSUMS_ASSET_NAME = "SHA256SUMS.txt"
+CHECKSUMS_TIMEOUT_SEC = 10
+# One short line per installer. A response far beyond this is not a checksum
+# file, and refusing it bounds what a hostile host can make the app hold.
+CHECKSUMS_MAX_BYTES = 64 * 1024
+DOWNLOAD_CHUNK_BYTES = 64 * 1024
+# `<64 hex digits><blanks>[*]<file name>`: text mode writes two spaces, binary
+# mode a space and an asterisk.
+_CHECKSUM_LINE = re.compile(r"(?P<digest>[0-9a-fA-F]{64})[ \t]+\*?(?P<name>.+)")
 # Absolute path to macOS's ditto tool. Exposed as a module attribute so
 # tests (which run on non-macOS CI runners without /usr/bin/ditto) can
 # substitute a path that exists.
@@ -164,6 +179,9 @@ class ReleaseInfo:
     asset_name: str
     asset_size: int
     release_notes: str
+    # Where the release's SHA256SUMS.txt lives; None when it publishes none,
+    # in which case the installer is never downloaded.
+    checksums_url: Optional[str] = None
 
 
 @dataclass
@@ -239,6 +257,14 @@ def _make_release_info(release: dict, asset: dict) -> ReleaseInfo:
         commit = _extract_release_commit(release)
         if commit:
             version = f"dev-{commit[:7]}"
+    checksums_url = next(
+        (
+            a.get("browser_download_url")
+            for a in release.get("assets", [])
+            if a.get("name") == CHECKSUMS_ASSET_NAME
+        ),
+        None,
+    )
     return ReleaseInfo(
         asset_id=asset["id"],
         tag_name=tag,
@@ -250,19 +276,48 @@ def _make_release_info(release: dict, asset: dict) -> ReleaseInfo:
         asset_name=asset["name"],
         asset_size=asset["size"],
         release_notes=release.get("body", ""),
+        checksums_url=checksums_url,
     )
 
 
-def check_for_updates(channel: Optional[UpdateChannel] = None) -> UpdateStatus:
+def automatic_check_enabled() -> bool:
+    """Whether the app may contact GitHub on its own (``update_check_enabled``).
+
+    An unreadable setting counts as off: the one value this guards is the
+    user's choice to be left alone, and a failure to read it is no reason to
+    override it.
+    """
+    try:
+        return bool(load_settings().update_check_enabled)
+    except Exception as e:
+        debug_log(f"Could not read update_check_enabled, treating it as off: {e}", "updater")
+        return False
+
+
+def check_for_updates(
+    channel: Optional[UpdateChannel] = None, *, automatic: bool = False
+) -> UpdateStatus:
     """Check GitHub Releases for available updates.
 
     Args:
         channel: Update channel to check. If None, uses current app's channel.
+        automatic: True for the check the app runs by itself at startup. It
+            honours ``update_check_enabled`` and sends no request when that is
+            off. A check the user asked for is never suppressed.
 
     Returns:
         UpdateStatus with update information.
     """
     current_version, current_channel = get_version()
+
+    if automatic and not automatic_check_enabled():
+        debug_log("Automatic update check skipped: update_check_enabled is off", "updater")
+        return UpdateStatus(
+            update_available=False,
+            current_version=current_version,
+            current_channel=current_channel,
+            latest_release=None,
+        )
 
     if channel is None:
         channel = (
@@ -369,43 +424,173 @@ def check_for_updates(channel: Optional[UpdateChannel] = None) -> UpdateStatus:
         )
 
 
+class UpdateIntegrityError(Exception):
+    """An installer cannot be shown to be the one its release published.
+
+    The message is written for the user: it says what was not verified and
+    that nothing was installed.
+    """
+
+
+def _expected_sha256(checksums_text: str, asset_name: str) -> str:
+    """The digest ``checksums_text`` lists for ``asset_name``, lower-cased.
+
+    Raises ``UpdateIntegrityError`` when the file lists the asset nowhere, or
+    lists it with two different digests: a file that contradicts itself
+    vouches for nothing.
+    """
+    digests = set()
+    for line in checksums_text.splitlines():
+        entry = _CHECKSUM_LINE.fullmatch(line.strip())
+        if entry and entry.group("name").strip() == asset_name:
+            digests.add(entry.group("digest").lower())
+    if not digests:
+        raise UpdateIntegrityError(
+            f"{CHECKSUMS_ASSET_NAME} does not list {asset_name}, so the installer "
+            "cannot be verified. Nothing was downloaded or installed."
+        )
+    if len(digests) > 1:
+        raise UpdateIntegrityError(
+            f"{CHECKSUMS_ASSET_NAME} lists {asset_name} with different digests, so the "
+            "installer cannot be verified. Nothing was downloaded or installed."
+        )
+    return digests.pop()
+
+
+def fetch_expected_sha256(checksums_url: Optional[str], asset_name: str) -> str:
+    """Download the release's checksum file and return the digest for ``asset_name``.
+
+    Every way this can fail is an ``UpdateIntegrityError``: with no digest to
+    compare against there is nothing to verify, and an unverified installer is
+    not run.
+    """
+    if not checksums_url:
+        raise UpdateIntegrityError(
+            f"This release publishes no {CHECKSUMS_ASSET_NAME}, so its installer cannot "
+            "be verified. Nothing was downloaded or installed. You can still update "
+            "manually from the release page."
+        )
+    body = bytearray()
+    try:
+        with requests.get(checksums_url, stream=True, timeout=CHECKSUMS_TIMEOUT_SEC) as response:
+            response.raise_for_status()
+            for chunk in response.iter_content(chunk_size=4096):
+                body += chunk
+                if len(body) > CHECKSUMS_MAX_BYTES:
+                    raise UpdateIntegrityError(
+                        f"{CHECKSUMS_ASSET_NAME} is far larger than a checksum file, so the "
+                        "installer cannot be verified. Nothing was downloaded or installed."
+                    )
+    except requests.RequestException as e:
+        raise UpdateIntegrityError(
+            f"Could not fetch {CHECKSUMS_ASSET_NAME} ({e}), so the installer cannot be "
+            "verified. Nothing was downloaded or installed."
+        ) from e
+    try:
+        text = bytes(body).decode("utf-8-sig")
+    except UnicodeDecodeError as e:
+        raise UpdateIntegrityError(
+            f"{CHECKSUMS_ASSET_NAME} is not readable text, so the installer cannot be "
+            "verified. Nothing was downloaded or installed."
+        ) from e
+    return _expected_sha256(text, asset_name)
+
+
+def verify_file_sha256(path: Path, expected_sha256: str) -> str:
+    """Return the SHA-256 of ``path`` once it equals ``expected_sha256``.
+
+    Raises ``UpdateIntegrityError`` when it does not, or when the file cannot
+    be read.
+    """
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            for block in iter(lambda: f.read(1024 * 1024), b""):
+                digest.update(block)
+    except OSError as e:
+        raise UpdateIntegrityError(
+            f"The update archive could not be read back to be verified ({e}). "
+            "Nothing was installed."
+        ) from e
+    actual = digest.hexdigest()
+    if actual != expected_sha256.lower():
+        raise UpdateIntegrityError(
+            "The update archive does not match the checksum published with this release "
+            f"(expected {expected_sha256.lower()[:12]}..., got {actual[:12]}...). "
+            "It was discarded and nothing was installed."
+        )
+    return actual
+
+
+def _discard_download(path: Path) -> None:
+    try:
+        Path(path).unlink(missing_ok=True)
+    except OSError as e:
+        debug_log(f"Could not delete {path}: {e}", "updater")
+
+
 class DownloadSignals(QObject):
     """Signals for download progress updates."""
 
     progress = pyqtSignal(int, int)  # downloaded_bytes, total_bytes
-    completed = pyqtSignal(str)  # path to downloaded file
+    completed = pyqtSignal(str, str)  # path to downloaded file, its verified SHA-256
     error = pyqtSignal(str)  # error message
 
 
 class DownloadWorker(QThread):
-    """Background worker for downloading updates."""
+    """Background worker that downloads an update and verifies it.
 
-    def __init__(self, url: str, dest_path: Path, signals: DownloadSignals):
+    ``completed`` is emitted only for an installer whose SHA-256 equals the
+    one the release's ``SHA256SUMS.txt`` lists. Every other outcome emits
+    ``error`` and leaves no installer on disk: a release with no checksum file
+    is refused before anything is downloaded.
+    """
+
+    def __init__(self, release: ReleaseInfo, dest_path: Path, signals: DownloadSignals):
         super().__init__()
-        self.url = url
+        self.release = release
         self.dest_path = dest_path
         self.signals = signals
         self._cancelled = False
 
     def run(self):
         try:
-            response = requests.get(self.url, stream=True, timeout=30)
-            response.raise_for_status()
+            expected = fetch_expected_sha256(self.release.checksums_url, self.release.asset_name)
+            digest = hashlib.sha256()
 
-            total_size = int(response.headers.get("content-length", 0))
-            downloaded = 0
+            with requests.get(self.release.download_url, stream=True, timeout=30) as response:
+                response.raise_for_status()
 
-            with open(self.dest_path, "wb") as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if self._cancelled:
-                        return
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    self.signals.progress.emit(downloaded, total_size)
+                total_size = int(response.headers.get("content-length", 0))
+                downloaded = 0
 
-            self.signals.completed.emit(str(self.dest_path))
+                with open(self.dest_path, "wb") as f:
+                    for chunk in response.iter_content(chunk_size=DOWNLOAD_CHUNK_BYTES):
+                        if self._cancelled:
+                            break
+                        f.write(chunk)
+                        digest.update(chunk)
+                        downloaded += len(chunk)
+                        self.signals.progress.emit(downloaded, total_size)
+
+            if self._cancelled:
+                _discard_download(self.dest_path)
+                return
+
+            actual = digest.hexdigest()
+            if actual != expected:
+                raise UpdateIntegrityError(
+                    "The downloaded installer does not match the checksum published with "
+                    f"this release (expected {expected[:12]}..., got {actual[:12]}...). "
+                    "It was deleted and nothing was installed."
+                )
+
+            debug_log(f"Update verified against {CHECKSUMS_ASSET_NAME}: {actual[:12]}", "updater")
+            self.signals.completed.emit(str(self.dest_path), actual)
 
         except Exception as e:
+            debug_log(f"Update download refused or failed: {e}", "updater")
+            _discard_download(self.dest_path)
             self.signals.error.emit(str(e))
 
     def cancel(self):
@@ -690,8 +875,16 @@ rm -rf {escaped_temp}
         return False
 
 
-def install_update(download_path: Path) -> bool:
-    """Install update for current platform."""
+def install_update(download_path: Path, expected_sha256: str) -> bool:
+    """Install update for current platform.
+
+    The archive is hashed again here, at the one point where it is handed to
+    something that runs it: it sat on disk while the session was saved, and
+    what was verified at download time is not what runs unless the bytes are
+    still the same. Raises ``UpdateIntegrityError`` and runs nothing when they
+    are not.
+    """
+    verify_file_sha256(download_path, expected_sha256)
     if sys.platform == "darwin":
         return install_update_macos(download_path)
     elif sys.platform == "win32":

@@ -19,6 +19,7 @@ tzdata==2026.1; sys_platform == "win32"
 miniupnpc==2.2.8
 pytest==8.3.2
 pytest-repeat==0.9.3
+pyyaml>=6.0
 mcp==1.13.1
 chatterbox-tts==0.1.2
 piper-tts>=1.3.0
@@ -38,6 +39,31 @@ mlx-whisper>=0.4.0; sys_platform == "darwin" and platform_machine == "arm64"
 # dependency tree resolves against the DLLs the loader picks. 6.9.1 is the
 # release the suite is green on there, so Windows holds it exactly and the
 # other platforms stay on the newest.
+#
+# Lifting the Windows pin (issue #6). The pin is a workaround for a loader
+# failure, so it moves on evidence and never on a version number alone.
+#   When to re-test: whenever PyQt6, PyQt6-Qt6 or PyQt6-WebEngine-Qt6 publishes
+#     a release (the runtime pins below are exact, so even a 6.9 patch release
+#     is only picked up through this procedure), and before cutting a release,
+#     since the pinned Qt is also the Chromium that Qt WebEngine embeds.
+#   What to run, on Windows, with the candidate wheels (PyQt6, PyQt6-Qt6,
+#     PyQt6-WebEngine, PyQt6-WebEngine-Qt6) installed in a scratch environment:
+#       python scripts/check_qt_pin.py --python <scratch environment>/python.exe
+#     It imports QtCore, QtWidgets, QtSvg and QtWebEngineWidgets in a child
+#     process each, prints the Qt and PyQt versions, and names the loader
+#     failure (0xc0000139) when it sees it, with what to try next. If it
+#     passes, install the same wheels in the project environment and run
+#       python -m pytest tests
+#     then start the desktop app (scripts/run_desktop_app.bat) and open the
+#     dashboard and the memory viewer, which the suite does not render. A
+#     passing check on a clean machine is not proof for this one: the cause is
+#     not diagnosed, so run it on the machine the release is built on too.
+#   What to update when a set passes: the four Windows pins below (the runtime
+#     pair may become a range such as >=6.9.2,<6.10 when only a patch release
+#     moved), the release named in the paragraph above, and the Qt sentence in
+#     the Known limitations of README.md. tests.yml and release.yml install
+#     this file, so they follow. When a 6.10 or later set passes, delete the
+#     pins and this procedure together.
 PyQt6>=6.6.0; sys_platform != "win32"
 PyQt6==6.9.1; sys_platform == "win32"
 PyQt6-WebEngine>=6.6.0; sys_platform != "win32"

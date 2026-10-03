@@ -1,6 +1,6 @@
 # LLM Backend Specification
 
-The `jarvis.llm` package owns every LLM HTTP call Jarvis makes and lets the same reply engine, planner, intent judge, evaluator, memory pipeline, and tools run against any local runtime: Ollama, an OpenAI-compatible server (LM Studio, oMLX, llama.cpp's `llama-server`, vLLM, LocalAI), or an Anthropic-compatible server.
+The `jarvis.llm` package owns every LLM HTTP call Jarvis makes and lets the same reply engine, planner, intent judge, memory pipeline, and tools run against Ollama or an OpenAI-compatible server (LM Studio, oMLX, llama.cpp's `llama-server`, vLLM, LocalAI, or a hosted endpoint). Those are the two providers the factory builds.
 
 ## Goals
 
@@ -36,24 +36,24 @@ Two interchangeable styles dispatch to the same backend:
 
 | Method | Returns | Contract |
 |--------|---------|----------|
-| `direct(model, system, user, *, timeout_sec, thinking, num_ctx, temperature)` | `Optional[str]` | Single-shot system+user. Returns assistant text, or `None` on timeout / error / empty content. |
+| `direct(model, system, user, *, timeout_sec, thinking, num_ctx, temperature, max_tokens)` | `Optional[str]` | Single-shot system+user. Returns assistant text, or `None` on timeout / error / empty content. `max_tokens` caps the generation (`num_predict` on Ollama, `max_tokens` on the OpenAI shape) and is unset by default; when a caller sets it, it should be generous (2-3x the expected answer) so a slightly long reply is never truncated mid-JSON. |
 | `streaming(model, system, user, *, on_token, timeout_sec, thinking)` | `Optional[str]` | Streams tokens via `on_token`; returns the concatenated full text or `None` if no content was produced. |
 | `chat(model, messages, *, timeout_sec, extra_options, tools, thinking, on_token)` | `Optional[Dict]` | Arbitrary messages array. Returns the raw response dict so callers (today: the reply engine) can inspect `content` and `tool_calls`. Raises `ToolsNotSupportedError` when the model rejects native tools. Re-raises `requests.ConnectionError` so callers can distinguish "server unreachable" from a transient HTTP failure. `on_token` receives content deltas during generation; **the return value is identical with or without it** — streaming is an extra output channel, not a different result. Backends that cannot stream must still accept the argument and may ignore it (Ollama buffers today: its JSON-lines stream needs its own reassembly path). |
 | `embed(text, model, *, timeout_sec)` | `Optional[List[float]]` | Vector embedding. Returns `None` on error or when the runtime does not expose embeddings. |
 | `list_models(*, timeout_sec)` | `List[str]` | Names of models the runtime has available. Returns `[]` on error. |
 | `warm_up(model, *, timeout_sec, keep_alive)` | `bool` | Page `model` into resident memory ahead of the first real request. Default impl returns `True` (no-op for runtimes without per-call unloading). Ollama overrides this to issue a minimal `/api/generate` ping with the caller-provided `keep_alive` duration, defaulting to `"30m"`. |
 
-`direct()` and `streaming()` are convenience methods over `chat()`: they construct the `[system, user]` messages array internally so callers running classification-shaped passes (planner, intent judge, evaluator, enrichment extractor) do not have to. `chat()` is the low-level primitive for arbitrary message arrays — multi-turn dialogue, native tool calls, and anything that needs custom roles.
+`direct()` and `streaming()` are convenience methods over `chat()`: they construct the `[system, user]` messages array internally so callers running classification-shaped passes (planner, intent judge, enrichment extractor) do not have to. `chat()` is the low-level primitive for arbitrary message arrays — multi-turn dialogue, native tool calls, and anything that needs custom roles.
 
 ### Tool calling
 
-The `tools` parameter accepts the OpenAI-compatible JSON-schema format produced by `jarvis.tools.registry.generate_tools_json_schema()`. Ollama 0.4+ adopts that exact format, so no translation layer is needed for the Ollama backend; OpenAI-compatible and Anthropic-compatible backends translate inside their `chat()` methods so the reply engine sees a single shape.
+The `tools` parameter accepts the OpenAI-compatible JSON-schema format produced by `jarvis.tools.registry.generate_tools_json_schema()`. Ollama 0.4+ adopts that exact format, so no translation layer is needed for the Ollama backend; the OpenAI-compatible backend normalises responses inside its `chat()` method so the reply engine sees a single shape.
 
 When a model rejects the `tools` parameter (Ollama returns HTTP 400 in that case), the backend raises `ToolsNotSupportedError`. The reply engine catches it and falls back to text-based tool calling for the rest of the session.
 
 ### Streaming
 
-Each backend parses its own stream format internally (Ollama JSONL, OpenAI SSE, Anthropic SSE event blocks). The public `on_token(str)` contract is identical across backends.
+Each backend parses its own stream format internally (Ollama JSON lines, OpenAI-compatible SSE). The public `on_token(str)` contract is identical across backends.
 
 ### Embeddings
 
@@ -80,7 +80,7 @@ The `ollama_base_url` / `ollama_chat_model` / `ollama_embed_model` keys hold the
 
 ### Splitting roles across models
 
-`intent_judge_model` / `tool_router_model` / `planner_model` / `evaluator_model` exist so the classification-shaped calls can run on a different model from the reply. On a cloud provider this is not a micro-optimisation — it dominates latency.
+`intent_judge_model` / `tool_router_model` / `planner_model` exist so the classification-shaped calls can run on a different model from the reply. On a cloud provider this is not a micro-optimisation — it dominates latency.
 
 Measured on the memory extractor (same prompt, same query, OpenRouter):
 
@@ -144,7 +144,6 @@ Each migrated module exposes a single intercept point so tests can patch one sym
 
 - `jarvis.reply.engine.chat_with_messages(cfg, messages, ...)` — agentic-loop chat boundary.
 - `jarvis.reply.planner.call_llm_direct(*, cfg, chat_model, ...)` — planner + step resolver.
-- `jarvis.reply.evaluator.call_llm_direct(*, cfg, chat_model, ...)` — terminal evaluator.
 - `jarvis.reply.enrichment.call_llm_direct(*, cfg, chat_model, ...)` — memory enrichment extractor + digest passes.
 - `jarvis.memory.graph_ops.call_llm_direct(*, cfg, chat_model, ...)` — knowledge graph extraction, best-child picker, node merge.
 - `jarvis.memory.conversation._direct_llm(cfg, system_prompt, user_content, ...)` — diary summary, deflection rewrite, topic optimisation.

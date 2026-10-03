@@ -3393,28 +3393,6 @@ class CompletePage(QWizardPage):
         return -1
 
 
-def run_setup_wizard() -> bool:
-    """
-    Run the setup wizard.
-    Returns True if setup completed successfully, False if cancelled.
-    """
-    if not _PYQT6_AVAILABLE:
-        raise ImportError(
-            "PyQt6 is not available. Install it with: pip install PyQt6\n"
-            "On Linux, you may also need: apt-get install libegl1"
-        )
-
-    # Create app if not exists
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication([])
-
-    wizard = SetupWizard()
-    result = wizard.exec()
-
-    return result == QWizard.DialogCode.Accepted
-
-
 if __name__ == "__main__":
     # For testing
     app = QApplication(sys.argv)

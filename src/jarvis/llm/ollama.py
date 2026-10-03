@@ -1,16 +1,10 @@
 """Ollama implementation of :class:`LLMBackend`.
 
-This module owns the original behaviour of the previous flat
-``src/jarvis/llm.py``: HTTP calls against ``/api/chat``,
-``/api/embeddings`` and ``/api/tags``, native tool calling with the
-``tools`` parameter (Ollama 0.4+), and the same fail-soft error
-handling (return ``None`` on timeouts / connection errors;
-:class:`ToolsNotSupportedError` on HTTP 400 with tools).
-
-Nothing about the wire shape, defaults, or response parsing has
-changed in this PR — the file is the previous implementation reshaped
-into a class so future PRs can drop in OpenAI-compatible and
-Anthropic-compatible siblings without touching call sites.
+HTTP calls against ``/api/chat``, ``/api/embeddings``, ``/api/tags`` and
+``/api/generate`` (the warm-up ping), native tool calling with the
+``tools`` parameter (Ollama 0.4+), and fail-soft error handling (return
+``None`` on timeouts / connection errors; :class:`ToolsNotSupportedError`
+on HTTP 400 with tools).
 """
 
 from __future__ import annotations

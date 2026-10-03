@@ -17,25 +17,34 @@ from src.jarvis.tools.types import ToolExecutionResult
 from src.jarvis.utils.redact import redact
 
 
+def _mark_everything_saved(dm):
+    """Mark every message so far as saved, the way a finished diary flush does."""
+    _, snapshot = dm.get_pending_chunks_with_snapshot()
+    dm.mark_saved_up_to(snapshot)
+
+
 @pytest.mark.unit
 class TestDialogueMemory:
     """Test dialogue memory conversation flow preservation."""
     
-    def test_add_interaction_basic(self):
-        """Test basic interaction storage."""
+    def test_pending_chunks_label_each_role(self):
+        """Each stored message becomes one chunk, labelled by its role."""
         dm = DialogueMemory()
-        dm.add_interaction("Hello", "Hi there!")
+        dm.add_message("user", "Hello")
+        dm.add_message("assistant", "Hi there!")
         
         chunks = dm.get_pending_chunks()
         assert len(chunks) == 2
         assert "User: Hello" in chunks
         assert "Assistant: Hi there!" in chunks
     
-    def test_add_interaction_preserves_order(self):
-        """Test that multiple interactions preserve chronological order."""
+    def test_pending_chunks_preserve_order(self):
+        """Test that multiple exchanges preserve chronological order."""
         dm = DialogueMemory()
-        dm.add_interaction("First message", "First response")
-        dm.add_interaction("Second message", "Second response")
+        dm.add_message("user", "First message")
+        dm.add_message("assistant", "First response")
+        dm.add_message("user", "Second message")
+        dm.add_message("assistant", "Second response")
         
         chunks = dm.get_pending_chunks()
         assert len(chunks) == 4
@@ -44,11 +53,11 @@ class TestDialogueMemory:
         assert chunks[2] == "User: Second message"
         assert chunks[3] == "Assistant: Second response"
     
-    def test_add_interaction_with_conversation_flow(self):
-        """Test storing full conversation flow in user_text."""
+    def test_a_multi_line_message_stays_one_chunk(self):
+        """Test storing full conversation flow in one message."""
         dm = DialogueMemory()
         conversation_flow = "User: london, please\nAssistant: I'll check London weather\nUser: what's the temperature?\nAssistant: It's 18°C in London"
-        dm.add_interaction(conversation_flow, "")
+        dm.add_message("user", conversation_flow)
         
         chunks = dm.get_pending_chunks()
         assert len(chunks) == 1
@@ -61,8 +70,9 @@ class TestDialogueMemory:
         # No interactions yet
         assert not dm.should_update_diary()
         
-        # Add interaction
-        dm.add_interaction("Hello", "Hi")
+        # Add an exchange
+        dm.add_message("user", "Hello")
+        dm.add_message("assistant", "Hi")
         assert not dm.should_update_diary()  # Too soon
         
         # Mock time passage
@@ -70,16 +80,17 @@ class TestDialogueMemory:
         with patch('time.time', return_value=time.time() + 2.0):
             assert dm.should_update_diary()  # Timeout passed
     
-    def test_clear_pending_updates(self):
-        """Test clearing pending diary updates."""
+    def test_marking_saved_clears_pending_updates(self):
+        """Test that a saved snapshot ends the pending diary update."""
         dm = DialogueMemory(inactivity_timeout=0.1)  # Short timeout for testing
-        dm.add_interaction("Hello", "Hi")
+        dm.add_message("user", "Hello")
+        dm.add_message("assistant", "Hi")
         
         # Mock time passage to trigger diary update
         import time
         with patch('time.time', return_value=time.time() + 1.0):
             assert dm.should_update_diary()
-            dm.clear_pending_updates()
+            _mark_everything_saved(dm)
             assert not dm.should_update_diary()
 
 
@@ -313,7 +324,7 @@ class TestDialogueMemoryIntegration:
             "User: Here's my apikey: sk-1234567890\n"
             "Assistant: Thanks, I'll process that securely"
         )
-        dm.add_interaction(sensitive_conversation, "")
+        dm.add_message("user", sensitive_conversation)
         
         # Get chunks (should contain sensitive info)
         chunks = dm.get_pending_chunks()
@@ -467,7 +478,7 @@ class TestDialogueMemoryEdgeCases:
         dm.add_message("user", "Message 2")
 
         # Mark all as saved
-        dm.clear_pending_updates()
+        _mark_everything_saved(dm)
 
         # Manually make messages old (beyond RECENT_WINDOW_SEC)
         with dm._lock:
@@ -510,7 +521,7 @@ class TestDialogueMemoryEdgeCases:
         assert dm.has_pending_chunks()
 
         # Mark as saved
-        dm.clear_pending_updates()
+        _mark_everything_saved(dm)
         assert not dm.has_pending_chunks()
 
     def test_should_update_diary_returns_false_when_no_pending(self):
@@ -522,7 +533,7 @@ class TestDialogueMemoryEdgeCases:
 
         # Add and save messages
         dm.add_message("user", "Hello")
-        dm.clear_pending_updates()
+        _mark_everything_saved(dm)
 
         # Even after timeout, should return False if no pending
         time.sleep(0.15)
@@ -549,7 +560,7 @@ class TestDialogueMemoryEdgeCases:
         """Snapshot excludes messages already marked as saved."""
         dm = DialogueMemory()
         dm.add_message("user", "Old message")
-        dm.clear_pending_updates()
+        _mark_everything_saved(dm)
         dm.add_message("user", "New message")
         chunks, _ = dm.get_pending_chunks_with_snapshot()
         assert len(chunks) == 1

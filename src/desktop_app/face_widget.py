@@ -30,13 +30,14 @@ Features:
 from __future__ import annotations
 import math
 import random
-import threading
 import time as _time
 from typing import Optional, List, Tuple
 from enum import Enum
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QApplication
 from PyQt6.QtGui import QPainter, QPen, QColor, QBrush, QPainterPath, QLinearGradient, QRadialGradient
-from PyQt6.QtCore import Qt, QTimer, QPointF, pyqtSignal, QObject
+from PyQt6.QtCore import Qt, QTimer, QPointF
+
+from jarvis.state import JarvisState, get_jarvis_state
 
 
 class Expression(Enum):
@@ -49,105 +50,6 @@ class Expression(Enum):
     CURIOUS = "curious"
     EXCITED = "excited"
     CONCERNED = "concerned"
-
-
-class JarvisState(Enum):
-    """Overall Jarvis state for face animation."""
-    ASLEEP = "asleep"          # Daemon not started yet
-    IDLE = "idle"              # Awake and ready, waiting for wake word
-    LISTENING = "listening"    # Actively listening (collecting or hot window)
-    THINKING = "thinking"      # Processing query
-    SPEAKING = "speaking"      # Speaking response
-    DICTATING = "dictating"    # Hold-to-dictate recording active
-    DICTATION_PROCESSING = "dictation_processing"  # Transcribing & pasting captured dictation
-
-
-# Global Jarvis state - allows daemon to signal overall state to face widget
-# Uses a file-based approach to work across processes (dev mode runs daemon as subprocess)
-import tempfile
-import os
-
-def _get_jarvis_state_file() -> str:
-    """Get the path to the Jarvis state file."""
-    return os.path.join(tempfile.gettempdir(), "jarvis_state")
-
-
-class JarvisStateManager(QObject):
-    """Global singleton for Jarvis state management.
-
-    Uses a file-based approach to communicate across processes:
-    - In dev mode, daemon runs as subprocess (different process)
-    - In bundled mode, daemon runs as QThread (same process)
-    - File-based state works in both cases
-
-    Note: Singleton pattern uses module-level instance instead of __new__
-    because PyQt6 QObject doesn't support __new__ override properly.
-    """
-    state_changed = pyqtSignal(str)
-
-    def __init__(self):
-        super().__init__()
-        self._state = JarvisState.ASLEEP  # Start asleep
-        self._state_lock = threading.Lock()
-        self._state_file = _get_jarvis_state_file()
-        # Always start fresh in ASLEEP state on app launch
-        # (state file is for cross-process communication during a session,
-        # not for persisting state across app restarts)
-        self._write_state(JarvisState.ASLEEP)
-
-    @property
-    def state(self) -> JarvisState:
-        """Read current state (checks file for cross-process communication)."""
-        # First check file (for cross-process), then fall back to memory
-        try:
-            if os.path.exists(self._state_file):
-                with open(self._state_file, 'r', encoding='utf-8') as f:
-                    content = f.read().strip()
-                    return JarvisState(content)
-        except (ValueError, OSError):
-            # Invalid content or read error - fall back to in-memory state
-            pass
-
-        with self._state_lock:
-            return self._state
-
-    def _write_state(self, state: JarvisState) -> None:
-        """Write state to file for cross-process communication."""
-        try:
-            with open(self._state_file, 'w', encoding='utf-8') as f:
-                f.write(state.value)
-        except OSError:
-            # File write failed - state won't be shared across processes
-            pass
-
-    def set_state(self, state: JarvisState) -> None:
-        """Set the Jarvis state (thread-safe, cross-process)."""
-        with self._state_lock:
-            self._state = state
-
-        # Write to file for cross-process communication
-        self._write_state(state)
-
-        # Emit signal for same-process listeners
-        try:
-            self.state_changed.emit(state.value)
-        except RuntimeError:
-            # If Qt event loop isn't running, just update the flag
-            pass
-
-
-# Module-level singleton instance
-_jarvis_state_instance: Optional[JarvisStateManager] = None
-_jarvis_state_lock = threading.Lock()
-
-
-def get_jarvis_state() -> JarvisStateManager:
-    """Get the global Jarvis state singleton."""
-    global _jarvis_state_instance
-    with _jarvis_state_lock:
-        if _jarvis_state_instance is None:
-            _jarvis_state_instance = JarvisStateManager()
-        return _jarvis_state_instance
 
 
 class LowPolyFaceWidget(QWidget):
@@ -228,9 +130,8 @@ class LowPolyFaceWidget(QWidget):
         self._listening_rings: List[float] = []  # Active ring expansions (0.0 to 1.0)
         self._dictation_pulse_phase = 0.0  # Steady pulse phase for DICTATING state
 
-        # Connect to global Jarvis state
+        # The assistant's state, polled each frame (see ``_animate``)
         self._state_manager = get_jarvis_state()
-        self._state_manager.state_changed.connect(self._on_state_changed)
 
         # Animation timer
         self._animation_timer = QTimer(self)
@@ -251,13 +152,6 @@ class LowPolyFaceWidget(QWidget):
             self._is_blinking = True
             self._blink_progress = 0.0
         self._schedule_next_blink()
-
-    def _on_state_changed(self, state_value: str):
-        """Handle Jarvis state change from global state."""
-        try:
-            self._jarvis_state = JarvisState(state_value)
-        except ValueError:
-            pass
 
     def set_expression(self, expression: Expression):
         """Set the face expression."""
@@ -423,7 +317,8 @@ class LowPolyFaceWidget(QWidget):
     
     def _animate(self):
         """Animation tick - update all animated properties."""
-        # Poll Jarvis state directly (more reliable than cross-thread signals)
+        # Poll the shared state: it is published from daemon threads, and from
+        # another process in a development checkout
         prev_state = self._jarvis_state
         try:
             self._jarvis_state = self._state_manager.state

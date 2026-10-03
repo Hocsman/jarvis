@@ -11,37 +11,67 @@ REM   run_evals.bat --no-judge   Exclude LLM-as-judge tests
 REM   run_evals.bat --no-report  Skip EVALS.md generation
 REM   run_evals.bat --single     Run with single model only (EVAL_JUDGE_MODEL)
 REM
+REM An eval that runs the real chat model takes the real_model_config
+REM fixture (evals/conftest.py), never load_settings(): the fixture keeps the
+REM provider and the models, moves the database into the sandbox and switches
+REM location off, so the user's memory and whereabouts never reach a provider
+REM from a measurement. The guards in
+REM evals/test_evals_keep_the_core_out_of_the_repository.py hold it to that.
+REM
 REM Environment variables:
-REM   EVAL_JUDGE_MODEL    - Model to use for LLM-as-judge (default: gpt-oss:20b)
+REM   EVAL_JUDGE_MODEL    - Model to use for LLM-as-judge (default: gemma4:e2b,
+REM                         matching evals/helpers.py: the smallest supported
+REM                         model is the canary, see MODEL_SMALL below)
 REM   EVAL_JUDGE_BASE_URL - Ollama base URL (default: http://localhost:11434)
-REM   EVAL_REPEAT_COUNT   - Number of times to run each test (default: 3)
+REM   EVAL_REPEAT_COUNT   - Number of times to run each test (default: 1; use 3
+REM                         when tuning prompts to surface flakiness)
+REM   PYTHON              - Interpreter to run pytest with (default: the mamba
+REM                         environment of this checkout)
+REM
+REM Exit code: pytest's own. 0 means every eval passed, 1 that some failed.
+REM Any other code means the suite did not run (5: nothing collected, 4: bad
+REM arguments, 9009: the interpreter could not be executed), and nothing was
+REM measured.
 
 REM Navigate to project root
 for %%I in ("%~dp0..") do set "PROJECT_ROOT=%%~fI"
 set "SCRIPT_DIR=%~dp0"
 cd /d "%PROJECT_ROOT%"
 
-REM Resolve mamba env: prefer this checkout's own, fall back to the main
-REM repo's when running from a git worktree (worktrees share one env).
-set "MAMBA_ENV=%PROJECT_ROOT%\.mamba_env"
-if not exist "!MAMBA_ENV!\python.exe" (
-    for /f "usebackq delims=" %%G in (`git -C "%PROJECT_ROOT%" rev-parse --git-common-dir 2^>nul`) do (
-        for %%I in ("%%G\..") do (
-            if exist "%%~fI\.mamba_env\python.exe" set "MAMBA_ENV=%%~fI\.mamba_env"
+REM Resolve the interpreter. PYTHON, when set, wins. Otherwise use this
+REM checkout's own mamba env, falling back to the main repo's when running
+REM from a git worktree (worktrees share one env).
+if not defined PYTHON (
+    set "MAMBA_ENV=%PROJECT_ROOT%\.mamba_env"
+    if not exist "!MAMBA_ENV!\python.exe" (
+        for /f "usebackq delims=" %%G in (`git -C "%PROJECT_ROOT%" rev-parse --git-common-dir 2^>nul`) do (
+            for %%I in ("%%G\..") do (
+                if exist "%%~fI\.mamba_env\python.exe" set "MAMBA_ENV=%%~fI\.mamba_env"
+            )
         )
     )
+
+    if not exist "!MAMBA_ENV!\python.exe" (
+        echo ERROR: Mamba environment not found.
+        echo    Looked in: %PROJECT_ROOT%\.mamba_env
+        echo    And the main repo's .mamba_env ^(if this is a git worktree^).
+        echo Please run the setup script first, or set PYTHON=C:\path\to\python.exe.
+        pause
+        exit /b 9009
+    )
+
+    set "PYTHON=!MAMBA_ENV!\python.exe"
 )
 
-if not exist "!MAMBA_ENV!\python.exe" (
-    echo ERROR: Mamba environment not found.
-    echo    Looked in: %PROJECT_ROOT%\.mamba_env
-    echo    And the main repo's .mamba_env ^(if this is a git worktree^).
-    echo Please run the setup script first.
-    pause
-    exit /b 1
+REM An interpreter that cannot be run would make every run end with the
+REM same code as a suite with failing evals, so say so here instead.
+call "!PYTHON!" --version >nul 2>&1
+if errorlevel 1 (
+    echo ERROR: The Python interpreter could not be executed: !PYTHON!
+    echo    Set PYTHON=C:\path\to\python.exe.
+    exit /b 9009
 )
 
-set "PYTHON=!MAMBA_ENV!\python.exe"
 set "PYTHONPATH=%PROJECT_ROOT%\src;%PYTHONPATH%"
 
 REM Officially supported models (from config.py)
@@ -159,7 +189,7 @@ if "!RUN_MULTI!"=="true" (
 
     set "EVAL_REPORT_PATH=!TEMP_DIR!\evals_small.md"
     call :run_evals_for_model "!MODEL_SMALL!" "_small"
-    if errorlevel 1 set "FINAL_EXIT_CODE=1"
+    if errorlevel 1 set "FINAL_EXIT_CODE=!errorlevel!"
 
     echo   Unloading models before switching...
     curl -s "!OLLAMA_URL!/api/generate" -d "{\"model\":\"!MODEL_SMALL!\",\"keep_alive\":0}" >nul 2>&1
@@ -167,7 +197,7 @@ if "!RUN_MULTI!"=="true" (
 
     set "EVAL_REPORT_PATH=!TEMP_DIR!\evals_large.md"
     call :run_evals_for_model "!MODEL_LARGE!" "_large"
-    if errorlevel 1 set "FINAL_EXIT_CODE=1"
+    if errorlevel 1 set "FINAL_EXIT_CODE=!errorlevel!"
 
     if "!GENERATE_REPORT!"=="true" (
         "!PYTHON!" "!SCRIPT_DIR!merge_eval_reports.py" ^
@@ -180,18 +210,38 @@ if "!RUN_MULTI!"=="true" (
 
     rmdir /s /q "!TEMP_DIR!" >nul 2>&1
 ) else (
-    if not defined EVAL_JUDGE_MODEL set "EVAL_JUDGE_MODEL=!MODEL_LARGE!"
+    REM Single model mode. Defaults to the small tier, matching
+    REM evals/helpers.py: the smallest supported model is where field
+    REM failures show first, so it is the default and the upper tier is
+    REM the opt-in.
+    if not defined EVAL_JUDGE_MODEL set "EVAL_JUDGE_MODEL=!MODEL_SMALL!"
     set "EVAL_REPORT_PATH=!PROJECT_ROOT!\EVALS.md"
     call :run_evals_for_model "!EVAL_JUDGE_MODEL!" ""
-    if errorlevel 1 set "FINAL_EXIT_CODE=1"
+    if errorlevel 1 set "FINAL_EXIT_CODE=!errorlevel!"
 )
 
 echo.
 echo ----------------------------------------------------------------
 if "!FINAL_EXIT_CODE!"=="0" (
-    echo   All evaluations passed!
+    echo   All evaluations passed^^!
+) else if "!FINAL_EXIT_CODE!"=="1" (
+    echo   WARNING: Some evaluations failed ^(exit code: 1^)
 ) else (
-    echo   WARNING: Some evaluations failed ^(exit code: !FINAL_EXIT_CODE!^)
+    REM Anything else is pytest failing to run rather than tests failing:
+    REM 5 is "no tests collected", 4 a usage error, 9009 the interpreter
+    REM could not be executed at all. Reporting those as failed evaluations
+    REM is a run that measured nothing wearing the face of one that did.
+    echo   ERROR: The suite did not run ^(exit code: !FINAL_EXIT_CODE!^).
+    if "!FINAL_EXIT_CODE!"=="5" (
+        echo      pytest collected no tests. Check the filter argument.
+    ) else if "!FINAL_EXIT_CODE!"=="4" (
+        echo      pytest usage error. Check the arguments passed through.
+    ) else if "!FINAL_EXIT_CODE!"=="9009" (
+        echo      The Python interpreter could not be executed. Set PYTHON=C:\path\to\python.exe.
+    ) else (
+        echo      pytest exited !FINAL_EXIT_CODE! before reporting results.
+    )
+    echo      Nothing was measured; this is not a set of failing evals.
 )
 echo.
 echo   Legend:
@@ -199,7 +249,7 @@ echo      PASSED  -^> Test passed
 echo      FAILED  -^> Test failed
 echo      SKIPPED -^> Test skipped ^(missing dependencies^)
 echo      XFAIL   -^> Expected failure ^(documents known limitation^)
-echo      XPASS   -^> Bug fixed! ^(expected failure now passes^)
+echo      XPASS   -^> Bug fixed^^! ^(expected failure now passes^)
 echo.
 if "!GENERATE_REPORT!"=="true" (
     echo   Full report: EVALS.md
@@ -225,7 +275,7 @@ echo.
 if defined EVAL_REPEAT_COUNT (
     set "_REPEAT_COUNT=!EVAL_REPEAT_COUNT!"
 ) else (
-    set "_REPEAT_COUNT=3"
+    set "_REPEAT_COUNT=1"
 )
 
 set "_CMD="!PYTHON!" -m pytest evals/ !PYTEST_ARGS! --tb=short --count=!_REPEAT_COUNT!"

@@ -102,6 +102,12 @@ main thread. All are optional and default to `None`.
 Callbacks fire from the worker thread. The desktop app must marshal them onto
 the Qt main thread via signals (same pattern as `DiaryUpdateDialog`).
 
+The chat window wires `on_start`, `on_complete` and `on_busy`. The dashboard
+wires all five: its callbacks do not touch a widget, each one emits the
+matching `__CHAT__:` line (see below) through a `ChatIpcSignals` instance that
+queues it onto the main thread, where the dashboard parses it exactly as it
+parses a subprocess line. See the Dashboard section of `desktop_app.spec.md`.
+
 ### IPC protocol (subprocess mode)
 
 When the daemon runs as a subprocess (development mode), callbacks are not
@@ -292,8 +298,9 @@ send button are disabled and a local banner explains the state. On daemon
 start/restart, the tray hands the window its submit, cancel and control hooks
 together (they share a lifecycle), hides the banner, and re-enables the
 controls. On daemon stop, failed start or unexpected subprocess exit, the tray
-clears all three hooks and the confirmation decision writer, so neither a
-query, a cancel, a rewind nor a decision can be written to a dead pipe.
+clears all three hooks, the dashboard's submit hook and the confirmation
+decision writer, so neither a query, a cancel, a rewind nor a decision can be
+written to a dead pipe.
 
 ### Theme
 

@@ -23,6 +23,7 @@ warnings.filterwarnings('ignore', message='pkg_resources is deprecated',
 
 # Note: QtWebEngine is not used on macOS bundled apps due to sandbox/bundling issues
 # The Memory Viewer opens in the system browser instead (see MemoryViewerWindow)
+# and the dashboard is not built at all (see _dashboard_available)
 
 import subprocess
 import signal
@@ -63,12 +64,30 @@ except ImportError:
 
 from jarvis.debug import debug_log
 from jarvis.config import default_config_path, _default_db_path, SUPPORTED_CHAT_MODELS, get_supported_model_ids
+from jarvis.state import JarvisState, get_jarvis_state
 from desktop_app.diary_dialog import DiaryUpdateDialog
 from desktop_app.themes import JARVIS_THEME_STYLESHEET
+from desktop_app.updater import GITHUB_REPO
 from desktop_app.face_widget import FaceWindow
 
 
 _LOG_SEPARATOR = "─" * 50
+
+
+def _is_macos_bundle() -> bool:
+    """Whether this is a frozen macOS build.
+
+    There QtWebEngine crashes the app the moment a view is shown (sandbox and
+    bundling issues), so no ``QWebEngineView`` may be built.
+    """
+    return sys.platform == 'darwin' and bool(getattr(sys, 'frozen', False))
+
+
+def _dashboard_available() -> bool:
+    """Whether the HUD dashboard, a web view driven over a ``QWebChannel``,
+    can be shown. Unlike the memory viewer it has no system-browser fallback:
+    the channel to the bridge exists only inside this process."""
+    return HAS_WEBENGINE and not _is_macos_bundle()
 
 
 @dataclass
@@ -140,8 +159,9 @@ def _should_emit_as_log(line: str) -> bool:
 def _chat_event_line(event_type: str, data) -> str:
     """A ``__CHAT__:`` line as the daemon would print it.
 
-    Bundled mode has no stdout bus, so a daemon callback that must reach
-    the chat window is fed through the same parser as a subprocess line.
+    Bundled mode has no stdout bus, so a daemon callback that must reach a
+    window (the chat window, the dashboard) is fed through the same parser
+    as a subprocess line.
     """
     import json as _json
     from jarvis.daemon import CHAT_IPC_PREFIX
@@ -403,6 +423,20 @@ def _snap_to_line_boundary(text: str) -> str:
     if newline_idx != -1 and newline_idx < 200:
         return text[newline_idx + 1:]
     return text
+
+
+def _new_issue_url(title: str, body: str, labels: str) -> str:
+    """GitHub's new-issue form on this project's tracker, prefilled.
+
+    Built from the repository the updater reads releases from, so a bug
+    report and an update check always address the same project.
+    """
+    params = urllib.parse.urlencode({
+        'title': title,
+        'body': body,
+        'labels': labels,
+    })
+    return f"https://github.com/{GITHUB_REPO}/issues/new?{params}"
 
 
 def _truncate_logs_for_report(logs: str, max_len: int) -> str:
@@ -725,13 +759,7 @@ def show_crash_report_dialog(crash_content: str) -> None:
 ### Additional Context
 (Any other relevant information)
 """
-                # URL encode
-                params = urllib.parse.urlencode({
-                    'title': title,
-                    'body': body,
-                    'labels': 'bug,crash'
-                })
-                url = f"https://github.com/isair/jarvis/issues/new?{params}"
+                url = _new_issue_url(title, body, 'bug,crash')
 
                 webbrowser.open(url)
                 self.accept()
@@ -1188,12 +1216,7 @@ class LogViewerWindow(QMainWindow):
 ### Additional Context
 (Any other relevant information)
 """
-        params = urllib.parse.urlencode({
-            'title': title,
-            'body': body,
-            'labels': 'bug'
-        })
-        url = f"https://github.com/isair/jarvis/issues/new?{params}"
+        url = _new_issue_url(title, body, 'bug')
 
         webbrowser.open(url)
 
@@ -1300,7 +1323,7 @@ class MemoryViewerWindow(QMainWindow):
         # Determine if we should use embedded WebEngine or browser fallback
         # On macOS bundled apps, QtWebEngine crashes due to sandbox/bundling issues
         # so we use the system browser instead. Windows works fine with WebEngine.
-        is_macos_bundle = sys.platform == 'darwin' and getattr(sys, 'frozen', False)
+        is_macos_bundle = _is_macos_bundle()
         use_webengine = HAS_WEBENGINE and not is_macos_bundle
 
         web_view_created = False
@@ -1671,12 +1694,10 @@ class JarvisSystemTray:
         self.memory_viewer = MemoryViewerWindow()
 
         # Create face window (hidden by default)
-        # Note: Creating the face window also initializes the SpeakingState singleton
-        # in the main thread, which is important for cross-thread signal delivery
         self.face_window = FaceWindow()
 
         # Floating orb, always on top, built at startup and shown on
-        # demand (at launch only when WebEngine is unavailable). It reads
+        # demand (at launch only when the dashboard is unavailable). It reads
         # the shared JarvisState (idle/listening/thinking/speaking) and
         # follows it, so it is the live visual of the assistant during
         # voice without opening the chat window. The chat window embeds
@@ -1697,19 +1718,15 @@ class JarvisSystemTray:
         self._chat_submit_fn = None
         self._chat_cancel_fn = None
         self._chat_control_fn = None
-        # The HUD dashboard (unified web UI). Created lazily on first open;
-        # shares the same daemon chat submission + IPC event stream as the
-        # chat window.
+        # The HUD dashboard (unified web UI). Created lazily on first open.
+        # It submits through its own hook, wired and cleared with the chat
+        # window's: in subprocess mode both write to the daemon's stdin, in
+        # bundled mode only the dashboard needs one (see _submit_dashboard_bundled).
         self.dashboard_window = None
+        self._dashboard_submit_fn = None
         self._daemon_stop_expected = False
 
-        # Main-thread signal bridge for chat IPC. The log reader thread emits
-        # ``line_received`` (a queued connection) so the chat window is created
-        # and the IPC line is parsed on the Qt main thread, never on the
-        # worker thread (Qt widgets must be created on the GUI thread).
-        from desktop_app.chat_window import ChatIpcSignals
-        self._chat_ipc_signals = ChatIpcSignals()
-        self._chat_ipc_signals.line_received.connect(self._on_chat_ipc_line)
+        self._wire_chat_signals()
 
         # Log reader threads
         self.log_reader_threads = []
@@ -1743,12 +1760,9 @@ class JarvisSystemTray:
         # JarvisState), the conversation and the system stats are all
         # there from launch. The standalone QPainter orb is therefore not
         # auto-shown; it stays available on demand via the "🟠 Toggle Orb"
-        # tray action. Falls back to the floating orb only when WebEngine
-        # isn't available.
-        if HAS_WEBENGINE:
-            self.show_dashboard()
-        else:
-            self.show_orb_window()
+        # tray action. Falls back to the floating orb wherever a web view
+        # cannot be shown (no WebEngine, or a frozen macOS build).
+        self._show_primary_window()
 
         # Register cleanup on app exit
         self.app.aboutToQuit.connect(self.cleanup_on_exit)
@@ -1757,6 +1771,32 @@ class JarvisSystemTray:
         QTimer.singleShot(5000, self.check_for_updates)
 
         debug_log("desktop app initialized", "desktop")
+
+    def _wire_chat_signals(self) -> None:
+        """Create the main-thread bridges for chat events.
+
+        The daemon answers from worker threads (the log reader in subprocess
+        mode, the reply worker in bundled mode), and a widget must be created
+        and touched on the Qt main thread. Each bridge's ``line_received``
+        signal is a queued connection, so its handler runs on the main thread.
+        ``_chat_ipc_signals`` feeds the chat window; ``_dashboard_chat_signals``
+        carries a bundled daemon's answers to the dashboard alone.
+        """
+        from desktop_app.chat_window import ChatIpcSignals
+
+        self._chat_ipc_signals = ChatIpcSignals()
+        self._chat_ipc_signals.line_received.connect(self._on_chat_ipc_line)
+        self._dashboard_chat_signals = ChatIpcSignals()
+        self._dashboard_chat_signals.line_received.connect(self._on_dashboard_chat_line)
+
+    def _show_primary_window(self) -> None:
+        """Open the window the app starts with: the dashboard where a web view
+        can be shown, the floating orb everywhere else."""
+        if _dashboard_available():
+            self.show_dashboard()
+        else:
+            debug_log("dashboard unavailable, showing the floating orb instead", "desktop")
+            self.show_orb_window()
 
     def cleanup_orphaned_processes(self) -> None:
         """Kill any orphaned Jarvis daemon processes from previous sessions."""
@@ -1848,7 +1888,7 @@ class JarvisSystemTray:
         self.menu.addAction(self.dictation_history_action)
 
         # Dashboard (unified HUD) action — the primary interface.
-        if HAS_WEBENGINE:
+        if _dashboard_available():
             self.dashboard_action = QAction("🖥️ Dashboard")
             self.dashboard_action.triggered.connect(self.show_dashboard)
             self.menu.addAction(self.dashboard_action)
@@ -2000,11 +2040,7 @@ class JarvisSystemTray:
             self.stop_daemon()
 
         # Face should look asleep while wizard is open (daemon isn't running)
-        try:
-            from desktop_app.face_widget import JarvisState, get_jarvis_state
-            get_jarvis_state().set_state(JarvisState.ASLEEP)
-        except Exception:
-            pass
+        get_jarvis_state().set_state(JarvisState.ASLEEP)
 
         wizard = SetupWizard()
         result = wizard.exec()
@@ -2064,6 +2100,9 @@ class JarvisSystemTray:
 
         Args:
             show_no_update_dialog: If True, shows a dialog even when no update is available.
+                That is the user asking from the tray menu; a check with no dialog to
+                show is the automatic one at startup, which ``update_check_enabled`` can
+                switch off.
         """
         from desktop_app.updater import check_for_updates, is_frozen
         from desktop_app.update_dialog import (
@@ -2087,7 +2126,7 @@ class JarvisSystemTray:
             return
 
         try:
-            status = check_for_updates()
+            status = check_for_updates(automatic=not show_no_update_dialog)
 
             if status.error:
                 debug_log(f"Update check failed: {status.error}", "desktop")
@@ -2324,33 +2363,28 @@ class JarvisSystemTray:
     def show_dashboard(self) -> None:
         """Show the unified HUD dashboard (created lazily on first open).
 
-        It shares the daemon chat submission callable and the ``__CHAT__:``
-        IPC event stream with the chat window, so voice and text and the
-        dashboard are all one conversation.
+        It talks to the same daemon as the chat window and the voice path,
+        so voice, text and the dashboard are one conversation.
         """
-        if not HAS_WEBENGINE:
+        if not _dashboard_available():
             return
         if self.dashboard_window is None:
             from desktop_app.dashboard_window import DashboardWindow
-            self.dashboard_window = DashboardWindow(submit_fn=self._chat_submit_fn)
+            self.dashboard_window = DashboardWindow(submit_fn=self._dashboard_submit_fn)
         else:
-            self.dashboard_window.set_submit_fn(self._chat_submit_fn)
+            self.dashboard_window.set_submit_fn(self._dashboard_submit_fn)
         self.dashboard_window.show()
         self.dashboard_window.raise_()
         self.dashboard_window.activateWindow()
 
-    def _set_chat_daemon_available(self, available: bool) -> None:
-        """Update an existing chat window when the daemon starts or stops."""
-        self._set_chat_daemon_status("running" if available else "stopped")
-
     def _set_chat_daemon_status(self, status: str) -> None:
         """Update an existing chat window with daemon lifecycle state."""
-        # Keep the dashboard's submit callable in sync too — it routes
-        # chat through the same daemon path. getattr for the same reason as
-        # in _on_chat_ipc_line: no dashboard must never block the chat window.
+        # Keep the dashboard's submit callable in sync too: it reaches the
+        # same daemon, by its own route. getattr for the same reason as in
+        # _on_chat_ipc_line: no dashboard must never block the chat window.
         dashboard = getattr(self, "dashboard_window", None)
         if dashboard is not None:
-            dashboard.set_submit_fn(self._chat_submit_fn)
+            dashboard.set_submit_fn(self._dashboard_submit_fn)
         if self.chat_window is None:
             return
         self.chat_window.set_daemon_hooks(**self._chat_hooks())
@@ -2361,6 +2395,7 @@ class JarvisSystemTray:
         self._chat_submit_fn = None
         self._chat_cancel_fn = None
         self._chat_control_fn = None
+        self._dashboard_submit_fn = None
         try:
             from desktop_app.chat_window import set_decision_writer
             set_decision_writer(None)
@@ -2409,6 +2444,41 @@ class JarvisSystemTray:
         if self.chat_window is not None:
             self.chat_window.set_daemon_status("crashed")
             self.chat_window.signals.completed.emit(None)
+
+    # --- Bundled dashboard bus -----------------------------------------
+    #
+    # In bundled mode the chat window calls the daemon itself, with its own
+    # callbacks. The dashboard does the same through this hook. The daemon
+    # answers from a worker thread, where a widget must not be touched, so
+    # each event is rewritten as the ``__CHAT__:`` line the subprocess bus
+    # would have carried and emitted through ``_dashboard_chat_signals``,
+    # which queues it onto the main thread. The dashboard has one parser for
+    # the wire format, whichever process the daemon runs in.
+
+    def _submit_dashboard_bundled(self, text: str) -> None:
+        from jarvis import daemon
+
+        emit = self._dashboard_chat_signals.line_received.emit
+
+        def forward(kind: str):
+            # ``busy`` carries no payload, hence the default.
+            return lambda data=None: emit(_chat_event_line(kind, data))
+
+        debug_log("dashboard query submitted to the in-process daemon", "desktop")
+        daemon.submit_text_query(
+            text,
+            on_start=forward("start"),
+            on_token=forward("token"),
+            on_stage=forward("stage"),
+            on_complete=forward("complete"),
+            on_busy=forward("busy"),
+        )
+
+    def _on_dashboard_chat_line(self, line: str) -> None:
+        """Hand a bundled daemon's answer to the dashboard, on the main thread."""
+        dashboard = getattr(self, "dashboard_window", None)
+        if dashboard is not None:
+            dashboard.process_ipc_line(line)
 
     def _cancel_chat_subprocess(self) -> None:
         from jarvis.daemon import CHAT_CANCEL_IPC_PREFIX
@@ -2484,7 +2554,6 @@ class JarvisSystemTray:
         try:
             from desktop_app.orb.orb_window import OrbWindow
             from desktop_app.orb.state_controller import StateController
-            from desktop_app.face_widget import get_jarvis_state
 
             particles = True
             try:
@@ -2730,6 +2799,10 @@ class JarvisSystemTray:
                 except Exception as exc:
                     debug_log(f"confirmation callbacks not wired: {exc}", "desktop")
 
+                # The chat window calls the daemon module itself in this
+                # mode, so only the dashboard needs a hook.
+                self._dashboard_submit_fn = self._submit_dashboard_bundled
+
                 self.daemon_thread = DaemonThread(self.log_signals)
                 # Connect finished signal to reset UI state
                 self.daemon_thread.finished.connect(lambda: self._on_daemon_finished())
@@ -2776,6 +2849,7 @@ class JarvisSystemTray:
                 self._chat_submit_fn = self._submit_chat_subprocess
                 self._chat_cancel_fn = self._cancel_chat_subprocess
                 self._chat_control_fn = self._control_chat_subprocess
+                self._dashboard_submit_fn = self._submit_chat_subprocess
                 # A window created while no daemon ran has no hooks yet;
                 # one that outlived a previous daemon had them cleared.
                 if self.chat_window is not None:
@@ -2799,9 +2873,9 @@ class JarvisSystemTray:
             self.update_icon()
             self._set_chat_daemon_status("running")
 
-            # The log viewer no longer pops up on start — it's a debug
-            # surface, available on demand via the "📝 View Logs" tray
-            # action. The dashboard is the primary window.
+            # The log viewer is a debug surface, available on demand via
+            # the "📝 View Logs" tray action. The dashboard is the primary
+            # window.
 
             self.tray_icon.showMessage(
                 "Jarvis Started",
@@ -2844,11 +2918,7 @@ class JarvisSystemTray:
             self._set_chat_daemon_status(status)
             self._daemon_stop_expected = False
             # Reset face to asleep so it doesn't look ready while daemon is down
-            try:
-                from desktop_app.face_widget import JarvisState, get_jarvis_state
-                get_jarvis_state().set_state(JarvisState.ASLEEP)
-            except Exception:
-                pass
+            get_jarvis_state().set_state(JarvisState.ASLEEP)
 
     def _read_daemon_logs(self) -> None:
         """Read logs from daemon subprocess in a background thread."""
@@ -3019,6 +3089,7 @@ class JarvisSystemTray:
                         self.daemon_thread.wait(shutdown_wait_timeout_sec * 2000)
 
                 self.daemon_thread = None
+                self._clear_chat_hooks()
             elif self.daemon_process:
                 # For subprocess mode, show diary dialog with IPC-based updates
                 # The existing log reader thread emits signals; we use a queue to collect lines

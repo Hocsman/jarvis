@@ -160,7 +160,9 @@ class TestDiaryOptimiseTopicsEndpoint:
         """Regression guard: btn-optimise-topics must be wired in the
         always-run page setup, not inside initGraph() which only fires
         when the user opens the Knowledge tab."""
-        html = self.client.get("/").get_data(as_text=True)
+        from conftest import viewer_page_with_scripts
+
+        html = viewer_page_with_scripts(self.client)
 
         wiring = "document.getElementById('btn-optimise-topics')"
         assert wiring in html, "optimise-topics button has no click handler in the rendered page"

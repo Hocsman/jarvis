@@ -43,13 +43,14 @@ class FieldMeta:
     label: str
     description: str
     category: str
-    field_type: str  # "bool", "int", "float", "str", "choice", "device", "list"
+    field_type: str  # "bool", "int", "float", "str", "choice", "device", "list", "map"
     choices: Optional[List[tuple[str, str]]] = None  # [(value, display), ...]
     min_val: Optional[float] = None
     max_val: Optional[float] = None
     step: Optional[float] = None
     suffix: Optional[str] = None
     nullable: bool = False  # Whether None/"" is a valid value (shows "Default" option)
+    example: Optional[str] = None  # "map" fields: a sample row shown when adding one
 
 
 # Categories and their display order
@@ -74,6 +75,42 @@ CATEGORIES = [
     ("mcps", "🔌 MCP Servers"),
     ("advanced", "🔧 Advanced"),
 ]
+
+
+_MAP_ARROW = "->"
+
+
+def _map_to_rows(value: Any) -> List[str]:
+    """The rows a ``map`` field shows: one ``key -> value`` per entry."""
+    if not isinstance(value, dict):
+        return []
+    return [f"{key} {_MAP_ARROW} {val}" for key, val in value.items()]
+
+
+def _parse_map_row(row: str) -> Optional[tuple[str, str]]:
+    """One ``key -> value`` row as a pair, or None when it names no key or
+    no value. Only the first arrow separates, so a value may contain one."""
+    key, arrow, val = row.partition(_MAP_ARROW)
+    key, val = key.strip(), val.strip()
+    if not arrow or not key or not val:
+        return None
+    return key, val
+
+
+def _rows_to_map(rows: List[str]) -> Dict[str, str]:
+    """The dict a ``map`` field stores. A malformed row is dropped, and a
+    key listed twice keeps its last value."""
+    pairs = (_parse_map_row(row) for row in rows)
+    return {key: val for key, val in (pair for pair in pairs if pair)}
+
+
+def _rows_for(fm: "FieldMeta", value: Any) -> List[str]:
+    """The rows a list or map field shows for a config value."""
+    if fm.field_type == "map":
+        return _map_to_rows(value)
+    if not isinstance(value, list):
+        return []
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
 
 
 def _is_default_value(val: Any, default_val: Any) -> bool:
@@ -208,8 +245,19 @@ def _build_field_metadata() -> List[FieldMeta]:
       "Pause after each sentence",
       "piper", "float", min_val=0.0, max_val=2.0, step=0.05, suffix="s")
     f("tts_piper_model_path", "Custom Voice Model",
-      "Path to .onnx voice model (leave empty for default)",
+      "Path to .onnx voice model, spoken for every language not listed under "
+      "Voice per Language (leave empty for default)",
       "piper", "str", nullable=True)
+    f("tts_piper_voices", "Voice per Language",
+      "Which Piper voice speaks which language, one 'language -> voice' per row. "
+      "The voice follows the language of each reply: the language she is set to "
+      "answer in, or the one she heard when that is left on auto. A voice is a "
+      "path to a .onnx model or a Piper voice name, downloaded on first use. "
+      "A language outside French, English, Spanish, German, Italian, Dutch, "
+      "Portuguese, Polish, Russian, Turkish and Chinese must be written as its "
+      "ISO 639-1 code (ja, sv), the code the speech recogniser reports: a name "
+      "such as Japanese is not recognised on auto.",
+      "piper", "map", example="fr -> fr_FR-siwis-medium")
     f("tts_piper_speaker", "Speaker ID",
       "Speaker index for multi-speaker models",
       "piper", "int", min_val=0, max_val=99, nullable=True)
@@ -378,6 +426,11 @@ def _build_field_metadata() -> List[FieldMeta]:
       "features", "bool")
     f("tune_enabled", "Startup Tune",
       "Play startup sound",
+      "features", "bool")
+    f("update_check_enabled", "Check for Updates at Startup",
+      "Ask GitHub for a newer release a few seconds after the app opens. "
+      "Off, the app does not check for updates on its own; Check for Updates in the tray "
+      "menu still works when you ask",
       "features", "bool")
     f("dictation_enabled", "Dictation Mode",
       "Hold a hotkey to record speech, release to paste transcription into any app",
@@ -694,7 +747,7 @@ class SettingsWindow(QDialog):
             w.setToolTip(fm.description)
             return w
 
-        if fm.field_type == "list":
+        if fm.field_type in ("list", "map"):
             return self._create_list_widget(fm, current)
 
         if fm.field_type == "password":
@@ -761,10 +814,8 @@ class SettingsWindow(QDialog):
         list_w.setToolTip(fm.description)
 
         # Populate with current values
-        if isinstance(current, list):
-            for item in current:
-                if isinstance(item, str) and item.strip():
-                    list_w.addItem(item.strip())
+        for row in _rows_for(fm, current):
+            list_w.addItem(row)
 
         layout.addWidget(list_w)
 
@@ -782,12 +833,24 @@ class SettingsWindow(QDialog):
 
         layout.addLayout(btn_layout)
 
+        def _valid(text: str) -> bool:
+            """A map row must name a key and a value, or it would be dropped
+            on save without a word."""
+            if fm.field_type == "map" and _parse_map_row(text) is None:
+                QMessageBox.warning(
+                    self, "⚠️ Not a valid row",
+                    f"Write it as 'language {_MAP_ARROW} voice', "
+                    f"for example '{fm.example}'.",
+                )
+                return False
+            return True
+
         def _on_add():
             text, ok = QInputDialog.getText(
                 self, f"Add {fm.label}",
-                "Enter value (e.g. 'wrong -> right'):",
+                f"Enter value (e.g. '{fm.example or 'wrong -> right'}'):",
             )
-            if ok and text.strip():
+            if ok and text.strip() and _valid(text.strip()):
                 list_w.addItem(text.strip())
 
         def _on_edit():
@@ -799,7 +862,7 @@ class SettingsWindow(QDialog):
                 "Edit value:",
                 text=item.text(),
             )
-            if ok and text.strip():
+            if ok and text.strip() and _valid(text.strip()):
                 item.setText(text.strip())
 
         def _on_remove():
@@ -1000,9 +1063,10 @@ class SettingsWindow(QDialog):
                     return 16000
             return val if val != "" else None
 
-        if fm.field_type == "list":
+        if fm.field_type in ("list", "map"):
             list_w = w._list_widget
-            return [list_w.item(i).text() for i in range(list_w.count())]
+            rows = [list_w.item(i).text() for i in range(list_w.count())]
+            return _rows_to_map(rows) if fm.field_type == "map" else rows
 
         # str
         text = w.text().strip()
@@ -1107,13 +1171,11 @@ class SettingsWindow(QDialog):
             if idx >= 0:
                 w.setCurrentIndex(idx)
 
-        elif fm.field_type == "list":
+        elif fm.field_type in ("list", "map"):
             list_w = w._list_widget
             list_w.clear()
-            if isinstance(value, list):
-                for item in value:
-                    if isinstance(item, str) and item.strip():
-                        list_w.addItem(item.strip())
+            for row in _rows_for(fm, value):
+                list_w.addItem(row)
 
         else:  # str
             w.setText(str(value) if value not in (None, "") else "")

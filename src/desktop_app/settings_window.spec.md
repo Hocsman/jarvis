@@ -21,12 +21,13 @@ FieldMeta (dataclass)
   ├── label: str         # Human-readable label
   ├── description: str   # Tooltip text
   ├── category: str      # Tab grouping key
-  ├── field_type: str    # "bool" | "int" | "float" | "str" | "choice" | "device" | "list"
+  ├── field_type: str    # "bool" | "int" | "float" | "str" | "choice" | "device" | "list" | "map"
   ├── choices            # For "choice"/"device": [(value, display), ...]
   ├── min_val / max_val  # Numeric bounds
   ├── step               # Increment step
   ├── suffix             # Unit label (e.g. "s", "ms", "WPM")
-  └── nullable           # Whether None is valid (shows placeholder)
+  ├── nullable           # Whether None is valid (shows placeholder)
+  └── example            # For "map": a sample row shown when adding one
 ```
 
 ## Widget Mapping
@@ -42,6 +43,7 @@ FieldMeta (dataclass)
 | `choice` | QComboBox | Pre-defined options |
 | `device` | QComboBox | Dynamically populated from sounddevice |
 | `list` | QListWidget + Add/Edit/Remove buttons | Stores as JSON array in config |
+| `map` | QListWidget + Add/Edit/Remove buttons | One `key -> value` row per entry; stores as a JSON object in config. A row that names no key or no value is refused when added, and dropped on save if it got in some other way. Only the first arrow separates, so a value may contain one; a key listed twice keeps its last value |
 
 ## Layout
 
@@ -62,7 +64,7 @@ The settings window uses a sidebar navigation pattern: a fixed-width `QListWidge
 11. Timing & Windows
 12. Memory & Dialogue
 13. Location
-14. Features (includes web search, Wikipedia fallback, low-power mode, startup tune, and dictation toggles)
+14. Features (includes web search, Wikipedia fallback, low-power mode, startup tune, the startup update check, and dictation toggles)
 15. 🙋 Permissions
 16. ⏰ Rappels
 17. 🌅 Routines
@@ -89,6 +91,16 @@ sentence about one promise, not a number that applies to all of them.
 The master switch and the two limits that decide when she gives up on an
 occurrence and when she gives up on a routine. What each routine may
 reach lives in `yuba/routines.md`, one block per routine.
+
+### Piper TTS
+
+Besides the voice's pace and expressiveness, the page holds the two ways to
+choose a voice (`tts.spec.md`, "Which voice"): `tts_piper_model_path`, one
+voice for every language that is not listed, and `tts_piper_voices`, a
+`map` field of language to voice, one row per language, for example
+`fr -> fr_FR-siwis-medium`. A voice is a path to a `.onnx` model or a Piper
+voice name, fetched on first use. An empty map is the default and is not
+written to `config.json`.
 
 ### LLM Provider
 
@@ -123,6 +135,7 @@ dedicated page:
 - `wikipedia_fallback_enabled`
 - `low_power_mode`
 - `tune_enabled`
+- `update_check_enabled`
 - `dictation_enabled`
 - `dictation_hotkey`
 - `dictation_filler_removal`
@@ -132,6 +145,10 @@ dedicated page:
 LLM startup warmup and the Ollama keep-alive windows used by warmup and the
 intent judge are short. The setting is saved only when it differs from the
 default, like every other metadata-managed field.
+
+`update_check_enabled` is a boolean toggle, on by default. Off, the bundled app
+sends no update check by itself at startup; the tray's "Check for Updates" still
+works when the user asks (see "Update System" in `desktop_app.spec.md`).
 
 ## Hardware Device Selection
 

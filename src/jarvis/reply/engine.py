@@ -22,6 +22,7 @@ from ..tools.confirmation import (
     utterance_channel_available,
 )
 from ..debug import debug_log
+from ..state import JarvisState, get_jarvis_state
 from ..llm import (
     extract_text_from_response,
     get_auxiliary_backend,
@@ -317,97 +318,6 @@ def _indent_text(text: str, prefix: str = "  ") -> str:
     return f"\n{prefix}".join(text.splitlines())
 
 
-def _get_tool_input_schema(
-    tool_name: Optional[str],
-    mcp_tools: Optional[dict] = None,
-) -> Optional[dict]:
-    if not tool_name:
-        return None
-    spec = BUILTIN_TOOLS.get(tool_name)
-    if spec is None and mcp_tools:
-        spec = mcp_tools.get(tool_name)
-    if spec is None:
-        return None
-    raw = getattr(spec, "inputSchema", None)
-    return raw if isinstance(raw, dict) else None
-
-
-def _validate_tool_args_against_schema(
-    tool_name: Optional[str],
-    args: Optional[dict],
-    mcp_tools: Optional[dict] = None,
-) -> Optional[str]:
-    """Return a short error string when args don't satisfy the input schema.
-
-    Lightweight check limited to the failure modes that matter for direct-exec:
-    unknown argument keys (the main evaluator-hallucination case) and missing
-    required keys. Type-checking is intentionally not enforced here — the
-    tool implementations own that — because a stricter pre-check would
-    reject too many borderline cases and force fallbacks unnecessarily.
-    Returns ``None`` when the args pass or when no schema is available.
-    """
-    if not tool_name:
-        return "missing tool name"
-    if args is None:
-        args = {}
-    if not isinstance(args, dict):
-        return "arguments is not an object"
-    schema = _get_tool_input_schema(tool_name, mcp_tools)
-    if not schema:
-        return None
-    props = schema.get("properties")
-    if not isinstance(props, dict):
-        return None
-    allowed_keys = set(props.keys())
-    unknown = [k for k in args.keys() if k not in allowed_keys]
-    if unknown:
-        expected = sorted(allowed_keys) or ["(none)"]
-        return (
-            f"unknown argument key(s) {sorted(unknown)!r}; "
-            f"expected one of {expected!r}"
-        )
-    required = schema.get("required")
-    if isinstance(required, list):
-        missing = [
-            r for r in required
-            if isinstance(r, str) and r not in args
-        ]
-        if missing:
-            return f"missing required argument(s) {sorted(missing)!r}"
-    return None
-
-
-def _format_tool_schema_hint(
-    tool_name: Optional[str],
-    mcp_tools: Optional[dict] = None,
-) -> str:
-    """Render ``toolName(param: type required, ...)`` for nudge injection."""
-    if not tool_name:
-        return ""
-    schema = _get_tool_input_schema(tool_name, mcp_tools)
-    if not schema:
-        return f"{tool_name}()"
-    props = schema.get("properties")
-    if not isinstance(props, dict) or not props:
-        return f"{tool_name}()"
-    required = set()
-    req_raw = schema.get("required")
-    if isinstance(req_raw, list):
-        required = {str(r) for r in req_raw if isinstance(r, str)}
-    parts = []
-    for key, spec in props.items():
-        type_hint = ""
-        if isinstance(spec, dict):
-            t = spec.get("type")
-            if isinstance(t, str):
-                type_hint = t
-        marker = " required" if key in required else ""
-        parts.append(
-            f"{key}: {type_hint}{marker}" if type_hint else f"{key}{marker}"
-        )
-    return f"{tool_name}(" + ", ".join(parts) + ")"
-
-
 def resolve_tool_router_model(cfg) -> str:
     """Pick the LLM model for tool routing.
 
@@ -532,16 +442,15 @@ def _unavailable_tool_message(tool_name: str, allowed_tools: list[str]) -> str:
 def _graph_context_block(graph_parts: list) -> str:
     """Introduce the graph hits to the model, claiming only what they say.
 
-    The block used to open with "Things you looked up in earlier
-    conversations", which is a provenance claim made over every line at
-    once — including lines written before provenance was recorded, and
+    The block does not open with "Things you looked up in earlier
+    conversations": that is a provenance claim made over every line at
+    once, including lines written before provenance was recorded, and
     lines read off a page the assistant does not vouch for.
 
     Each line already ends with what it rests on, because that is how it
-    is stored (see ``provenance.spec.md``). What was missing is that the
-    model had no idea those words meant anything. Only the words actually
-    present are explained: a block of trusted-tool lines should not spend
-    prompt on `web`.
+    is stored (see ``provenance.spec.md``). The block tells the model what
+    those words mean. Only the words actually present are explained: a
+    block of trusted-tool lines should not spend prompt on `web`.
     """
     from ..memory.provenance import SOURCE_TOOL, SOURCE_UNKNOWN, SOURCE_WEB
 
@@ -1286,7 +1195,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
     # New conversation reset: when the previous session lapsed past the
     # inactivity window, drop the conversation-scoped cache and any
     # tool-carryover from the previous session. This is what bounds the
-    # cache lifetime now that individual entries no longer expire by age.
+    # cache lifetime: individual entries do not expire by age.
     if is_new_conversation and dialogue_memory is not None:
         if hasattr(dialogue_memory, "clear_hot_cache"):
             try:
@@ -1402,8 +1311,8 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
     #     separate tool-router LLM call.
     #
     # Fail-open: if the planner returns ``[]`` (short query, disabled,
-    # LLM timeout, empty response), we fall through to the legacy safe
-    # defaults — run the memory extractor and the tool router as before.
+    # LLM timeout, empty response), we fall through to the safe
+    # defaults: run the memory extractor and the tool router.
     # A positive single-step ``["Reply to the user."]`` plan is NOT the
     # same as ``[]``: it's the planner deciding no memory or tools are
     # needed. Both cases are preserved for the engine to distinguish.
@@ -1732,8 +1641,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
     # Extract keywords and implicit questions only when the planner asked
     # for a memory search (or the planner failed and we're falling open).
     # For queries the planner classified as reply-only ("what are you
-    # thinking", a greeting, a pure opinion) this skips an LLM call we'd
-    # have paid unconditionally in the old flow.
+    # thinking", a greeting, a pure opinion) this skips the LLM call.
     if needs_memory:
         try:
             _extractor_query = redacted
@@ -2166,9 +2074,14 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         # Add model-size-appropriate prompt components
         guidance.extend(prompts.to_list())
 
-        # Both current TTS engines (Piper, Chatterbox) only support English.
-        # Responding in another language would produce garbled audio.
-        # Remove this constraint when a multilingual TTS engine is added.
+        # Chatterbox speaks English only, and Piper speaks the language of
+        # its voice: English unless response_language or tts_piper_voices
+        # names another (see output/tts.spec.md). A reply in a language the
+        # voice does not speak comes out with the wrong phonetics, so both
+        # engines are told to answer in English.
+        # The line does not look at the voice map: lifting it for a mapped
+        # language is a prompt change that needs an eval on a model that
+        # obeys it.
         tts_engine = getattr(cfg, 'tts_engine', 'piper')
         if tts_engine in ('piper', 'chatterbox'):
             guidance.append(
@@ -3014,13 +2927,8 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 except Exception:
                     pass
 
-                # Set face state to IDLE (waiting for wake word)
-                try:
-                    from desktop_app.face_widget import get_jarvis_state, JarvisState
-                    state_manager = get_jarvis_state()
-                    state_manager.set_state(JarvisState.IDLE)
-                except Exception:
-                    pass
+                # Waiting for the wake word
+                get_jarvis_state().set_state(JarvisState.IDLE)
 
                 # Stop is a dismissal — clear any tool carryover from the
                 # prior turn so the next wake-word turn starts fresh, and
@@ -3059,15 +2967,12 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                     if mcp_tools:
                         _valid_names.update(mcp_tools.keys())
                     for line in (result.reply_text or "").splitlines():
-                        # Lines look like "toolName: one-line description"; fall
-                        # back to splitting on em dash for backwards compat.
+                        # Lines look like "toolName: one-line description",
+                        # or a bare "toolName" when the tool has no description.
                         raw = line.strip()
                         if not raw:
                             continue
-                        for sep in (":", "—"):
-                            if sep in raw:
-                                raw = raw.split(sep, 1)[0]
-                                break
+                        raw = raw.split(":", 1)[0]
                         name_part = raw.lstrip("-* \t").strip()
                         if not name_part or name_part in allowed_tools:
                             continue

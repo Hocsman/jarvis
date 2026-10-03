@@ -216,20 +216,20 @@ def test_the_tab_exists(viewer):
 
 
 def test_the_page_still_parses(viewer):
-    """One bad character in this template kills every handler on the
+    """One bad character in the page's script kills every handler on the
     page, silently."""
-    import re
     import shutil
     import subprocess
     import tempfile
     from pathlib import Path
 
-    from src.desktop_app.memory_viewer import index
+    from conftest import viewer_scripts
 
     if shutil.which("node") is None:
         pytest.skip("node not installed")
 
-    for script in re.findall(r"<script>(.*?)</script>", index(), re.DOTALL):
+    _db, client = viewer
+    for script in viewer_scripts(client):
         with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as f:
             f.write(script)
             path = f.name

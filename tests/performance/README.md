@@ -33,7 +33,6 @@ benchmarking a change, use `JARVIS_PERF_RUNS=10` or higher.
   inspection in [`timing_recorder.py`](timing_recorder.py).
 
 Shape invariants (not absolute numbers):
-- Evaluator p50 ≤ main chat turn p50 × 1.5.
 - Tool router p50 ≤ main chat turn p50 × 1.5.
 - Enrichment extractor shares the router model chain.
 

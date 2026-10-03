@@ -136,16 +136,38 @@ def _local_only_gate() -> Optional[Any]:
     return None
 
 
+#: What the served page may load and do. The page runs one script, served
+#: from its own origin, and holds no inline script or handler, so scripts
+#: are admitted from the origin and nowhere else: markup that slips past an
+#: escape cannot run, and with it cannot reach the launch token or the
+#: writes it unlocks. Styles stay inline-friendly because the page sets
+#: them in attributes; every other fetch is refused unless named, nothing
+#: remote is named, and the page can be neither rebased, nor made to post a
+#: form elsewhere, nor framed.
+_CONTENT_SECURITY_POLICY = "; ".join((
+    "default-src 'none'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "connect-src 'self'",
+    "base-uri 'none'",
+    "form-action 'none'",
+    "frame-ancestors 'none'",
+))
+
+
 @app.after_request
-def _frame_and_cache_guard(response: Response) -> Response:
+def _response_guard(response: Response) -> Response:
     """The page holds the launch token, so it must never render inside a
     foreign frame: a framed genuine page is same-origin and tokened, and
     clickjacking it sidesteps the whole gate. It must also never come
     back from a cache: a stale page wields a dead token and every write
-    fails closed until a hard reload. Both headers ride on every
-    response, gate refusals included."""
+    fails closed until a hard reload. The policy confines what the page
+    may run and load, and `nosniff` stops a same-origin response being
+    taken for a script it is not. All of it rides on every response, gate
+    refusals included."""
     response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
+    response.headers["Content-Security-Policy"] = _CONTENT_SECURITY_POLICY
+    response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Cache-Control"] = "no-store"
     return response
 
@@ -657,9 +679,9 @@ def routines_get() -> Response:
         # Blocks with no live row: routines that were stopped. Listed,
         # because the block is the durable record of what that routine
         # was allowed to do and saying the same request again restarts
-        # it — and until now the only surface holding that was a file the
-        # desktop app never opened, under an empty state reading "aucune
-        # routine" over a routines.md that held one.
+        # it. Unlisted, the only surface holding it would be a file the
+        # desktop app never opens, under an empty state reading "aucune
+        # routine" over a routines.md that holds one.
         for nom, bloc in blocs.items():
             if nom in vus:
                 continue
@@ -1498,7 +1520,7 @@ def index() -> str:
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>🧠 Jarvis Memory</title>
-    <script>window.__JARVIS_VIEWER_TOKEN__ = "__VIEWER_TOKEN__";</script>
+    <meta name="jarvis-viewer-token" content="__VIEWER_TOKEN__">
     <style>
         :root {
             /* Deep space theme with amber accents */
@@ -3217,11 +3239,35 @@ def index() -> str:
         </div>
     </main>
 
-    <script>
-        // Every write the page sends carries the launch token the server
-        // embedded in the head; wrapping fetch once beats threading the
-        // header through thirty call sites.
-        const VIEWER_TOKEN = window.__JARVIS_VIEWER_TOKEN__ || '';
+    <script src="/viewer.js"></script>
+</body>
+</html>""".replace("__VIEWER_TOKEN__", _LAUNCH_TOKEN)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The page's script
+#
+# One script, served from /viewer.js, so the Content-Security-Policy can
+# admit scripts from the viewer's own origin and nothing inline. The page
+# therefore carries no inline script and no event-handler attribute:
+#
+# - the launch token is read from the page's <meta> tag;
+# - no handler is ever a string in the markup. A control either carries a
+#   `data-action` name that `registerAction` has registered, which one
+#   delegated listener dispatches, or it is wired with `addEventListener`
+#   on the element the script has just built (on the page's own static
+#   controls, once at boot). Either way, what a handler acts on reaches it
+#   through the element's `dataset`, an enclosing element or a closure;
+# - a value the server supplied reaches an attribute through the DOM
+#   (`dataset`, a property), never by being spliced into a template, so no
+#   quoting has to hold for it to stay inside its attribute.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_VIEWER_SCRIPT = """        // Every write the page sends carries the launch token the server
+        // embedded in the page's markup; wrapping fetch once beats
+        // threading the header through thirty call sites.
+        const TOKEN_META = document.querySelector('meta[name="jarvis-viewer-token"]');
+        const VIEWER_TOKEN = (TOKEN_META && TOKEN_META.content) || '';
         const _nativeFetch = window.fetch.bind(window);
         window.fetch = function (url, opts) {
             opts = Object.assign({}, opts);
@@ -3273,6 +3319,48 @@ def index() -> str:
                       .replace(/"/g, '&quot;').replace(/'/g, '&#039;');
         }
 
+        // Markup the script builds is static text plus escaped text. A value
+        // that belongs in an attribute (an id, a path, a name) is set on the
+        // element afterwards, through the DOM, so no quoting has to hold for
+        // it to stay inside its attribute.
+        function elementFrom(markup) {
+            const template = document.createElement('template');
+            template.innerHTML = markup.trim();
+            return template.content.firstElementChild;
+        }
+
+        function replaceContent(container, elements) {
+            const fragment = document.createDocumentFragment();
+            elements.forEach(element => fragment.appendChild(element));
+            container.replaceChildren(fragment);
+        }
+
+        // A control that carries a data-action name is dispatched here:
+        // the one delegated listener below looks the name up among the
+        // handlers registered under it, and the handler reads what it acts
+        // on from the element's dataset or from the element that encloses
+        // it. Only the controls whose name is registered take this route;
+        // every other control is wired with addEventListener on the markup
+        // the script has just built. Neither route has an inline handler,
+        // so there is no string an id could be spliced into.
+        const ACTIONS = new Map();
+
+        function registerAction(name, handler) {
+            ACTIONS.set(name, handler);
+        }
+
+        document.addEventListener('click', (e) => {
+            const trigger = e.target instanceof Element ? e.target.closest('[data-action]') : null;
+            if (!trigger) return;
+            const handler = ACTIONS.get(trigger.dataset.action);
+            if (handler) handler(trigger, e);
+        });
+
+        registerAction('close-modal', (trigger) => {
+            const overlay = trigger.closest('.modal-overlay');
+            if (overlay) overlay.remove();
+        });
+
         // API calls
         async function fetchMemories() {
             const params = new URLSearchParams();
@@ -3321,13 +3409,17 @@ def index() -> str:
                 return;
             }
 
-            topicsCloud.innerHTML = topics.map(topic => `
-                <button class="topic-tag ${selectedTopics.has(topic.name) ? 'active' : ''}"
-                        data-topic="${escapeHtml(topic.name)}">
-                    ${escapeHtml(topic.name)}
-                    <span class="topic-count">${topic.count}</span>
-                </button>
-            `).join('');
+            replaceContent(topicsCloud, topics.map(topic => {
+                const tag = elementFrom(`
+                    <button class="topic-tag">
+                        ${escapeHtml(topic.name)}
+                        <span class="topic-count">${topic.count}</span>
+                    </button>
+                `);
+                tag.classList.toggle('active', selectedTopics.has(topic.name));
+                tag.dataset.topic = topic.name;
+                return tag;
+            }));
 
             // Add click handlers
             topicsCloud.querySelectorAll('.topic-tag').forEach(tag => {
@@ -3373,25 +3465,29 @@ def index() -> str:
                 return;
             }
 
-            memoriesContent.innerHTML = memories.map(memory => `
-                <article class="memory-card" data-id="${memory.id}">
-                    <div class="memory-header">
-                        <div class="memory-date">
-                            <span>📅</span>
-                            ${formatDate(memory.date_utc)}
+            replaceContent(memoriesContent, memories.map(memory => {
+                const card = elementFrom(`
+                    <article class="memory-card">
+                        <div class="memory-header">
+                            <div class="memory-date">
+                                <span>📅</span>
+                                ${formatDate(memory.date_utc)}
+                            </div>
+                            <div class="memory-actions">
+                                <button class="action-btn delete" title="Delete memory">🗑️</button>
+                            </div>
                         </div>
-                        <div class="memory-actions">
-                            <button class="action-btn delete" title="Delete memory">🗑️</button>
-                        </div>
-                    </div>
-                    <p class="memory-summary">${escapeHtml(memory.summary)}</p>
-                    ${memory.topics_list.length ? `
-                        <div class="memory-topics">
-                            ${memory.topics_list.map(t => `<span class="memory-topic">${escapeHtml(t)}</span>`).join('')}
-                        </div>
-                    ` : ''}
-                </article>
-            `).join('');
+                        <p class="memory-summary">${escapeHtml(memory.summary)}</p>
+                        ${memory.topics_list.length ? `
+                            <div class="memory-topics">
+                                ${memory.topics_list.map(t => `<span class="memory-topic">${escapeHtml(t)}</span>`).join('')}
+                            </div>
+                        ` : ''}
+                    </article>
+                `);
+                card.dataset.id = memory.id;
+                return card;
+            }));
 
             // Add delete handlers
             memoriesContent.querySelectorAll('.action-btn.delete').forEach(btn => {
@@ -3425,43 +3521,47 @@ def index() -> str:
                 return;
             }
 
-            mealsContent.innerHTML = meals.map(meal => `
-                <div class="meal-card" data-id="${meal.id}">
-                    <div class="meal-info">
-                        <div class="meal-header">
-                            <h3>${escapeHtml(meal.description)}</h3>
-                            <button class="action-btn delete meal-delete" title="Delete meal">🗑️</button>
+            replaceContent(mealsContent, meals.map(meal => {
+                const card = elementFrom(`
+                    <div class="meal-card">
+                        <div class="meal-info">
+                            <div class="meal-header">
+                                <h3>${escapeHtml(meal.description)}</h3>
+                                <button class="action-btn delete meal-delete" title="Delete meal">🗑️</button>
+                            </div>
+                            <div class="meal-time">${new Date(meal.ts_utc).toLocaleString()}</div>
                         </div>
-                        <div class="meal-time">${new Date(meal.ts_utc).toLocaleString()}</div>
+                        <div class="meal-macros">
+                            ${meal.calories_kcal ? `
+                                <div class="macro">
+                                    <div class="macro-value">${Math.round(meal.calories_kcal)}</div>
+                                    <div class="macro-label">kcal</div>
+                                </div>
+                            ` : ''}
+                            ${meal.protein_g ? `
+                                <div class="macro">
+                                    <div class="macro-value">${Math.round(meal.protein_g)}g</div>
+                                    <div class="macro-label">protein</div>
+                                </div>
+                            ` : ''}
+                            ${meal.carbs_g ? `
+                                <div class="macro">
+                                    <div class="macro-value">${Math.round(meal.carbs_g)}g</div>
+                                    <div class="macro-label">carbs</div>
+                                </div>
+                            ` : ''}
+                            ${meal.fat_g ? `
+                                <div class="macro">
+                                    <div class="macro-value">${Math.round(meal.fat_g)}g</div>
+                                    <div class="macro-label">fat</div>
+                                </div>
+                            ` : ''}
+                        </div>
                     </div>
-                    <div class="meal-macros">
-                        ${meal.calories_kcal ? `
-                            <div class="macro">
-                                <div class="macro-value">${Math.round(meal.calories_kcal)}</div>
-                                <div class="macro-label">kcal</div>
-                            </div>
-                        ` : ''}
-                        ${meal.protein_g ? `
-                            <div class="macro">
-                                <div class="macro-value">${Math.round(meal.protein_g)}g</div>
-                                <div class="macro-label">protein</div>
-                            </div>
-                        ` : ''}
-                        ${meal.carbs_g ? `
-                            <div class="macro">
-                                <div class="macro-value">${Math.round(meal.carbs_g)}g</div>
-                                <div class="macro-label">carbs</div>
-                            </div>
-                        ` : ''}
-                        ${meal.fat_g ? `
-                            <div class="macro">
-                                <div class="macro-value">${Math.round(meal.fat_g)}g</div>
-                                <div class="macro-label">fat</div>
-                            </div>
-                        ` : ''}
-                    </div>
-                </div>
-            `).join('');
+                `);
+                card.dataset.id = meal.id;
+                return card;
+            }));
 
             // Add delete handlers for meals
             mealsContent.querySelectorAll('.meal-delete').forEach(btn => {
@@ -3597,37 +3697,47 @@ def index() -> str:
 
         function renderCoreEntries(entries) {
             if (!entries.length) {
-                return '<div class="core-empty">Nothing yet. Say "remember that…" and it lands here.</div>';
+                return elementFrom('<div class="core-empty">Nothing yet. Say "remember that…" and it lands here.</div>');
             }
-            return '<div class="core-entries">' + entries.map(e => {
+            const list = elementFrom('<div class="core-entries"></div>');
+            entries.forEach(e => {
                 const meta = [e.date, e.source].filter(Boolean).join(' · ');
                 const why = e.retired
                     ? `<span class="core-entry-why">retiré${e.retired_on ? ' le ' + escapeHtml(e.retired_on) : ''}${e.retired_reason ? ' : ' + escapeHtml(e.retired_reason) : ''}</span>`
                     : '';
-                return `<div class="core-entry${e.retired ? ' retired' : ''}">
+                const entry = elementFrom(`<div class="core-entry">
                     <span class="core-entry-meta">${escapeHtml(meta)}</span>
                     <span class="core-entry-text"><span class="core-entry-body">${escapeHtml(e.text)}</span> ${why}</span>
-                </div>`;
-            }).join('') + '</div>';
+                </div>`);
+                entry.classList.toggle('retired', Boolean(e.retired));
+                list.appendChild(entry);
+            });
+            return list;
         }
 
         function renderCoreFile(section, payload) {
-            return `<div class="core-file" data-section="${section.key}">
+            const file = elementFrom(`<div class="core-file">
                 <div class="core-file-head">
                     <span class="core-file-title">${section.title}</span>
-                    <span class="core-file-path" title="${escapeHtml(payload.path)}">${escapeHtml(payload.path)}</span>
-                    <button class="graph-btn" data-core-edit="${section.key}" title="Edit the file directly">✏️</button>
+                    <span class="core-file-path"></span>
+                    <button class="graph-btn" data-action="core-edit" title="Edit the file directly">✏️</button>
                 </div>
-                <div class="core-rendered">${renderCoreEntries(payload.entries)}</div>
+                <div class="core-rendered"></div>
                 <div class="core-editor">
                     <textarea spellcheck="false"></textarea>
                     <div class="core-editor-actions">
-                        <button class="graph-btn" data-core-save="${section.key}" title="Save">💾</button>
-                        <button class="graph-btn" data-core-cancel="${section.key}" title="Cancel">✖️</button>
+                        <button class="graph-btn" data-action="core-save" title="Save">💾</button>
+                        <button class="graph-btn" data-action="core-cancel" title="Cancel">✖️</button>
                         <span class="core-status"></span>
                     </div>
                 </div>
-            </div>`;
+            </div>`);
+            file.dataset.section = section.key;
+            const path = file.querySelector('.core-file-path');
+            path.textContent = payload.path;
+            path.title = payload.path;
+            file.querySelector('.core-rendered').appendChild(renderCoreEntries(payload.entries));
+            return file;
         }
 
         let coreData = {};
@@ -3641,60 +3751,49 @@ def index() -> str:
                 container.innerHTML = '<div class="core-empty">Could not read the core files.</div>';
                 return;
             }
-            container.innerHTML = CORE_SECTIONS
-                .map(section => renderCoreFile(section, coreData[section.key] || { path: '', raw: '', entries: [] }))
-                .join('');
+            replaceContent(container, CORE_SECTIONS.map(
+                section => renderCoreFile(section, coreData[section.key] || { path: '', raw: '', entries: [] })
+            ));
         }
 
-        function coreFileEl(key) {
-            return document.querySelector(`.core-file[data-section="${key}"]`);
-        }
+        registerAction('core-edit', (trigger) => {
+            const file = trigger.closest('.core-file');
+            file.querySelector('textarea').value = (coreData[file.dataset.section] || {}).raw || '';
+            file.querySelector('.core-rendered').style.display = 'none';
+            file.querySelector('.core-editor').style.display = 'block';
+        });
 
-        document.getElementById('core-files').addEventListener('click', async (ev) => {
-            const editKey = ev.target.dataset && ev.target.dataset.coreEdit;
-            const saveKey = ev.target.dataset && ev.target.dataset.coreSave;
-            const cancelKey = ev.target.dataset && ev.target.dataset.coreCancel;
+        registerAction('core-cancel', (trigger) => {
+            const file = trigger.closest('.core-file');
+            file.querySelector('.core-editor').style.display = 'none';
+            file.querySelector('.core-rendered').style.display = '';
+            file.querySelector('.core-status').textContent = '';
+        });
 
-            if (editKey) {
-                const el = coreFileEl(editKey);
-                el.querySelector('textarea').value = (coreData[editKey] || {}).raw || '';
-                el.querySelector('.core-rendered').style.display = 'none';
-                el.querySelector('.core-editor').style.display = 'block';
-                return;
-            }
-
-            if (cancelKey) {
-                const el = coreFileEl(cancelKey);
-                el.querySelector('.core-editor').style.display = 'none';
-                el.querySelector('.core-rendered').style.display = '';
-                el.querySelector('.core-status').textContent = '';
-                return;
-            }
-
-            if (saveKey) {
-                const el = coreFileEl(saveKey);
-                const status = el.querySelector('.core-status');
-                status.textContent = 'Saving…';
-                try {
-                    const resp = await fetch('/api/core/' + saveKey, {
-                        method: 'PUT',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ raw: el.querySelector('textarea').value }),
-                    });
-                    if (!resp.ok) {
-                        const err = await resp.json().catch(() => ({}));
-                        status.textContent = 'Not saved: ' + (err.error || resp.status);
-                        return;
-                    }
-                    const payload = await resp.json();
-                    coreData[saveKey] = payload;
-                    el.querySelector('.core-rendered').innerHTML = renderCoreEntries(payload.entries);
-                    el.querySelector('.core-editor').style.display = 'none';
-                    el.querySelector('.core-rendered').style.display = '';
-                    status.textContent = '';
-                } catch (e) {
-                    status.textContent = 'Not saved: ' + e;
+        registerAction('core-save', async (trigger) => {
+            const file = trigger.closest('.core-file');
+            const key = file.dataset.section;
+            const status = file.querySelector('.core-status');
+            status.textContent = 'Saving…';
+            try {
+                const resp = await fetch('/api/core/' + encodeURIComponent(key), {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ raw: file.querySelector('textarea').value }),
+                });
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    status.textContent = 'Not saved: ' + (err.error || resp.status);
+                    return;
                 }
+                const payload = await resp.json();
+                coreData[key] = payload;
+                file.querySelector('.core-rendered').replaceChildren(renderCoreEntries(payload.entries));
+                file.querySelector('.core-editor').style.display = 'none';
+                file.querySelector('.core-rendered').style.display = '';
+                status.textContent = '';
+            } catch (e) {
+                status.textContent = 'Not saved: ' + e;
             }
         });
 
@@ -3726,11 +3825,12 @@ def index() -> str:
                        .map(a => a.request_id)
             );
 
-            container.innerHTML = '<div class="core-file">' + actions.map(a => {
+            const list = elementFrom('<div class="core-file"></div>');
+            actions.forEach(a => {
                 // The ask is folded into its outcome, unless nobody ever
                 // answered — an unanswered question is the only trace a
                 // decision never taken leaves, so it keeps its own row.
-                if (a.outcome === 'demandé' && settledIds.has(a.request_id)) return '';
+                if (a.outcome === 'demandé' && settledIds.has(a.request_id)) return;
 
                 const when = (a.ts_utc || '').replace('T', ' ').slice(0, 19);
                 const ms = a.duration_ms != null ? ` ${a.duration_ms} ms` : '';
@@ -3741,17 +3841,21 @@ def index() -> str:
                 const asked = (a.request_id && a.outcome !== 'demandé')
                     ? '<span class="activity-badge activity-asked" title="Yuba a demandé ta permission">demandé</span>'
                     : '';
-                return `<div class="activity-row">
+                const row = elementFrom(`<div class="activity-row">
                     <span class="activity-when">${escapeHtml(when)}</span>
                     <span class="activity-origin" title="D'où venait la demande">${origin}</span>
                     <span class="activity-tool">${escapeHtml(a.tool)}</span>
-                    <span class="activity-args" title="${escapeHtml(a.query || '')}">${escapeHtml(a.args || '')}</span>
+                    <span class="activity-args">${escapeHtml(a.args || '')}</span>
                     <span class="activity-badge">${escapeHtml(a.risk)}</span>
                     <span class="activity-badge">${escapeHtml(a.verdict)}</span>
                     ${asked}
-                    <span class="activity-badge activity-${escapeHtml(a.outcome)}">${escapeHtml(a.outcome)}${ms}</span>
-                </div>`;
-            }).join('') + '</div>';
+                    <span class="activity-badge" data-role="outcome">${escapeHtml(a.outcome)}${ms}</span>
+                </div>`);
+                row.querySelector('.activity-args').title = a.query || '';
+                row.querySelector('[data-role="outcome"]').setAttribute('class', 'activity-badge activity-' + a.outcome);
+                list.appendChild(row);
+            });
+            container.replaceChildren(list);
         }
 
         // ── Reminders tab ───────────────────────────────────────────
@@ -3773,16 +3877,20 @@ def index() -> str:
                 container.innerHTML = "<div class='core-empty'>Rien de prévu. Dis-lui « rappelle-moi… », ou pose-en un ci-dessus.</div>";
                 return;
             }
-            container.innerHTML = '<div class="core-file">' + rappels.map(r => {
+            const list = elementFrom('<div class="core-file"></div>');
+            rappels.forEach(r => {
                 const when = (r.due_local || '').replace('T', ' à ');
                 const origin = r.origin ? escapeHtml(r.origin) : '—';
-                return `<div class="rappel-row">
+                const row = elementFrom(`<div class="rappel-row">
                     <span class="rappel-when">${escapeHtml(when)}</span>
                     <span class="rappel-texte">${escapeHtml(r.texte || '')}</span>
                     <span class="rappel-origin" title="D'où venait la demande">${origin}</span>
-                    <button class="rappel-cancel" data-rappel="${escapeHtml(r.id)}">Annuler</button>
-                </div>`;
-            }).join('') + '</div>';
+                    <button class="rappel-cancel">Annuler</button>
+                </div>`);
+                row.querySelector('.rappel-cancel').dataset.rappel = r.id;
+                list.appendChild(row);
+            });
+            container.replaceChildren(list);
 
             container.querySelectorAll('[data-rappel]').forEach(button => {
                 button.addEventListener('click', async () => {
@@ -3845,46 +3953,60 @@ def index() -> str:
                 container.innerHTML = "<div class='core-empty'>Aucune routine, et aucun bloc dans routines.md. Dis-lui « tous les matins à 7h, … ».</div>";
                 return;
             }
-            container.innerHTML = '<div class="core-file">' + routines.map(r => {
+            // A flag is a small badge. Its words and its hover title are set
+            // as text through the DOM: the title can carry the names of tools
+            // the machine no longer has, and that is not markup.
+            const flag = (text, title, warn) => {
+                const badge = elementFrom('<span class="routine-flag"></span>');
+                badge.classList.toggle('warn', Boolean(warn));
+                badge.textContent = text;
+                badge.title = title;
+                return badge;
+            };
+
+            const list = elementFrom('<div class="core-file"></div>');
+            routines.forEach(r => {
                 // Trim to minutes first: ' à ' is three characters where
                 // the T was one, so slicing afterwards eats them.
                 const when = (r.due_local || '').slice(0, 16).replace('T', ' à ');
                 const flags = [];
                 if (r.arretee) {
-                    flags.push('<span class="routine-flag" title="Arrêtée. Son bloc est toujours là : redis la même demande et elle repart.">arrêtée</span>');
+                    flags.push(flag('arrêtée', "Arrêtée. Son bloc est toujours là : redis la même demande et elle repart."));
                 }
                 if (r.horaire_divergent) {
-                    flags.push('<span class="routine-flag warn" title="routines.md annonce un horaire différent de celui auquel elle part.">horaire à revoir</span>');
+                    flags.push(flag('horaire à revoir', "routines.md annonce un horaire différent de celui auquel elle part.", true));
                 }
                 if (r.suspendue) {
-                    flags.push('<span class="routine-flag warn" title="Plus de bloc dans routines.md : elle ne fera rien tant qu&#39;il n&#39;est pas revenu">suspendue</span>');
+                    flags.push(flag('suspendue', "Plus de bloc dans routines.md : elle ne fera rien tant qu'il n'est pas revenu", true));
                 } else if ((r.introuvables || []).length) {
-                    flags.push('<span class="routine-flag warn" title="Nommés dans son bloc, absents de la machine : ' +
-                               escapeHtml((r.introuvables || []).join(', ')) +
-                               '">' + escapeHtml(String(r.introuvables.length)) + ' outil(s) disparu(s)</span>');
+                    flags.push(flag(r.introuvables.length + ' outil(s) disparu(s)',
+                                    'Nommés dans son bloc, absents de la machine : ' + r.introuvables.join(', '), true));
                 }
                 if (!r.suspendue && !r.outils.length) {
-                    flags.push('<span class="routine-flag warn" title="Périmètre vide : elle ne peut atteindre aucun outil">périmètre vide</span>');
+                    flags.push(flag('périmètre vide', "Périmètre vide : elle ne peut atteindre aucun outil", true));
                 }
                 if (r.memoire) {
-                    flags.push('<span class="routine-flag" title="Ton profil et tes règles partent avec elle">mémoire</span>');
+                    flags.push(flag('mémoire', "Ton profil et tes règles partent avec elle"));
                 }
                 if (r.steriles) {
-                    flags.push('<span class="routine-flag warn" title="Passages de suite sans rien produire. Au bout de 5, elle s&#39;arrête.">' +
-                               escapeHtml(String(r.steriles)) + ' sans résultat</span>');
+                    flags.push(flag(r.steriles + ' sans résultat', "Passages de suite sans rien produire. Au bout de 5, elle s'arrête.", true));
                 }
                 const outils = r.outils.length
                     ? escapeHtml(r.outils.join(', '))
                     : "aucun outil";
-                return `<div class="routine-row">
+                const row = elementFrom(`<div class="routine-row">
                     <span class="routine-nom">${escapeHtml(r.nom || '?')}</span>
                     <span class="routine-quand">${escapeHtml(when)}</span>
                     <span class="routine-phrase">${escapeHtml(r.texte || '')}</span>
-                    ${flags.join(' ')}
-                    ${r.arretee ? '' : `<button class="rappel-cancel" data-routine="${escapeHtml(r.id)}">Arrêter</button>`}
+                    ${r.arretee ? '' : '<button class="rappel-cancel">Arrêter</button>'}
                     <span class="routine-outils">🔧 ${outils}</span>
-                </div>`;
-            }).join('') + '</div>';
+                </div>`);
+                row.querySelector('.routine-phrase').after(...flags);
+                const stop = row.querySelector('.rappel-cancel');
+                if (stop) stop.dataset.routine = r.id;
+                list.appendChild(row);
+            });
+            container.replaceChildren(list);
 
             container.querySelectorAll('[data-routine]').forEach(button => {
                 button.addEventListener('click', async () => {
@@ -3926,29 +4048,42 @@ def index() -> str:
                          : p.section === 'profil' ? 'ton profil'
                          : 'nulle part : titre inconnu';
                 const boutons = agissable
-                    ? `<button class="rappel-cancel" data-retenir="${escapeHtml(p.ligne)}">Je confirme</button>
-                       <button class="rappel-cancel" data-refuser="${escapeHtml(p.ligne)}">Non</button>`
+                    ? `<button class="rappel-cancel" data-retenir="">Je confirme</button>
+                       <button class="rappel-cancel" data-refuser="">Non</button>`
                     : `<span class="routine-flag">${
                         p.etat === 'rayée'
                           ? (p.tampon ? escapeHtml(p.tampon) : 'refusée')
                           : escapeHtml(p.etat)}</span>`;
-                return `<div class="routine-row">
+                const row = elementFrom(`<div class="routine-row">
                     <span class="routine-phrase">${escapeHtml(p.texte || '')}</span>
                     <span class="routine-quand">${escapeHtml(p.date || '')}</span>
                     <span class="routine-flag" title="Où elle irait si tu confirmes">${escapeHtml(ou)}</span>
                     ${boutons}
                     <span class="routine-outils" title="La phrase de ton journal d'où elle vient">📖 ${escapeHtml(p.citation || 'sans citation')}</span>
-                </div>`;
+                </div>`);
+                // The line is the user's own sentence: it goes on the
+                // buttons as data, exactly as it is, not as markup.
+                const accept = row.querySelector('[data-retenir]');
+                if (accept) accept.dataset.retenir = p.ligne;
+                const refuse = row.querySelector('[data-refuser]');
+                if (refuse) refuse.dataset.refuser = p.ligne;
+                return row;
             };
 
-            container.innerHTML =
-                (attente.length
-                    ? '<div class="core-files">' + attente.map(p => carte(p, true)).join('') + '</div>'
-                    : "<div class='core-empty'>Rien en attente.</div>") +
-                (reglees.length
-                    ? '<div class="core-intro"><p>Déjà réglées, gardées pour la trace :</p></div>' +
-                      '<div class="core-files">' + reglees.map(p => carte(p, false)).join('') + '</div>'
-                    : '');
+            const groupe = (items, agissable) => {
+                const group = elementFrom('<div class="core-files"></div>');
+                items.forEach(p => group.appendChild(carte(p, agissable)));
+                return group;
+            };
+
+            const parts = [attente.length
+                ? groupe(attente, true)
+                : elementFrom("<div class='core-empty'>Rien en attente.</div>")];
+            if (reglees.length) {
+                parts.push(elementFrom('<div class="core-intro"><p>Déjà réglées, gardées pour la trace :</p></div>'));
+                parts.push(groupe(reglees, false));
+            }
+            replaceContent(container, parts);
 
             container.querySelectorAll('[data-retenir]').forEach(button => {
                 button.addEventListener('click', async () => {
@@ -4025,7 +4160,7 @@ def index() -> str:
                 container.innerHTML = "<div class='core-empty'>Aucun objectif. Dis-lui « garde une trace de… ».</div>";
                 return;
             }
-            container.innerHTML = objectifs.map(o => {
+            replaceContent(container, objectifs.map(o => {
                 const points = (o.points || []).map(p =>
                     `<div class="objectif-point">
                         <span class="objectif-date">${escapeHtml(p.date)}</span>
@@ -4034,9 +4169,9 @@ def index() -> str:
                     </div>`).join('')
                     || "<div class='objectif-point'><span class='objectif-texte'>Rien de noté pour l'instant.</span></div>";
                 const etat = o.ouvert
-                    ? `<button class="rappel-cancel" data-objectif="${escapeHtml(o.nom)}">Terminer</button>`
+                    ? '<button class="rappel-cancel" data-objectif="">Terminer</button>'
                     : `<span class="routine-flag">terminé ${escapeHtml(o.clos)}</span>`;
-                return `<div class="objectif-carte${o.ouvert ? '' : ' close'}">
+                const carte = elementFrom(`<div class="objectif-carte">
                     <div class="objectif-tete">
                         <span class="objectif-nom">${escapeHtml(o.nom)}</span>
                         <span class="objectif-phrase">${escapeHtml(o.phrase)}</span>
@@ -4044,8 +4179,12 @@ def index() -> str:
                     </div>
                     <div class="objectif-fin">Fini quand : ${escapeHtml(o.fini_quand || '(non dit)')}</div>
                     ${points}
-                </div>`;
-            }).join('');
+                </div>`);
+                carte.classList.toggle('close', !o.ouvert);
+                const terminer = carte.querySelector('[data-objectif]');
+                if (terminer) terminer.dataset.objectif = o.nom;
+                return carte;
+            }));
 
             container.querySelectorAll('[data-objectif]').forEach(button => {
                 button.addEventListener('click', async () => {
@@ -4070,8 +4209,7 @@ def index() -> str:
         });
 
         function switchTab(tabName) {
-            tabs.forEach(t => t.classList.remove('active'));
-            document.querySelector(`.tab[data-tab="${tabName}"]`).classList.add('active');
+            tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === tabName));
             currentTab = tabName;
 
             // Hide all panes
@@ -4570,22 +4708,6 @@ def index() -> str:
             const { node, children, ancestors } = data;
             const sidebar = document.getElementById('detail-sidebar');
 
-            const breadcrumb = ancestors.map((a, i) => {
-                const isLast = i === ancestors.length - 1;
-                return `<span onclick="selectNode('${a.id}')">${escapeHtml(a.name)}</span>` +
-                       (isLast ? '' : '<span class="sep"> › </span>');
-            }).join('');
-
-            const childrenHtml = children.length > 0
-                ? children.map(c => `
-                    <div class="detail-child" onclick="selectNode('${c.id}')">
-                        <span>${c.has_children || c.data_token_count > 0 ? '📁' : '📄'}</span>
-                        <span class="detail-child-name">${escapeHtml(c.name)}</span>
-                        <span class="tree-node-count">${c.data_token_count}t</span>
-                    </div>
-                `).join('')
-                : '<div style="color: var(--text-muted); font-size: 0.85rem;">No children</div>';
-
             const dataHtml = node.data
                 ? `<div class="detail-data">${escapeHtml(node.data)}</div>`
                 : '<div style="color: var(--text-muted); font-size: 0.85rem; font-style: italic;">No data stored</div>';
@@ -4595,7 +4717,7 @@ def index() -> str:
             });
 
             sidebar.innerHTML = `
-                <div class="detail-breadcrumb">${breadcrumb}</div>
+                <div class="detail-breadcrumb"></div>
                 <div class="detail-name">${escapeHtml(node.name)}</div>
                 <div class="detail-description">${escapeHtml(node.description)}</div>
 
@@ -4625,15 +4747,58 @@ def index() -> str:
 
                 <div class="detail-section">
                     <div class="detail-section-title">📂 Children</div>
-                    <div class="detail-children-list">${childrenHtml}</div>
+                    <div class="detail-children-list"></div>
                 </div>
 
                 <div class="detail-actions">
-                    <button class="detail-action-btn" onclick="editNode('${node.id}')">✏️ Edit</button>
-                    <button class="detail-action-btn" onclick="showCreateNodeModal('${node.id}')">➕ Add child</button>
-                    ${!PRESET_NODE_IDS.has(node.id) ? `<button class="detail-action-btn delete" onclick="deleteNode('${node.id}')">🗑️ Delete</button>` : ''}
+                    <button class="detail-action-btn" data-action="edit-node">✏️ Edit</button>
+                    <button class="detail-action-btn" data-action="add-child-node">➕ Add child</button>
+                    ${!PRESET_NODE_IDS.has(node.id) ? '<button class="detail-action-btn delete" data-action="delete-node">🗑️ Delete</button>' : ''}
                 </div>
             `;
+
+            // Every node id below is set through the DOM, where there is
+            // no quoting for a name or an id to get wrong.
+            const breadcrumb = sidebar.querySelector('.detail-breadcrumb');
+            ancestors.forEach((a, i) => {
+                const crumb = document.createElement('span');
+                crumb.dataset.action = 'select-node';
+                crumb.dataset.nodeId = a.id;
+                crumb.textContent = a.name;
+                breadcrumb.appendChild(crumb);
+                if (i < ancestors.length - 1) {
+                    const separator = document.createElement('span');
+                    separator.className = 'sep';
+                    separator.textContent = ' › ';
+                    breadcrumb.appendChild(separator);
+                }
+            });
+
+            const childrenList = sidebar.querySelector('.detail-children-list');
+            if (children.length > 0) {
+                children.forEach(c => {
+                    const child = elementFrom(`
+                        <div class="detail-child" data-action="select-node">
+                            <span>${c.has_children || c.data_token_count > 0 ? '📁' : '📄'}</span>
+                            <span class="detail-child-name">${escapeHtml(c.name)}</span>
+                            <span class="tree-node-count">${c.data_token_count}t</span>
+                        </div>
+                    `);
+                    child.dataset.nodeId = c.id;
+                    childrenList.appendChild(child);
+                });
+            } else {
+                childrenList.innerHTML = '<div style="color: var(--text-muted); font-size: 0.85rem;">No children</div>';
+            }
+
+            stampNodeIdOnActions(sidebar, node.id);
+        }
+
+        // The buttons under a node's details all act on that node.
+        function stampNodeIdOnActions(root, nodeId) {
+            root.querySelectorAll('.detail-actions [data-action]').forEach(button => {
+                button.dataset.nodeId = nodeId;
+            });
         }
 
         async function editNode(nodeId) {
@@ -4645,7 +4810,7 @@ def index() -> str:
                 <div class="detail-name">✏️ Edit Node</div>
                 <div class="modal-field">
                     <label>Name</label>
-                    <input type="text" class="detail-edit-field" id="edit-name" value="${escapeHtml(node.name)}" />
+                    <input type="text" class="detail-edit-field" id="edit-name" />
                 </div>
                 <div class="modal-field">
                     <label>Description</label>
@@ -4656,10 +4821,12 @@ def index() -> str:
                     <textarea class="detail-edit-field" id="edit-data" rows="8">${escapeHtml(node.data)}</textarea>
                 </div>
                 <div class="detail-actions">
-                    <button class="detail-action-btn" onclick="saveNodeEdit('${nodeId}')" style="background: var(--accent-glow); border-color: var(--accent-primary); color: var(--accent-secondary);">💾 Save</button>
-                    <button class="detail-action-btn" onclick="selectNode('${nodeId}')">Cancel</button>
+                    <button class="detail-action-btn" data-action="save-node-edit" style="background: var(--accent-glow); border-color: var(--accent-primary); color: var(--accent-secondary);">💾 Save</button>
+                    <button class="detail-action-btn" data-action="select-node">Cancel</button>
                 </div>
             `;
+            document.getElementById('edit-name').value = node.name;
+            stampNodeIdOnActions(sidebar, nodeId);
         }
 
         async function saveNodeEdit(nodeId) {
@@ -4700,6 +4867,12 @@ def index() -> str:
             }
         }
 
+        registerAction('select-node', (trigger) => selectNode(trigger.dataset.nodeId));
+        registerAction('edit-node', (trigger) => editNode(trigger.dataset.nodeId));
+        registerAction('add-child-node', (trigger) => showCreateNodeModal(trigger.dataset.nodeId));
+        registerAction('save-node-edit', (trigger) => saveNodeEdit(trigger.dataset.nodeId));
+        registerAction('delete-node', (trigger) => deleteNode(trigger.dataset.nodeId));
+
         function showCreateNodeModal(parentId) {
             // Remove existing modal if any
             const existing = document.querySelector('.modal-overlay');
@@ -4723,7 +4896,7 @@ def index() -> str:
                         <textarea class="detail-edit-field" id="new-node-data" rows="4" placeholder="Initial memories…"></textarea>
                     </div>
                     <div class="modal-actions">
-                        <button class="modal-btn secondary" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
+                        <button class="modal-btn secondary" data-action="close-modal">Cancel</button>
                         <button class="modal-btn primary" id="btn-create-node">Create</button>
                     </div>
                 </div>
@@ -4853,7 +5026,7 @@ def index() -> str:
                                     document.getElementById('import-status').textContent = msg.message;
                                     document.getElementById('import-bar').style.width = '100%';
                                     document.getElementById('import-actions').innerHTML = `
-                                        <button class="modal-btn primary" onclick="this.closest('.modal-overlay').remove()">Done</button>
+                                        <button class="modal-btn primary" data-action="close-modal">Done</button>
                                     `;
                                     delete overlay.dataset.importing;
                                     diaryImportDone = true;
@@ -4864,7 +5037,7 @@ def index() -> str:
                                 } else if (msg.type === 'error') {
                                     document.getElementById('import-status').textContent = 'Error: ' + msg.message;
                                     document.getElementById('import-actions').innerHTML = `
-                                        <button class="modal-btn secondary" onclick="this.closest('.modal-overlay').remove()">Close</button>
+                                        <button class="modal-btn secondary" data-action="close-modal">Close</button>
                                     `;
                                     delete overlay.dataset.importing;
                                     showToast('Import failed', 'error');
@@ -4875,7 +5048,7 @@ def index() -> str:
                 } catch (e) {
                     document.getElementById('import-status').textContent = 'Connection error: ' + e.message;
                     document.getElementById('import-actions').innerHTML = `
-                        <button class="modal-btn secondary" onclick="this.closest('.modal-overlay').remove()">Close</button>
+                        <button class="modal-btn secondary" data-action="close-modal">Close</button>
                     `;
                     delete overlay.dataset.importing;
                     showToast('Import failed', 'error');
@@ -4972,7 +5145,7 @@ def index() -> str:
                                     document.getElementById('consolidate-bar').style.width = '100%';
                                     document.getElementById('consolidate-status').textContent = `Done — ${msg.nodes} node${msg.nodes !== 1 ? 's' : ''}, ${msg.total_before} → ${msg.total_after} lines (Δ${msg.total_delta})`;
                                     document.getElementById('consolidate-actions').innerHTML = `
-                                        <button class="modal-btn primary" onclick="this.closest('.modal-overlay').remove()">Done</button>
+                                        <button class="modal-btn primary" data-action="close-modal">Done</button>
                                     `;
                                     delete overlay.dataset.consolidating;
                                     loadGraphData();
@@ -4983,7 +5156,7 @@ def index() -> str:
                                     document.getElementById('consolidate-status').textContent = 'Error: ' + msg.message;
                                     document.getElementById('consolidate-bar').style.width = '0%';
                                     document.getElementById('consolidate-actions').innerHTML = `
-                                        <button class="modal-btn secondary" onclick="this.closest('.modal-overlay').remove()">Close</button>
+                                        <button class="modal-btn secondary" data-action="close-modal">Close</button>
                                     `;
                                     delete overlay.dataset.consolidating;
                                     showToast('Consolidation failed', 'error');
@@ -4996,7 +5169,7 @@ def index() -> str:
                     // Reset the bar so a half-filled UI doesn't linger next to an error message.
                     document.getElementById('consolidate-bar').style.width = '0%';
                     document.getElementById('consolidate-actions').innerHTML = `
-                        <button class="modal-btn secondary" onclick="this.closest('.modal-overlay').remove()">Close</button>
+                        <button class="modal-btn secondary" data-action="close-modal">Close</button>
                     `;
                     delete overlay.dataset.consolidating;
                     showToast('Consolidation failed', 'error');
@@ -5149,7 +5322,7 @@ def index() -> str:
                                           + (msg.rows_would_empty ? ` (${msg.rows_would_empty} kept original to avoid emptying)` : '');
                                     document.getElementById('scrub-status').textContent = summary;
                                     document.getElementById('scrub-actions').innerHTML = `
-                                        <button class="modal-btn primary" onclick="this.closest('.modal-overlay').remove()">Done</button>
+                                        <button class="modal-btn primary" data-action="close-modal">Done</button>
                                     `;
                                     delete overlay.dataset.scrubbing;
                                     loadStats();
@@ -5159,7 +5332,7 @@ def index() -> str:
                                     document.getElementById('scrub-status').textContent = 'Error: ' + msg.message;
                                     document.getElementById('scrub-bar').style.width = '0%';
                                     document.getElementById('scrub-actions').innerHTML = `
-                                        <button class="modal-btn secondary" onclick="this.closest('.modal-overlay').remove()">Close</button>
+                                        <button class="modal-btn secondary" data-action="close-modal">Close</button>
                                     `;
                                     delete overlay.dataset.scrubbing;
                                     showToast('Diary clean failed', 'error');
@@ -5177,7 +5350,7 @@ def index() -> str:
                             : 'Stopped before any entries were processed';
                         document.getElementById('scrub-status').textContent = summary;
                         document.getElementById('scrub-actions').innerHTML = `
-                            <button class="modal-btn secondary" onclick="this.closest('.modal-overlay').remove()">Close</button>
+                            <button class="modal-btn secondary" data-action="close-modal">Close</button>
                         `;
                         delete overlay.dataset.scrubbing;
                         loadStats();
@@ -5188,7 +5361,7 @@ def index() -> str:
                         document.getElementById('scrub-status').textContent = 'Connection error: ' + e.message;
                         document.getElementById('scrub-bar').style.width = '0%';
                         document.getElementById('scrub-actions').innerHTML = `
-                            <button class="modal-btn secondary" onclick="this.closest('.modal-overlay').remove()">Close</button>
+                            <button class="modal-btn secondary" data-action="close-modal">Close</button>
                         `;
                         delete overlay.dataset.scrubbing;
                         showToast('Diary clean failed', 'error');
@@ -5325,7 +5498,7 @@ def index() -> str:
                                     }
                                     document.getElementById('optimise-status').textContent = summary;
                                     document.getElementById('optimise-actions').innerHTML = `
-                                        <button class="modal-btn primary" onclick="this.closest('.modal-overlay').remove()">Done</button>
+                                        <button class="modal-btn primary" data-action="close-modal">Done</button>
                                     `;
                                     delete overlay.dataset.optimising;
                                     loadStats();
@@ -5336,7 +5509,7 @@ def index() -> str:
                                     document.getElementById('optimise-status').textContent = 'Error: ' + msg.message;
                                     document.getElementById('optimise-bar').style.width = '0%';
                                     document.getElementById('optimise-actions').innerHTML = `
-                                        <button class="modal-btn secondary" onclick="this.closest('.modal-overlay').remove()">Close</button>
+                                        <button class="modal-btn secondary" data-action="close-modal">Close</button>
                                     `;
                                     delete overlay.dataset.optimising;
                                     showToast('Tag optimisation failed', 'error');
@@ -5348,7 +5521,7 @@ def index() -> str:
                     document.getElementById('optimise-status').textContent = 'Connection error: ' + e.message;
                     document.getElementById('optimise-bar').style.width = '0%';
                     document.getElementById('optimise-actions').innerHTML = `
-                        <button class="modal-btn secondary" onclick="this.closest('.modal-overlay').remove()">Close</button>
+                        <button class="modal-btn secondary" data-action="close-modal">Close</button>
                     `;
                     delete overlay.dataset.optimising;
                     showToast('Tag optimisation failed', 'error');
@@ -5360,9 +5533,14 @@ def index() -> str:
         loadStats();
         loadTopics();
         loadMemories();
-    </script>
-</body>
-</html>""".replace("__VIEWER_TOKEN__", _LAUNCH_TOKEN)
+"""
+
+
+@app.route("/viewer.js")
+def viewer_script() -> Response:
+    """Serve the page's script. It holds no secret: the token rides in the
+    page's markup, so this read needs none."""
+    return Response(_VIEWER_SCRIPT, mimetype="text/javascript")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

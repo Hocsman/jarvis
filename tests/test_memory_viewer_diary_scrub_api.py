@@ -177,7 +177,9 @@ class TestDiaryScrubEndpoint:
         from desktop_app import memory_viewer
 
         client = memory_viewer.app.test_client()
-        html = client.get("/").get_data(as_text=True)
+        from conftest import viewer_page_with_scripts
+
+        html = viewer_page_with_scripts(client)
 
         wiring = "document.getElementById('btn-scrub-deflections')"
         assert wiring in html, "diary maintenance button has no click handler in the rendered page"

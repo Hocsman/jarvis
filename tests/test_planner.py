@@ -17,7 +17,6 @@ from jarvis.reply import planner as planner_mod
 from jarvis.reply.planner import (
     MAX_STEPS,
     SEARCH_MEMORY_DIRECTIVE,
-    _is_trivial_plan,
     _parse_plan,
     format_plan_block,
     is_search_memory_step,
@@ -78,22 +77,6 @@ class TestParsePlan:
         assert len(parsed) == 1
         assert parsed[0].endswith("…")
         assert len(parsed[0]) <= 201
-
-
-class TestIsTrivialPlan:
-    def test_empty_is_trivial(self):
-        assert _is_trivial_plan([]) is True
-
-    def test_single_step_is_trivial_regardless_of_language(self):
-        # Purely structural: any 1-step plan is trivial. Language-agnostic.
-        assert _is_trivial_plan(["Reply to the user."]) is True
-        assert _is_trivial_plan(["Répondre à l'utilisateur."]) is True
-        assert _is_trivial_plan(["ユーザーに返信する"]) is True
-        assert _is_trivial_plan(["webSearch query='x'"]) is True
-
-    def test_multi_step_is_not_trivial(self):
-        assert _is_trivial_plan(["webSearch ...", "Reply to user"]) is False
-        assert _is_trivial_plan(["a", "b", "c"]) is False
 
 
 class TestResolvePlannerModel:

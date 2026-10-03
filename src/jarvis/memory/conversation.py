@@ -752,8 +752,6 @@ class DialogueMemory:
         # Messages with timestamp <= this value have been processed
         self._last_saved_timestamp: float = 0.0
         self._lock = threading.RLock()  # Reentrant lock for thread safety
-        # Track the last profile used for follow-up detection
-        self._last_profile: Optional[str] = None
         # The one action waiting on the user's say-so, and the turn
         # counter that bounds how long a spoken answer stays valid. Held
         # here because this is the object voice and text already share.
@@ -932,11 +930,6 @@ class DialogueMemory:
             timestamp = self._next_ts()
             self._messages.append((timestamp, role.strip(), content.strip()))
             self._last_activity_time = timestamp
-
-    def get_recent_context(self) -> List[str]:
-        """Get recent messages formatted as context strings."""
-        messages = self.get_recent_messages()
-        return [f"{msg['role'].title()}: {msg['content']}" for msg in messages]
 
     def get_recent_messages(self) -> List[dict]:
         """
@@ -1186,28 +1179,6 @@ class DialogueMemory:
             cutoff = time.time() - self.RECENT_WINDOW_SEC
             return any(ts >= cutoff for ts, _, _ in self._messages)
 
-    def set_last_profile(self, profile: str) -> None:
-        """Track the last profile used for follow-up detection."""
-        with self._lock:
-            self._last_profile = profile
-
-    def get_last_profile(self) -> Optional[str]:
-        """Get the last profile used, if within the recent window."""
-        with self._lock:
-            # Only return profile if we have recent messages
-            cutoff = time.time() - self.RECENT_WINDOW_SEC
-            if any(ts >= cutoff for ts, _, _ in self._messages):
-                return self._last_profile
-            return None
-
-    # Compatibility and diary functionality
-    def add_interaction(self, user_text: str, assistant_text: str) -> None:
-        """Compatibility method - use add_message() instead."""
-        if user_text.strip():
-            self.add_message("user", user_text.strip())
-        if assistant_text.strip():
-            self.add_message("assistant", assistant_text.strip())
-
     def get_pending_chunks(self) -> List[str]:
         """Get unsaved messages as formatted chunks for diary update.
 
@@ -1334,19 +1305,6 @@ class DialogueMemory:
             (ts, role, content) for ts, role, content in self._messages
             if ts >= cutoff or ts > self._last_saved_timestamp
         ]
-
-    def clear_pending_updates(self) -> None:
-        """Mark all current messages as saved. Thread-safe.
-
-        DEPRECATED: Use mark_saved_up_to() instead for proper timestamp tracking.
-        Kept for backward compatibility.
-        """
-        with self._lock:
-            if self._messages:
-                # Mark all current messages as saved
-                max_ts = max(ts for ts, _, _ in self._messages)
-                self._last_saved_timestamp = max_ts
-            self._cleanup_old_messages()
 
 
 def generate_conversation_summary(
@@ -1730,168 +1688,6 @@ def search_conversation_memory_by_keywords(
     return contexts[:max_results]
 
 
-def search_conversation_memory(
-    db: Database,
-    cfg,
-    *,
-    search_query: Optional[str] = None,
-    from_time: Optional[str] = None,
-    to_time: Optional[str] = None,
-    timeout_sec: float = 60.0,
-    voice_debug: bool = False,
-    max_results: int = 15,
-) -> List[str]:
-    """
-    Search conversation memory with a natural language query or phrase.
-    This is optimised for direct user queries and tool usage.
-
-    Args:
-        db: Database instance
-        cfg: Settings — used for embedding backend dispatch
-        search_query: Natural language query or phrase to search for
-        from_time: Start timestamp (ISO format)
-        to_time: End timestamp (ISO format)
-        timeout_sec: Timeout for embedding generation
-        voice_debug: Enable debug output
-        max_results: Maximum number of results to return (default: 15)
-
-    Returns:
-        List of formatted context strings (limited to max_results)
-    """
-    contexts = []
-
-    try:
-        if search_query and search_query.strip() and cfg.embedding_model:
-            # Primary: Use vector search for semantic similarity
-            try:
-                vec = _embed_text(search_query, cfg, timeout_sec=timeout_sec)
-                vec_json = json.dumps(vec) if vec is not None else None
-
-                if vec_json:
-                    # Use database hybrid search (combines vector similarity with FTS)
-                    search_results = db.search_hybrid(search_query, vec_json, top_k=max_results)
-                else:
-                    # Fallback: Pure FTS if embedding fails
-                    search_results = db.search_hybrid(search_query, None, top_k=max_results)
-
-                # Add search results to context
-                for result in search_results:
-                    # Handle both tuple (sqlite-vss) and dict (python vector store) results
-                    if isinstance(result, dict):
-                        result_text = result.get('text', '')
-                    else:
-                        result_text = result[2] if len(result) > 2 else ''
-                    if isinstance(result_text, str) and result_text:
-                        contexts.append(result_text)
-
-            except Exception as e:
-                if voice_debug:
-                    debug_log(f"memory search failed: {e}", "memory")
-
-        # Apply time filtering if provided
-        debug_log(f"      📋 Checking time filtering: from_time={from_time}, to_time={to_time}", "memory")
-
-        if from_time or to_time:
-            filtered_contexts = []
-            from_dt = None
-            to_dt = None
-
-            try:
-                if from_time:
-                    from_dt = datetime.fromisoformat(from_time.replace('Z', '+00:00'))
-                if to_time:
-                    to_dt = datetime.fromisoformat(to_time.replace('Z', '+00:00'))
-            except Exception as e:
-                debug_log(f"      📋 Error parsing time: {e}", "memory")
-
-            debug_log(f"      📋 Time filtering: search_query='{search_query}', from_dt={from_dt}, to_dt={to_dt}", "memory")
-
-            # If we have time constraints but no search query, get all summaries in range
-            if (not search_query or not search_query.strip()) and (from_dt or to_dt):
-                recent_summaries = db.get_recent_conversation_summaries(days=30)
-                debug_log(f"      📋 Time filter: from={from_dt.date() if from_dt else None} to={to_dt.date() if to_dt else None}", "memory")
-                debug_log(f"      📋 Found {len(recent_summaries)} summaries to check", "memory")
-
-                for summary_row in recent_summaries:
-                    date_str = summary_row['date_utc']
-                    summary_date = datetime.fromisoformat(date_str + 'T00:00:00+00:00')
-
-                    in_range = True
-                    if from_dt and summary_date.date() < from_dt.date():
-                        in_range = False
-                        debug_log(f"      📋 Skipping {date_str}: before from_dt", "memory")
-                    if to_dt and summary_date.date() > to_dt.date():
-                        in_range = False
-                        debug_log(f"      📋 Skipping {date_str}: after to_dt", "memory")
-
-                    if in_range:
-                        summary_text = summary_row['summary']
-                        topics = summary_row['topics'] or ""
-                        context_str = f"[{date_str}] {summary_text}"
-                        if topics:
-                            context_str += f" (Topics: {topics})"
-                        contexts.append(context_str)
-                        debug_log(f"      📋 Including summary from {date_str} (length: {len(summary_text)})", "memory")
-
-            else:
-                # Filter existing search results by time
-                import re
-                for ctx in contexts:
-                    if ctx.startswith("---"):  # Skip headers
-                        filtered_contexts.append(ctx)
-                        continue
-
-                    # Extract date from formatted text
-                    date_match = re.match(r'\[(\d{4}-\d{2}-\d{2})\]', ctx)
-                    if date_match:
-                        date_str = date_match.group(1)
-                        try:
-                            summary_date = datetime.fromisoformat(date_str + 'T00:00:00+00:00')
-
-                            in_range = True
-                            if from_dt and summary_date < from_dt:
-                                in_range = False
-                            if to_dt and summary_date > to_dt:
-                                in_range = False
-
-                            if in_range:
-                                filtered_contexts.append(ctx)
-                        except Exception:
-                            filtered_contexts.append(ctx)  # Keep if can't parse date
-                    else:
-                        filtered_contexts.append(ctx)  # Keep non-dated entries
-
-                contexts = filtered_contexts
-
-        return contexts[:max_results]  # Limit results
-
-    except Exception:
-        return contexts[:max_results] if contexts else []
-
-
-def get_relevant_conversation_context(
-    db: Database,
-    query: str,
-    cfg,
-    *,
-    timeout_sec: float = 60.0,
-    max_results: int = 15,
-) -> List[str]:
-    """Return conversation summaries semantically relevant to ``query``.
-
-    Thin wrapper around :func:`search_conversation_memory` for callers
-    that only need the simple "give me the top N matches" path.
-    """
-    return search_conversation_memory(
-        db=db,
-        cfg=cfg,
-        search_query=query,
-        timeout_sec=timeout_sec,
-        voice_debug=False,
-        max_results=max_results,
-    )
-
-
 def update_diary_from_dialogue_memory(
     db: Database,
     dialogue_memory: DialogueMemory,
@@ -2005,11 +1801,11 @@ def update_diary_from_dialogue_memory(
                     )
                     stored = result.stored
                     skipped = result.skipped
-                    # Print whenever extraction produced anything — including
-                    # all-duplicate flushes. Without the skipped count this
-                    # line went silent after #282's dedupe (cumulative diary
-                    # re-extracts the same facts on every flush), making it
-                    # look like the memory pipeline had stopped working.
+                    # Print whenever extraction produced anything, including
+                    # all-duplicate flushes: the cumulative diary re-extracts
+                    # the same facts on every flush, and a line that went
+                    # silent on those would make the memory pipeline look as
+                    # if it had stopped working.
                     if stored or skipped:
                         dup_suffix = (
                             f"{skipped} duplicate{'' if skipped == 1 else 's'} skipped"

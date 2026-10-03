@@ -8,6 +8,15 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
+# The autouse guard that fails a test which leaves a thread running behind it.
+# It lives in its own module so the test that holds it to its word can run it
+# in a session of its own.
+from thread_guard import _no_thread_outlives_its_test  # noqa: F401
+
+# The autouse guard that keeps a test off the native inference runtimes. It
+# lives in its own module for the same reason.
+from native_guard import _no_native_inference  # noqa: F401
+
 # Robustly locate repository root (directory containing src/jarvis)
 _this_file = Path(__file__).resolve()
 ROOT = None
@@ -168,6 +177,37 @@ def _isolate_dictation_history(_bac_a_sable, request, monkeypatch):
         monkeypatch.setattr(module, "_default_history_path", lambda: target)
         patched += 1
     assert patched, "neither dictation history module could be imported"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_jarvis_state(_bac_a_sable, request, monkeypatch):
+    """Keep the suite's state changes off the live state file.
+
+    The assistant's state (idle, listening, speaking, ...) is shared with the
+    desktop app through a file in the system temp directory, and the orb of a
+    running Jarvis polls it. A test that drives the listener or a speech
+    engine publishes to it, so without this a test run would flicker the orb
+    of the app the developer has open. Each test gets its own file and a fresh
+    process-wide manager.
+    """
+    target = str(_bac_a_sable / f"state-{abs(hash(request.node.nodeid)):x}")
+
+    # The suite imports modules both as ``jarvis.x`` and as ``src.jarvis.x``,
+    # which are two distinct module objects. Patching one leaves the other
+    # publishing to the live file; both share the sandbox file, so a state
+    # published through one is read through the other.
+    import importlib
+
+    patched = 0
+    for path in ("jarvis.state", "src.jarvis.state"):
+        try:
+            module = importlib.import_module(path)
+        except ImportError:
+            continue
+        monkeypatch.setattr(module, "_state_file_path", lambda: target)
+        monkeypatch.setattr(module, "_jarvis_state_instance", None)
+        patched += 1
+    assert patched, "neither jarvis state module could be imported"
 
 
 def _foyer_des_donnees() -> Path:
@@ -692,15 +732,47 @@ class ViewerClient:
         return self._client.__exit__(*exc_info)
 
 
+def viewer_scripts(client) -> List[str]:
+    """Every script the viewer's page runs, as the browser would get it.
+
+    The page names its scripts and the server serves them from its own
+    origin. This fetches the index, takes each inline body (the page has
+    none, and ``tests/test_memory_viewer_csp.py`` insists on it) and each
+    ``src`` the page points at, and returns their source texts. Suites
+    that pin something about the page's behaviour read it here, so they
+    follow the script wherever it is served from.
+    """
+    import re
+
+    page = client.get("/").get_data(as_text=True)
+    sources = [
+        body
+        for attrs, body in re.findall(r"<script([^>]*)>(.*?)</script>", page, re.DOTALL)
+        if "src=" not in attrs and body.strip()
+    ]
+    for src in re.findall(r'<script[^>]*\ssrc="([^"]+)"', page):
+        sources.append(client.get(src).get_data(as_text=True))
+    return sources
+
+
+def viewer_page_with_scripts(client) -> str:
+    """The index page followed by every script it runs, as one text."""
+    page = client.get("/").get_data(as_text=True)
+    return "\n".join([page, *viewer_scripts(client)])
+
+
 # Listeners created by test helpers across modules (test_hot_window_input's
-# factory is imported by other suites). The autouse drainer below stops
-# each one's thinking tune after every test, wherever it was created.
+# factory is imported by other suites). The autouse drainer below stops what
+# each one left running after every test, wherever it was created.
 _created_listeners: List[Any] = []
 
 
 @pytest.fixture(autouse=True)
-def _stop_lingering_tunes():
-    """Stop every thinking tune a test started, after the test.
+def _stop_what_listeners_started(_no_thread_outlives_its_test):
+    """Stop what every listener a test created left running, after the test.
+
+    Depending on the thread guard is what orders the two: the guard is set up
+    first and torn down last, so it looks for survivors once these are stopped.
 
     A test that enables the tune and gets a query accepted leaves the
     listener's TunePlayer running: on a machine without audio output
@@ -708,11 +780,19 @@ def _stop_lingering_tunes():
     in a loop for the rest of the session. It pollutes any process-wide
     time.sleep patch a later test sets up (its 0.2s entries land in the
     recorder) and interleaves its prints with their captured output.
+
+    A test that opens a hot window leaves the state manager's timers
+    pending: the expiry timer sleeps for the whole window, so the thread
+    outlives the test by seconds unless the state manager is stopped.
     """
     yield
     while _created_listeners:
         listener = _created_listeners.pop()
-        try:
-            listener._stop_thinking_tune()
-        except Exception:
-            pass
+        for stop in (
+            lambda: listener._stop_thinking_tune(),
+            lambda: listener.state_manager.stop(),
+        ):
+            try:
+                stop()
+            except Exception:
+                pass

@@ -163,7 +163,8 @@ class Settings:
     tts_chatterbox_cfg_weight: float  # CFG weight for quality/speed trade-off
 
     # Piper TTS
-    tts_piper_model_path: str | None  # Path to .onnx voice model
+    tts_piper_model_path: str | None  # Path to .onnx voice model; the voice for every language not in tts_piper_voices
+    tts_piper_voices: dict[str, str]  # Language code -> voice (.onnx path or voice name), chosen per reply
     tts_piper_speaker: int | None  # Speaker ID for multi-speaker models
     tts_piper_length_scale: float  # Speed: <1.0 faster, >1.0 slower
     tts_piper_noise_scale: float  # Audio variation
@@ -215,6 +216,10 @@ class Settings:
     hot_window_enabled: bool
     hot_window_seconds: float
     low_power_mode: bool
+    # Whether the desktop app asks GitHub for a newer release a few seconds
+    # after it opens. Off, it sends no update check on its own; the tray's
+    # "Check for Updates" still goes out when the user asks.
+    update_check_enabled: bool
 
     # Echo Detection
     echo_energy_threshold: float
@@ -286,25 +291,15 @@ class Settings:
     # When `tool_selection_strategy == "llm"`, this model does the routing.
     # Empty string means "reuse ``llm_chat_model``" (the default).
     tool_router_model: str
-    # Optional override for the post-turn evaluator LLM. Empty string means
-    # "fall back to intent_judge_model, then ``llm_chat_model``" (the default).
-    evaluator_model: str
-    # None = auto (on for SMALL models, off for LARGE). Explicit true/false forces.
-    evaluator_enabled: Optional[bool]
     # Upper bound on toolSearchTool invocations per reply turn. The cap
     # prevents a small model from churning through the escape hatch forever
     # when no tool really fits.
     tool_search_max_calls: int
-    # Upper bound on evaluator-driven nudges per reply. Each time the
-    # evaluator says "continue" with a nudge, the nudge is injected into
-    # the next turn's system message. This cap stops nudge ping-pong when
-    # the model keeps producing prose despite the nudge.
-    evaluator_nudge_max: int
     # Optional override for the pre-loop task-list planner model. Empty
     # string means "fall back to tool_router_model → intent_judge_model →
     # ``llm_chat_model``" (the default). The planner is a small
     # classification-shaped pass so it rides the same small-model chain
-    # as the router and the evaluator.
+    # as the router.
     planner_model: str
     # Whether the pre-loop planner is enabled. True = planner always runs;
     # False = planner never runs, and the compound-query split drives the
@@ -453,7 +448,7 @@ def _migrate_config(cfg_path: Path, cfg_json: Dict[str, Any]) -> Dict[str, Any]:
     migration_version = cfg_json.get("_config_version", 0)
 
     # Migration v1: tts_engine "system" -> "piper"
-    # Piper is now the default TTS with auto-download support.
+    # Piper is the default TTS, with auto-download support.
     if migration_version < 1:
         if cfg_json.get("tts_engine") == "system":
             cfg_json["tts_engine"] = "piper"
@@ -599,9 +594,9 @@ def _cloud_safe_model(value: str, field: str, provider: str,
     """Keep auxiliary model names valid for the endpoint actually in use.
 
     Jarvis runs several small LLM tasks (intent judge, tool router,
-    evaluator, planner) on their own configured model. A remote cloud
-    endpoint namespaces its model IDs as ``vendor/model`` and answers
-    HTTP 400 ("X is not a valid model ID") to a bare local tag like
+    planner) on their own configured model. A remote cloud endpoint
+    namespaces its model IDs as ``vendor/model`` and answers HTTP 400
+    ("X is not a valid model ID") to a bare local tag like
     ``gemma4:e2b``, so the auxiliary task dies for no gain: those get the
     chat model instead when no local Ollama instance is reachable.
 
@@ -613,7 +608,7 @@ def _cloud_safe_model(value: str, field: str, provider: str,
     the only shape it accepts, and the pin is the whole reason the user
     set a small model for a small task. So the endpoint decides rather
     than the provider name, and a discarded pin is announced: nothing
-    downstream ever shows the effective value, and three of these four
+    downstream ever shows the effective value, and two of these three
     fields have no field in the settings window at all.
     """
     if not value:
@@ -653,6 +648,17 @@ def _ensure_list(value: Any) -> list[str]:
     if isinstance(value, str):
         return [v.strip() for v in value.split(",") if v.strip()]
     return [str(value)]
+
+
+def _as_bool(value: Any) -> bool:
+    """A config flag as a bool.
+
+    ``bool("false")`` is True, so a flag edited by hand as text would stay on
+    whatever it was meant to say. The usual spellings of off read as off.
+    """
+    if isinstance(value, str):
+        return value.strip().lower() not in {"false", "0", "no", "off"}
+    return bool(value)
 
 
 def _ensure_dict(value: Any) -> Dict[str, Any]:
@@ -734,6 +740,7 @@ def get_default_config() -> Dict[str, Any]:
 
         # Piper TTS
         "tts_piper_model_path": None,  # Path to .onnx voice model
+        "tts_piper_voices": {},  # Language code -> voice (.onnx path or voice name), e.g. {"fr": "fr_FR-siwis-medium"}
         "tts_piper_speaker": None,  # Speaker ID for multi-speaker models
         "tts_piper_length_scale": 0.65,  # Speed: <1.0 faster, >1.0 slower (0.65 = ~30% faster)
         "tts_piper_noise_scale": 0.8,  # Audio variation (higher = more expressive)
@@ -785,6 +792,9 @@ def get_default_config() -> Dict[str, Any]:
         "hot_window_enabled": True,
         "hot_window_seconds": 3.0,
         "low_power_mode": False,
+        # The bundled desktop app asks GitHub for a newer release shortly
+        # after it opens. False and it sends no update check on its own.
+        "update_check_enabled": True,
         "echo_energy_threshold": 2.0,
         "echo_tolerance": 0.3,  # Time tolerance for echo detection timing
 
@@ -882,16 +892,8 @@ def get_default_config() -> Dict[str, Any]:
         # judge model isn't set. Override to decouple routing from both —
         # useful when you want routing on a dedicated smaller model.
         "tool_router_model": "",
-        # Empty string = reuse intent_judge_model, falling through to
-        # ollama_chat_model only if the judge isn't set. Override to pin the
-        # evaluator to a dedicated small/fast model.
-        "evaluator_model": "",
-        # None = auto (on for small models, off for large). Set true/false to force.
-        "evaluator_enabled": None,
         # Cap the number of toolSearchTool invocations per reply.
         "tool_search_max_calls": 3,
-        # Cap the number of evaluator-driven nudges per reply.
-        "evaluator_nudge_max": 2,
         # Task-list planner (see src/jarvis/reply/planner.spec.md). Empty
         # model string = reuse tool_router_model → intent_judge_model →
         # ollama_chat_model.
@@ -943,9 +945,23 @@ def get_default_config() -> Dict[str, Any]:
     }
 
 
+# Defaults whose value depends on the platform reading them (the dictation
+# hotkey differs between Windows and the rest). An example file written on one
+# machine would hand that machine's value to every reader, so the example
+# leaves them out and each reader keeps the default of their own platform.
+_HOST_DEPENDENT_DEFAULTS = ("dictation_hotkey",)
+
+
 def export_example_config(include_db_path: bool = False) -> Dict[str, Any]:
-    """Returns example config suitable for JSON export (with adjusted db_path)."""
+    """Returns example config suitable for JSON export.
+
+    With ``include_db_path=False`` the result is the same whichever machine
+    builds it: host-dependent defaults are left out and ``db_path`` is
+    replaced with a friendly path.
+    """
     config = get_default_config().copy()
+    for key in _HOST_DEPENDENT_DEFAULTS:
+        config.pop(key, None)
     if not include_db_path:
         # Use a user-friendly path for examples
         config["db_path"] = "~/.local/share/jarvis/jarvis.db"
@@ -1065,6 +1081,16 @@ def load_settings() -> Settings:
         if tts_piper_model_path_val not in (None, "", "null")
         else None
     )
+    tts_piper_voices_val = merged.get("tts_piper_voices")
+    tts_piper_voices = (
+        {
+            key.strip(): voice.strip()
+            for key, voice in tts_piper_voices_val.items()
+            if isinstance(key, str) and isinstance(voice, str) and key.strip() and voice.strip()
+        }
+        if isinstance(tts_piper_voices_val, dict)
+        else {}
+    )
     tts_piper_speaker_val = merged.get("tts_piper_speaker")
     try:
         tts_piper_speaker = None if tts_piper_speaker_val in (None, "", "null") else int(tts_piper_speaker_val)
@@ -1113,6 +1139,7 @@ def load_settings() -> Settings:
     hot_window_enabled = bool(merged.get("hot_window_enabled", True))
     hot_window_seconds = float(merged.get("hot_window_seconds", 3.0))
     low_power_mode = bool(merged.get("low_power_mode", False))
+    update_check_enabled = _as_bool(merged.get("update_check_enabled", True))
     echo_energy_threshold = float(merged.get("echo_energy_threshold", 2.0))
     echo_tolerance = float(merged.get("echo_tolerance", 0.3))
 
@@ -1190,16 +1217,6 @@ def load_settings() -> Settings:
     tool_router_model = _cloud_safe_model(
         tool_router_model, "tool_router_model", llm_provider, llm_base_url, llm_chat_model,
         ollama_base_url=ollama_base_url)
-    evaluator_model = str(merged.get("evaluator_model", "") or "").strip()
-    evaluator_model = _cloud_safe_model(
-        evaluator_model, "evaluator_model", llm_provider, llm_base_url, llm_chat_model,
-        ollama_base_url=ollama_base_url)
-    _eval_raw = merged.get("evaluator_enabled", None)
-    evaluator_enabled: Optional[bool]
-    if _eval_raw is None:
-        evaluator_enabled = None
-    else:
-        evaluator_enabled = bool(_eval_raw)
     planner_model = str(merged.get("planner_model", "") or "").strip()
     planner_model = _cloud_safe_model(
         planner_model, "planner_model", llm_provider, llm_base_url, llm_chat_model,
@@ -1215,12 +1232,6 @@ def load_settings() -> Settings:
         tool_search_max_calls = 3
     if tool_search_max_calls < 0:
         tool_search_max_calls = 0
-    try:
-        evaluator_nudge_max = int(merged.get("evaluator_nudge_max", 2))
-    except (TypeError, ValueError):
-        evaluator_nudge_max = 2
-    if evaluator_nudge_max < 0:
-        evaluator_nudge_max = 0
     location_enabled = bool(merged.get("location_enabled", True))
     location_cache_minutes = int(merged.get("location_cache_minutes", 60))
     location_ip_address_val = merged.get("location_ip_address")
@@ -1255,17 +1266,13 @@ def load_settings() -> Settings:
     weather_city = str(merged.get("weather_city", "") or "").strip()
 
     # Parse ui subsection. ``orb_particles_enabled`` defaults to True;
-    # coerced via bool()/string rules so a hand-edited config that
-    # writes "false"/0/"no" still resolves sensibly. A missing or
-    # non-dict ``ui`` block falls back to the default.
+    # coerced via `_as_bool` so a hand-edited config that writes
+    # "false"/0/"no" still resolves sensibly. A missing or non-dict
+    # ``ui`` block falls back to the default.
     raw_ui = merged.get("ui", {})
     if not isinstance(raw_ui, dict):
         raw_ui = {}
-    raw_particles = raw_ui.get("orb_particles_enabled", True)
-    if isinstance(raw_particles, str):
-        orb_particles_enabled = raw_particles.strip().lower() not in {"false", "0", "no", "off"}
-    else:
-        orb_particles_enabled = bool(raw_particles)
+    orb_particles_enabled = _as_bool(raw_ui.get("orb_particles_enabled", True))
     ui = UISettings(orb_particles_enabled=orb_particles_enabled)
 
     whisper_min_confidence = float(merged.get("whisper_min_confidence", 0.4))
@@ -1324,6 +1331,7 @@ def load_settings() -> Settings:
 
         # Piper TTS
         tts_piper_model_path=tts_piper_model_path,
+        tts_piper_voices=tts_piper_voices,
         tts_piper_speaker=tts_piper_speaker,
         tts_piper_length_scale=tts_piper_length_scale,
         tts_piper_noise_scale=tts_piper_noise_scale,
@@ -1373,6 +1381,7 @@ def load_settings() -> Settings:
         hot_window_enabled=hot_window_enabled,
         hot_window_seconds=hot_window_seconds,
         low_power_mode=low_power_mode,
+        update_check_enabled=update_check_enabled,
         echo_energy_threshold=echo_energy_threshold,
         echo_tolerance=echo_tolerance,
         # Reminders
@@ -1415,10 +1424,7 @@ def load_settings() -> Settings:
         agentic_max_turns=agentic_max_turns,
         tool_selection_strategy=tool_selection_strategy,
         tool_router_model=tool_router_model,
-        evaluator_model=evaluator_model,
-        evaluator_enabled=evaluator_enabled,
         tool_search_max_calls=tool_search_max_calls,
-        evaluator_nudge_max=evaluator_nudge_max,
         planner_model=planner_model,
         planner_enabled=planner_enabled,
         planner_timeout_sec=planner_timeout_sec,

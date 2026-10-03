@@ -9,6 +9,7 @@ Tests exercise VoiceListener._process_transcript with mocked TTS and intent judg
 but use real StateManager and EchoDetector instances to avoid coupling to internals.
 """
 
+import threading
 import time
 from unittest.mock import patch, MagicMock
 
@@ -922,7 +923,7 @@ class TestLongTtsTailEcho:
 
 
 # ---------------------------------------------------------------------------
-# Tests: Early beep and face state feedback
+# Tests: Early beep and published state feedback
 # ---------------------------------------------------------------------------
 
 def _is_beeping(listener) -> bool:
@@ -1595,36 +1596,102 @@ class TestIntentJudgeGating:
 
 
 # ---------------------------------------------------------------------------
-# Tests: The window's length does not depend on what activation tells the face
+# Tests: The window's length does not depend on what activation announces
 # ---------------------------------------------------------------------------
 
 @pytest.mark.unit
 class TestHotWindowLengthIsMeasuredFromActivation:
     """``hot_window_seconds`` runs from the moment the window opens.
 
-    Activation also tells the face and the console, and the first time that
-    happens in a process it imports the desktop face widget, a measurable
-    fraction of a second. The clock is armed before that work, so the window
-    is the same length whatever the announcement costs."""
+    Activation also publishes the assistant's state and tells the console,
+    and either can be slow: a state file on a busy disk, a console that
+    blocks. The clock is armed before that work, so the window is the same
+    length whatever the announcement costs."""
 
     @patch("builtins.print")
-    def test_a_slow_face_update_does_not_lengthen_the_window(self, _print):
+    def test_a_slow_state_update_does_not_lengthen_the_window(self, _print):
         from unittest.mock import MagicMock
 
         listener, _ = _create_listener(echo_tolerance=0.02, hot_window_seconds=0.05)
+        announcement_over = threading.Event()
 
-        def slow_face():
-            time.sleep(0.6)
+        announcing = []
+
+        def slow_publish():
+            announcing.append(time.time())
+            # The announcement's cost. The test ends it as soon as it has its
+            # answer, so the timer threads still announcing do not outlive it.
+            announcement_over.wait(0.6)
             return MagicMock()
 
-        with patch("desktop_app.face_widget.get_jarvis_state", side_effect=slow_face):
-            listener.echo_detector.track_tts_start("Short answer.")
-            _simulate_tts_finish(listener)
-            assert _wait_for_hot_window_active(listener)
-            opened_at = time.time()
+        try:
+            with patch("jarvis.listening.state_manager.get_jarvis_state", side_effect=slow_publish):
+                listener.echo_detector.track_tts_start("Short answer.")
+                _simulate_tts_finish(listener)
+                assert _wait_for_hot_window_active(listener)
+                opened_at = time.time()
 
-            # Six times the window, a tenth of the announcement.
-            assert _wait_for_hot_window_expiry(listener, timeout=0.3), (
-                f"still open {time.time() - opened_at:.2f}s after a 0.05s window"
-            )
+                # Six times the window, a tenth of the announcement.
+                assert _wait_for_hot_window_expiry(listener, timeout=0.3), (
+                    f"still open {time.time() - opened_at:.2f}s after a 0.05s window"
+                )
+                assert announcing, "the activation never reached the slow state update"
+        finally:
+            announcement_over.set()
+            listener.state_manager.stop()
+
+
+# ---------------------------------------------------------------------------
+# Tests: The listener publishes the assistant's state as a query moves through
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+class TestTheListenerPublishesItsState:
+    """Whatever shows the assistant to the user (orb, dashboard) reads the
+    shared state the listener publishes; these follow one query through it.
+    The state is read back through the same reader a viewer uses."""
+
+    @patch("builtins.print")
+    def test_hearing_the_wake_word_is_listening(self, _print):
+        from jarvis.state import JarvisState, get_jarvis_state
+
+        listener, _ = _create_listener()
+        get_jarvis_state().set_state(JarvisState.IDLE)
+
+        listener._process_transcript("jarvis what time is it", utterance_energy=0.01)
+
+        assert get_jarvis_state().state == JarvisState.LISTENING
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_a_query_is_thinking_while_the_engine_works_on_it(self, _print):
+        from jarvis.state import JarvisState, get_jarvis_state
+
+        listener, _ = _create_listener()
+        get_jarvis_state().set_state(JarvisState.LISTENING)
+        seen_by_the_engine = []
+
+        def engine(*_args, **_kwargs):
+            seen_by_the_engine.append(get_jarvis_state().state)
+            return None
+
+        with patch("jarvis.reply.engine.run_reply_engine", side_effect=engine):
+            listener._dispatch_query("what time is it")
+
+        assert seen_by_the_engine == [JarvisState.THINKING]
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_a_query_with_no_reply_leaves_the_assistant_idle(self, _print):
+        """Nothing will be spoken to move the state on, so the tune that was
+        covering the wait stops and the assistant goes back to idle."""
+        from jarvis.state import JarvisState, get_jarvis_state
+
+        listener, _ = _create_listener()
+        listener._tune_player = MagicMock()
+        get_jarvis_state().set_state(JarvisState.THINKING)
+
+        listener._speak_reply(None)
+
+        assert get_jarvis_state().state == JarvisState.IDLE
         listener.state_manager.stop()

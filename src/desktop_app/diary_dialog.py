@@ -164,14 +164,6 @@ class DiaryUpdateDialog(QDialog):
 
         self.conversations_text.setPlainText("\n\n".join(formatted))
 
-    def set_diary_content(self, content: str):
-        """Set the diary content (for non-streaming updates)."""
-        self.diary_text.setPlainText(content)
-
-    def append_diary_token(self, token: str):
-        """Append a token to the diary content (for streaming)."""
-        self.signals.token_received.emit(token)
-
     def set_status(self, status: str):
         """Update the status message."""
         self.signals.status_changed.emit(status)
@@ -215,14 +207,3 @@ class DiaryUpdateDialog(QDialog):
             return True
         except Exception:
             return False
-
-    def set_subprocess_mode(self):
-        """
-        Configure dialog for subprocess mode.
-
-        In subprocess mode, the daemon emits IPC events via stdout which are
-        intercepted and forwarded to this dialog via process_log_line().
-        """
-        # Initial state - will be updated when IPC events arrive
-        self.conversations_text.setPlaceholderText("Waiting for daemon...")
-        self.diary_text.setPlaceholderText("Waiting for diary generation...")

@@ -2,7 +2,7 @@
 
 The orb has its own enum (``OrbState``): four visual modes plus a
 transient ERROR overlay. The shared ``JarvisState`` from
-``desktop_app.face_widget`` has more granularity (DICTATING /
+``jarvis.state`` has more granularity (DICTATING /
 DICTATION_PROCESSING / ASLEEP) than the orb cares to express
 visually, so we collapse those onto the closest orb-state.
 
@@ -39,10 +39,10 @@ class OrbState(str, Enum):
     ERROR = "error"
 
 
-# Mapping from the shared ``JarvisState`` (face_widget) onto the orb's
-# states. Resolved by *value* (string) so the orb does not have to
-# import the JarvisState enum class at module load time, which would
-# pull face_widget and therefore the entire Qt stack.
+# Mapping from the shared ``JarvisState`` (``jarvis.state``) onto the
+# orb's states. Resolved by *value* (string) so a provider can hand over
+# an enum member or a plain string alike, and this module stays a pure
+# mapping that imports nothing of the core.
 _JARVIS_TO_ORB: dict[str, OrbState] = {
     "asleep": OrbState.IDLE,                    # asleep collapses to idle visually
     "idle": OrbState.IDLE,

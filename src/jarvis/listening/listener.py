@@ -31,6 +31,7 @@ from .intent_judge import (
     warm_up_chat_model,
 )
 from ..debug import debug_log
+from ..state import JarvisState, get_jarvis_state
 from ..utils.location import is_location_available
 
 if TYPE_CHECKING:
@@ -412,7 +413,7 @@ def _predownload_whisper_snapshot(model_name: str) -> None:
     """Best-effort visible download of the faster-whisper snapshot.
 
     faster-whisper silences huggingface_hub's progress bars, and the desktop
-    app never shows a TTY, so a multi-GB first-run download used to print
+    app never shows a TTY, so a multi-GB first-run download would print
     nothing for minutes. This surfaces progress. Failures are deliberately
     swallowed: WhisperModel's own cache/429/offline paths handle them.
     """
@@ -578,6 +579,10 @@ class VoiceListener(threading.Thread):
         # reply, and reset there so a turn that never streamed behaves
         # exactly as before.
         self._streamed_chars = 0
+        # The language the user was heard in when the streamed reply began.
+        # Every part of that reply carries it, the tail included, so one
+        # reply is never spoken in two voices.
+        self._streamed_language: Optional[str] = None
         self._capture = UtteranceCapture.from_env()
         self._capture.announce()
 
@@ -639,31 +644,19 @@ class VoiceListener(threading.Thread):
             self._tune_player.start_tune()
 
     def _stop_thinking_tune(self) -> None:
-        """Stop the thinking tune and revert face state to IDLE."""
+        """Stop the thinking tune and revert the published state to IDLE."""
         if self._tune_player is not None:
             self._tune_player.stop_tune()
             self._tune_player = None
-            try:
-                from desktop_app.face_widget import get_jarvis_state, JarvisState
-                get_jarvis_state().set_state(JarvisState.IDLE)
-            except ImportError:
-                pass
-            except Exception:
-                pass
+            get_jarvis_state().set_state(JarvisState.IDLE)
 
     def _is_thinking_tune_active(self) -> bool:
         """Check if thinking tune is currently active."""
         return self._tune_player is not None and self._tune_player.is_playing()
 
-    def _set_face_state_listening(self) -> None:
-        """Set the desktop face widget to LISTENING state."""
-        try:
-            from desktop_app.face_widget import get_jarvis_state, JarvisState
-            get_jarvis_state().set_state(JarvisState.LISTENING)
-        except ImportError:
-            pass
-        except Exception as e:
-            debug_log(f"failed to set face state to LISTENING: {e}", "voice")
+    def _publish_listening_state(self) -> None:
+        """Publish LISTENING as the assistant's state."""
+        get_jarvis_state().set_state(JarvisState.LISTENING)
 
     def _speak_as_it_comes(self):
         """A token callback that speaks each sentence as it closes.
@@ -684,12 +677,16 @@ class VoiceListener(threading.Thread):
 
         decoupeur = SentenceStreamer()
         self._streamed_chars = 0
+        # Fixed before the first sentence: a transcript landing mid-reply
+        # moves `_last_detected_language`, and the rest of this reply must
+        # not change voice because of it.
+        self._streamed_language = langue = self._last_detected_language
 
         def _sur_jeton(delta: str) -> None:
             try:
                 for phrase in decoupeur.feed(delta):
                     self.track_tts_start(phrase, continues=self._streamed_chars > 0)
-                    self.tts.speak(phrase)
+                    self.tts.speak(phrase, language=langue)
                     self._streamed_chars += len(phrase) + 1
             except Exception as e:
                 # Never let delivery break generation: the buffered path
@@ -818,8 +815,7 @@ class VoiceListener(threading.Thread):
                         # remainder is only speech if it carries words she
                         # did not say. Left as "whatever is left over", a
                         # decimated tail of her own sentence rides through
-                        # as a query — the same absence-of-proof-for-proof
-                        # trade the echo override used to make.
+                        # as a query.
                         min_words = self.echo_detector.min_salvage_words
                         if (salvaged != text_lower
                                 and len(salvaged.split()) >= min_words
@@ -848,7 +844,7 @@ class VoiceListener(threading.Thread):
 
                 # Non-echo (or salvaged) in hot window — start beep
                 self._start_thinking_tune()
-                self._set_face_state_listening()
+                self._publish_listening_state()
                 debug_log("early beep: hot window active", "voice")
             else:
                 # Not in hot window — check for wake word
@@ -858,7 +854,7 @@ class VoiceListener(threading.Thread):
                 if is_wake_word_detected(text_lower, wake_word, aliases, fuzzy_ratio):
                     self._wake_timestamp = utterance_start_time
                     self._start_thinking_tune()
-                    self._set_face_state_listening()
+                    self._publish_listening_state()
                     debug_log("early beep: wake word detected", "voice")
 
         # Echo rejection & stop commands — only while TTS is actively playing.
@@ -1465,14 +1461,8 @@ class VoiceListener(threading.Thread):
         # Clear audio buffers to prevent stale audio from next query
         self._clear_audio_buffers()
 
-        # Set face state to THINKING
-        try:
-            from desktop_app.face_widget import get_jarvis_state, JarvisState
-            state_manager = get_jarvis_state()
-            state_manager.set_state(JarvisState.THINKING)
-            debug_log("face state set to THINKING (dispatch_query)", "voice")
-        except Exception as e:
-            debug_log(f"failed to set face state to THINKING: {e}", "voice")
+        get_jarvis_state().set_state(JarvisState.THINKING)
+        debug_log("state set to THINKING (dispatch_query)", "voice")
 
         # Import reply engine
         from ..reply.engine import run_reply_engine
@@ -1556,7 +1546,8 @@ class VoiceListener(threading.Thread):
                 if reste:
                     self.track_tts_start(reste, continues=True)
                 self.tts.speak(reste, completion_callback=_on_tts_complete,
-                               duration_callback=_on_duration_known)
+                               duration_callback=_on_duration_known,
+                               language=self._streamed_language)
                 return
 
             # Track TTS start for echo detection with actual text
@@ -1564,7 +1555,8 @@ class VoiceListener(threading.Thread):
             debug_log(f"starting TTS for reply ({len(reply)} chars)", "voice")
 
             self.tts.speak(reply, completion_callback=_on_tts_complete,
-                          duration_callback=_on_duration_known)
+                          duration_callback=_on_duration_known,
+                          language=self._last_detected_language)
         else:
             debug_log(f"no TTS output: reply={bool(reply)}, tts={bool(self.tts)}, enabled={getattr(self.tts, 'enabled', False) if self.tts else False}", "voice")
             # Stop thinking tune if no TTS response
@@ -1609,13 +1601,13 @@ class VoiceListener(threading.Thread):
     def drain_reply_queue(self) -> None:
         """Say at most one queued reply. This thread only.
 
-        One at a time, and only while nothing is already being said.
-        ``TTS.speak`` keeps its completion callback in a single
-        engine-level slot (output/tts.py:369, set at :469, cleared at
-        :579), so a second call before the first finishes overwrites the
-        first's callback — and that callback is what reopens the
-        listening window. Whatever is left waits for the next pass, which
-        is at most one audio frame away.
+        One at a time, and only while nothing is already being said. The
+        echo detector holds the record of one reply (its text, its start
+        and its exact duration), so a second reply started while the
+        first is still audible would replace it, and the rest of the
+        first would be compared against the wrong sentence. Whatever is
+        left waits for the next pass, which is at most one audio frame
+        away.
         """
         q = getattr(self, "_reply_queue", None)
         if q is None:
@@ -1826,14 +1818,12 @@ class VoiceListener(threading.Thread):
     def _transcription_announcement(self, text: str) -> str:
         """The console line for one transcription — heard, or thrown away.
 
-        The announcement used to print before the guards ran, and the
-        rejection only reached the debug log, which is off by default. On
-        2026-08-17 the console filled with a hundred and ten repetitions
-        of "I" being announced as Heard, over and over, while the guard
-        was catching every one of them. The system was behaving and the
-        only surface he reads said otherwise — the day's motif inverted,
-        a success wearing the face of a failure, and just as expensive: a
-        log that cannot be trusted is a log nobody judges by.
+        The repetition guard picks the line, so a transcription it rejects
+        is announced as discarded and never as heard. The rejection would
+        otherwise reach only the debug log, which is off by default, and
+        a console that reports "Heard" while the guard is catching every
+        repetition says the opposite of what the system is doing: a log
+        that cannot be trusted is a log nobody judges by.
 
         What is discarded says so, briefly, with its reason. Repeating
         the garbage under a different emoji would fix nothing.
@@ -2790,13 +2780,8 @@ class VoiceListener(threading.Thread):
                     flush=True,
                 )
 
-            # Set face state to IDLE (awake and ready, waiting for wake word)
-            try:
-                from desktop_app.face_widget import get_jarvis_state, JarvisState
-                state_manager = get_jarvis_state()
-                state_manager.set_state(JarvisState.IDLE)
-            except Exception:
-                pass
+            # Awake and ready, waiting for the wake word
+            get_jarvis_state().set_state(JarvisState.IDLE)
 
             while not self._should_stop:
                 self._check_audio_health()

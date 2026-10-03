@@ -34,10 +34,11 @@
 
 **📊 Transparent progress** - We track what works (and what doesn't) with automated evals. [See the suite →](evals/)
 
-**🚧 Known limitations:** Jarvis is under active development. Primary development happens on macOS. Windows/Linux support may lag behind. On Windows, Qt is held at 6.9: 6.10 and later fail to load `Qt6Core.dll`, so upgrading PyQt6 by hand breaks the app. We're building in the open, [issues](https://github.com/isair/jarvis/issues) and [contributions](https://github.com/isair/jarvis/pulls) welcome!
-- No mobile apps ([#17](https://github.com/isair/jarvis/issues/17))
-- "Stop" commands during speech sometimes get filtered as echo ([#24](https://github.com/isair/jarvis/issues/24))
-- Dictation is not available on macOS 26+ (Tahoe) due to a pynput incompatibility ([#172](https://github.com/isair/jarvis/issues/172))
+**🚧 Known limitations:** Jarvis is under active development. Primary development happens on macOS. Windows/Linux support may lag behind. On Windows, Qt is held at 6.9: 6.10 and later fail to load `Qt6Core.dll`, so upgrading PyQt6 by hand breaks the app. We're building in the open, [issues](https://github.com/Hocsman/jarvis/issues) and [contributions](https://github.com/Hocsman/jarvis/pulls) welcome!
+- No mobile apps ([upstream #17](https://github.com/isair/jarvis/issues/17))
+- "Stop" commands during speech sometimes get filtered as echo ([upstream #24](https://github.com/isair/jarvis/issues/24))
+- Dictation is not available on macOS 26+ (Tahoe) due to a pynput incompatibility ([upstream #172](https://github.com/isair/jarvis/issues/172))
+- The packaged macOS app starts with the floating orb instead of the dashboard, because Qt WebEngine cannot be shown from that bundle (the memory viewer opens in your browser)
 
 <details>
 <summary><strong>See it in action</strong> (example conversations)</summary>
@@ -135,7 +136,7 @@ I have opened YouTube for you.
 
 ### 2. Download Jarvis
 
-Get the latest from [GitHub Releases](https://github.com/isair/jarvis/releases):
+Get the latest from [GitHub Releases](https://github.com/Hocsman/jarvis/releases):
 
 | Platform | Download | Run |
 |----------|----------|-----|
@@ -335,7 +336,7 @@ Both thresholds are exposed in the Settings window under *Whisper*.
 ```json
 {
   "planner_enabled": true,          // set to false to disable the planner entirely
-  "planner_model": "",              // override which model plans (default: reuses tool_router_model chain)
+  "planner_model": "",              // override which model plans (default: tracks llm_chat_model)
   "planner_timeout_sec": 6.0        // per-call timeout for plan and step-resolver LLM calls
 }
 ```
@@ -418,6 +419,19 @@ To pick a voice yourself, browse [HuggingFace](https://huggingface.co/rhasspy/pi
   "tts_piper_model_path": "~/.local/share/jarvis/models/piper/fr_FR-siwis-medium.onnx"
 }
 ```
+
+To have the voice follow the language of each reply, list a voice per language (also under Settings, Piper TTS, Voice per Language). A voice is a Piper voice name or the path of a `.onnx` file, downloaded on first use:
+```json
+{
+  "tts_piper_voices": { "fr": "fr_FR-siwis-medium", "de": "de_DE-thorsten-medium" },
+  "tts_piper_model_path": "~/.local/share/jarvis/models/piper/en_GB-alan-medium.onnx"
+}
+```
+- With `response_language` empty, the voice follows the language she heard you speak, on the assumption that she answers in it.
+- With `response_language` set, that language decides the voice, whatever you spoke.
+- A language you did not list is read with `tts_piper_model_path`, or the built-in voice when that is empty.
+- A key is a language: its ISO 639-1 code (`fr`) works for every language, a regional variant (`fr-FR`) counts as its base language, and for the eleven languages named above the language's name (`français`, `French`) works too. Any other language has to be keyed by its ISO 639-1 code (`ja`, `sv`), which is what the speech recogniser reports: with `response_language` empty, a name such as `Japanese` is not recognised.
+- Known limitation: the voice is chosen from the language she is expected to answer in, not from the words she writes, and with Piper her instructions also say "Always respond in English". A model that obeys that line answers in English, and the voice you mapped to your language then reads English with its accent. The voice map only helps when the model answers in the mapped language anyway.
 
 **Kokoro** - more natural neural voice (Kokoro-82M), still real-time on CPU:
 ```json
@@ -638,7 +652,7 @@ Get API key at [composio.dev](https://composio.dev)
 <summary><strong>Running from source</strong></summary>
 
 ```bash
-git clone https://github.com/isair/jarvis.git
+git clone https://github.com/Hocsman/jarvis.git
 cd jarvis
 
 # macOS
@@ -666,9 +680,12 @@ Running from source enables Chatterbox TTS (AI voice with emotion/cloning). Pipe
   "mcps": {},
   "location_auto_detect": false,
   "location_cgnat_resolve_public_ip": false,
-  "location_enabled": false
+  "location_enabled": false,
+  "update_check_enabled": false
 }
 ```
+
+`update_check_enabled` stops the installed desktop app from asking GitHub for new releases when it starts (**⚙️ Settings → ✨ Features → Check for Updates at Startup**). **Check for Updates** in the tray menu still works when you ask. When you do update, the installer is checked against the release's `SHA256SUMS.txt` before it runs and is discarded if it does not match.
 
 Verify: `sudo lsof -i -n -P | grep jarvis` (should only show 127.0.0.1 to Ollama)
 
@@ -707,7 +724,8 @@ provider can't run out the voice-assistant latency budget.
 
 - **Personal use**: Free forever
 - **Commercial use**: [Contact us](mailto:baris@writeme.com)
+- **Origin**: a fork of [isair/jarvis](https://github.com/isair/jarvis) by Baris Sencan, under the same licence (see [LICENSE](LICENSE))
 
 ## Support
 
-[Report issues](https://github.com/isair/jarvis/issues) · [Discussions](https://github.com/isair/jarvis/discussions) · [Sponsor](https://github.com/sponsors/isair)
+[Report issues](https://github.com/Hocsman/jarvis/issues) · [Sponsor](https://github.com/sponsors/isair)

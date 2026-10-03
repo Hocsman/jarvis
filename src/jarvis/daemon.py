@@ -30,6 +30,7 @@ from .memory.conversation import DialogueMemory, update_diary_from_dialogue_memo
 from .output.tts import create_tts_engine
 from .tools.registry import initialize_mcp_tools
 from .debug import debug_log
+from .state import JarvisState, get_jarvis_state
 from .listening.listener import VoiceListener
 from .utils.location import get_location_context, is_location_available
 
@@ -38,7 +39,6 @@ _global_dialogue_memory: Optional[DialogueMemory] = None
 _global_stop_requested: bool = False
 _global_skip_shutdown_diary_update: bool = False
 _warm_profile_core_listener = None  # registered callback, kept for shutdown unregister
-_global_tts_engine = None  # TTS engine reference for face animation polling
 _global_dictation_engine = None  # Dictation engine reference for history UI
 # Config + DB booted by main(). Shared by the voice listener and the text-chat
 # submission path so voice and text are one conversation against one store.
@@ -160,20 +160,6 @@ def set_diary_update_callbacks(
     _diary_update_callbacks["on_status"] = on_status
     _diary_update_callbacks["on_chunks"] = on_chunks
     _diary_update_callbacks["on_complete"] = on_complete
-
-
-def get_pending_diary_chunks() -> list:
-    """Get pending conversation chunks from dialogue memory (for UI display only).
-
-    Uses ``get_pending_chunks()`` which discards the atomic snapshot timestamp.
-    Do not use the result of this function to drive diary saves — the actual
-    save path goes through ``update_diary_from_dialogue_memory``, which calls
-    ``get_pending_chunks_with_snapshot()`` internally.
-    """
-    global _global_dialogue_memory
-    if _global_dialogue_memory is None:
-        return []
-    return _global_dialogue_memory.get_pending_chunks()
 
 
 def get_hot_window_messages() -> list:
@@ -931,11 +917,6 @@ def is_stop_requested() -> bool:
     return _global_stop_requested
 
 
-def get_tts_engine():
-    """Get the global TTS engine for speaking state polling (used by face widget)."""
-    return _global_tts_engine
-
-
 def get_dictation_engine():
     """Get the global dictation engine (used by desktop app for history window)."""
     return _global_dictation_engine
@@ -1106,9 +1087,42 @@ def _apply_ledger_retention(db) -> None:
         debug_log(f"startup ledger prune skipped: {e}", "tools")
 
 
+def build_tts_engine(cfg):
+    """The speech engine the settings ask for, not yet started.
+
+    One place carries every ``tts_*`` setting (and ``response_language``,
+    which picks the Piper voice) to the engine, so a setting that is read,
+    shown in the settings window and then not passed on cannot go unnoticed.
+    """
+    return create_tts_engine(
+        engine=cfg.tts_engine,
+        enabled=cfg.tts_enabled,
+        voice=cfg.tts_voice,
+        rate=cfg.tts_rate,
+        # Chatterbox parameters
+        device=cfg.tts_chatterbox_device,
+        audio_prompt_path=cfg.tts_chatterbox_audio_prompt,
+        exaggeration=cfg.tts_chatterbox_exaggeration,
+        cfg_weight=cfg.tts_chatterbox_cfg_weight,
+        # Piper parameters
+        piper_model_path=cfg.tts_piper_model_path,
+        piper_speaker=cfg.tts_piper_speaker,
+        piper_length_scale=cfg.tts_piper_length_scale,
+        piper_noise_scale=cfg.tts_piper_noise_scale,
+        piper_noise_w=cfg.tts_piper_noise_w,
+        piper_sentence_silence=cfg.tts_piper_sentence_silence,
+        response_language=cfg.response_language,
+        piper_voices=cfg.tts_piper_voices,
+        # Kokoro parameters
+        kokoro_voice=cfg.tts_kokoro_voice,
+        kokoro_lang_code=cfg.tts_kokoro_lang_code,
+        kokoro_speed=cfg.tts_kokoro_speed,
+    )
+
+
 def main() -> None:
     """Main daemon entry point."""
-    global _global_dialogue_memory, _global_stop_requested, _global_tts_engine, _global_dictation_engine, _global_listener
+    global _global_dialogue_memory, _global_stop_requested, _global_dictation_engine, _global_listener
     global _warm_profile_core_listener
     global _global_skip_shutdown_diary_update
 
@@ -1299,30 +1313,7 @@ def main() -> None:
 
     # Initialize TTS
     print(f"🔊 Initializing TTS engine ({cfg.tts_engine})...", flush=True)
-    tts = create_tts_engine(
-        engine=cfg.tts_engine,
-        enabled=cfg.tts_enabled,
-        voice=cfg.tts_voice,
-        rate=cfg.tts_rate,
-        # Chatterbox parameters
-        device=cfg.tts_chatterbox_device,
-        audio_prompt_path=cfg.tts_chatterbox_audio_prompt,
-        exaggeration=cfg.tts_chatterbox_exaggeration,
-        cfg_weight=cfg.tts_chatterbox_cfg_weight,
-        # Piper parameters
-        piper_model_path=cfg.tts_piper_model_path,
-        piper_speaker=cfg.tts_piper_speaker,
-        piper_length_scale=cfg.tts_piper_length_scale,
-        piper_noise_scale=cfg.tts_piper_noise_scale,
-        piper_noise_w=cfg.tts_piper_noise_w,
-        piper_sentence_silence=cfg.tts_piper_sentence_silence,
-        response_language=cfg.response_language,
-        # Kokoro parameters
-        kokoro_voice=cfg.tts_kokoro_voice,
-        kokoro_lang_code=cfg.tts_kokoro_lang_code,
-        kokoro_speed=cfg.tts_kokoro_speed,
-    )
-    _global_tts_engine = tts  # Expose for face widget speaking animation
+    tts = build_tts_engine(cfg)
     if tts.enabled:
         tts.start()
         print("✓ TTS engine started", flush=True)
@@ -1395,28 +1386,16 @@ def main() -> None:
 
             def _on_dictation_start():
                 voice_thread._dictation_active = True
-                try:
-                    from desktop_app.face_widget import JarvisState, get_jarvis_state
-                    get_jarvis_state().set_state(JarvisState.DICTATING)
-                except Exception:
-                    pass
+                get_jarvis_state().set_state(JarvisState.DICTATING)
                 debug_log("dictation started — listener paused", "dictation")
 
             def _on_dictation_processing_start():
-                try:
-                    from desktop_app.face_widget import JarvisState, get_jarvis_state
-                    get_jarvis_state().set_state(JarvisState.DICTATION_PROCESSING)
-                except Exception:
-                    pass
+                get_jarvis_state().set_state(JarvisState.DICTATION_PROCESSING)
                 debug_log("dictation processing started — transcribing captured audio", "dictation")
 
             def _on_dictation_end():
                 voice_thread._dictation_active = False
-                try:
-                    from desktop_app.face_widget import JarvisState, get_jarvis_state
-                    get_jarvis_state().set_state(JarvisState.IDLE)
-                except Exception:
-                    pass
+                get_jarvis_state().set_state(JarvisState.IDLE)
                 debug_log("dictation ended — listener resumed", "dictation")
 
             dictation = _DE(

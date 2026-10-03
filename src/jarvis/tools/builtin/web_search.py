@@ -14,8 +14,8 @@ from ..types import ToolExecutionResult
 
 
 # Per-fetch deadline — tight enough that a worst-case 3-way cascade fits the
-# voice-assistant latency budget. Historical value was 8s per fetch (24s worst
-# case); 4s keeps the cascade under 12s even if every attempt stalls.
+# voice-assistant latency budget: at 4s per fetch the cascade stays under 12s
+# even if every attempt stalls.
 _FETCH_TIMEOUT_SEC = 4.0
 # Wall-clock cap for the entire cascade when fetches run in parallel.
 _CASCADE_WALL_CLOCK_SEC = 8.0
@@ -722,9 +722,9 @@ class WebSearchTool(Tool):
             # falling back regardless of whether a subsequent provider rescues
             # the query. The spec requires the 🚧 bot-challenge line to fire
             # even when Wikipedia then succeeds (spec §Progress messages).
-            # The ⚠️ no-results line fills the equivalent gap for the zero-
-            # result case, which previously produced no output between
-            # "🌐 Searching…" and "📚 Searching Wikipedia…".
+            # The ⚠️ no-results line covers the zero-result case, so there
+            # is always output between "🌐 Searching…" and
+            # "📚 Searching Wikipedia…".
             if ddg_rate_limited and not instant_results:
                 context.user_print(
                     "🚧 DuckDuckGo served a bot-challenge page — "
@@ -735,15 +735,15 @@ class WebSearchTool(Tool):
 
             # Auto-fetch content from top results to provide actual data.
             # Cascade through the first 3 results in PARALLEL under a shared
-            # wall-clock cap. The original serial 3 × 8s design could block
-            # for 24s worst case (intolerable for a voice assistant);
+            # wall-clock cap. Fetching them serially could block for three
+            # per-fetch deadlines (intolerable for a voice assistant);
             # parallel + a single _CASCADE_WALL_CLOCK_SEC cap puts us inside
             # ~8s even when two of three hosts hang, and we prefer the
-            # top-ranked result whenever its fetch succeeds. Field failures
-            # 2026-04-20 showed top-1 fetches silently returning None
-            # (timeout / TLS / decode) — one attempt left the reply
-            # answerless. Fetching in parallel also masks tail latency from
-            # slow-but-eventually-responsive origins.
+            # top-ranked result whenever its fetch succeeds. A top-1 fetch
+            # can silently return None (timeout / TLS / decode), so a single
+            # attempt would leave the reply answerless. Fetching in parallel
+            # also masks tail latency from slow-but-eventually-responsive
+            # origins.
             fetched_content: Optional[str] = None
             fetch_attempted_any = False
             if result_urls and not instant_results:
@@ -980,8 +980,7 @@ class WebSearchTool(Tool):
                     # for a 2B model are: explicit negative examples of
                     # the deflection phrasing, a pointer to the exact
                     # section to read, and a one-line template of the
-                    # expected answer shape. Previously the envelope was
-                    # just "use this information" — far too permissive.
+                    # expected answer shape.
                     envelope = (
                         f"Here are the web search results for '{search_query}'. "
                         f"The answer the user needs is INSIDE the UNTRUSTED WEB "
