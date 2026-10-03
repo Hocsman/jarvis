@@ -2,6 +2,7 @@
 
 import pytest
 from unittest.mock import Mock, patch, MagicMock
+import sys
 import threading
 import time
 
@@ -594,94 +595,150 @@ class TestPiperTTSThreadSafety:
         assert tts._q.qsize() == 30
 
 
+def _http_error_response(status):
+    """A response whose ``raise_for_status`` raises the given HTTP error."""
+    import requests
+
+    response = MagicMock()
+    error = requests.exceptions.HTTPError(response=MagicMock(status_code=status))
+    error.response = MagicMock(status_code=status)
+    response.raise_for_status.side_effect = error
+    return response
+
+
+def _served_response(body=b"data"):
+    response = MagicMock()
+    response.raise_for_status.return_value = None
+    response.headers = {"content-length": str(len(body))}
+    response.iter_content.return_value = [body]
+    return response
+
+
+class _DownloadIO:
+    """``requests.get`` and ``time.sleep`` as one voice download sees them.
+
+    Both live on modules every thread shares, so patching them hands a
+    counter whatever else is running during the window: a worker an earlier
+    test left behind, the thinking tune's spinner sleeping 0.2 s, another
+    download. This counts a ``get`` only when the thread running the download
+    asks for this voice's files, and a ``sleep`` only when the download itself
+    asks for it. Every other call goes to the function that was in place
+    before, untouched.
+
+    ``respond(url, nth)`` answers the download's ``nth`` request (from 1) for
+    that URL.
+    """
+
+    def __init__(self, voice, models_dir, respond):
+        import requests
+
+        self._voice = voice
+        self._models_dir = models_dir
+        self._respond = respond
+        self._owner = threading.get_ident()
+        self._get_elsewhere = requests.get
+        self._sleep_elsewhere = time.sleep
+        self.gets = []
+        self.sleeps = []
+
+    def get(self, url, **kwargs):
+        if threading.get_ident() != self._owner or f"/{self._voice}." not in url:
+            return self._get_elsewhere(url, **kwargs)
+        self.gets.append(url)
+        return self._respond(url, self.gets.count(url))
+
+    def sleep(self, seconds):
+        from src.jarvis.output.tts import _download_piper_voice
+
+        asked_by_the_download = sys._getframe(1).f_code is _download_piper_voice.__code__
+        if threading.get_ident() != self._owner or not asked_by_the_download:
+            return self._sleep_elsewhere(seconds)
+        self.sleeps.append(seconds)
+
+    def download(self):
+        from src.jarvis.output.tts import _download_piper_voice
+
+        with patch("requests.get", self.get), \
+             patch("src.jarvis.output.tts.time.sleep", self.sleep), \
+             patch("src.jarvis.output.tts._get_piper_models_dir", return_value=self._models_dir):
+            return _download_piper_voice(self._voice)
+
+    def requests_for(self, suffix):
+        return [url for url in self.gets if url.endswith(suffix)]
+
+
 class TestPiperVoiceDownloadRetry:
     """Tests for retry logic when HuggingFace returns 429 Too Many Requests."""
 
+    VOICE = "en_GB-alan-medium"
+
     def test_429_retried_then_succeeds(self, tmp_path):
         """Download retries on 429 and succeeds on subsequent attempt."""
-        import requests
-        from src.jarvis.output.tts import _download_piper_voice
+        def respond(url, nth):
+            return _http_error_response(429) if nth == 1 else _served_response()
 
-        call_count = {"onnx": 0, "json": 0}
-
-        def mock_get(url, **kwargs):
-            resp = MagicMock()
-            is_json = url.endswith(".json")
-            key = "json" if is_json else "onnx"
-            call_count[key] += 1
-
-            if call_count[key] == 1:
-                # First call: 429
-                http_err = requests.exceptions.HTTPError(
-                    response=MagicMock(status_code=429)
-                )
-                http_err.response = MagicMock(status_code=429)
-                resp.raise_for_status.side_effect = http_err
-                return resp
-
-            # Subsequent calls: success
-            resp.raise_for_status.return_value = None
-            resp.headers = {"content-length": "4"}
-            resp.iter_content.return_value = [b"data"]
-            return resp
-
-        with patch("requests.get", side_effect=mock_get):
-            with patch("src.jarvis.output.tts._get_piper_models_dir", return_value=tmp_path):
-                with patch("src.jarvis.output.tts.time.sleep") as mock_sleep:
-                    result = _download_piper_voice("en_GB-alan-medium")
+        io = _DownloadIO(self.VOICE, tmp_path, respond)
+        result = io.download()
 
         assert result is not None
-        assert (tmp_path / "en_GB-alan-medium.onnx").exists()
-        # Verify exponential backoff: 2^1=2s for the onnx 429, 2^1=2s for the json 429
-        sleep_values = [c.args[0] for c in mock_sleep.call_args_list if c.args and c.args[0] >= 1]
-        assert all(v == 2 for v in sleep_values)
+        assert (tmp_path / f"{self.VOICE}.onnx").exists()
+        # Exponential backoff: 2^1=2s for the onnx 429, 2^1=2s for the json 429
+        assert io.sleeps == [2, 2]
 
     def test_429_gives_up_after_max_retries(self, tmp_path):
         """Download gives up after exhausting retries on persistent 429."""
-        import requests
-        from src.jarvis.output.tts import _download_piper_voice
-
-        def mock_get(url, **kwargs):
-            resp = MagicMock()
-            http_err = requests.exceptions.HTTPError(
-                response=MagicMock(status_code=429)
-            )
-            http_err.response = MagicMock(status_code=429)
-            resp.raise_for_status.side_effect = http_err
-            return resp
-
-        with patch("requests.get", side_effect=mock_get):
-            with patch("src.jarvis.output.tts._get_piper_models_dir", return_value=tmp_path):
-                with patch("src.jarvis.output.tts.time.sleep") as mock_sleep:
-                    result = _download_piper_voice("en_GB-alan-medium")
+        io = _DownloadIO(self.VOICE, tmp_path, lambda url, nth: _http_error_response(429))
+        result = io.download()
 
         assert result is None
-        # Verify exponential backoff sequence: 2, 4, 8, 16
-        sleep_values = [c.args[0] for c in mock_sleep.call_args_list if c.args and c.args[0] >= 1]
-        assert sleep_values == [2, 4, 8, 16]
+        # Exponential backoff sequence: 2, 4, 8, 16
+        assert io.sleeps == [2, 4, 8, 16]
 
     def test_non_429_error_not_retried(self, tmp_path):
         """Download does not retry on non-429 HTTP errors (e.g. 404)."""
-        import requests
-        from src.jarvis.output.tts import _download_piper_voice
-
-        get_call_count = 0
-
-        def mock_get(url, **kwargs):
-            nonlocal get_call_count
-            get_call_count += 1
-            resp = MagicMock()
-            http_err = requests.exceptions.HTTPError(
-                response=MagicMock(status_code=404)
-            )
-            http_err.response = MagicMock(status_code=404)
-            resp.raise_for_status.side_effect = http_err
-            return resp
-
-        with patch("requests.get", side_effect=mock_get):
-            with patch("src.jarvis.output.tts._get_piper_models_dir", return_value=tmp_path):
-                result = _download_piper_voice("en_GB-alan-medium")
+        io = _DownloadIO(self.VOICE, tmp_path, lambda url, nth: _http_error_response(404))
+        result = io.download()
 
         assert result is None
         # Should only call once for the onnx file (no retry)
-        assert get_call_count == 1
+        assert len(io.gets) == 1
+        assert io.sleeps == []
+
+    def test_calls_from_other_threads_do_not_change_what_is_counted(self, tmp_path):
+        """A thread that is not running the download may call ``requests.get``
+        and ``time.sleep`` while it runs. Those calls are not the download's:
+        they change neither its counts nor its answers, and they reach the
+        functions that were in place before."""
+        import requests
+
+        elsewhere = {"gets": [], "sleeps": []}
+
+        def foreign_calls():
+            requests.get("https://elsewhere.example/other.onnx", timeout=1)
+            time.sleep(7.5)
+
+        def respond(url, nth):
+            if nth == 1:
+                other = threading.Thread(target=foreign_calls)
+                other.start()
+                other.join(5)
+                return _http_error_response(429)
+            return _served_response()
+
+        def get_elsewhere(url, **kwargs):
+            elsewhere["gets"].append(url)
+            return MagicMock()
+
+        with patch("requests.get", get_elsewhere), \
+             patch("time.sleep", elsewhere["sleeps"].append):
+            io = _DownloadIO(self.VOICE, tmp_path, respond)
+            result = io.download()
+
+        assert result is not None
+        assert io.sleeps == [2, 2]
+        assert len(io.requests_for(".onnx")) == 2
+        assert len(io.requests_for(".onnx.json")) == 2
+        assert "https://elsewhere.example/other.onnx" in elsewhere["gets"]
+        assert 7.5 in elsewhere["sleeps"]
+        assert "https://elsewhere.example/other.onnx" not in io.gets
+        assert 7.5 not in io.sleeps
