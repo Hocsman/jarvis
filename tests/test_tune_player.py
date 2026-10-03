@@ -1,7 +1,7 @@
 """Behavioural tests for the thinking-tune player.
 
 Covers:
-- Sample / WAV generation: right format/size, seam is effectively seamless.
+- Sample generation: right format/size, seam is effectively seamless.
 - TunePlayer lifecycle: idempotent start/stop, is_playing state, prompt
   stop even when a "stream" is running.
 - Sounddevice dispatch: stop_tune closes the stream cleanly from the
@@ -13,12 +13,9 @@ injected into sys.modules — works headlessly in CI.
 """
 from __future__ import annotations
 
-import io
-import struct
 import sys
 import time
 import types
-import wave
 from unittest.mock import MagicMock
 
 import pytest
@@ -27,13 +24,11 @@ from jarvis.output import tune_player
 from jarvis.output.tune_player import (
     TunePlayer,
     _generate_thinking_pad_samples,
-    _generate_thinking_pad_wav,
     _get_thinking_pad_samples,
-    _get_thinking_pad_wav,
 )
 
 
-# --- Sample / WAV generation -----------------------------------------------
+# --- Sample generation -----------------------------------------------------
 
 def test_thinking_pad_samples_have_expected_shape():
     samples, rate = _generate_thinking_pad_samples()
@@ -44,22 +39,10 @@ def test_thinking_pad_samples_have_expected_shape():
     assert samples.size / rate >= 5.0
 
 
-def test_thinking_pad_wav_is_well_formed():
-    data = _generate_thinking_pad_wav()
-    with wave.open(io.BytesIO(data)) as w:
-        assert w.getnchannels() == 1
-        assert w.getsampwidth() == 2
-        assert w.getframerate() == 44100
-
-
 def test_thinking_pad_samples_cached():
     a = _get_thinking_pad_samples()
     b = _get_thinking_pad_samples()
     assert a is b
-
-
-def test_thinking_pad_wav_cached():
-    assert _get_thinking_pad_wav() is _get_thinking_pad_wav()
 
 
 def test_thinking_pad_seam_is_effectively_seamless():

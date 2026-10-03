@@ -164,7 +164,7 @@ Split quality safeguards:
 
 ## Auto-Merge (Future — requires LLM integration)
 
-When all children collectively hold < MERGE_THRESHOLD (200 tokens):
+When all children collectively hold fewer than 200 tokens:
 
 1. Collapse children's data back into parent
 2. Delete child nodes
@@ -228,10 +228,8 @@ Note: the always-on core profile, injected on every turn, is separate from query
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `SPLIT_THRESHOLD` | 1500 | Tokens before auto-split |
-| `MERGE_THRESHOLD` | 200 | Tokens below which children collapse |
 | `RECENT_NODES_COUNT` | 10 | Recent nodes to surface |
 | `TOP_NODES_COUNT` | 15 | Top nodes to surface |
-| `TOP_NODES_WINDOW_DAYS` | 30 | Legacy — kept for API compat, no longer used for filtering |
 | `DECAY_HALF_LIFE_DAYS` | 14 | Days until a node's access score halves |
 | `MAX_TRAVERSAL_DEPTH` | 8 | Safety limit on graph traversal |
 | `SUMMARY_MAX_LENGTH` | 300 | Max chars for node description |

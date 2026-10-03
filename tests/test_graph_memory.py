@@ -11,7 +11,6 @@ from src.jarvis.memory.graph import (
     MemoryNode,
     _estimate_tokens,
     SPLIT_THRESHOLD,
-    MERGE_THRESHOLD,
     FIXED_BRANCHES,
 )
 
