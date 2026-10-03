@@ -223,7 +223,7 @@ sequenceDiagram
   
   Engine->>Engine: sanitize (drop tool markers)
   Engine->>Out: print + optional speak
-  Engine->>ShortMem: add_interaction(user, assistant)
+  Engine->>ShortMem: add_message(user), add_message(assistant)
   Engine-->>Caller: reply
 ```
 

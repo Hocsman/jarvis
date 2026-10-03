@@ -63,9 +63,8 @@ resident for the daemon's lifetime.
   task-group teardown, surfaces as `MCPServerSessionError` (the
   original kept as `__cause__`) so the tool funnel records the call in
   the ledger instead of losing the turn.
-- `MCPClient.invoke_tool_async` is unchanged and still uses one-shot
-  sessions. Sync `MCPClient.list_tools` / `invoke_tool` route through
-  the runtime.
+- `MCPClient.list_tools` / `invoke_tool` are the only way to reach a
+  server, and both route through the runtime.
 
 ## Public surface
 

@@ -657,9 +657,9 @@ def routines_get() -> Response:
         # Blocks with no live row: routines that were stopped. Listed,
         # because the block is the durable record of what that routine
         # was allowed to do and saying the same request again restarts
-        # it — and until now the only surface holding that was a file the
-        # desktop app never opened, under an empty state reading "aucune
-        # routine" over a routines.md that held one.
+        # it. Unlisted, the only surface holding it would be a file the
+        # desktop app never opens, under an empty state reading "aucune
+        # routine" over a routines.md that holds one.
         for nom, bloc in blocs.items():
             if nom in vus:
                 continue

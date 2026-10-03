@@ -1,7 +1,7 @@
 """
 Opt-in per-turn prompt dump for the reply engine.
 
-Motivation: PR #232's harness evals cannot reproduce the live confab where
+Motivation: the harness evals cannot reproduce the live confab where
 `gemma4:e2b` answers "Tell me about the movie Possessor" with "The movie is
 Under the Skin" despite a successful webSearch fetch. To bridge the
 harness-vs-field gap, this module writes the exact `messages` array, the

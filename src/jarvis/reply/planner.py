@@ -65,8 +65,8 @@ def call_llm_direct(*, cfg, chat_model, system_prompt, user_content,
 # readable and prevents the model from treating the plan as exhaustive.
 MAX_STEPS = 5
 
-# Absolute minimum query length worth planning. The planner now runs
-# FIRST in the reply flow (before memory search and tool routing), so
+# Absolute minimum query length worth planning. The planner runs
+# first in the reply flow (before memory search and tool routing), so
 # even short queries benefit: a "Reply to user." plan lets the engine
 # skip the memory enrichment LLM call and the tool router LLM call
 # entirely. We keep a tiny floor to drop pure noise ("hi", "ok", ".").
@@ -304,15 +304,6 @@ def _parse_plan(raw: str) -> List[str]:
         if len(out) >= MAX_STEPS:
             break
     return out
-
-
-def _is_trivial_plan(steps: List[str]) -> bool:
-    """Retained for callers; the planner no longer filters these out
-    internally. The engine now treats ``[]`` as "planner failed,
-    fall open to safe defaults" and ``["Reply to the user."]`` as a
-    positive "no memory, no tools needed" decision — those two cases
-    must remain distinguishable, so this helper is advisory only."""
-    return len(steps) <= 1
 
 
 def is_search_memory_step(step: str) -> bool:

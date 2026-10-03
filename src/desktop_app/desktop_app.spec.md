@@ -14,7 +14,7 @@ The desktop app is a **separate package** from the core `jarvis` module. It depe
 
 ```
 src/desktop_app/
-├── __init__.py          # Package exports, main() entry point
+├── __init__.py          # Re-exports main() as the entry point
 ├── app.py               # JarvisSystemTray, windows, startup flow
 ├── splash_screen.py     # Animated startup splash
 ├── setup_wizard.py      # First-run setup wizard

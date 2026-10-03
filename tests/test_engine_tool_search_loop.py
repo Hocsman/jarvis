@@ -32,8 +32,17 @@ def _assistant_content(text: str):
     return {"message": {"role": "assistant", "content": text}}
 
 
+@pytest.mark.parametrize(
+    "surfaced",
+    [
+        "getWeather: Report current weather.",
+        "getWeather",
+        "- getWeather: Report current weather.",
+    ],
+    ids=["name-and-description", "bare-name", "bulleted"],
+)
 def test_loop_merges_toolsearchtool_results_into_allowlist(
-    mock_config, db, dialogue_memory
+    mock_config, db, dialogue_memory, surfaced
 ):
     from jarvis.reply import engine as engine_mod
     from jarvis.tools.types import ToolExecutionResult
@@ -50,7 +59,7 @@ def test_loop_merges_toolsearchtool_results_into_allowlist(
             # Returns a newly-routed tool that was NOT in the initial pick.
             return ToolExecutionResult(
                 success=True,
-                reply_text="getWeather: Report current weather.",
+                reply_text=surfaced,
                 error_message=None,
             )
         if tool_name == "getWeather":

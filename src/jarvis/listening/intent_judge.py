@@ -353,8 +353,8 @@ Examples:
             IntentJudgment or None if parsing failed
         """
         # Locate the outermost JSON object by brace-matching. This handles
-        # markdown code fences and JSON whose string values contain braces
-        # — cases the old `\{[^{}]*\}` regex missed.
+        # markdown code fences and JSON whose string values contain braces,
+        # which a flat brace-free regex would miss.
         json_text = _extract_json_object(response_text)
         if not json_text:
             debug_log(f"intent judge: no JSON found in response: {response_text[:100]}", "voice")

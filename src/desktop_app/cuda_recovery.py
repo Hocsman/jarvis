@@ -5,9 +5,8 @@ downloads cuBLAS and cuDNN into `{app}\\cuda`. That step runs once during
 install and may fail silently — slow connections truncate the 643 MB cuDNN
 wheel, AV quarantines the unsigned engines DLL, the user dismisses a UAC
 prompt. When that happens the runtime probe in `jarvis.listening.listener`
-falls back to CPU and the only documented fix used to be "reinstall the app",
-which doesn't help because the `.cuda_installed` marker tricks the installer
-into skipping the CUDA step.
+falls back to CPU. Reinstalling the app does not help, because the
+`.cuda_installed` marker tricks the installer into skipping the CUDA step.
 
 This module exposes a tray menu action that re-runs the installer script
 directly, with UAC elevation, so users can recover without touching the

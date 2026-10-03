@@ -144,15 +144,9 @@ CREATE TABLE IF NOT EXISTS summary_vec (
 def _normalize_fts_query(raw: str) -> str:
     """Turn what he typed into something FTS5 will accept.
 
-    The import below read `.fuzzy_search` — this package — while the
-    module has always lived in `jarvis.utils`. So it raised on every
-    call, the `except` swallowed it, and the bare tokenise underneath ran
-    every time. Nothing failed; searching his diary simply worked less
-    well than it was built to, for as long as this file has existed, and
-    the only trace was a `pass`.
-
-    The fallback stays, for a builder that declines or breaks, but it is
-    the safety net rather than the normal path.
+    The flexible builder in `jarvis.utils.fuzzy_search` (prefix and OR
+    matching) is the normal path. The bare tokenise underneath is the
+    safety net for a builder that declines or breaks.
     """
     try:
         from ..utils.fuzzy_search import generate_flexible_fts_query
@@ -282,7 +276,7 @@ class Database:
         """Make the diary's search index say how many days it really holds.
 
         A day's row is rewritten on every flush, and a rewrite that
-        deleted and re-inserted handed the row a new id, leaving the old
+        deletes and re-inserts hands the row a new id, leaving the old
         terms in the index under an id no row carries any more. Nothing
         on the surface shows it: `COUNT(*)` on the index reads the
         content table and answers with the number of days, and FTS5's own

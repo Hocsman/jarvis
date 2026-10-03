@@ -6,7 +6,6 @@ import re
 import requests
 import threading
 import time
-from datetime import datetime, timezone, timedelta
 from pathlib import Path
 import os
 
@@ -338,35 +337,6 @@ def generate_tools_description(allowed_tools: Optional[List[str]] = None, mcp_to
                         lines.append(f"Input: {', '.join(param_descriptions)}")
 
     return "\n".join(lines)
-
-def _normalize_time_range(args: Optional[Dict[str, Any]]) -> Tuple[str, str]:
-    now = datetime.now(timezone.utc)
-    since: Optional[str] = None
-    until: Optional[str] = None
-    if args and isinstance(args, dict):
-        try:
-            since_val = args.get("since_utc")
-            since = str(since_val) if since_val else None
-        except Exception:
-            since = None
-        try:
-            until_val = args.get("until_utc")
-            until = str(until_val) if until_val else None
-        except Exception:
-            until = None
-    if since is None and until is None:
-        # Default last 24h
-        return (now - timedelta(days=1)).isoformat(), now.isoformat()
-    if since is None and until is not None:
-        # backfill 24h prior to until
-        try:
-            until_dt = datetime.fromisoformat(until.replace("Z", "+00:00"))
-        except Exception:
-            until_dt = now
-        return (until_dt - timedelta(days=1)).isoformat(), until_dt.isoformat()
-    if since is not None and until is None:
-        return since, now.isoformat()
-    return since or (now - timedelta(days=1)).isoformat(), until or now.isoformat()
 
 
 # ── Policy gate ──────────────────────────────────────────────────────

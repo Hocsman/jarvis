@@ -3,8 +3,8 @@
 
 A self-organising node graph that stores the assistant's accumulated world
 knowledge — anything learned during conversations that it wouldn't already know.
-Three fast-access entry points (recent nodes, top nodes, root node) ensure the
-most relevant knowledge is always reachable without exhaustive search.
+Placement descends greedily from a fixed branch root; recent nodes and top
+nodes stay available as ranked queries.
 
 See graph.spec.md for the full specification.
 """
@@ -108,10 +108,8 @@ def fold_for_search(text: str) -> str:
 # ── Configuration defaults ──────────────────────────────────────────────────
 
 SPLIT_THRESHOLD = 1500       # tokens — when to split a node into children
-MERGE_THRESHOLD = 200        # tokens — when to collapse sparse children back
 RECENT_NODES_COUNT = 10      # number of recently-accessed nodes to track
 TOP_NODES_COUNT = 15         # most-accessed nodes to surface
-TOP_NODES_WINDOW_DAYS = 30   # time window for top-nodes ranking (legacy, kept for compat)
 MAX_TRAVERSAL_DEPTH = 8      # safety limit on graph traversal
 SUMMARY_MAX_LENGTH = 300     # max characters for a node description
 DECAY_HALF_LIFE_DAYS = 14    # days until a node's access score halves
@@ -120,19 +118,17 @@ DECAY_HALF_LIFE_DAYS = 14    # days until a node's access score halves
 # ── Fixed top-level branches ────────────────────────────────────────────────
 #
 # The root is seeded with three fixed children on first run. The graph
-# is still self-organising below these — auto-split/merge runs within
-# each branch — but the top level is purpose-shaped, not content-shaped,
-# so the extractor can route each new fact into the right semantic slot.
+# is still self-organising below these (auto-split runs within each
+# branch) but the top level is purpose-shaped, not content-shaped.
 #
-# - USER: everything about the person the assistant serves (identity,
-#   tastes, preferences, plans, opinions). Warm-loaded into the system
-#   prompt on every turn.
-# - DIRECTIVES: imperatives the user issued at the assistant about its
-#   own behaviour ("be concise", "use British English", "stop apologising").
-#   Verbatim rules, never summarised. Warm-loaded on every turn.
-# - WORLD: external facts with attribution (current graph content —
-#   films, businesses, recipes, techniques). Unbounded. Not warm-loaded;
-#   retrieved on demand via searchMemory.
+# - WORLD: external facts with attribution (films, businesses, recipes,
+#   techniques). Unbounded. Extraction writes here and nowhere else. Not
+#   warm-loaded; retrieved on demand by query-driven enrichment.
+# - USER and DIRECTIVES: retained so the nodes already in them stay
+#   visible in the memory viewer and readable by the hand-over into the
+#   core (see graph.spec.md). Nothing new is written to them and nothing
+#   in them reaches the prompt: what the assistant knows about the user
+#   lives in the core.
 #
 # The IDs are stable strings so re-opening an existing graph is
 # idempotent — no duplicate branches get seeded if the store already
@@ -289,8 +285,8 @@ class GraphMemoryStore:
     """
     Self-organising node graph for persistent memory.
 
-    Backed by SQLite with thread-safe access. Provides three entry points
-    for fast retrieval: recent nodes, top nodes, and the root node.
+    Backed by SQLite with thread-safe access. Answers ranked queries (recent
+    nodes, top nodes) and tree queries (children, subtree, ancestors).
     """
 
     def __init__(self, db_path: str) -> None:
@@ -431,8 +427,8 @@ class GraphMemoryStore:
             # root, from before the taxonomy, can never be reached by
             # branch-pinned traversal — carrying it is dead weight. That
             # justifies deleting those nodes. It does not justify deleting
-            # the table, which is what used to happen: one stray child, and
-            # every correctly-filed fact he had looked up went with it.
+            # the table: one stray child must not take every correctly-filed
+            # fact he had looked up along with it.
             enleves: list = []
             for ligne in self.conn.execute(
                 "SELECT id, name FROM memory_nodes "
@@ -707,7 +703,7 @@ class GraphMemoryStore:
             )
             self.conn.commit()
 
-    # ── Entry points ────────────────────────────────────────────────────
+    # ── Ranked queries ──────────────────────────────────────────────────
 
     def get_recent_nodes(self, limit: int = RECENT_NODES_COUNT) -> list[MemoryNode]:
         """Get the most recently accessed nodes."""
@@ -721,17 +717,12 @@ class GraphMemoryStore:
             ).fetchall()
             return [self._row_to_node(r) for r in rows]
 
-    def get_top_nodes(
-        self,
-        limit: int = TOP_NODES_COUNT,
-        window_days: int = TOP_NODES_WINDOW_DAYS,
-    ) -> list[MemoryNode]:
+    def get_top_nodes(self, limit: int = TOP_NODES_COUNT) -> list[MemoryNode]:
         """Get nodes with the highest time-decayed access score.
 
         Uses hyperbolic decay so frequently accessed nodes that haven't
         been touched in a while naturally fall off without needing a hard
-        window cutoff. The ``window_days`` parameter is kept for backward
-        compatibility but is no longer used for filtering.
+        window cutoff.
         """
         score = _decay_score_sql()
         with self._lock:

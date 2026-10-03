@@ -43,7 +43,7 @@ class ScreenshotTool(Tool):
         """Execute the screenshot tool."""
         context.user_print("📸 Capturing a screenshot for OCR…")
         debug_log("screenshot: capturing OCR...", "screenshot")
-        # Inline OCR capture logic (previously in separate helper)
+        # OCR capture, inline
         ocr_text: str = ""
         sc = shutil.which("screencapture")
         if sc:
