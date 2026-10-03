@@ -13,6 +13,10 @@ import pytest
 # in a session of its own.
 from thread_guard import _no_thread_outlives_its_test  # noqa: F401
 
+# The autouse guard that keeps a test off the native inference runtimes. It
+# lives in its own module for the same reason.
+from native_guard import _no_native_inference  # noqa: F401
+
 # Robustly locate repository root (directory containing src/jarvis)
 _this_file = Path(__file__).resolve()
 ROOT = None
