@@ -335,7 +335,7 @@ Both thresholds are exposed in the Settings window under *Whisper*.
 ```json
 {
   "planner_enabled": true,          // set to false to disable the planner entirely
-  "planner_model": "",              // override which model plans (default: reuses tool_router_model chain)
+  "planner_model": "",              // override which model plans (default: tracks llm_chat_model)
   "planner_timeout_sec": 6.0        // per-call timeout for plan and step-resolver LLM calls
 }
 ```

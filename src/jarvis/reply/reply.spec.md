@@ -39,18 +39,18 @@ Design principles enforced by the engine:
      - Lifetime: entries persist until (a) the `stop` signal clears the whole cache, (b) the engine detects a new conversation at turn entry (`has_recent_messages()` was False) and clears it before running, or (c) targeted invalidation (core profile only) on core writes. Entries are *not* bounded by `RECENT_WINDOW_SEC` age, so a long active session keeps them warm.
 
 3. Pre-flight Planner
-   - The task-list planner (`plan_query` in `src/jarvis/reply/planner.py`) runs **first**, before any memory lookup or tool routing. It sees the query, a compact dialogue snippet, and the full builtin + MCP tool catalogue (names + one-line descriptions).
+   - The task-list planner (`plan_query` in `src/jarvis/reply/planner.py`) runs **after the tool router** (see **Tool allow-list per turn** below) and **before any memory lookup**. It sees the query, a compact dialogue snippet, and the router-narrowed tool catalogue (names + one-line descriptions), not the full builtin + MCP list.
    - The planner emits an ordered list of short sub-tasks (max 5). Two of the tokens are structural for the engine:
      - `searchMemory topic='...'` as a leading step means "answering requires information from prior conversations"; the engine runs memory enrichment. Omitting it means "no memory needed".
-     - Concrete tool steps (e.g. `webSearch query='...'`) name specific tools; the engine uses those names as the allow-list directly.
-   - An empty plan (disabled, LLM timeout, too short) is the fail-open state — the engine reverts to running the memory extractor and the `select_tools` router as before.
-   - A single-step `["Reply to the user."]` plan is a positive "no memory, no tools" decision — the engine skips the memory extractor, the tool router, the diary / graph / digest LLM calls, and the direct-exec path entirely.
+     - Concrete tool steps (e.g. `webSearch query='...'`) name specific tools; the engine unions those names into the router's allow-list, never replacing it.
+   - An empty plan (disabled, LLM timeout, too short) is the fail-open state: the engine runs the memory extractor (subject to the recall gate) and keeps the router's allow-list as it is.
+   - A single-step `["Reply to the user."]` plan is a positive "no memory, no tool step" decision: the engine skips the memory extractor, the diary / graph / digest LLM calls, and the direct-exec path entirely. The router has already run, so its allow-list still stands.
    - See `planner.spec.md` for the full prompt contract, helpers, and fail-open invariants.
 
 4. Conversation Memory Enrichment (gated)
-   - Runs only when the planner emitted a `searchMemory` directive OR the planner returned an empty plan (fail-open). Skipped otherwise, along with the keyword-extractor LLM call, the diary and graph queries, and the memory-digest LLM call.
+   - Runs only when the planner emitted a `searchMemory` directive OR the planner returned an empty plan (fail-open). Otherwise the keyword-extractor LLM call and the keyword-driven diary and graph queries are skipped. The graph is still read on the arguments of the plan's own tool steps (`lookup_terms_of`), and the memory-digest LLM call runs only when the diary or graph produced text, so a reply-only plan reads nothing and a tool-only plan can still surface a world fact already kept.
    - Extract search parameters via `extract_search_params_for_memory(query, base_url, router_model, ..., context_hint=...)`.
-     - Runs on the tool-router model chain (`resolve_tool_router_model(cfg)` → `tool_router_model → intent_judge_model → ollama_chat_model`), not the big chat model. The extractor is a small classification-shaped task and rides the already-warm router/judge model instead of paging in the chat weights.
+     - Runs on the tool-router model chain (`resolve_tool_router_model(cfg)` → `tool_router_model → intent_judge_model → llm_chat_model`), so the chat model is only the last link. The extractor is a small classification-shaped task and rides the already-warm router/judge model instead of paging in the chat weights.
      - The planner's `topic` hint (when present) is appended to the query the extractor sees, so keyword selection anchors on what the planner actually wanted to look up.
      - Output fields: `keywords: List[str]`, optional `from`, optional `to`, optional `questions: List[str]`.
      - **Failure is not emptiness**: the extractor returns `None` when it could not run at all (no model configured, nothing usable after both attempts, an error). That is a different answer from `{"keywords": []}`, which is the extractor reading the query and deciding it needs no memory search. On `None` the engine prints `⚠️ 🔍 Memory search: keywords could not be read this turn` and never writes the result to the hot-window cache: that cache has no age-based expiry, so caching one unavailable minute would keep the same question memory-blind for the rest of the conversation.
@@ -98,7 +98,7 @@ Design principles enforced by the engine:
    - When detected, the engine falls back to the standard "I had trouble understanding that request" error reply (model-size-aware). The malformed content is never shown to the user.
 
    Task-list planner (all model sizes, strongest impact on small models):
-   - The planner runs at the **front** of the reply flow (see step 3 above), not after tool selection. By the time the agentic loop starts, the plan already exists, the memory block has either been run or skipped based on the plan's `searchMemory` directive, and the tool allow-list has been derived from the tool names the plan referenced. See `planner.spec.md` for the prompt contract and fail-open semantics.
+   - The planner runs after the tool router and before memory enrichment (see step 3 above). By the time the agentic loop starts, the plan already exists, the memory block has either been run or skipped based on the plan's `searchMemory` directive, and the tool allow-list is the router's picks plus any tool names the plan referenced. See `planner.spec.md` for the prompt contract and fail-open semantics.
    - When the plan has more than one step, `format_plan_block(steps)` appends an `ACTION PLAN:` section to the initial system message so the chat model can see its own pre-committed sub-tasks in order. A single reply-only plan renders nothing — it's the planner's positive no-op signal.
    - When `use_text_tools` is True and the plan still has unexecuted tool steps, the engine runs `resolve_next_tool_call` at the top of each loop iteration. That call converts the next planned step (with `<placeholder>` entity references) into a concrete `{name, arguments}` JSON, grounds a vague argument from the turn's memory digest when enrichment recalled one (fenced background data; see `planner.spec.md`), validates the name against the per-turn allow-list, and direct-executes the tool. The chat model is only invoked for the final synthesis turn. This direct-exec path fires at the top of each loop iteration, before the chat model is called.
    - After each tool result, `progress_nudge(steps, tool_results_so_far)` builds a per-turn remainder hint that names the next planned step and reminds the model to substitute entities discovered in prior results. This replaces the generic completeness prompt whenever a plan is present.
@@ -118,7 +118,7 @@ Design principles enforced by the engine:
      Compensates for small routers that misroute follow-ups where the user is supplying the missing info (field trace 2026-05-03: turn 1 invoked `getWeather` with no location configured, the tool returned `success=False`, the assistant relayed the request, turn 2 was "I'm in London", router picked `webSearch`, planner web-searched "weather in london tomorrow", Wikipedia fallback returned "Edge of Tomorrow" and the assistant parroted the film summary as the weather answer). A successful chain followed by a genuine new short ask ("log my breakfast") correctly does NOT carry over the prior tool — its `tool_failed=False` flag short-circuits the walker.
      The walker stops at the first genuine user message, walks both calling protocols (native: `assistant.tool_calls[*].function.name` matched to `role=tool` results by `tool_call_id`; text-tool fallback: `role=user` messages tagged with `tool_name`), and only collects names whose matching tool result message has `tool_failed=True`. The augmentation is an engine-side per-turn overlay: the router cache stores only the raw router output, so identical-query replays in future turns are unaffected. When carry-over fires, `_selection_source` becomes `<strategy>+carryover` (or `<strategy>+plan+carryover`) so the printed `🔧 Tools` log line stays honest.
      The flag distinguishes only success vs failure, not failure mode (argument issue vs network vs anything else); the user is most likely to follow up with a correction either way, and the chat model can still pick a different tool from the widened list. Edge cases: an MCP tool unloaded between turns is filtered out by the `_full_catalog_names` membership check (so a stale name never leaks into the schema). A tool turn evicted from `DialogueMemory._tool_turns` by the storage cap (`_tool_turns_max_storage`, default 16) loses its carry-over protection — acceptable because active sessions rarely accumulate 16 tool turns before reaching the recent-window boundary, and the chat model can still call `toolSearchTool` to re-widen mid-loop. Orphan assistant `tool_calls` (no matching `role=tool` result in the recent window — possible after truncation or scrub) are ignored and logged via `debug_log` so upstream data loss is diagnosable rather than silent.
-   - The per-turn allow-list exposed to the chat model is: `<plan or router picks>` + `<previous-turn carry-over (if any)>` + `stop` (the sentinel) + `toolSearchTool`.
+   - The per-turn allow-list exposed to the chat model is: `<router picks + tool names the plan referenced>` + `<previous-turn carry-over (if any)>` + `stop` (the sentinel) + `toolSearchTool`.
    - `toolSearchTool` wraps the same routing logic (`select_tools`) but is invokable mid-loop. It takes a refined natural-language description of what the model is trying to accomplish and returns the expanded set of candidate tools. When invoked, the returned tools are merged into the allow-list for subsequent turns (still plus `stop` and `toolSearchTool` itself). This gives the agent a single-shot escape hatch when the initial routing was too narrow without widening the allow-list to "everything" by default.
    - `toolSearchTool` is a builtin; see `src/jarvis/tools/builtin/tool_search.spec.md`.
 
@@ -287,9 +287,11 @@ Turn 4: LLM → {content: "Here's a comprehensive comparison of the iPhone 15 mo
 ### Configuration and Defaults
 - Timeouts (seconds):
 
-  - `llm_tools_timeout_sec` (enrichment extraction)
-  - `llm_embedding_timeout_sec` (vector search)
-  - `llm_chat_timeout_sec` (messages loop turn)
+  - `llm_tools_timeout_sec` (default 300 s; tool router, memory extractor, `toolSearchTool`, weather place extractor)
+  - `llm_embedding_timeout_sec` (default 60 s; vector search)
+  - `llm_chat_timeout_sec` (default 180 s; messages loop turn)
+  - `llm_digest_timeout_sec` (default 8 s; memory digest, tool-result digest, max-turn digest)
+  - `planner_timeout_sec` (default 6 s; planner and step resolver)
 - Memory enrichment:
   - `memory_enrichment_max_results` limits recalled snippets.
   - `memory_digest_enabled` (default `null` = auto-on for SMALL models ≤7B, off for LARGE) distils the combined diary + graph dump into a short relevance-filtered note via a cheap LLM pass before injecting into the system prompt. See **Memory Digest for Small Models** below.
@@ -365,7 +367,7 @@ Small models struggle with long tool outputs the same way they struggle with lon
 `digest_tool_result_for_query` (in `src/jarvis/reply/enrichment.py`) runs a cheap LLM pass over the raw tool output and returns an attributed fact note that replaces the tool-role message content before it reaches the main model.
 
 Behaviour:
-- **Gating**: `tool_result_digest_enabled` (config). Default is `false` — the digest is opt-in. `null` opts into the auto-on-for-SMALL behaviour (off for LARGE), and explicit `true`/`false` forces.
+- **Gating**: `tool_result_digest_enabled` (config). `None` (default) means auto-on for SMALL models, off for LARGE. Explicit `true`/`false` forces.
 - **Short-circuit**: if the raw result is below `_TOOL_DIGEST_MIN_CHARS` (400 chars), it's passed through unchanged.
 - **Single-batch fast path**: if the raw result fits under `_TOOL_DIGEST_BATCH_MAX_CHARS` (2500 chars), one distil call produces the note. This is the typical case for webSearch.
 - **Multi-batch fallback**: if the raw result exceeds the per-batch cap, it's split on paragraph boundaries (blank-line-separated) so envelope framing and fence markers stay in whichever chunk contains them; each chunk is distilled independently and surviving notes are joined.
