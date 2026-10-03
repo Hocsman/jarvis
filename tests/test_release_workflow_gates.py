@@ -15,6 +15,7 @@ repository controls.
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import os
@@ -29,6 +30,9 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOWS = ROOT / ".github" / "workflows"
 BRANCH_REFS = ("refs/heads/main", "refs/heads/develop")
+
+# The workflow that runs the suite. The release workflow calls it as its gate.
+SUITE_FILE = "tests.yml"
 
 # The check that runs on a finished build. It reads the frozen layout and
 # launches nothing, so it ends on every runner and fails with a non-zero exit
@@ -266,6 +270,65 @@ def _simulate(workflow: dict, ref: str, failing=(), outputs=None, cancelled_afte
     return results
 
 
+def _interpolate(template: str, context: dict[str, str]) -> str:
+    """Fill the ``${{ ... }}`` parts of a string, for the contexts given."""
+    def lookup(path: str) -> str:
+        if path not in context:
+            raise NotImplementedError(f"context {path!r} is not modelled")
+        return context[path]
+
+    return re.sub(
+        r"\$\{\{(.*?)\}\}",
+        lambda match: str(_Expression(match.group(1), {"status": {}, "lookup": lookup}).evaluate()),
+        template,
+    )
+
+
+def _tests_group(tests_workflow: dict, head_ref: str, run_id: int) -> str:
+    """The concurrency group of one run of ``tests.yml``.
+
+    ``head_ref`` is only set when a pull request starts the run. A push, or a
+    call from the release workflow, has none, and a called workflow sees the
+    context of its caller.
+    """
+    return _interpolate(
+        tests_workflow["concurrency"]["group"],
+        {"github.head_ref": head_ref, "github.run_id": str(run_id)},
+    )
+
+
+def _pushes_to(workflow: dict, branch: str) -> bool:
+    triggers = _triggers(workflow)
+    if "push" not in triggers:
+        return False
+    push = triggers["push"] or {}
+    only = push.get("branches")
+    if only is not None and not any(fnmatch.fnmatchcase(branch, pattern) for pattern in only):
+        return False
+    return not any(fnmatch.fnmatchcase(branch, pattern) for pattern in push.get("branches-ignore") or [])
+
+
+def _suite_runs_started_by_a_push_to(branch: str) -> list[str]:
+    """Every run of the suite a push to ``branch`` starts, across all workflows.
+
+    ``tests.yml`` runs when its own triggers include the push, and again for
+    each job of a push-triggered workflow that calls it.
+    """
+    runs = []
+    for path in sorted([*WORKFLOWS.glob("*.yml"), *WORKFLOWS.glob("*.yaml")]):
+        workflow = _load(path.name)
+        if not _pushes_to(workflow, branch):
+            continue
+        if path.name == SUITE_FILE:
+            runs.append(f"{path.name}: its own push trigger")
+        runs.extend(
+            f"{path.name}: job {name}"
+            for name, job in workflow["jobs"].items()
+            if _uses(job) == f"./.github/workflows/{SUITE_FILE}"
+        )
+    return runs
+
+
 RELEASE_OUTPUT = {"semantic-release": {"new_release_published": "true"}}
 NO_RELEASE_OUTPUT = {"semantic-release": {"new_release_published": "false"}}
 
@@ -353,12 +416,15 @@ class TestTheSimulationSeesWhatItShould:
 # ---------------------------------------------------------------------------
 
 class TestTheSuiteCanBeCalled:
-    def test_tests_yml_is_callable_and_still_runs_on_its_own_triggers(self, tests_workflow):
+    def test_tests_yml_runs_for_pull_requests_and_when_called_but_not_on_push(self, tests_workflow):
         triggers = _triggers(tests_workflow)
 
         assert "workflow_call" in triggers
         assert "pull_request" in triggers
-        assert "push" in triggers
+        assert "push" not in triggers, (
+            "a push to main or develop already runs the suite through the release gate, "
+            "so a push trigger here would run it a second time for the same commit"
+        )
 
     def test_the_release_workflow_calls_it_as_a_job(self, release):
         jobs = release["jobs"]
@@ -372,6 +438,61 @@ class TestTheSuiteCanBeCalled:
 
         assert not (call or {}).get("inputs"), "an input would have to be wired in every caller"
         assert not (call or {}).get("secrets"), "the suite must not need a secret"
+
+
+class TestTheSuiteRunsOncePerPush:
+    """The release workflow's gate is the only run of the suite that blocks
+    anything, so a push to main or develop must start exactly that one."""
+
+    @pytest.mark.parametrize("branch", ["main", "develop"])
+    def test_a_push_starts_exactly_one_run_of_the_suite(self, branch):
+        runs = _suite_runs_started_by_a_push_to(branch)
+
+        assert len(runs) == 1, f"a push to {branch} starts {len(runs)} runs of the suite: {runs}"
+
+    @pytest.mark.parametrize("branch", ["main", "develop"])
+    def test_the_one_run_is_the_release_gate(self, release, branch):
+        gate = _gate_job_name(release["jobs"])
+
+        assert _suite_runs_started_by_a_push_to(branch) == [f"release.yml: job {gate}"]
+
+
+class TestANewerPushCancelsTheOlderPullRequestRun:
+    def test_cancelling_the_run_in_progress_is_on(self, tests_workflow):
+        assert tests_workflow["concurrency"]["cancel-in-progress"] is True
+
+    def test_runs_for_one_pull_request_branch_share_a_group(self, tests_workflow):
+        older = _tests_group(tests_workflow, head_ref="feature/x", run_id=100)
+        newer = _tests_group(tests_workflow, head_ref="feature/x", run_id=101)
+
+        assert older == newer
+
+    def test_runs_for_two_pull_request_branches_do_not_cancel_each_other(self, tests_workflow):
+        one = _tests_group(tests_workflow, head_ref="feature/x", run_id=100)
+        other = _tests_group(tests_workflow, head_ref="feature/y", run_id=101)
+
+        assert one != other
+
+    def test_a_run_that_is_not_a_pull_request_gets_a_group_of_its_own(self, tests_workflow):
+        # A push and a call from another workflow have no head_ref: the group
+        # falls back to the run id, so one such run never cancels another.
+        first = _tests_group(tests_workflow, head_ref="", run_id=100)
+        second = _tests_group(tests_workflow, head_ref="", run_id=101)
+
+        assert first != second
+
+    @pytest.mark.parametrize("branch", ["main", "develop"])
+    def test_the_release_gate_never_shares_a_group_with_the_release_workflow(self, tests_workflow, release, branch):
+        # The called workflow sees its caller's context. Two runs that share a
+        # concurrency group while one waits on the other cancel or deadlock
+        # each other.
+        release_group = _interpolate(
+            release["concurrency"]["group"],
+            {"github.workflow": release["name"], "github.ref_name": branch},
+        )
+        gate_group = _tests_group(tests_workflow, head_ref="", run_id=100)
+
+        assert gate_group != release_group
 
 
 class TestEvalsAreCollected:
