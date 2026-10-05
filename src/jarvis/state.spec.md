@@ -34,6 +34,7 @@ The end of speech publishes nothing. What follows it (a hot window, so `LISTENIN
 - **Readers read the file every time**, so a reader in one process sees what a writer in another published. The in-memory value is the fallback when the file is missing, unreadable or holds a value no release defines, and the only copy on a machine with no usable temp directory.
 - **A new holder always starts `ASLEEP`** and writes that to the file. The file carries state across processes during a session, not across launches, so a value left by a previous session never shows.
 - **Publishing never raises.** A file that cannot be written costs the viewer its view of the state, never the user their answer, so publishers call `set_state` bare and do not wrap it. The failure is logged through `debug_log`.
+- **Publishes are ordered within a process.** Timer threads, the reply thread and the speech threads publish concurrently. The memory value and the file are updated as one step, so publishes land in the order they are admitted and both end up holding the last one, and a publish held up on the disk cannot land over a later one. Readers are not held up by a publish in progress. The order is per publish call: whether a state is still true when its publisher gets its turn is the publisher's check to make. Two processes publishing to the one file are not ordered against each other.
 
 ## Readers
 
@@ -47,6 +48,6 @@ The desktop app also publishes one value, `ASLEEP`, when the daemon stops and wh
 
 ## Tests
 
-- `tests/test_jarvis_state.py`: the holder's contract (starts asleep, shared through the file, falls back, never raises) and the headless import guarantee, checked in a clean interpreter.
+- `tests/test_jarvis_state.py`: the holder's contract (starts asleep, shared through the file, falls back, never raises, publishes stay ordered under concurrency) and the headless import guarantee, checked in a clean interpreter.
 - `tests/test_the_pipeline_publishes_its_state.py` and `TestTheListenerPublishesItsState` in `tests/test_hot_window_input.py`: each stage publishes the state it enters, read back through the same reader a viewer uses.
 - `tests/conftest.py` gives every test its own state file, so a test run never moves the orb of an app the developer has open.
