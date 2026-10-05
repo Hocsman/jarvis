@@ -222,8 +222,9 @@ def _simulate(workflow: dict, ref: str, failing=(), outputs=None, cancelled_afte
 
     A job whose ``if`` has no status function runs only when every job it
     depends on, directly or through others, succeeded. One whose ``if`` has a
-    status function (``always()``, ``!cancelled()``, ``failure()``) is judged
-    by that expression alone, whatever its ancestors did.
+    status function is judged by that expression alone: ``always()`` and
+    ``cancelled()`` ignore its ancestors, while ``success()`` and
+    ``failure()`` read all of them.
 
     ``cancelled_after`` plays out a run that a newer push cancels once the
     named jobs have finished: no other job starts unless its ``if`` uses a
@@ -257,7 +258,7 @@ def _simulate(workflow: dict, ref: str, failing=(), outputs=None, cancelled_afte
                         return (outputs.get(parts[1], {}) if ran else {}).get(parts[3], "")
                 raise NotImplementedError(f"context {path!r} is not modelled")
 
-            # The status functions look at the whole dependency chain, not
+            # success() and failure() look at the whole dependency chain, not
             # only at the jobs listed in `needs`: a skipped or failed job any
             # distance back holds a job that has no status function of its own.
             ancestors = [results[ancestor] for ancestor in _transitive_needs(jobs, name)]
@@ -631,6 +632,15 @@ class TestACancelledRunStartsNothing:
         assert started == [], f"{started} started after the run was cancelled on {ref}"
 
     @pytest.mark.parametrize("ref", BRANCH_REFS)
+    def test_no_job_starts_once_the_run_is_cancelled_right_after_the_suite(self, release, ref):
+        gate = _gate_job_name(release["jobs"])
+
+        results = _simulate(release, ref, outputs=RELEASE_OUTPUT, cancelled_after={gate})
+
+        started = [name for name, result in results.items() if name != gate and result != "skipped"]
+        assert started == [], f"{started} started after the run was cancelled on {ref}, before semantic-release ran"
+
+    @pytest.mark.parametrize("ref", BRANCH_REFS)
     def test_no_publisher_starts_once_the_run_is_cancelled_after_the_builds(self, release, ref):
         gate = _gate_job_name(release["jobs"])
         finished = {gate, "semantic-release", *_build_jobs(release)}
@@ -746,7 +756,9 @@ class TestAPublisherRunsWhenItShouldAndOnlyThen:
         green = _simulate(release, ref, outputs=RELEASE_OUTPUT)
         assert green[publisher] == "success", f"{publisher} never runs on {ref}, so a skip below proves nothing"
         before = sorted(name for name in _transitive_needs(release["jobs"], publisher) if green[name] == "success")
-        assert set(_build_jobs(release)) | {_gate_job_name(release["jobs"])} <= set(before)
+        assert set(_build_jobs(release)) | {_gate_job_name(release["jobs"])} <= set(before), (
+            f"the jobs that run before {publisher} must include the gate and every build"
+        )
 
         for failing in before:
             results = _simulate(release, ref, failing={failing}, outputs=RELEASE_OUTPUT)
@@ -761,6 +773,29 @@ class TestAPublisherRunsWhenItShouldAndOnlyThen:
 
         assert results["release-main"] == "skipped"
         assert all(results[build] == "success" for build in _build_jobs(release)), "the builds still run"
+
+
+class TestAJobWithAStatusFunctionChecksTheSuiteItself:
+    """A status function drops the implicit check of the whole dependency
+    chain, the suite included. So a job that uses one must need the suite and
+    read its result itself, or a condition loosened elsewhere in the chain
+    would let it start behind a red suite."""
+
+    def test_every_such_job_reads_the_suite_result(self, release):
+        gate = _gate_job_name(release["jobs"])
+        users = [
+            name
+            for name, job in release["jobs"].items()
+            if name != gate and _uses_status_function(str(job.get("if", "")))
+        ]
+        assert users, "no job uses a status function: the rule below would pass over nothing"
+
+        for name in users:
+            job = release["jobs"][name]
+            assert gate in _needs(job), f"{name} does not need {gate}, so it cannot read the suite's result"
+            assert f"needs.{gate}.result" in str(job["if"]), (
+                f"{name} uses a status function but never checks needs.{gate}.result"
+            )
 
 
 class TestEveryScriptAWorkflowRunsIsInTheRepository:
