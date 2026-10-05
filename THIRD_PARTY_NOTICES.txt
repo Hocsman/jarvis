@@ -252,7 +252,7 @@ numpy 1.26.4
 onnxruntime 1.29.0
     Licence: MIT License
     Home: https://onnxruntime.ai
-    Required by: faster-whisper, piper-tts
+    Required by: requirements.txt, faster-whisper, piper-tts
 
 packaging 26.3
     Licence: Apache-2.0 OR BSD-2-Clause
