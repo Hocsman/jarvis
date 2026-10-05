@@ -27,11 +27,16 @@ concurrency:
 
 jobs:
   # Nothing below runs unless the suite is green. Every other job needs this
-  # one, directly or through a job that does. A job whose `if` uses a status
-  # function (it has to, to run after a skipped semantic-release on develop)
-  # would otherwise start with the suite red, so it also checks
-  # `needs.tests.result` itself. It uses `!cancelled()` rather than
-  # `always()`, so a run that a newer push cancels does not start its builds.
+  # one, directly or through a job that does.
+  #
+  # A job whose `if` has no status function is skipped when any job in its
+  # dependency chain, however far back, did not succeed. semantic-release is
+  # skipped on develop, so every job behind it that has to run there (the
+  # builds and release-develop) uses `!cancelled()` and checks for itself the
+  # results it depends on. A build checks `needs.tests.result`; release-develop
+  # checks the builds, which succeed only when the suite did. It is
+  # `!cancelled()` rather than `always()`, so a run that a newer push cancels
+  # starts nothing more.
   tests:
     name: Tests
     uses: ./.github/workflows/tests.yml
@@ -360,7 +365,9 @@ jobs:
     # No `always()`: the release is attached to and published only when every
     # build has succeeded, so a failed build leaves the draft that
     # semantic-release created unpublished, with no assets and no audience.
-    # Re-running the failed jobs completes it.
+    # Re-running the failed jobs completes it. semantic-release runs on every
+    # push to main, so nothing in this job's chain is skipped there and the
+    # implicit success check is enough.
     if: needs.semantic-release.outputs.new_release_published == 'true'
 
     permissions:
@@ -433,10 +440,12 @@ jobs:
   release-develop:
     needs: [build-windows, build-macos, build-linux]
     runs-on: ubuntu-latest
-    # No `always()`: the rolling release is rewritten only when every build
-    # has succeeded, so its assets always belong to the commit it names and a
-    # failed build leaves the previous one untouched.
-    if: github.ref == 'refs/heads/develop'
+    # A status function, because semantic-release is skipped on develop and a
+    # job without one is skipped behind it however green the builds are. Each
+    # build's result is checked instead: the rolling release is rewritten only
+    # when every build has succeeded, so its assets always belong to the commit
+    # it names, and a failed build leaves the previous one untouched.
+    if: ${{ !cancelled() && github.ref == 'refs/heads/develop' && needs.build-windows.result == 'success' && needs.build-macos.result == 'success' && needs.build-linux.result == 'success' }}
 
     permissions:
       contents: write
