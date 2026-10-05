@@ -443,8 +443,8 @@ class TestEveryClickOnScriptBuiltMarkupIsDelegated:
 class TestAClickOnAModalBackdropIsDelegatedToo:
     """Clicking beside a modal closes it, unless its work is in flight.
     The overlay says so with an attribute and the one delegated listener
-    acts on it, with the semantics a per-overlay listener had: only a
-    click on the overlay itself, never one on anything inside it."""
+    acts on it: only a click on the overlay itself closes it, never one on
+    anything inside it."""
 
     def test_the_delegated_listener_recognises_the_overlay_attribute(self, viewer):
         listener = _delegated_listener(_script(viewer))
@@ -513,3 +513,55 @@ class TestServerValuesReachAttributesThroughTheDom:
         ]
 
         assert hits == []
+
+
+class TestAnIdReadFromTheDomIsEncodedIntoARequestPath:
+    """What a handler reads from the DOM is not trusted to be an id. Appended
+    raw to a request path, a value such as ../../activity would address
+    another route once the browser resolved it, so it is encoded: it stays
+    one path segment."""
+
+    APPENDED_RE = re.compile(r"""['"]/api/[A-Za-z0-9_/-]*/['"]\s*\+\s*(?!\s|encodeURIComponent\()""")
+    ENCODED_RE = re.compile(r"""['"]/api/[A-Za-z0-9_/-]*/['"]\s*\+\s*encodeURIComponent\(""")
+
+    def test_no_request_path_is_built_by_appending_a_raw_value(self, viewer):
+        script = _script(viewer)
+
+        lines = [script.count("\n", 0, m.start()) + 1 for m in self.APPENDED_RE.finditer(script)]
+
+        assert not lines, (
+            f"request paths built from a raw value at script lines {lines}: wrap the "
+            "value in encodeURIComponent so that '../' cannot leave its path segment"
+        )
+
+    def test_the_rule_has_something_to_check(self, viewer):
+        assert self.ENCODED_RE.search(_script(viewer)), (
+            "no request path is built from an encoded value: the rule above would pass over nothing"
+        )
+
+
+class TestAnActionNameIsRegisteredOnce:
+    """Two handlers under one name would leave the first one silently dead,
+    so the registry refuses the second."""
+
+    def test_registering_a_name_twice_fails_loudly(self, viewer):
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node is not installed")
+        script = _script(viewer)
+        start = script.index("const ACTIONS = new Map();")
+        end = script.index("document.addEventListener('click'", start)
+        program = (
+            script[start:end]
+            + "\nregisterAction('once', () => 1);\n"
+            + "let refused = false;\n"
+            + "try { registerAction('once', () => 2); } catch (error) { refused = true; }\n"
+            + "console.log(refused ? 'refused' : 'overwritten');\n"
+        )
+
+        result = subprocess.run([node, "-e", program], capture_output=True, text=True, timeout=30)
+
+        assert result.stdout.strip() == "refused", result.stderr or "the second registration replaced the first"

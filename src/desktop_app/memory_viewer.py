@@ -3256,8 +3256,9 @@ def index() -> str:
 #   script builds goes through one route: the control carries a
 #   `data-action` name that `registerAction` has registered, and one
 #   delegated listener dispatches it. Only the page's own static
-#   controls (the tabs, the maintenance and graph buttons, the Rappels
-#   and Activity buttons) are wired with `addEventListener`, once at boot.
+#   controls are wired with `addEventListener`, each once: the tabs, the
+#   maintenance buttons and the Rappels and Activity buttons at boot, the
+#   graph toolbar and the canvas the first time the Knowledge tab opens.
 #   What a handler acts on reaches it through the `dataset` of the
 #   element or of one that encloses it;
 # - a value the server supplied reaches an attribute through the DOM
@@ -3346,12 +3347,14 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
         // overlay carries data-backdrop-dismiss, and a click on the overlay
         // itself (not on anything inside it) closes it, unless the modal's
         // work is in flight (data-busy). Only the page's own static
-        // controls, wired once at boot, listen for themselves. Neither
-        // route has an inline handler, so there is no string an id could
-        // be spliced into.
+        // controls, each wired once (at boot, or for the graph toolbar and
+        // the canvas the first time the Knowledge tab opens), listen for
+        // themselves. Neither route has an inline handler, so there is no
+        // string an id could be spliced into.
         const ACTIONS = new Map();
 
         function registerAction(name, handler) {
+            if (ACTIONS.has(name)) throw new Error('action registered twice: ' + name);
             ACTIONS.set(name, handler);
         }
 
@@ -3420,12 +3423,12 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
         }
 
         async function deleteMemory(id) {
-            const response = await fetch('/api/memory/' + id, { method: 'DELETE' });
+            const response = await fetch('/api/memory/' + encodeURIComponent(id), { method: 'DELETE' });
             return response.json();
         }
 
         async function deleteMeal(id) {
-            const response = await fetch('/api/meal/' + id, { method: 'DELETE' });
+            const response = await fetch('/api/meal/' + encodeURIComponent(id), { method: 'DELETE' });
             return response.json();
         }
 
@@ -4191,7 +4194,7 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
                     ${points}
                 </div>`);
                 carte.classList.toggle('close', !o.ouvert);
-                const terminer = carte.querySelector('[data-action]');
+                const terminer = carte.querySelector('[data-action="close-objectif"]');
                 if (terminer) terminer.dataset.objectif = o.nom;
                 return carte;
             }));
@@ -4697,7 +4700,7 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
             sidebar.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
 
             try {
-                const resp = await fetch('/api/graph/node/' + nodeId);
+                const resp = await fetch('/api/graph/node/' + encodeURIComponent(nodeId));
                 const data = await resp.json();
                 renderNodeDetail(data);
             } catch (e) {
@@ -4803,7 +4806,7 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
         }
 
         async function editNode(nodeId) {
-            const resp = await fetch('/api/graph/node/' + nodeId);
+            const resp = await fetch('/api/graph/node/' + encodeURIComponent(nodeId));
             const { node } = await resp.json();
 
             const sidebar = document.getElementById('detail-sidebar');
@@ -4838,7 +4841,7 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
             if (!name) { showToast('Name is required', 'error'); return; }
 
             try {
-                await fetch('/api/graph/node/' + nodeId, {
+                await fetch('/api/graph/node/' + encodeURIComponent(nodeId), {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ name, description, data })
@@ -4856,7 +4859,7 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
             if (!confirm('Delete this node? Children will be orphaned.')) return;
 
             try {
-                await fetch('/api/graph/node/' + nodeId, { method: 'DELETE' });
+                await fetch('/api/graph/node/' + encodeURIComponent(nodeId), { method: 'DELETE' });
                 showToast('Node deleted', 'success');
                 selectedNodeId = null;
                 document.getElementById('detail-sidebar').innerHTML =
