@@ -3252,12 +3252,15 @@ def index() -> str:
 # therefore carries no inline script and no event-handler attribute:
 #
 # - the launch token is read from the page's <meta> tag;
-# - no handler is ever a string in the markup. A control either carries a
-#   `data-action` name that `registerAction` has registered, which one
-#   delegated listener dispatches, or it is wired with `addEventListener`
-#   on the element the script has just built (on the page's own static
-#   controls, once at boot). Either way, what a handler acts on reaches it
-#   through the element's `dataset`, an enclosing element or a closure;
+# - no handler is ever a string in the markup. Every click on markup the
+#   script builds goes through one route: the control carries a
+#   `data-action` name that `registerAction` has registered, and one
+#   delegated listener dispatches it. Only the page's own static
+#   controls are wired with `addEventListener`, each once: the tabs, the
+#   maintenance buttons and the Rappels and Activity buttons at boot, the
+#   graph toolbar and the canvas the first time the Knowledge tab opens.
+#   What a handler acts on reaches it through the `dataset` of the
+#   element or of one that encloses it;
 # - a value the server supplied reaches an attribute through the DOM
 #   (`dataset`, a property), never by being spliced into a template, so no
 #   quoting has to hold for it to stay inside its attribute.
@@ -3280,6 +3283,7 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
         // State
         let currentTab = 'memories';
         let selectedTopics = new Set();
+        let shownTopics = [];
         let searchQuery = '';
         let diaryImportDone = false;
         let fromDate = '';
@@ -3335,26 +3339,52 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
             container.replaceChildren(fragment);
         }
 
-        // A control that carries a data-action name is dispatched here:
-        // the one delegated listener below looks the name up among the
-        // handlers registered under it, and the handler reads what it acts
-        // on from the element's dataset or from the element that encloses
-        // it. Only the controls whose name is registered take this route;
-        // every other control is wired with addEventListener on the markup
-        // the script has just built. Neither route has an inline handler,
-        // so there is no string an id could be spliced into.
+        // Every click on markup the script builds is dispatched here. The
+        // one delegated listener below looks a control's data-action name
+        // up among the handlers registered under it, and the handler reads
+        // what it acts on from the element's dataset or from the element
+        // that encloses it. A modal's backdrop takes the same route: the
+        // overlay carries data-backdrop-dismiss, and a click on the overlay
+        // itself (not on anything inside it) closes it, unless the modal's
+        // work is in flight (data-busy). Only the page's own static
+        // controls, each wired once (at boot, or for the graph toolbar and
+        // the canvas the first time the Knowledge tab opens), listen for
+        // themselves. Neither route has an inline handler, so there is no
+        // string an id could be spliced into.
         const ACTIONS = new Map();
 
         function registerAction(name, handler) {
+            if (ACTIONS.has(name)) throw new Error('action registered twice: ' + name);
             ACTIONS.set(name, handler);
         }
 
         document.addEventListener('click', (e) => {
-            const trigger = e.target instanceof Element ? e.target.closest('[data-action]') : null;
+            const target = e.target instanceof Element ? e.target : null;
+            if (!target) return;
+            if (target.hasAttribute('data-backdrop-dismiss')) {
+                if (!target.dataset.busy) target.remove();
+                return;
+            }
+            const trigger = target.closest('[data-action]');
             if (!trigger) return;
             const handler = ACTIONS.get(trigger.dataset.action);
             if (handler) handler(trigger, e);
         });
+
+        // A modal is one overlay over the page, and there is only ever one.
+        // The overlay is built here, so that every modal carries the
+        // attribute the delegated listener closes on.
+        function openModal(markup) {
+            const existing = document.querySelector('.modal-overlay');
+            if (existing) existing.remove();
+
+            const overlay = document.createElement('div');
+            overlay.className = 'modal-overlay';
+            overlay.dataset.backdropDismiss = '';
+            overlay.innerHTML = markup;
+            document.body.appendChild(overlay);
+            return overlay;
+        }
 
         registerAction('close-modal', (trigger) => {
             const overlay = trigger.closest('.modal-overlay');
@@ -3393,17 +3423,18 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
         }
 
         async function deleteMemory(id) {
-            const response = await fetch('/api/memory/' + id, { method: 'DELETE' });
+            const response = await fetch('/api/memory/' + encodeURIComponent(id), { method: 'DELETE' });
             return response.json();
         }
 
         async function deleteMeal(id) {
-            const response = await fetch('/api/meal/' + id, { method: 'DELETE' });
+            const response = await fetch('/api/meal/' + encodeURIComponent(id), { method: 'DELETE' });
             return response.json();
         }
 
         // Render functions
         function renderTopics(topics) {
+            shownTopics = topics;
             if (!topics.length) {
                 topicsCloud.innerHTML = '<div class="empty-state"><p>No topics yet</p></div>';
                 return;
@@ -3411,7 +3442,7 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
 
             replaceContent(topicsCloud, topics.map(topic => {
                 const tag = elementFrom(`
-                    <button class="topic-tag">
+                    <button class="topic-tag" data-action="toggle-topic">
                         ${escapeHtml(topic.name)}
                         <span class="topic-count">${topic.count}</span>
                     </button>
@@ -3420,21 +3451,18 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
                 tag.dataset.topic = topic.name;
                 return tag;
             }));
-
-            // Add click handlers
-            topicsCloud.querySelectorAll('.topic-tag').forEach(tag => {
-                tag.addEventListener('click', () => {
-                    const topic = tag.dataset.topic;
-                    if (selectedTopics.has(topic)) {
-                        selectedTopics.delete(topic);
-                    } else {
-                        selectedTopics.add(topic);
-                    }
-                    renderTopics(topics);
-                    loadMemories();
-                });
-            });
         }
+
+        registerAction('toggle-topic', (trigger) => {
+            const topic = trigger.dataset.topic;
+            if (selectedTopics.has(topic)) {
+                selectedTopics.delete(topic);
+            } else {
+                selectedTopics.add(topic);
+            }
+            renderTopics(shownTopics);
+            loadMemories();
+        });
 
         function formatDate(dateStr) {
             const date = new Date(dateStr + 'T00:00:00');
@@ -3474,7 +3502,7 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
                                 ${formatDate(memory.date_utc)}
                             </div>
                             <div class="memory-actions">
-                                <button class="action-btn delete" title="Delete memory">🗑️</button>
+                                <button class="action-btn delete" data-action="delete-memory" title="Delete memory">🗑️</button>
                             </div>
                         </div>
                         <p class="memory-summary">${escapeHtml(memory.summary)}</p>
@@ -3488,26 +3516,23 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
                 card.dataset.id = memory.id;
                 return card;
             }));
-
-            // Add delete handlers
-            memoriesContent.querySelectorAll('.action-btn.delete').forEach(btn => {
-                btn.addEventListener('click', async (e) => {
-                    const card = e.target.closest('.memory-card');
-                    const id = card.dataset.id;
-
-                    if (confirm('Delete this memory?')) {
-                        const result = await deleteMemory(id);
-                        if (result.success) {
-                            card.remove();
-                            showToast('Memory deleted', 'success');
-                            loadStats();
-                        } else {
-                            showToast('Failed to delete', 'error');
-                        }
-                    }
-                });
-            });
         }
+
+        registerAction('delete-memory', async (trigger) => {
+            const card = trigger.closest('.memory-card');
+            const id = card.dataset.id;
+
+            if (confirm('Delete this memory?')) {
+                const result = await deleteMemory(id);
+                if (result.success) {
+                    card.remove();
+                    showToast('Memory deleted', 'success');
+                    loadStats();
+                } else {
+                    showToast('Failed to delete', 'error');
+                }
+            }
+        });
 
         function renderMeals(meals) {
             if (!meals.length) {
@@ -3527,7 +3552,7 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
                         <div class="meal-info">
                             <div class="meal-header">
                                 <h3>${escapeHtml(meal.description)}</h3>
-                                <button class="action-btn delete meal-delete" title="Delete meal">🗑️</button>
+                                <button class="action-btn delete meal-delete" data-action="delete-meal" title="Delete meal">🗑️</button>
                             </div>
                             <div class="meal-time">${new Date(meal.ts_utc).toLocaleString()}</div>
                         </div>
@@ -3562,26 +3587,23 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
                 card.dataset.id = meal.id;
                 return card;
             }));
-
-            // Add delete handlers for meals
-            mealsContent.querySelectorAll('.meal-delete').forEach(btn => {
-                btn.addEventListener('click', async (e) => {
-                    const card = e.target.closest('.meal-card');
-                    const id = card.dataset.id;
-
-                    if (confirm('Delete this meal?')) {
-                        const result = await deleteMeal(id);
-                        if (result.success) {
-                            card.remove();
-                            showToast('Meal deleted', 'success');
-                            loadStats();
-                        } else {
-                            showToast('Failed to delete meal', 'error');
-                        }
-                    }
-                });
-            });
         }
+
+        registerAction('delete-meal', async (trigger) => {
+            const card = trigger.closest('.meal-card');
+            const id = card.dataset.id;
+
+            if (confirm('Delete this meal?')) {
+                const result = await deleteMeal(id);
+                if (result.success) {
+                    card.remove();
+                    showToast('Meal deleted', 'success');
+                    loadStats();
+                } else {
+                    showToast('Failed to delete meal', 'error');
+                }
+            }
+        });
 
         function showToast(message, type = 'success') {
             const toast = document.createElement('div');
@@ -3885,27 +3907,25 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
                     <span class="rappel-when">${escapeHtml(when)}</span>
                     <span class="rappel-texte">${escapeHtml(r.texte || '')}</span>
                     <span class="rappel-origin" title="D'où venait la demande">${origin}</span>
-                    <button class="rappel-cancel">Annuler</button>
+                    <button class="rappel-cancel" data-action="cancel-rappel">Annuler</button>
                 </div>`);
                 row.querySelector('.rappel-cancel').dataset.rappel = r.id;
                 list.appendChild(row);
             });
             container.replaceChildren(list);
-
-            container.querySelectorAll('[data-rappel]').forEach(button => {
-                button.addEventListener('click', async () => {
-                    button.disabled = true;
-                    try {
-                        await fetch('/api/rappels/' + encodeURIComponent(button.dataset.rappel),
-                                    { method: 'DELETE' });
-                    } catch (e) {
-                        button.disabled = false;
-                        return;
-                    }
-                    loadRappels();
-                });
-            });
         }
+
+        registerAction('cancel-rappel', async (trigger) => {
+            trigger.disabled = true;
+            try {
+                await fetch('/api/rappels/' + encodeURIComponent(trigger.dataset.rappel),
+                            { method: 'DELETE' });
+            } catch (e) {
+                trigger.disabled = false;
+                return;
+            }
+            loadRappels();
+        });
 
         document.getElementById('btn-rappel-add').addEventListener('click', async () => {
             const texte = document.getElementById('rappel-texte');
@@ -3998,7 +4018,7 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
                     <span class="routine-nom">${escapeHtml(r.nom || '?')}</span>
                     <span class="routine-quand">${escapeHtml(when)}</span>
                     <span class="routine-phrase">${escapeHtml(r.texte || '')}</span>
-                    ${r.arretee ? '' : '<button class="rappel-cancel">Arrêter</button>'}
+                    ${r.arretee ? '' : '<button class="rappel-cancel" data-action="stop-routine">Arrêter</button>'}
                     <span class="routine-outils">🔧 ${outils}</span>
                 </div>`);
                 row.querySelector('.routine-phrase').after(...flags);
@@ -4007,22 +4027,20 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
                 list.appendChild(row);
             });
             container.replaceChildren(list);
-
-            container.querySelectorAll('[data-routine]').forEach(button => {
-                button.addEventListener('click', async () => {
-                    if (!confirm("Arrêter cette routine ? Son bloc restera dans routines.md.")) return;
-                    button.disabled = true;
-                    try {
-                        await fetch('/api/routines/' + encodeURIComponent(button.dataset.routine),
-                                    { method: 'DELETE' });
-                    } catch (e) {
-                        button.disabled = false;
-                        return;
-                    }
-                    loadRoutines();
-                });
-            });
         }
+
+        registerAction('stop-routine', async (trigger) => {
+            if (!confirm("Arrêter cette routine ? Son bloc restera dans routines.md.")) return;
+            trigger.disabled = true;
+            try {
+                await fetch('/api/routines/' + encodeURIComponent(trigger.dataset.routine),
+                            { method: 'DELETE' });
+            } catch (e) {
+                trigger.disabled = false;
+                return;
+            }
+            loadRoutines();
+        });
 
         async function loadAppris() {
             const container = document.getElementById('appris-list');
@@ -4048,8 +4066,8 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
                          : p.section === 'profil' ? 'ton profil'
                          : 'nulle part : titre inconnu';
                 const boutons = agissable
-                    ? `<button class="rappel-cancel" data-retenir="">Je confirme</button>
-                       <button class="rappel-cancel" data-refuser="">Non</button>`
+                    ? `<button class="rappel-cancel" data-action="appris-retenir">Je confirme</button>
+                       <button class="rappel-cancel" data-action="appris-refuser">Non</button>`
                     : `<span class="routine-flag">${
                         p.etat === 'rayée'
                           ? (p.tampon ? escapeHtml(p.tampon) : 'refusée')
@@ -4063,10 +4081,9 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
                 </div>`);
                 // The line is the user's own sentence: it goes on the
                 // buttons as data, exactly as it is, not as markup.
-                const accept = row.querySelector('[data-retenir]');
-                if (accept) accept.dataset.retenir = p.ligne;
-                const refuse = row.querySelector('[data-refuser]');
-                if (refuse) refuse.dataset.refuser = p.ligne;
+                row.querySelectorAll('[data-action]').forEach(button => {
+                    button.dataset.ligne = p.ligne;
+                });
                 return row;
             };
 
@@ -4084,42 +4101,38 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
                 parts.push(groupe(reglees, false));
             }
             replaceContent(container, parts);
-
-            container.querySelectorAll('[data-retenir]').forEach(button => {
-                button.addEventListener('click', async () => {
-                    button.disabled = true;
-                    try {
-                        await fetch('/api/appris/retenir', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ ligne: button.dataset.retenir }),
-                        });
-                    } catch (e) {
-                        button.disabled = false;
-                        return;
-                    }
-                    loadAppris();
-                });
-            });
-
-            container.querySelectorAll('[data-refuser]').forEach(button => {
-                button.addEventListener('click', async () => {
-                    if (!confirm("Elle ne te la reproposera jamais. C'est bien ça ?")) return;
-                    button.disabled = true;
-                    try {
-                        await fetch('/api/appris/refuser', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ ligne: button.dataset.refuser }),
-                        });
-                    } catch (e) {
-                        button.disabled = false;
-                        return;
-                    }
-                    loadAppris();
-                });
-            });
         }
+
+        registerAction('appris-retenir', async (trigger) => {
+            trigger.disabled = true;
+            try {
+                await fetch('/api/appris/retenir', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ligne: trigger.dataset.ligne }),
+                });
+            } catch (e) {
+                trigger.disabled = false;
+                return;
+            }
+            loadAppris();
+        });
+
+        registerAction('appris-refuser', async (trigger) => {
+            if (!confirm("Elle ne te la reproposera jamais. C'est bien ça ?")) return;
+            trigger.disabled = true;
+            try {
+                await fetch('/api/appris/refuser', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ligne: trigger.dataset.ligne }),
+                });
+            } catch (e) {
+                trigger.disabled = false;
+                return;
+            }
+            loadAppris();
+        });
 
         async function loadJournal() {
             const container = document.getElementById('journal-list');
@@ -4169,7 +4182,7 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
                     </div>`).join('')
                     || "<div class='objectif-point'><span class='objectif-texte'>Rien de noté pour l'instant.</span></div>";
                 const etat = o.ouvert
-                    ? '<button class="rappel-cancel" data-objectif="">Terminer</button>'
+                    ? '<button class="rappel-cancel" data-action="close-objectif">Terminer</button>'
                     : `<span class="routine-flag">terminé ${escapeHtml(o.clos)}</span>`;
                 const carte = elementFrom(`<div class="objectif-carte">
                     <div class="objectif-tete">
@@ -4181,26 +4194,24 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
                     ${points}
                 </div>`);
                 carte.classList.toggle('close', !o.ouvert);
-                const terminer = carte.querySelector('[data-objectif]');
+                const terminer = carte.querySelector('[data-action="close-objectif"]');
                 if (terminer) terminer.dataset.objectif = o.nom;
                 return carte;
             }));
-
-            container.querySelectorAll('[data-objectif]').forEach(button => {
-                button.addEventListener('click', async () => {
-                    if (!confirm("Terminer cet objectif ? Tout ce qu'il a enregistré reste dans le fichier.")) return;
-                    button.disabled = true;
-                    try {
-                        await fetch('/api/objectifs/' + encodeURIComponent(button.dataset.objectif),
-                                    { method: 'DELETE' });
-                    } catch (e) {
-                        button.disabled = false;
-                        return;
-                    }
-                    loadObjectifs();
-                });
-            });
         }
+
+        registerAction('close-objectif', async (trigger) => {
+            if (!confirm("Terminer cet objectif ? Tout ce qu'il a enregistré reste dans le fichier.")) return;
+            trigger.disabled = true;
+            try {
+                await fetch('/api/objectifs/' + encodeURIComponent(trigger.dataset.objectif),
+                            { method: 'DELETE' });
+            } catch (e) {
+                trigger.disabled = false;
+                return;
+            }
+            loadObjectifs();
+        });
 
         document.getElementById('btn-clear-activity').addEventListener('click', async () => {
             if (!confirm("Effacer tout le registre d'activité ?")) return;
@@ -4360,12 +4371,16 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
 
             const nodeEl = document.createElement('div');
             nodeEl.className = 'tree-node' + (selectedNodeId === node.id ? ' selected' : '');
+            nodeEl.dataset.action = 'select-node';
             nodeEl.dataset.nodeId = node.id;
             nodeEl.style.paddingLeft = (0.75 + depth * 0.75) + 'rem';
 
             const toggle = document.createElement('span');
             toggle.className = 'tree-toggle' + (hasChildren ? ' expanded' : ' leaf');
             toggle.textContent = '▶';
+            // A leaf's arrow does nothing of its own: a click on it is a
+            // click on the node.
+            if (hasChildren) toggle.dataset.action = 'toggle-tree-node';
 
             const nameSpan = document.createElement('span');
             nameSpan.className = 'tree-node-name';
@@ -4381,22 +4396,11 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
                 nodeEl.appendChild(countSpan);
             }
 
-            nodeEl.addEventListener('click', (e) => {
-                e.stopPropagation();
-                selectNode(node.id);
-            });
-
             el.appendChild(nodeEl);
 
             if (hasChildren) {
                 const childContainer = document.createElement('div');
                 childContainer.className = 'tree-children';
-
-                toggle.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    childContainer.classList.toggle('collapsed');
-                    toggle.classList.toggle('expanded');
-                });
 
                 children.forEach(child => {
                     renderTreeNode(childContainer, child, depth + 1);
@@ -4696,7 +4700,7 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
             sidebar.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
 
             try {
-                const resp = await fetch('/api/graph/node/' + nodeId);
+                const resp = await fetch('/api/graph/node/' + encodeURIComponent(nodeId));
                 const data = await resp.json();
                 renderNodeDetail(data);
             } catch (e) {
@@ -4802,7 +4806,7 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
         }
 
         async function editNode(nodeId) {
-            const resp = await fetch('/api/graph/node/' + nodeId);
+            const resp = await fetch('/api/graph/node/' + encodeURIComponent(nodeId));
             const { node } = await resp.json();
 
             const sidebar = document.getElementById('detail-sidebar');
@@ -4837,7 +4841,7 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
             if (!name) { showToast('Name is required', 'error'); return; }
 
             try {
-                await fetch('/api/graph/node/' + nodeId, {
+                await fetch('/api/graph/node/' + encodeURIComponent(nodeId), {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ name, description, data })
@@ -4855,7 +4859,7 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
             if (!confirm('Delete this node? Children will be orphaned.')) return;
 
             try {
-                await fetch('/api/graph/node/' + nodeId, { method: 'DELETE' });
+                await fetch('/api/graph/node/' + encodeURIComponent(nodeId), { method: 'DELETE' });
                 showToast('Node deleted', 'success');
                 selectedNodeId = null;
                 document.getElementById('detail-sidebar').innerHTML =
@@ -4873,14 +4877,13 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
         registerAction('save-node-edit', (trigger) => saveNodeEdit(trigger.dataset.nodeId));
         registerAction('delete-node', (trigger) => deleteNode(trigger.dataset.nodeId));
 
-        function showCreateNodeModal(parentId) {
-            // Remove existing modal if any
-            const existing = document.querySelector('.modal-overlay');
-            if (existing) existing.remove();
+        registerAction('toggle-tree-node', (trigger) => {
+            trigger.closest('.tree-node').nextElementSibling.classList.toggle('collapsed');
+            trigger.classList.toggle('expanded');
+        });
 
-            const overlay = document.createElement('div');
-            overlay.className = 'modal-overlay';
-            overlay.innerHTML = `
+        function showCreateNodeModal(parentId) {
+            const overlay = openModal(`
                 <div class="modal">
                     <h3>✨ New Memory Node</h3>
                     <div class="modal-field">
@@ -4897,47 +4900,43 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
                     </div>
                     <div class="modal-actions">
                         <button class="modal-btn secondary" data-action="close-modal">Cancel</button>
-                        <button class="modal-btn primary" id="btn-create-node">Create</button>
+                        <button class="modal-btn primary" data-action="create-node">Create</button>
                     </div>
                 </div>
-            `;
-            document.body.appendChild(overlay);
-
-            overlay.addEventListener('click', (e) => {
-                if (e.target === overlay) overlay.remove();
-            });
-
-            document.getElementById('btn-create-node').addEventListener('click', async () => {
-                const name = document.getElementById('new-node-name').value.trim();
-                const description = document.getElementById('new-node-desc').value.trim();
-                const data = document.getElementById('new-node-data').value;
-
-                if (!name) { showToast('Name is required', 'error'); return; }
-
-                try {
-                    const resp = await fetch('/api/graph/node', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ name, description, data, parent_id: parentId })
-                    });
-                    const result = await resp.json();
-                    overlay.remove();
-                    showToast('Node created', 'success');
-                    loadGraphData();
-                    loadTreeData();
-                    if (result.node) selectNode(result.node.id);
-                } catch (e) {
-                    showToast('Failed to create node', 'error');
-                }
-            });
+            `);
+            // The parent is data on the modal the Create button sits in.
+            overlay.dataset.parentId = parentId;
 
             document.getElementById('new-node-name').focus();
         }
 
-        function showImportDiaryModal(firstTime = false) {
-            const existing = document.querySelector('.modal-overlay');
-            if (existing) existing.remove();
+        registerAction('create-node', async (trigger) => {
+            const overlay = trigger.closest('.modal-overlay');
+            const parentId = overlay.dataset.parentId;
+            const name = document.getElementById('new-node-name').value.trim();
+            const description = document.getElementById('new-node-desc').value.trim();
+            const data = document.getElementById('new-node-data').value;
 
+            if (!name) { showToast('Name is required', 'error'); return; }
+
+            try {
+                const resp = await fetch('/api/graph/node', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name, description, data, parent_id: parentId })
+                });
+                const result = await resp.json();
+                overlay.remove();
+                showToast('Node created', 'success');
+                loadGraphData();
+                loadTreeData();
+                if (result.node) selectNode(result.node.id);
+            } catch (e) {
+                showToast('Failed to create node', 'error');
+            }
+        });
+
+        function showImportDiaryModal(firstTime = false) {
             const title = firstTime
                 ? '🧠 Build Your Knowledge Graph'
                 : '📥 Import from Diary';
@@ -4950,9 +4949,7 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
                   + 'into the graph. This may take a while for large diaries.';
             const cancelLabel = firstTime ? 'Not Now' : 'Cancel';
 
-            const overlay = document.createElement('div');
-            overlay.className = 'modal-overlay';
-            overlay.innerHTML = `
+            openModal(`
                 <div class="modal">
                     <h3>${title}</h3>
                     <p style="color: var(--text-secondary); margin-bottom: 16px; line-height: 1.5;">
@@ -4969,100 +4966,89 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
                         <div id="import-log" style="margin-top: 12px; max-height: 200px; overflow-y: auto; font-size: 0.8em; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; color: var(--text-muted); line-height: 1.6;"></div>
                     </div>
                     <div class="modal-actions" id="import-actions">
-                        <button class="modal-btn secondary" id="btn-cancel-import">${cancelLabel}</button>
-                        <button class="modal-btn primary" id="btn-start-import">Start Import</button>
+                        <button class="modal-btn secondary" data-action="close-modal">${cancelLabel}</button>
+                        <button class="modal-btn primary" data-action="start-import">Start Import</button>
                     </div>
                 </div>
-            `;
-            document.body.appendChild(overlay);
-
-            const dismiss = () => overlay.remove();
-            document.getElementById('btn-cancel-import').addEventListener('click', dismiss);
-            overlay.addEventListener('click', (e) => {
-                if (e.target === overlay && !overlay.dataset.importing) dismiss();
-            });
-
-            document.getElementById('btn-start-import').addEventListener('click', async () => {
-                overlay.dataset.importing = 'true';
-                document.getElementById('import-progress').style.display = 'block';
-                document.getElementById('btn-start-import').disabled = true;
-                document.getElementById('btn-start-import').textContent = 'Importing…';
-
-                try {
-                    const resp = await fetch('/api/graph/import-diary', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: '{}',
-                    });
-                    const reader = resp.body.getReader();
-                    const decoder = new TextDecoder();
-                    let buffer = '';
-
-                    while (true) {
-                        const { done, value } = await reader.read();
-                        if (done) break;
-
-                        buffer += decoder.decode(value, { stream: true });
-                        const lines = buffer.split('\\n');
-                        buffer = lines.pop();
-
-                        for (const line of lines) {
-                            if (!line.trim()) continue;
-                            try {
-                                const msg = JSON.parse(line);
-                                if (msg.type === 'start') {
-                                    document.getElementById('import-count').textContent = `0/${msg.total}`;
-                                } else if (msg.type === 'progress') {
-                                    const pct = Math.round((msg.processed / msg.total) * 100);
-                                    document.getElementById('import-bar').style.width = pct + '%';
-                                    document.getElementById('import-count').textContent = `${msg.processed}/${msg.total}`;
-                                    document.getElementById('import-status').textContent = `Processing ${msg.date}…`;
-                                    const log = document.getElementById('import-log');
-                                    const icon = msg.error ? '❌' : '📅';
-                                    const detail = msg.error ? `error: ${msg.error}` : `${msg.facts} fact${msg.facts !== 1 ? 's' : ''}`;
-                                    log.innerHTML += `<div>${icon} ${escapeHtml(msg.date)} — ${escapeHtml(detail)}</div>`;
-                                    log.scrollTop = log.scrollHeight;
-                                } else if (msg.type === 'complete') {
-                                    document.getElementById('import-status').textContent = msg.message;
-                                    document.getElementById('import-bar').style.width = '100%';
-                                    document.getElementById('import-actions').innerHTML = `
-                                        <button class="modal-btn primary" data-action="close-modal">Done</button>
-                                    `;
-                                    delete overlay.dataset.importing;
-                                    diaryImportDone = true;
-                                    loadGraphData();
-                                    loadTreeData();
-                                    loadStats();
-                                    showToast('Diary import complete', 'success');
-                                } else if (msg.type === 'error') {
-                                    document.getElementById('import-status').textContent = 'Error: ' + msg.message;
-                                    document.getElementById('import-actions').innerHTML = `
-                                        <button class="modal-btn secondary" data-action="close-modal">Close</button>
-                                    `;
-                                    delete overlay.dataset.importing;
-                                    showToast('Import failed', 'error');
-                                }
-                            } catch (e) { /* skip malformed lines */ }
-                        }
-                    }
-                } catch (e) {
-                    document.getElementById('import-status').textContent = 'Connection error: ' + e.message;
-                    document.getElementById('import-actions').innerHTML = `
-                        <button class="modal-btn secondary" data-action="close-modal">Close</button>
-                    `;
-                    delete overlay.dataset.importing;
-                    showToast('Import failed', 'error');
-                }
-            });
+            `);
         }
 
-        function showConsolidateAllModal() {
-            const existing = document.querySelector('.modal-overlay');
-            if (existing) existing.remove();
+        registerAction('start-import', async (trigger) => {
+            const overlay = trigger.closest('.modal-overlay');
+            overlay.dataset.busy = 'true';
+            document.getElementById('import-progress').style.display = 'block';
+            trigger.disabled = true;
+            trigger.textContent = 'Importing…';
 
-            const overlay = document.createElement('div');
-            overlay.className = 'modal-overlay';
-            overlay.innerHTML = `
+            try {
+                const resp = await fetch('/api/graph/import-diary', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: '{}',
+                });
+                const reader = resp.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\\n');
+                    buffer = lines.pop();
+
+                    for (const line of lines) {
+                        if (!line.trim()) continue;
+                        try {
+                            const msg = JSON.parse(line);
+                            if (msg.type === 'start') {
+                                document.getElementById('import-count').textContent = `0/${msg.total}`;
+                            } else if (msg.type === 'progress') {
+                                const pct = Math.round((msg.processed / msg.total) * 100);
+                                document.getElementById('import-bar').style.width = pct + '%';
+                                document.getElementById('import-count').textContent = `${msg.processed}/${msg.total}`;
+                                document.getElementById('import-status').textContent = `Processing ${msg.date}…`;
+                                const log = document.getElementById('import-log');
+                                const icon = msg.error ? '❌' : '📅';
+                                const detail = msg.error ? `error: ${msg.error}` : `${msg.facts} fact${msg.facts !== 1 ? 's' : ''}`;
+                                log.innerHTML += `<div>${icon} ${escapeHtml(msg.date)} — ${escapeHtml(detail)}</div>`;
+                                log.scrollTop = log.scrollHeight;
+                            } else if (msg.type === 'complete') {
+                                document.getElementById('import-status').textContent = msg.message;
+                                document.getElementById('import-bar').style.width = '100%';
+                                document.getElementById('import-actions').innerHTML = `
+                                    <button class="modal-btn primary" data-action="close-modal">Done</button>
+                                `;
+                                delete overlay.dataset.busy;
+                                diaryImportDone = true;
+                                loadGraphData();
+                                loadTreeData();
+                                loadStats();
+                                showToast('Diary import complete', 'success');
+                            } else if (msg.type === 'error') {
+                                document.getElementById('import-status').textContent = 'Error: ' + msg.message;
+                                document.getElementById('import-actions').innerHTML = `
+                                    <button class="modal-btn secondary" data-action="close-modal">Close</button>
+                                `;
+                                delete overlay.dataset.busy;
+                                showToast('Import failed', 'error');
+                            }
+                        } catch (e) { /* skip malformed lines */ }
+                    }
+                }
+            } catch (e) {
+                document.getElementById('import-status').textContent = 'Connection error: ' + e.message;
+                document.getElementById('import-actions').innerHTML = `
+                    <button class="modal-btn secondary" data-action="close-modal">Close</button>
+                `;
+                delete overlay.dataset.busy;
+                showToast('Import failed', 'error');
+            }
+        });
+
+        function showConsolidateAllModal() {
+            openModal(`
                 <div class="modal">
                     <h3>🧹 Consolidate All Nodes</h3>
                     <p style="color: var(--text-secondary); margin-bottom: 16px; line-height: 1.5;">
@@ -5079,115 +5065,104 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
                         <div id="consolidate-log" style="margin-top: 12px; max-height: 200px; overflow-y: auto; font-size: 0.8em; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; color: var(--text-muted); line-height: 1.6;"></div>
                     </div>
                     <div class="modal-actions" id="consolidate-actions">
-                        <button class="modal-btn secondary" id="btn-cancel-consolidate">Cancel</button>
-                        <button class="modal-btn primary" id="btn-start-consolidate">Start</button>
+                        <button class="modal-btn secondary" data-action="close-modal">Cancel</button>
+                        <button class="modal-btn primary" data-action="start-consolidate">Start</button>
                     </div>
                 </div>
-            `;
-            document.body.appendChild(overlay);
-
-            const dismiss = () => overlay.remove();
-            document.getElementById('btn-cancel-consolidate').addEventListener('click', dismiss);
-            overlay.addEventListener('click', (e) => {
-                if (e.target === overlay && !overlay.dataset.consolidating) dismiss();
-            });
-
-            document.getElementById('btn-start-consolidate').addEventListener('click', async () => {
-                overlay.dataset.consolidating = 'true';
-                document.getElementById('consolidate-progress').style.display = 'block';
-                document.getElementById('btn-start-consolidate').disabled = true;
-                document.getElementById('btn-start-consolidate').textContent = 'Consolidating…';
-
-                try {
-                    const resp = await fetch('/api/graph/consolidate-all', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: '{}',
-                    });
-                    const reader = resp.body.getReader();
-                    const decoder = new TextDecoder();
-                    let buffer = '';
-                    let nodeCount = 0;
-                    let totalNodes = 0;
-
-                    while (true) {
-                        const { done, value } = await reader.read();
-                        if (done) break;
-
-                        buffer += decoder.decode(value, { stream: true });
-                        const lines = buffer.split('\\n');
-                        buffer = lines.pop();
-
-                        for (const line of lines) {
-                            if (!line.trim()) continue;
-                            try {
-                                const msg = JSON.parse(line);
-                                if (msg.type === 'start') {
-                                    totalNodes = msg.total || 0;
-                                    document.getElementById('consolidate-count').textContent = `0 / ${totalNodes} node${totalNodes !== 1 ? 's' : ''}`;
-                                } else if (msg.type === 'progress') {
-                                    nodeCount++;
-                                    const countLabel = totalNodes
-                                        ? `${nodeCount} / ${totalNodes} node${totalNodes !== 1 ? 's' : ''}`
-                                        : `${nodeCount} node${nodeCount !== 1 ? 's' : ''}`;
-                                    document.getElementById('consolidate-count').textContent = countLabel;
-                                    document.getElementById('consolidate-status').textContent = `Consolidating ${msg.node}…`;
-                                    const log = document.getElementById('consolidate-log');
-                                    const arrow = msg.delta < 0 ? '⬇️' : (msg.delta > 0 ? '⬆️' : '➖');
-                                    log.innerHTML += `<div>${arrow} ${escapeHtml(msg.node)} — ${msg.before} → ${msg.after} lines (Δ${msg.delta})</div>`;
-                                    log.scrollTop = log.scrollHeight;
-                                    // Real progress when the total is known; fall back to indeterminate pulse otherwise.
-                                    const pct = totalNodes
-                                        ? Math.min(100, Math.round((nodeCount / totalNodes) * 100))
-                                        : 50 + (nodeCount % 2) * 50;
-                                    document.getElementById('consolidate-bar').style.width = pct + '%';
-                                } else if (msg.type === 'complete') {
-                                    document.getElementById('consolidate-bar').style.width = '100%';
-                                    document.getElementById('consolidate-status').textContent = `Done — ${msg.nodes} node${msg.nodes !== 1 ? 's' : ''}, ${msg.total_before} → ${msg.total_after} lines (Δ${msg.total_delta})`;
-                                    document.getElementById('consolidate-actions').innerHTML = `
-                                        <button class="modal-btn primary" data-action="close-modal">Done</button>
-                                    `;
-                                    delete overlay.dataset.consolidating;
-                                    loadGraphData();
-                                    loadTreeData();
-                                    loadStats();
-                                    showToast('Graph consolidated', 'success');
-                                } else if (msg.type === 'error') {
-                                    document.getElementById('consolidate-status').textContent = 'Error: ' + msg.message;
-                                    document.getElementById('consolidate-bar').style.width = '0%';
-                                    document.getElementById('consolidate-actions').innerHTML = `
-                                        <button class="modal-btn secondary" data-action="close-modal">Close</button>
-                                    `;
-                                    delete overlay.dataset.consolidating;
-                                    showToast('Consolidation failed', 'error');
-                                }
-                            } catch (e) { /* skip malformed lines */ }
-                        }
-                    }
-                } catch (e) {
-                    document.getElementById('consolidate-status').textContent = 'Connection error: ' + e.message;
-                    // Reset the bar so a half-filled UI doesn't linger next to an error message.
-                    document.getElementById('consolidate-bar').style.width = '0%';
-                    document.getElementById('consolidate-actions').innerHTML = `
-                        <button class="modal-btn secondary" data-action="close-modal">Close</button>
-                    `;
-                    delete overlay.dataset.consolidating;
-                    showToast('Consolidation failed', 'error');
-                }
-            });
+            `);
         }
 
-        function showScrubDeflectionsModal() {
-            const existing = document.querySelector('.modal-overlay');
-            if (existing) existing.remove();
+        registerAction('start-consolidate', async (trigger) => {
+            const overlay = trigger.closest('.modal-overlay');
+            overlay.dataset.busy = 'true';
+            document.getElementById('consolidate-progress').style.display = 'block';
+            trigger.disabled = true;
+            trigger.textContent = 'Consolidating…';
 
-            const overlay = document.createElement('div');
-            overlay.className = 'modal-overlay';
+            try {
+                const resp = await fetch('/api/graph/consolidate-all', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: '{}',
+                });
+                const reader = resp.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                let nodeCount = 0;
+                let totalNodes = 0;
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\\n');
+                    buffer = lines.pop();
+
+                    for (const line of lines) {
+                        if (!line.trim()) continue;
+                        try {
+                            const msg = JSON.parse(line);
+                            if (msg.type === 'start') {
+                                totalNodes = msg.total || 0;
+                                document.getElementById('consolidate-count').textContent = `0 / ${totalNodes} node${totalNodes !== 1 ? 's' : ''}`;
+                            } else if (msg.type === 'progress') {
+                                nodeCount++;
+                                const countLabel = totalNodes
+                                    ? `${nodeCount} / ${totalNodes} node${totalNodes !== 1 ? 's' : ''}`
+                                    : `${nodeCount} node${nodeCount !== 1 ? 's' : ''}`;
+                                document.getElementById('consolidate-count').textContent = countLabel;
+                                document.getElementById('consolidate-status').textContent = `Consolidating ${msg.node}…`;
+                                const log = document.getElementById('consolidate-log');
+                                const arrow = msg.delta < 0 ? '⬇️' : (msg.delta > 0 ? '⬆️' : '➖');
+                                log.innerHTML += `<div>${arrow} ${escapeHtml(msg.node)} — ${msg.before} → ${msg.after} lines (Δ${msg.delta})</div>`;
+                                log.scrollTop = log.scrollHeight;
+                                // Real progress when the total is known; fall back to indeterminate pulse otherwise.
+                                const pct = totalNodes
+                                    ? Math.min(100, Math.round((nodeCount / totalNodes) * 100))
+                                    : 50 + (nodeCount % 2) * 50;
+                                document.getElementById('consolidate-bar').style.width = pct + '%';
+                            } else if (msg.type === 'complete') {
+                                document.getElementById('consolidate-bar').style.width = '100%';
+                                document.getElementById('consolidate-status').textContent = `Done — ${msg.nodes} node${msg.nodes !== 1 ? 's' : ''}, ${msg.total_before} → ${msg.total_after} lines (Δ${msg.total_delta})`;
+                                document.getElementById('consolidate-actions').innerHTML = `
+                                    <button class="modal-btn primary" data-action="close-modal">Done</button>
+                                `;
+                                delete overlay.dataset.busy;
+                                loadGraphData();
+                                loadTreeData();
+                                loadStats();
+                                showToast('Graph consolidated', 'success');
+                            } else if (msg.type === 'error') {
+                                document.getElementById('consolidate-status').textContent = 'Error: ' + msg.message;
+                                document.getElementById('consolidate-bar').style.width = '0%';
+                                document.getElementById('consolidate-actions').innerHTML = `
+                                    <button class="modal-btn secondary" data-action="close-modal">Close</button>
+                                `;
+                                delete overlay.dataset.busy;
+                                showToast('Consolidation failed', 'error');
+                            }
+                        } catch (e) { /* skip malformed lines */ }
+                    }
+                }
+            } catch (e) {
+                document.getElementById('consolidate-status').textContent = 'Connection error: ' + e.message;
+                // Reset the bar so a half-filled UI doesn't linger next to an error message.
+                document.getElementById('consolidate-bar').style.width = '0%';
+                document.getElementById('consolidate-actions').innerHTML = `
+                    <button class="modal-btn secondary" data-action="close-modal">Close</button>
+                `;
+                delete overlay.dataset.busy;
+                showToast('Consolidation failed', 'error');
+            }
+        });
+
+        function showScrubDeflectionsModal() {
             // Body copy is intentionally explicit about *what stays* and
             // *what is removed*. Users have correctly worried about
             // "clean" buttons quietly destroying data — say exactly what
             // happens so the action is unsurprising.
-            overlay.innerHTML = `
+            openModal(`
                 <div class="modal">
                     <h3>🧹 Clean up deflection narration</h3>
                     <p style="color: var(--text-secondary); margin-bottom: 12px; line-height: 1.5;">
@@ -5212,171 +5187,167 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
                         <div id="scrub-log" style="margin-top: 12px; max-height: 200px; overflow-y: auto; font-size: 0.8em; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; color: var(--text-muted); line-height: 1.6;"></div>
                     </div>
                     <div class="modal-actions" id="scrub-actions">
-                        <button class="modal-btn secondary" id="btn-cancel-scrub">Cancel</button>
-                        <button class="modal-btn primary" id="btn-start-scrub">Start</button>
+                        <button class="modal-btn secondary" data-action="close-modal">Cancel</button>
+                        <button class="modal-btn primary" data-action="start-scrub">Start</button>
                     </div>
                 </div>
-            `;
-            document.body.appendChild(overlay);
-
-            const dismiss = () => overlay.remove();
-            document.getElementById('btn-cancel-scrub').addEventListener('click', dismiss);
-            overlay.addEventListener('click', (e) => {
-                if (e.target === overlay && !overlay.dataset.scrubbing) dismiss();
-            });
-
-            document.getElementById('btn-start-scrub').addEventListener('click', async () => {
-                overlay.dataset.scrubbing = 'true';
-                document.getElementById('scrub-progress').style.display = 'block';
-                // The sweep is one synchronous LLM call per row; on a
-                // multi-year diary that's many minutes. The user must
-                // be able to bail out without closing the browser. When
-                // the AbortController fires, the fetch reader rejects
-                // with AbortError and the Flask generator gets a closed
-                // pipe on its next yield, ending the sweep cleanly. Any
-                // rows already rewritten stay rewritten — partial
-                // progress is the design (the bulk sweep is idempotent,
-                // so a re-run picks up where this run stopped).
-                const controller = new AbortController();
-                let processed = 0;
-                let totalRows = 0;
-                document.getElementById('scrub-actions').innerHTML = `
-                    <button class="modal-btn secondary" id="btn-abort-scrub">Abort</button>
-                `;
-                document.getElementById('btn-abort-scrub').addEventListener('click', () => {
-                    controller.abort();
-                });
-
-                try {
-                    const resp = await fetch('/api/diary/scrub-deflections', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: '{}',
-                        signal: controller.signal,
-                    });
-                    const reader = resp.body.getReader();
-                    const decoder = new TextDecoder();
-                    let buffer = '';
-
-                    while (true) {
-                        const { done, value } = await reader.read();
-                        if (done) break;
-
-                        buffer += decoder.decode(value, { stream: true });
-                        const lines = buffer.split('\\n');
-                        buffer = lines.pop();
-
-                        for (const line of lines) {
-                            if (!line.trim()) continue;
-                            try {
-                                const msg = JSON.parse(line);
-                                if (msg.type === 'start') {
-                                    totalRows = msg.total || 0;
-                                    document.getElementById('scrub-count').textContent =
-                                        `0 / ${totalRows} entr${totalRows === 1 ? 'y' : 'ies'}`;
-                                } else if (msg.type === 'progress') {
-                                    processed = msg.processed;
-                                    const countLabel = totalRows
-                                        ? `${processed} / ${totalRows} entr${totalRows === 1 ? 'y' : 'ies'}`
-                                        : `${processed} entr${processed === 1 ? 'y' : 'ies'}`;
-                                    document.getElementById('scrub-count').textContent = countLabel;
-                                    document.getElementById('scrub-status').textContent = `Cleaning ${msg.date_utc}…`;
-                                    const log = document.getElementById('scrub-log');
-                                    let icon, detail;
-                                    if (msg.error) {
-                                        icon = '❌';
-                                        detail = `error: ${msg.error}`;
-                                    } else if (msg.would_empty) {
-                                        // Model wanted to empty the row; kept original instead.
-                                        icon = '🛡️';
-                                        detail = 'would have emptied · kept original';
-                                    } else if (msg.rewritten) {
-                                        const delta = (msg.chars_before || 0) - (msg.chars_after || 0);
-                                        icon = '🧹';
-                                        detail = `rewritten · ${delta} chars removed`;
-                                    } else {
-                                        icon = '➖';
-                                        detail = 'clean';
-                                    }
-                                    // Use textContent on a constructed node
-                                    // rather than innerHTML+=. The values
-                                    // come from server-controlled JSON, but
-                                    // a corrupted DB row could contain a
-                                    // malformed date_utc and the endpoint
-                                    // surfaces an exception class name on
-                                    // error — neither should be able to
-                                    // inject markup into the modal log.
-                                    const entry = document.createElement('div');
-                                    entry.textContent = `${icon} ${msg.date_utc} — ${detail}`;
-                                    log.appendChild(entry);
-                                    log.scrollTop = log.scrollHeight;
-                                    const pct = totalRows
-                                        ? Math.min(100, Math.round((processed / totalRows) * 100))
-                                        : 50 + (processed % 2) * 50;
-                                    document.getElementById('scrub-bar').style.width = pct + '%';
-                                } else if (msg.type === 'complete') {
-                                    document.getElementById('scrub-bar').style.width = '100%';
-                                    const summary = msg.rows === 0
-                                        ? 'No diary entries found.'
-                                        : `Done — ${msg.rows_rewritten} of ${msg.rows} entr${msg.rows === 1 ? 'y' : 'ies'} rewritten`
-                                          + (msg.rows_would_empty ? ` (${msg.rows_would_empty} kept original to avoid emptying)` : '');
-                                    document.getElementById('scrub-status').textContent = summary;
-                                    document.getElementById('scrub-actions').innerHTML = `
-                                        <button class="modal-btn primary" data-action="close-modal">Done</button>
-                                    `;
-                                    delete overlay.dataset.scrubbing;
-                                    loadStats();
-                                    loadMemories();
-                                    showToast('Diary cleaned', 'success');
-                                } else if (msg.type === 'error') {
-                                    document.getElementById('scrub-status').textContent = 'Error: ' + msg.message;
-                                    document.getElementById('scrub-bar').style.width = '0%';
-                                    document.getElementById('scrub-actions').innerHTML = `
-                                        <button class="modal-btn secondary" data-action="close-modal">Close</button>
-                                    `;
-                                    delete overlay.dataset.scrubbing;
-                                    showToast('Diary clean failed', 'error');
-                                }
-                            } catch (e) { /* skip malformed lines */ }
-                        }
-                    }
-                } catch (e) {
-                    if (e.name === 'AbortError') {
-                        // User-initiated abort. Partial progress stays
-                        // in the DB (the sweep is per-row idempotent and
-                        // re-running picks up where this run stopped).
-                        const summary = totalRows
-                            ? `Stopped — ${processed} of ${totalRows} entr${totalRows === 1 ? 'y' : 'ies'} processed`
-                            : 'Stopped before any entries were processed';
-                        document.getElementById('scrub-status').textContent = summary;
-                        document.getElementById('scrub-actions').innerHTML = `
-                            <button class="modal-btn secondary" data-action="close-modal">Close</button>
-                        `;
-                        delete overlay.dataset.scrubbing;
-                        loadStats();
-                        loadMemories();
-                        // No toast on user-initiated abort — the modal
-                        // status update communicates the partial result.
-                    } else {
-                        document.getElementById('scrub-status').textContent = 'Connection error: ' + e.message;
-                        document.getElementById('scrub-bar').style.width = '0%';
-                        document.getElementById('scrub-actions').innerHTML = `
-                            <button class="modal-btn secondary" data-action="close-modal">Close</button>
-                        `;
-                        delete overlay.dataset.scrubbing;
-                        showToast('Diary clean failed', 'error');
-                    }
-                }
-            });
+            `);
         }
 
-        function showOptimiseTopicsModal() {
-            const existing = document.querySelector('.modal-overlay');
-            if (existing) existing.remove();
+        // A running sweep's controller, keyed by the modal it runs in: the
+        // Abort button reaches it through the modal that encloses it.
+        const scrubControllers = new WeakMap();
 
-            const overlay = document.createElement('div');
-            overlay.className = 'modal-overlay';
-            overlay.innerHTML = `
+        registerAction('abort-scrub', (trigger) => {
+            const controller = scrubControllers.get(trigger.closest('.modal-overlay'));
+            if (controller) controller.abort();
+        });
+
+        registerAction('start-scrub', async (trigger) => {
+            const overlay = trigger.closest('.modal-overlay');
+            overlay.dataset.busy = 'true';
+            document.getElementById('scrub-progress').style.display = 'block';
+            // The sweep is one synchronous LLM call per row; on a
+            // multi-year diary that's many minutes. The user must
+            // be able to bail out without closing the browser. When
+            // the AbortController fires, the fetch reader rejects
+            // with AbortError and the Flask generator gets a closed
+            // pipe on its next yield, ending the sweep cleanly. Any
+            // rows already rewritten stay rewritten — partial
+            // progress is the design (the bulk sweep is idempotent,
+            // so a re-run picks up where this run stopped).
+            const controller = new AbortController();
+            let processed = 0;
+            let totalRows = 0;
+            scrubControllers.set(overlay, controller);
+            document.getElementById('scrub-actions').innerHTML = `
+                <button class="modal-btn secondary" data-action="abort-scrub">Abort</button>
+            `;
+
+            try {
+                const resp = await fetch('/api/diary/scrub-deflections', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: '{}',
+                    signal: controller.signal,
+                });
+                const reader = resp.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\\n');
+                    buffer = lines.pop();
+
+                    for (const line of lines) {
+                        if (!line.trim()) continue;
+                        try {
+                            const msg = JSON.parse(line);
+                            if (msg.type === 'start') {
+                                totalRows = msg.total || 0;
+                                document.getElementById('scrub-count').textContent =
+                                    `0 / ${totalRows} entr${totalRows === 1 ? 'y' : 'ies'}`;
+                            } else if (msg.type === 'progress') {
+                                processed = msg.processed;
+                                const countLabel = totalRows
+                                    ? `${processed} / ${totalRows} entr${totalRows === 1 ? 'y' : 'ies'}`
+                                    : `${processed} entr${processed === 1 ? 'y' : 'ies'}`;
+                                document.getElementById('scrub-count').textContent = countLabel;
+                                document.getElementById('scrub-status').textContent = `Cleaning ${msg.date_utc}…`;
+                                const log = document.getElementById('scrub-log');
+                                let icon, detail;
+                                if (msg.error) {
+                                    icon = '❌';
+                                    detail = `error: ${msg.error}`;
+                                } else if (msg.would_empty) {
+                                    // Model wanted to empty the row; kept original instead.
+                                    icon = '🛡️';
+                                    detail = 'would have emptied · kept original';
+                                } else if (msg.rewritten) {
+                                    const delta = (msg.chars_before || 0) - (msg.chars_after || 0);
+                                    icon = '🧹';
+                                    detail = `rewritten · ${delta} chars removed`;
+                                } else {
+                                    icon = '➖';
+                                    detail = 'clean';
+                                }
+                                // Use textContent on a constructed node
+                                // rather than innerHTML+=. The values
+                                // come from server-controlled JSON, but
+                                // a corrupted DB row could contain a
+                                // malformed date_utc and the endpoint
+                                // surfaces an exception class name on
+                                // error — neither should be able to
+                                // inject markup into the modal log.
+                                const entry = document.createElement('div');
+                                entry.textContent = `${icon} ${msg.date_utc} — ${detail}`;
+                                log.appendChild(entry);
+                                log.scrollTop = log.scrollHeight;
+                                const pct = totalRows
+                                    ? Math.min(100, Math.round((processed / totalRows) * 100))
+                                    : 50 + (processed % 2) * 50;
+                                document.getElementById('scrub-bar').style.width = pct + '%';
+                            } else if (msg.type === 'complete') {
+                                document.getElementById('scrub-bar').style.width = '100%';
+                                const summary = msg.rows === 0
+                                    ? 'No diary entries found.'
+                                    : `Done — ${msg.rows_rewritten} of ${msg.rows} entr${msg.rows === 1 ? 'y' : 'ies'} rewritten`
+                                      + (msg.rows_would_empty ? ` (${msg.rows_would_empty} kept original to avoid emptying)` : '');
+                                document.getElementById('scrub-status').textContent = summary;
+                                document.getElementById('scrub-actions').innerHTML = `
+                                    <button class="modal-btn primary" data-action="close-modal">Done</button>
+                                `;
+                                delete overlay.dataset.busy;
+                                loadStats();
+                                loadMemories();
+                                showToast('Diary cleaned', 'success');
+                            } else if (msg.type === 'error') {
+                                document.getElementById('scrub-status').textContent = 'Error: ' + msg.message;
+                                document.getElementById('scrub-bar').style.width = '0%';
+                                document.getElementById('scrub-actions').innerHTML = `
+                                    <button class="modal-btn secondary" data-action="close-modal">Close</button>
+                                `;
+                                delete overlay.dataset.busy;
+                                showToast('Diary clean failed', 'error');
+                            }
+                        } catch (e) { /* skip malformed lines */ }
+                    }
+                }
+            } catch (e) {
+                if (e.name === 'AbortError') {
+                    // User-initiated abort. Partial progress stays
+                    // in the DB (the sweep is per-row idempotent and
+                    // re-running picks up where this run stopped).
+                    const summary = totalRows
+                        ? `Stopped — ${processed} of ${totalRows} entr${totalRows === 1 ? 'y' : 'ies'} processed`
+                        : 'Stopped before any entries were processed';
+                    document.getElementById('scrub-status').textContent = summary;
+                    document.getElementById('scrub-actions').innerHTML = `
+                        <button class="modal-btn secondary" data-action="close-modal">Close</button>
+                    `;
+                    delete overlay.dataset.busy;
+                    loadStats();
+                    loadMemories();
+                    // No toast on user-initiated abort — the modal
+                    // status update communicates the partial result.
+                } else {
+                    document.getElementById('scrub-status').textContent = 'Connection error: ' + e.message;
+                    document.getElementById('scrub-bar').style.width = '0%';
+                    document.getElementById('scrub-actions').innerHTML = `
+                        <button class="modal-btn secondary" data-action="close-modal">Close</button>
+                    `;
+                    delete overlay.dataset.busy;
+                    showToast('Diary clean failed', 'error');
+                }
+            }
+        });
+
+        function showOptimiseTopicsModal() {
+            openModal(`
                 <div class="modal">
                     <h3>🏷️ Optimise tags</h3>
                     <p style="color: var(--text-secondary); margin-bottom: 12px; line-height: 1.5;">
@@ -5399,135 +5370,129 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
                         <div id="optimise-log" style="margin-top: 12px; max-height: 200px; overflow-y: auto; font-size: 0.8em; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; color: var(--text-muted); line-height: 1.6;"></div>
                     </div>
                     <div class="modal-actions" id="optimise-actions">
-                        <button class="modal-btn secondary" id="btn-cancel-optimise">Cancel</button>
-                        <button class="modal-btn primary" id="btn-start-optimise">Start</button>
+                        <button class="modal-btn secondary" data-action="close-modal">Cancel</button>
+                        <button class="modal-btn primary" data-action="start-optimise">Start</button>
                     </div>
                 </div>
-            `;
-            document.body.appendChild(overlay);
-
-            const dismiss = () => overlay.remove();
-            document.getElementById('btn-cancel-optimise').addEventListener('click', dismiss);
-            overlay.addEventListener('click', (e) => {
-                if (e.target === overlay && !overlay.dataset.optimising) dismiss();
-            });
-
-            document.getElementById('btn-start-optimise').addEventListener('click', async () => {
-                overlay.dataset.optimising = 'true';
-                document.getElementById('optimise-progress').style.display = 'block';
-                document.getElementById('btn-start-optimise').disabled = true;
-                document.getElementById('btn-start-optimise').textContent = 'Optimising…';
-
-                try {
-                    const resp = await fetch('/api/diary/optimise-topics', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: '{}',
-                    });
-                    const reader = resp.body.getReader();
-                    const decoder = new TextDecoder();
-                    let buffer = '';
-                    let processed = 0;
-                    let totalRows = 0;
-
-                    while (true) {
-                        const { done, value } = await reader.read();
-                        if (done) break;
-
-                        buffer += decoder.decode(value, { stream: true });
-                        const lines = buffer.split('\\n');
-                        buffer = lines.pop();
-
-                        for (const line of lines) {
-                            if (!line.trim()) continue;
-                            try {
-                                const msg = JSON.parse(line);
-                                if (msg.type === 'start') {
-                                    totalRows = msg.total || 0;
-                                    document.getElementById('optimise-status').textContent = 'Building tag taxonomy…';
-                                    document.getElementById('optimise-count').textContent =
-                                        `0 / ${totalRows} entr${totalRows === 1 ? 'y' : 'ies'}`;
-                                } else if (msg.type === 'progress') {
-                                    processed = msg.processed;
-                                    const countLabel = totalRows
-                                        ? `${processed} / ${totalRows} entr${totalRows === 1 ? 'y' : 'ies'}`
-                                        : `${processed} entr${processed === 1 ? 'y' : 'ies'}`;
-                                    document.getElementById('optimise-count').textContent = countLabel;
-                                    document.getElementById('optimise-status').textContent = `Applying to ${msg.date_utc}…`;
-                                    const log = document.getElementById('optimise-log');
-                                    let icon, detail;
-                                    if (msg.error) {
-                                        icon = '❌';
-                                        detail = `error: ${msg.error}`;
-                                    } else if (!msg.topics_changed) {
-                                        icon = '➖';
-                                        detail = 'no change';
-                                    } else {
-                                        const oldN = msg.old_topic_count || 0;
-                                        const newN = msg.new_topic_count || 0;
-                                        icon = '🏷️';
-                                        detail = newN < oldN
-                                            ? `${oldN} → ${newN} tags (merged)`
-                                            : newN > oldN
-                                                ? `${oldN} → ${newN} tags (split)`
-                                                : `${newN} tag${newN === 1 ? '' : 's'} updated`;
-                                    }
-                                    const entry = document.createElement('div');
-                                    entry.textContent = `${icon} ${msg.date_utc} — ${detail}`;
-                                    log.appendChild(entry);
-                                    log.scrollTop = log.scrollHeight;
-                                    const pct = totalRows
-                                        ? Math.min(100, Math.round((processed / totalRows) * 100))
-                                        : 50 + (processed % 2) * 50;
-                                    document.getElementById('optimise-bar').style.width = pct + '%';
-                                } else if (msg.type === 'complete') {
-                                    document.getElementById('optimise-bar').style.width = '100%';
-                                    let summary;
-                                    if (msg.rows === 0) {
-                                        summary = 'No diary entries found.';
-                                    } else {
-                                        const parts = [];
-                                        if (msg.rows_changed > 0) {
-                                            parts.push(`${msg.rows_changed} of ${msg.rows} entr${msg.rows === 1 ? 'y' : 'ies'} updated`);
-                                        } else {
-                                            parts.push(`${msg.rows} entr${msg.rows === 1 ? 'y' : 'ies'} checked — all tags already optimal`);
-                                        }
-                                        if (msg.topics_merged > 0) parts.push(`${msg.topics_merged} tag${msg.topics_merged === 1 ? '' : 's'} merged`);
-                                        if (msg.topics_expanded > 0) parts.push(`${msg.topics_expanded} tag${msg.topics_expanded === 1 ? '' : 's'} split`);
-                                        summary = 'Done — ' + parts.join(', ');
-                                    }
-                                    document.getElementById('optimise-status').textContent = summary;
-                                    document.getElementById('optimise-actions').innerHTML = `
-                                        <button class="modal-btn primary" data-action="close-modal">Done</button>
-                                    `;
-                                    delete overlay.dataset.optimising;
-                                    loadStats();
-                                    loadTopics();
-                                    loadMemories();
-                                    showToast('Tags optimised', 'success');
-                                } else if (msg.type === 'error') {
-                                    document.getElementById('optimise-status').textContent = 'Error: ' + msg.message;
-                                    document.getElementById('optimise-bar').style.width = '0%';
-                                    document.getElementById('optimise-actions').innerHTML = `
-                                        <button class="modal-btn secondary" data-action="close-modal">Close</button>
-                                    `;
-                                    delete overlay.dataset.optimising;
-                                    showToast('Tag optimisation failed', 'error');
-                                }
-                            } catch (e) { /* skip malformed lines */ }
-                        }
-                    }
-                } catch (e) {
-                    document.getElementById('optimise-status').textContent = 'Connection error: ' + e.message;
-                    document.getElementById('optimise-bar').style.width = '0%';
-                    document.getElementById('optimise-actions').innerHTML = `
-                        <button class="modal-btn secondary" data-action="close-modal">Close</button>
-                    `;
-                    delete overlay.dataset.optimising;
-                    showToast('Tag optimisation failed', 'error');
-                }
-            });
+            `);
         }
+
+        registerAction('start-optimise', async (trigger) => {
+            const overlay = trigger.closest('.modal-overlay');
+            overlay.dataset.busy = 'true';
+            document.getElementById('optimise-progress').style.display = 'block';
+            trigger.disabled = true;
+            trigger.textContent = 'Optimising…';
+
+            try {
+                const resp = await fetch('/api/diary/optimise-topics', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: '{}',
+                });
+                const reader = resp.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                let processed = 0;
+                let totalRows = 0;
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\\n');
+                    buffer = lines.pop();
+
+                    for (const line of lines) {
+                        if (!line.trim()) continue;
+                        try {
+                            const msg = JSON.parse(line);
+                            if (msg.type === 'start') {
+                                totalRows = msg.total || 0;
+                                document.getElementById('optimise-status').textContent = 'Building tag taxonomy…';
+                                document.getElementById('optimise-count').textContent =
+                                    `0 / ${totalRows} entr${totalRows === 1 ? 'y' : 'ies'}`;
+                            } else if (msg.type === 'progress') {
+                                processed = msg.processed;
+                                const countLabel = totalRows
+                                    ? `${processed} / ${totalRows} entr${totalRows === 1 ? 'y' : 'ies'}`
+                                    : `${processed} entr${processed === 1 ? 'y' : 'ies'}`;
+                                document.getElementById('optimise-count').textContent = countLabel;
+                                document.getElementById('optimise-status').textContent = `Applying to ${msg.date_utc}…`;
+                                const log = document.getElementById('optimise-log');
+                                let icon, detail;
+                                if (msg.error) {
+                                    icon = '❌';
+                                    detail = `error: ${msg.error}`;
+                                } else if (!msg.topics_changed) {
+                                    icon = '➖';
+                                    detail = 'no change';
+                                } else {
+                                    const oldN = msg.old_topic_count || 0;
+                                    const newN = msg.new_topic_count || 0;
+                                    icon = '🏷️';
+                                    detail = newN < oldN
+                                        ? `${oldN} → ${newN} tags (merged)`
+                                        : newN > oldN
+                                            ? `${oldN} → ${newN} tags (split)`
+                                            : `${newN} tag${newN === 1 ? '' : 's'} updated`;
+                                }
+                                const entry = document.createElement('div');
+                                entry.textContent = `${icon} ${msg.date_utc} — ${detail}`;
+                                log.appendChild(entry);
+                                log.scrollTop = log.scrollHeight;
+                                const pct = totalRows
+                                    ? Math.min(100, Math.round((processed / totalRows) * 100))
+                                    : 50 + (processed % 2) * 50;
+                                document.getElementById('optimise-bar').style.width = pct + '%';
+                            } else if (msg.type === 'complete') {
+                                document.getElementById('optimise-bar').style.width = '100%';
+                                let summary;
+                                if (msg.rows === 0) {
+                                    summary = 'No diary entries found.';
+                                } else {
+                                    const parts = [];
+                                    if (msg.rows_changed > 0) {
+                                        parts.push(`${msg.rows_changed} of ${msg.rows} entr${msg.rows === 1 ? 'y' : 'ies'} updated`);
+                                    } else {
+                                        parts.push(`${msg.rows} entr${msg.rows === 1 ? 'y' : 'ies'} checked — all tags already optimal`);
+                                    }
+                                    if (msg.topics_merged > 0) parts.push(`${msg.topics_merged} tag${msg.topics_merged === 1 ? '' : 's'} merged`);
+                                    if (msg.topics_expanded > 0) parts.push(`${msg.topics_expanded} tag${msg.topics_expanded === 1 ? '' : 's'} split`);
+                                    summary = 'Done — ' + parts.join(', ');
+                                }
+                                document.getElementById('optimise-status').textContent = summary;
+                                document.getElementById('optimise-actions').innerHTML = `
+                                    <button class="modal-btn primary" data-action="close-modal">Done</button>
+                                `;
+                                delete overlay.dataset.busy;
+                                loadStats();
+                                loadTopics();
+                                loadMemories();
+                                showToast('Tags optimised', 'success');
+                            } else if (msg.type === 'error') {
+                                document.getElementById('optimise-status').textContent = 'Error: ' + msg.message;
+                                document.getElementById('optimise-bar').style.width = '0%';
+                                document.getElementById('optimise-actions').innerHTML = `
+                                    <button class="modal-btn secondary" data-action="close-modal">Close</button>
+                                `;
+                                delete overlay.dataset.busy;
+                                showToast('Tag optimisation failed', 'error');
+                            }
+                        } catch (e) { /* skip malformed lines */ }
+                    }
+                }
+            } catch (e) {
+                document.getElementById('optimise-status').textContent = 'Connection error: ' + e.message;
+                document.getElementById('optimise-bar').style.width = '0%';
+                document.getElementById('optimise-actions').innerHTML = `
+                    <button class="modal-btn secondary" data-action="close-modal">Close</button>
+                `;
+                delete overlay.dataset.busy;
+                showToast('Tag optimisation failed', 'error');
+            }
+        });
 
         // Initial load
         loadStats();
