@@ -10,6 +10,11 @@ name: Release
 #   semantic-release would find the tag already there and release nothing.
 # - Every platform must build for anything to publish, so one failed runner
 #   holds back all of them until its job is re-run.
+# - On develop, a newer push cancels a release-develop that has already
+#   started, and the swap of the rolling `latest` release is not atomic, so
+#   `latest` can be left half replaced until the next green push rewrites it
+#   (the updater refuses it meanwhile). Re-run jobs only for the newest
+#   develop run: re-running an older one rewrites `latest` with that commit.
 # - tests.yml has no push trigger: the copy called below is the only run of the
 #   suite for a push to main or develop, and it is the one that gates. A newer
 #   push cancels it with the rest of the run (see `concurrency`), so the older
@@ -27,11 +32,15 @@ concurrency:
 
 jobs:
   # Nothing below runs unless the suite is green. Every other job needs this
-  # one, directly or through a job that does. A job whose `if` uses a status
-  # function (it has to, to run after a skipped semantic-release on develop)
-  # would otherwise start with the suite red, so it also checks
-  # `needs.tests.result` itself. It uses `!cancelled()` rather than
-  # `always()`, so a run that a newer push cancels does not start its builds.
+  # one, directly or through a job that does.
+  #
+  # A job whose `if` has no status function is skipped when any job in its
+  # dependency chain, however far back, did not succeed. semantic-release is
+  # skipped on develop, so every job behind it that has to run there (the
+  # builds and release-develop) uses `!cancelled()` and checks for itself the
+  # results it depends on, the suite's included (`needs.tests.result`).
+  # release-develop checks the builds too. It is `!cancelled()` rather than
+  # `always()`, so a run that a newer push cancels starts nothing more.
   tests:
     name: Tests
     uses: ./.github/workflows/tests.yml
@@ -360,7 +369,9 @@ jobs:
     # No `always()`: the release is attached to and published only when every
     # build has succeeded, so a failed build leaves the draft that
     # semantic-release created unpublished, with no assets and no audience.
-    # Re-running the failed jobs completes it.
+    # Re-running the failed jobs completes it. semantic-release runs on every
+    # push to main, so nothing in this job's chain is skipped there and the
+    # implicit success check is enough.
     if: needs.semantic-release.outputs.new_release_published == 'true'
 
     permissions:
@@ -431,12 +442,17 @@ jobs:
 
   # Create/update latest pre-release (develop only)
   release-develop:
-    needs: [build-windows, build-macos, build-linux]
+    needs: [tests, build-windows, build-macos, build-linux]
     runs-on: ubuntu-latest
-    # No `always()`: the rolling release is rewritten only when every build
-    # has succeeded, so its assets always belong to the commit it names and a
-    # failed build leaves the previous one untouched.
-    if: github.ref == 'refs/heads/develop'
+    # A status function, because semantic-release is skipped on develop and a
+    # job without one is skipped behind it however green the builds are. The
+    # results it depends on are checked instead, the suite's included: the
+    # rolling release is rewritten only when the suite passed and every build
+    # succeeded, and a failed build leaves the previous one untouched. Once the
+    # job has started, a newer push cancels it like any other, and the asset
+    # swap is not atomic: `latest` can be left half replaced until the next
+    # green push rewrites it.
+    if: ${{ !cancelled() && github.ref == 'refs/heads/develop' && needs.tests.result == 'success' && needs.build-windows.result == 'success' && needs.build-macos.result == 'success' && needs.build-linux.result == 'success' }}
 
     permissions:
       contents: write

@@ -2,11 +2,14 @@
 
 The release workflow cannot be run from here, so these tests read it the way
 GitHub does: they parse ``release.yml`` and ``tests.yml``, evaluate each job's
-``if`` with the same rules (a job is skipped when anything it needs did not
-succeed, unless its condition uses a status function such as ``always()``),
-and play out a push to ``main`` and to ``develop`` under each failure. That is
-where the gate breaks in practice: a job that lists the suite in ``needs`` but
-writes ``if: always() && ...`` still runs when the suite is red.
+``if`` with the same rules (a job is skipped when anything in its dependency
+chain, however far back, did not succeed, unless its condition uses a status
+function such as ``always()`` or ``!cancelled()``), and play out a push to
+``main`` and to ``develop`` under each failure. That is where the gate breaks
+in practice, in both directions: a job that lists the suite in ``needs`` but
+writes ``if: always() && ...`` still runs when the suite is red, and a job
+with no status function never runs behind a job that was skipped on its
+branch, even when every job it lists in ``needs`` succeeded.
 
 What it cannot show is what GitHub's own services do with the result; the
 claims here are about the graph and the order of steps, which is all the
@@ -217,6 +220,12 @@ def _simulate(workflow: dict, ref: str, failing=(), outputs=None, cancelled_afte
     A job that runs succeeds unless it is in ``failing``. ``outputs`` gives the
     outputs of a job that ran and succeeded, as ``{job: {name: value}}``.
 
+    A job whose ``if`` has no status function runs only when every job it
+    depends on, directly or through others, succeeded. One whose ``if`` has a
+    status function is judged by that expression alone: ``always()`` and
+    ``cancelled()`` ignore its ancestors, while ``success()`` and
+    ``failure()`` read all of them.
+
     ``cancelled_after`` plays out a run that a newer push cancels once the
     named jobs have finished: no other job starts unless its ``if`` uses a
     status function and still holds with ``cancelled()`` true.
@@ -249,11 +258,15 @@ def _simulate(workflow: dict, ref: str, failing=(), outputs=None, cancelled_afte
                         return (outputs.get(parts[1], {}) if ran else {}).get(parts[3], "")
                 raise NotImplementedError(f"context {path!r} is not modelled")
 
+            # success() and failure() look at the whole dependency chain, not
+            # only at the jobs listed in `needs`: a skipped or failed job any
+            # distance back holds a job that has no status function of its own.
+            ancestors = [results[ancestor] for ancestor in _transitive_needs(jobs, name)]
             not_started = cancelled and name not in cancelled_after
             status = {
-                "success": all(result == "success" for result in needs.values()),
+                "success": all(result == "success" for result in ancestors),
                 "always": True,
-                "failure": any(result == "failure" for result in needs.values()),
+                "failure": any(result == "failure" for result in ancestors),
                 "cancelled": not_started,
             }
             condition = job.get("if")
@@ -332,6 +345,10 @@ def _suite_runs_started_by_a_push_to(branch: str) -> list[str]:
 RELEASE_OUTPUT = {"semantic-release": {"new_release_published": "true"}}
 NO_RELEASE_OUTPUT = {"semantic-release": {"new_release_published": "false"}}
 
+# The job that attaches assets for a push to each branch: the rolling
+# pre-release the develop update channel reads, and the versioned release.
+PUBLISHER_ON = {"refs/heads/develop": "release-develop", "refs/heads/main": "release-main"}
+
 
 @pytest.fixture(scope="module")
 def release() -> dict:
@@ -341,6 +358,22 @@ def release() -> dict:
 @pytest.fixture(scope="module")
 def tests_workflow() -> dict:
     return _load("tests.yml")
+
+
+def _build_jobs(release: dict) -> list[str]:
+    builds = [name for name, job in release["jobs"].items() if _is_build(job)]
+    assert builds, "no job builds anything"
+    return builds
+
+
+def _publishing_jobs(release: dict) -> list[str]:
+    """The jobs that attach assets to a release."""
+    publishers = [
+        name for name, job in release["jobs"].items()
+        if any(_uses(step).startswith("softprops/action-gh-release") for step in _steps(job))
+    ]
+    assert publishers, "no job attaches anything to a release"
+    return publishers
 
 
 def _others(release: dict) -> list[str]:
@@ -366,9 +399,11 @@ class TestTheSimulationSeesWhatItShould:
     }}
 
     def test_always_overrides_a_needs_edge(self):
+        # The build starts behind a red suite. `publish` has no status
+        # function, so the red suite two steps back still holds it.
         results = _simulate(self.TRAPPED, "refs/heads/develop", failing={"tests"})
 
-        assert results == {"tests": "failure", "build": "success", "publish": "success"}
+        assert results == {"tests": "failure", "build": "success", "publish": "skipped"}
 
     def test_an_explicit_result_check_restores_the_gate(self):
         results = _simulate(self.SOUND, "refs/heads/develop", failing={"tests"})
@@ -400,6 +435,58 @@ class TestTheSimulationSeesWhatItShould:
 
         assert _simulate(workflow, "refs/heads/develop")["after"] == "skipped"
         assert _simulate(workflow, "refs/heads/main")["after"] == "success"
+
+    # A skipped job on one branch, a build that runs behind it through a
+    # status function, and a job after the build: the shape of the release
+    # workflow on develop.
+    BEHIND_A_SKIPPED_JOB = {
+        "tests": {"uses": "./.github/workflows/tests.yml"},
+        "only-main": {"needs": ["tests"], "if": "github.ref == 'refs/heads/main'"},
+        "build": {
+            "needs": ["tests", "only-main"],
+            "if": (
+                "!cancelled() && needs.tests.result == 'success' "
+                "&& (needs.only-main.result == 'success' || needs.only-main.result == 'skipped')"
+            ),
+        },
+    }
+
+    def test_a_skipped_ancestor_holds_a_job_with_no_status_function_although_its_direct_needs_succeeded(self):
+        workflow = {"jobs": {**self.BEHIND_A_SKIPPED_JOB, "publish": {"needs": ["build"]}}}
+
+        on_develop = _simulate(workflow, "refs/heads/develop")
+        on_main = _simulate(workflow, "refs/heads/main")
+
+        assert on_develop == {"tests": "success", "only-main": "skipped", "build": "success", "publish": "skipped"}
+        assert on_main["publish"] == "success"
+
+    def test_a_status_function_replaces_the_check_over_the_whole_chain(self):
+        workflow = {"jobs": {
+            **self.BEHIND_A_SKIPPED_JOB,
+            "publish": {"needs": ["build"], "if": "!cancelled() && needs.build.result == 'success'"},
+        }}
+
+        assert _simulate(workflow, "refs/heads/develop")["publish"] == "success"
+        assert _simulate(workflow, "refs/heads/develop", failing={"build"})["publish"] == "skipped"
+
+    def test_a_status_function_condition_that_is_false_still_skips_the_job(self):
+        workflow = {"jobs": {
+            **self.BEHIND_A_SKIPPED_JOB,
+            "publish": {"needs": ["build"], "if": "!cancelled() && github.ref == 'refs/heads/main'"},
+        }}
+
+        assert _simulate(workflow, "refs/heads/develop")["publish"] == "skipped"
+        assert _simulate(workflow, "refs/heads/main")["publish"] == "success"
+
+    def test_failure_sees_a_failed_ancestor_behind_a_job_that_did_not_run(self):
+        workflow = {"jobs": {
+            "a": {},
+            "b": {"needs": ["a"], "if": "always() && false"},
+            "c": {"needs": ["b"], "if": "failure()"},
+        }}
+
+        assert _simulate(workflow, "refs/heads/main", failing={"a"})["c"] == "success"
+        assert _simulate(workflow, "refs/heads/main")["c"] == "skipped"
 
     def test_outputs_are_empty_when_the_job_did_not_succeed(self):
         workflow = {"jobs": {
@@ -544,35 +631,43 @@ class TestACancelledRunStartsNothing:
         started = [name for name, result in results.items() if name not in finished and result != "skipped"]
         assert started == [], f"{started} started after the run was cancelled on {ref}"
 
+    @pytest.mark.parametrize("ref", BRANCH_REFS)
+    def test_no_job_starts_once_the_run_is_cancelled_right_after_the_suite(self, release, ref):
+        gate = _gate_job_name(release["jobs"])
 
-class TestAFailedBuildPublishesNothing:
-    def _builds(self, release):
-        builds = [name for name, job in release["jobs"].items() if _is_build(job)]
-        assert builds, "no job builds anything"
-        return builds
+        results = _simulate(release, ref, outputs=RELEASE_OUTPUT, cancelled_after={gate})
 
-    def _publishers(self, release):
-        publishers = [
-            name for name, job in release["jobs"].items()
-            if any(_uses(step).startswith("softprops/action-gh-release") for step in _steps(job))
-        ]
-        assert publishers, "no job attaches anything to a release"
-        return publishers
+        started = [name for name, result in results.items() if name != gate and result != "skipped"]
+        assert started == [], f"{started} started after the run was cancelled on {ref}, before semantic-release ran"
 
     @pytest.mark.parametrize("ref", BRANCH_REFS)
+    def test_no_publisher_starts_once_the_run_is_cancelled_after_the_builds(self, release, ref):
+        gate = _gate_job_name(release["jobs"])
+        finished = {gate, "semantic-release", *_build_jobs(release)}
+
+        green = _simulate(release, ref, outputs=RELEASE_OUTPUT)
+        results = _simulate(release, ref, outputs=RELEASE_OUTPUT, cancelled_after=finished)
+
+        publisher = PUBLISHER_ON[ref]
+        assert green[publisher] == "success", f"{publisher} never runs on {ref}, so its skip below proves nothing"
+        assert results[publisher] == "skipped", f"{publisher} started after the run was cancelled on {ref}"
+
+
+class TestAFailedBuildPublishesNothing:
+    @pytest.mark.parametrize("ref", BRANCH_REFS)
     def test_no_job_that_attaches_assets_runs_when_any_build_fails(self, release, ref):
-        for failing in self._builds(release):
+        for failing in _build_jobs(release):
             results = _simulate(release, ref, failing={failing}, outputs=RELEASE_OUTPUT)
 
             assert results[failing] == "failure"
-            for publisher in self._publishers(release):
+            for publisher in _publishing_jobs(release):
                 assert results[publisher] == "skipped", f"{publisher} ran after {failing} failed on {ref}"
 
     def test_a_failed_semantic_release_starts_no_build(self, release):
         results = _simulate(release, "refs/heads/main", failing={"semantic-release"}, outputs=RELEASE_OUTPUT)
 
         assert results["semantic-release"] == "failure"
-        for name in self._builds(release) + self._publishers(release):
+        for name in _build_jobs(release) + _publishing_jobs(release):
             assert results[name] == "skipped"
 
     def test_semantic_release_failure_is_not_swallowed(self, release):
@@ -626,6 +721,81 @@ class TestTheReleaseStillShipsWhenEverythingPasses:
 
         assert results["release-main"] == "skipped"
         assert results["release-develop"] == "skipped"
+
+
+class TestAPublisherRunsWhenItShouldAndOnlyThen:
+    """A skip proves nothing about a publisher that the graph holds back on
+    every run: it is also skipped when a build fails. So each push is played
+    green first, where the publisher must run, and then once per job that ran
+    before it, where that one failure must be what stops it."""
+
+    @pytest.mark.parametrize("ref", BRANCH_REFS)
+    def test_a_green_push_runs_its_publisher_and_no_other(self, release, ref):
+        results = _simulate(release, ref, outputs=RELEASE_OUTPUT)
+
+        publisher = PUBLISHER_ON[ref]
+        held_by = [name for name in _transitive_needs(release["jobs"], publisher) if results[name] != "success"]
+        assert results[publisher] == "success", (
+            f"{publisher} is skipped on a green push to {ref}. Jobs behind it that did not succeed: {held_by}. "
+            "A job with no status function does not run behind a skipped job, however far back."
+        )
+        for other in _publishing_jobs(release):
+            if other != publisher:
+                assert results[other] == "skipped", f"{other} ran on a push to {ref}"
+
+    @pytest.mark.parametrize("ref", BRANCH_REFS)
+    def test_a_green_push_runs_every_build(self, release, ref):
+        results = _simulate(release, ref, outputs=RELEASE_OUTPUT)
+
+        for name in _build_jobs(release):
+            assert results[name] == "success", f"{name} did not run on a green push to {ref}"
+
+    @pytest.mark.parametrize("ref", BRANCH_REFS)
+    def test_one_failed_job_before_the_publisher_stops_it(self, release, ref):
+        publisher = PUBLISHER_ON[ref]
+        green = _simulate(release, ref, outputs=RELEASE_OUTPUT)
+        assert green[publisher] == "success", f"{publisher} never runs on {ref}, so a skip below proves nothing"
+        before = sorted(name for name in _transitive_needs(release["jobs"], publisher) if green[name] == "success")
+        assert set(_build_jobs(release)) | {_gate_job_name(release["jobs"])} <= set(before), (
+            f"the jobs that run before {publisher} must include the gate and every build"
+        )
+
+        for failing in before:
+            results = _simulate(release, ref, failing={failing}, outputs=RELEASE_OUTPUT)
+
+            assert results[failing] == "failure"
+            assert results[publisher] == "skipped", f"{publisher} ran on {ref} after {failing} failed"
+
+    def test_a_push_to_main_with_nothing_to_release_stops_the_publisher_that_would_have_run(self, release):
+        assert _simulate(release, "refs/heads/main", outputs=RELEASE_OUTPUT)["release-main"] == "success"
+
+        results = _simulate(release, "refs/heads/main", outputs=NO_RELEASE_OUTPUT)
+
+        assert results["release-main"] == "skipped"
+        assert all(results[build] == "success" for build in _build_jobs(release)), "the builds still run"
+
+
+class TestAJobWithAStatusFunctionChecksTheSuiteItself:
+    """A status function drops the implicit check of the whole dependency
+    chain, the suite included. So a job that uses one must need the suite and
+    read its result itself, or a condition loosened elsewhere in the chain
+    would let it start behind a red suite."""
+
+    def test_every_such_job_reads_the_suite_result(self, release):
+        gate = _gate_job_name(release["jobs"])
+        users = [
+            name
+            for name, job in release["jobs"].items()
+            if name != gate and _uses_status_function(str(job.get("if", "")))
+        ]
+        assert users, "no job uses a status function: the rule below would pass over nothing"
+
+        for name in users:
+            job = release["jobs"][name]
+            assert gate in _needs(job), f"{name} does not need {gate}, so it cannot read the suite's result"
+            assert f"needs.{gate}.result" in str(job["if"]), (
+                f"{name} uses a status function but never checks needs.{gate}.result"
+            )
 
 
 class TestEveryScriptAWorkflowRunsIsInTheRepository:
