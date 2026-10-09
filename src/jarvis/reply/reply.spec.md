@@ -35,7 +35,7 @@ Design principles enforced by the engine:
    - **Conversation-scoped scratch cache** (`DialogueMemory.hot_cache_get` / `hot_cache_put`): a small primitive used by the engine to memoise three idempotent per-turn computations for the lifetime of the active conversation:
      - **Core profile** (`DialogueMemory.WARM_PROFILE_CACHE_KEY`, query-agnostic): skips re-reading the two core files on every follow-up turn. Cached as `(fingerprint, block)`. Invalidated two ways: on any core write in this process, via a listener registered in `daemon.py` against `register_core_mutation_listener` (`src/jarvis/memory/core.py`), so a fact remembered mid-conversation reaches the very next turn; and by comparing `MemoryCore.fingerprint()` on entry, which catches the files changing underneath a running daemon. The listener only fires in the process that wrote, and hand-editing the files is the point of the core: the memory viewer and the user's own editor are other processes.
      - **Memory enrichment extractor** (`enrichment:{redacted_query[+topic_hint]}` key): skips the small-model LLM call that derives keywords / questions / time bounds when an identical query repeats.
-     - **Tool router** (`router:{redacted_query}|{strategy}|{builtin-names}|{mcp-names}` key): skips the router LLM call when the query and tool catalogue match. The catalogue signature lets a mid-conversation MCP refresh invalidate the cache. The engine refuses to cache the router's "fall open to all tools" fallback (detected by set equality with the full catalogue): that path fires only when the LLM router gave up, and pinning a fluke fall-open into the conversation cache would force every subsequent turn to expose the entire catalogue, overwhelming small chat models.
+     - **Tool router** (`router:{redacted_query}|{strategy}|{builtin-names}|{mcp-names}` key): skips the router LLM call when the query and tool catalogue match. The catalogue signature lets a mid-conversation MCP refresh invalidate the cache. The engine refuses to cache a pick the router did not make: the keyword fallback that answers when the LLM router expires, comes back empty or names nothing known (the selection's `degraded` flag), and the "fall open to all tools" answer (detected by set equality with the full catalogue). Both fire only when the router gave up, and pinning them into the conversation cache would keep a weaker allow-list than the next try gives, or force every subsequent turn to expose the entire catalogue, overwhelming small chat models. The next identical turn asks the router again.
      - Lifetime: entries persist until (a) the `stop` signal clears the whole cache, (b) the engine detects a new conversation at turn entry (`has_recent_messages()` was False) and clears it before running, or (c) targeted invalidation (core profile only) on core writes. Entries are *not* bounded by `RECENT_WINDOW_SEC` age, so a long active session keeps them warm.
 
 3. Pre-flight Planner
@@ -287,8 +287,8 @@ Turn 4: LLM → {content: "Here's a comprehensive comparison of the iPhone 15 mo
 ### Configuration and Defaults
 - Timeouts (seconds):
 
-  - `llm_tools_timeout_sec` (default 300 s; memory extractor, weather place extractor)
-  - `tool_router_timeout_sec` (default 15 s; the tool router, in the reply engine and in `toolSearchTool`; falls back to the keyword strategy when it expires)
+  - `llm_tools_timeout_sec` (default 300 s; weather place extractor)
+  - `tool_router_timeout_sec` (default 15 s; the tool router, in the reply engine and in `toolSearchTool`, and the memory extractor, which rides the router's model chain and backend; the router falls back to the keyword strategy when it expires)
   - `llm_embedding_timeout_sec` (default 60 s; vector search)
   - `llm_chat_timeout_sec` (default 180 s; messages loop turn)
   - `llm_digest_timeout_sec` (default 8 s; memory digest, tool-result digest, max-turn digest)

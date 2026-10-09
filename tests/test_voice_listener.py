@@ -1607,7 +1607,6 @@ def _make_listener_for_warmup(
                 mock_cfg.llm_chat_model = chat_model
                 mock_cfg.ollama_base_url = base_url
                 mock_cfg.llm_tools_timeout_sec = 8.0
-                mock_cfg.tool_router_timeout_sec = 8.0
                 mock_cfg.intent_judge_model = judge_model or ""
                 mock_cfg.intent_judge_timeout_sec = 10.0
                 mock_cfg.intent_judge_thinking_enabled = False

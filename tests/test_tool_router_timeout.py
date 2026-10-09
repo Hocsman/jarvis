@@ -1,18 +1,21 @@
 """The tool router waits for its model on a deadline of its own.
 
 The router is a classification call that stands between the user's sentence
-and the first token of the reply. It waited on ``llm_tools_timeout_sec``, a
-ceiling of minutes shared with other contexts, so a provider that stalled for
-fifteen seconds held the whole turn for fifteen seconds. These tests pin the
-properties that keep the wait bounded:
+and the first token of the reply, so it does not share the minutes-long
+``llm_tools_timeout_sec`` ceiling. These tests pin the properties that keep
+its wait bounded:
 
 1. the deadline is its own setting, read from the user's file, kept inside
-   sane bounds, and far below the shared tools ceiling by default;
-2. the reply engine and ``toolSearchTool`` both hand that deadline to the
-   router, not the shared one;
+   the bounds the settings window offers, and far below the shared tools
+   ceiling by default;
+2. the reply engine, ``toolSearchTool`` and the memory extractor that rides
+   the router's model chain all hand that deadline to their call, not the
+   shared one;
 3. a router whose server accepts the request and never answers is given up
    on at its deadline, and the selection degrades to the keyword strategy;
-4. the same holds for the intent judge, whose give-up leaves the listener on
+4. a pick that came from that fallback is not remembered for the rest of the
+   conversation, so the next turn asks the router again;
+5. the same holds for the intent judge, whose give-up leaves the listener on
    its no-verdict path instead of waiting out a stalled provider.
 """
 
@@ -80,7 +83,9 @@ def _server_that_never_answers():
     thread = threading.Thread(target=accept_and_hold, daemon=True)
     thread.start()
     try:
-        yield listener.getsockname()[1]
+        # `held` fills as requests arrive: a test that gives up on a closed
+        # port instead of a silent one would pass for the wrong reason.
+        yield SimpleNamespace(port=listener.getsockname()[1], held=held)
     finally:
         stop.set()
         thread.join(timeout=2)
@@ -142,6 +147,16 @@ def test_the_settings_window_offers_the_router_deadline_within_the_loaders_bound
     high = _settings_from(tmp_path, monkeypatch, {"tool_router_timeout_sec": field.max_val})
     assert low.tool_router_timeout_sec == field.min_val
     assert high.tool_router_timeout_sec == field.max_val
+
+    # Past either end, the loader stops where the window stops.
+    below = _settings_from(tmp_path, monkeypatch, {"tool_router_timeout_sec": field.min_val - 1})
+    above = _settings_from(tmp_path, monkeypatch, {"tool_router_timeout_sec": field.max_val + 1000})
+    assert below.tool_router_timeout_sec == field.min_val
+    assert above.tool_router_timeout_sec == field.max_val
+
+    from jarvis.config import get_default_config
+
+    assert field.min_val <= get_default_config()["tool_router_timeout_sec"] <= field.max_val
 
 
 # ── 2. The deadline reaches the router ────────────────────────────────
@@ -222,6 +237,38 @@ def test_the_reply_engine_hands_the_router_deadline_to_select_tools(
     assert captured.get("llm_timeout_sec") == 3.5
 
 
+@pytest.mark.unit
+def test_the_memory_extractor_shares_the_router_deadline(mock_config, db, dialogue_memory):
+    """The extractor rides the router's model chain and backend, so a provider
+    that stalls the router stalls it too; it must not wait out the shared
+    ceiling (twice, for its retry) once routing has given up."""
+    from jarvis.reply.engine import run_reply_engine
+
+    captured: dict = {}
+
+    def fake_extractor(*args, **kwargs):
+        captured.update(kwargs)
+        return {"keywords": []}
+
+    mock_config.tool_router_timeout_sec = 3.5
+    mock_config.llm_tools_timeout_sec = 77.0
+
+    # An empty plan is the planner failing open: memory enrichment then runs.
+    with patch("jarvis.reply.engine.plan_query", return_value=[]), \
+         patch("jarvis.reply.engine.chat_with_messages",
+               return_value={"message": {"content": "Bonjour.", "role": "assistant"}}), \
+         patch("jarvis.reply.engine.extract_search_params_for_memory",
+               side_effect=fake_extractor), \
+         patch("jarvis.reply.engine.select_tools", return_value=["stop"]):
+        run_reply_engine(
+            db=db, cfg=mock_config, tts=None, text="que sais-tu de mon week-end ?",
+            dialogue_memory=dialogue_memory,
+        )
+
+    assert captured, "the memory extractor never ran, so the test proves nothing"
+    assert captured.get("timeout_sec") == 3.5
+
+
 # ── 3. A router that never answers is given up on ─────────────────────
 
 
@@ -229,17 +276,19 @@ def test_the_reply_engine_hands_the_router_deadline_to_select_tools(
 def test_a_router_that_never_answers_is_given_up_on_at_its_deadline():
     from jarvis.tools.selection import ToolSelectionStrategy, select_tools
 
-    with _server_that_never_answers() as port:
+    with _server_that_never_answers() as server:
         started = time.monotonic()
         selected = select_tools(
             "weather in London", _catalogue(), {},
             strategy=ToolSelectionStrategy.LLM,
-            llm_backend=_stalled_backend(port),
+            llm_backend=_stalled_backend(server.port),
             llm_model="router-model",
             llm_timeout_sec=0.4,
         )
         waited = time.monotonic() - started
+        delivered = len(server.held)
 
+    assert delivered >= 1, "the request never reached the silent server"
     assert waited < 5.0, f"the router held the turn for {waited:.1f}s past its 0.4s deadline"
     # The keyword strategy answered: it narrows on the query, it does not
     # hand the model the whole catalogue.
@@ -263,8 +312,8 @@ def test_a_judge_that_never_answers_gives_no_verdict_at_its_deadline():
     now = time.time()
     segments = [TranscriptSegment("yuba, quelle heure est-il", now - 3.0, now - 1.0)]
 
-    with _server_that_never_answers() as port:
-        backend = _stalled_backend(port)
+    with _server_that_never_answers() as server:
+        backend = _stalled_backend(server.port)
         with patch("jarvis.listening.intent_judge.get_auxiliary_backend", return_value=backend):
             judge = create_intent_judge(cfg)
             started = time.monotonic()
@@ -273,7 +322,86 @@ def test_a_judge_that_never_answers_gives_no_verdict_at_its_deadline():
                 current_text="yuba, quelle heure est-il",
             )
             waited = time.monotonic() - started
+        delivered = len(server.held)
 
+    assert delivered >= 1, "the request never reached the silent server"
     assert verdict is None
     assert waited < 5.0, f"the judge held the audio loop for {waited:.1f}s past its 0.4s deadline"
     assert judge.last_failure_reason, "the listener prints why the judge was unavailable"
+
+
+# ── 4. A pick that came from the fallback is not remembered ───────────
+
+
+def _router_asked_over_two_identical_turns(mock_config, db, dialogue_memory, router_backend):
+    """How many times the router's backend was called across two identical
+    turns of one conversation, with the real selection and the real cache."""
+    from jarvis.reply.engine import run_reply_engine
+
+    mock_config.tool_selection_strategy = "llm"
+    mock_config.tool_router_model = "router-model"
+
+    with patch("jarvis.reply.engine.plan_query", return_value=[]), \
+         patch("jarvis.reply.engine.chat_with_messages",
+               return_value={"message": {"content": "Il fait beau.", "role": "assistant"}}), \
+         patch("jarvis.reply.engine.extract_search_params_for_memory",
+               return_value={"keywords": []}), \
+         patch("jarvis.reply.engine.get_auxiliary_backend", return_value=router_backend):
+        for _ in range(2):
+            run_reply_engine(
+                db=db, cfg=mock_config, tts=None, text="what is the weather in Paris",
+                dialogue_memory=dialogue_memory,
+            )
+    return router_backend.direct.call_count
+
+
+@pytest.mark.unit
+def test_a_router_that_gave_up_is_asked_again_on_the_next_turn(
+    mock_config, db, dialogue_memory
+):
+    """An expired or empty answer falls back to a keyword pick. That pick is
+    good enough for the turn in hand and not worth pinning for the whole
+    conversation: the next identical turn gets another try at the router."""
+    from unittest.mock import MagicMock
+
+    gave_up = MagicMock()
+    gave_up.direct.return_value = None  # what both backends return on a timeout
+
+    calls = _router_asked_over_two_identical_turns(mock_config, db, dialogue_memory, gave_up)
+
+    assert calls == 2
+
+
+@pytest.mark.unit
+def test_a_router_that_answered_is_not_asked_twice(mock_config, db, dialogue_memory):
+    """The control: the cache still does its job for a real answer."""
+    from unittest.mock import MagicMock
+
+    answered = MagicMock()
+    answered.direct.return_value = "getWeather"
+
+    calls = _router_asked_over_two_identical_turns(mock_config, db, dialogue_memory, answered)
+
+    assert calls == 1
+
+
+@pytest.mark.unit
+def test_the_selection_says_when_it_fell_back_and_when_it_did_not():
+    from unittest.mock import MagicMock
+
+    from jarvis.tools.selection import ToolSelectionStrategy, select_tools
+
+    def selection_from(answer):
+        backend = MagicMock()
+        backend.direct.return_value = answer
+        return select_tools(
+            "weather in London", _catalogue(), {},
+            strategy=ToolSelectionStrategy.LLM,
+            llm_backend=backend, llm_model="router-model", llm_timeout_sec=1.0,
+        )
+
+    assert selection_from(None).degraded is True          # expired or errored
+    assert selection_from("").degraded is True            # came back empty
+    assert selection_from("no such tool").degraded is True  # named nothing known
+    assert selection_from("getWeather").degraded is False
+    assert selection_from("none").degraded is False       # a real, deliberate answer

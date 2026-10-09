@@ -30,6 +30,26 @@ class ToolSelectionStrategy(Enum):
     LLM = "llm"
 
 
+class ToolSelection(list):
+    """The tool names a strategy picked, and whether the pick is a fallback.
+
+    A plain list in every other respect, so callers that only read names are
+    unaffected. ``degraded`` is True when the LLM router could not answer
+    (it expired, came back empty, named nothing known, or had no backend or
+    model) and the keyword strategy answered in its place. A degraded pick is
+    good enough for the turn in hand and not worth remembering: the caller
+    that caches picks leaves it out, so the next turn asks the router again.
+    """
+
+    degraded: bool = False
+
+    @classmethod
+    def fallback(cls, names: List[str]) -> "ToolSelection":
+        picked = cls(names)
+        picked.degraded = True
+        return picked
+
+
 # Tools that must always be available regardless of selection strategy.
 _ALWAYS_INCLUDED = {"stop", "remember", "forget"}
 
@@ -295,7 +315,7 @@ def _select_llm(
     """
     if not (llm_model or "").strip():
         debug_log("LLM tool selection skipped: no model configured, falling back to keyword strategy", "planning")
-        return _select_keyword(query, builtin_tools, mcp_tools)
+        return ToolSelection.fallback(_select_keyword(query, builtin_tools, mcp_tools))
 
     catalogue_lines: List[str] = []
     for name, tool in builtin_tools.items():
@@ -387,16 +407,21 @@ def _select_llm(
         )
     except Exception as e:
         debug_log(f"LLM tool selection failed: {e}, falling back to keyword strategy", "planning")
-        return _select_keyword(query, builtin_tools, mcp_tools)
+        return ToolSelection.fallback(_select_keyword(query, builtin_tools, mcp_tools))
 
     if not resp or not isinstance(resp, str):
-        debug_log("LLM tool selection returned empty, falling back to keyword strategy", "planning")
-        return _select_keyword(query, builtin_tools, mcp_tools)
+        # A deadline that expires lands here too: both backends answer None.
+        debug_log(
+            f"LLM tool selection got no answer within {llm_timeout_sec:g}s, "
+            "falling back to keyword strategy",
+            "planning",
+        )
+        return ToolSelection.fallback(_select_keyword(query, builtin_tools, mcp_tools))
 
     resp_lower = resp.strip().lower()
     if resp_lower == "none":
         debug_log("LLM tool selection returned 'none' — including only mandatory tools", "planning")
-        return [t for t in _ALWAYS_INCLUDED if t in builtin_tools or t in mcp_tools]
+        return ToolSelection(t for t in _ALWAYS_INCLUDED if t in builtin_tools or t in mcp_tools)
 
     known = set(builtin_tools.keys()) | set(mcp_tools.keys())
     selected: List[str] = []
@@ -422,12 +447,12 @@ def _select_llm(
     # small model then fails to pick from.
     if not selected:
         debug_log("LLM tool selection matched nothing, falling back to keyword strategy", "planning")
-        return _select_keyword(query, builtin_tools, mcp_tools)
+        return ToolSelection.fallback(_select_keyword(query, builtin_tools, mcp_tools))
 
     selected = _ensure_always_included(selected, builtin_tools, mcp_tools)
 
     debug_log(f"LLM tool selection: {len(selected)}/{len(known)} tools selected", "planning")
-    return selected
+    return ToolSelection(selected)
 
 
 # ---------------------------------------------------------------------------
@@ -500,7 +525,7 @@ def select_tools(
     elif strategy == ToolSelectionStrategy.LLM:
         if llm_backend is None:
             debug_log("LLM tool selection: no backend supplied, falling back to keyword strategy", "planning")
-            return _select_keyword(query, builtin_tools, mcp_tools)
+            return ToolSelection.fallback(_select_keyword(query, builtin_tools, mcp_tools))
         return _select_llm(
             query, builtin_tools, mcp_tools,
             llm_backend, llm_model, llm_timeout_sec,

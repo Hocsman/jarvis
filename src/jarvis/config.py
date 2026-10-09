@@ -136,9 +136,11 @@ class Settings:
     ollama_chat_model: str
     llm_chat_timeout_sec: float
     llm_tools_timeout_sec: float
-    # The tool router's own deadline. Routing is a classification call that
-    # sits in front of the first token of the reply, so it cannot inherit the
-    # minutes-long ceiling above: a stalled provider would hold the turn.
+    # The tool router's own deadline, shared by the memory extractor that
+    # rides the same model chain and backend. Routing is a classification
+    # call that sits in front of the first token of the reply, so it cannot
+    # inherit the minutes-long ceiling above: a stalled provider would hold
+    # the turn.
     tool_router_timeout_sec: float
     # Tight deadline for the cheap distil passes used by memory_digest and
     # tool_result_digest. Separate from `llm_tools_timeout_sec` because

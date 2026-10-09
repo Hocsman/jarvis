@@ -1391,23 +1391,30 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
             embed_timeout_sec=float(getattr(cfg, "llm_embedding_timeout_sec", 10.0)),
             context_hint=context_hint,
         )
-        # Don't cache the router's "fall open to all tools" fallback. That
-        # path fires when the LLM router times out, returns empty, or emits
-        # a response no token of which matches a known tool name — i.e. the
-        # router gave up. Caching its "give up = expose everything" output
-        # for the rest of the conversation pins ``allowed_tools`` to the
-        # full catalogue, overwhelms the planner (which then paraphrases
-        # tool steps as prose), and starves a small chat model into
-        # producing the empty-reply fallback. Re-rolling the router on the
-        # next turn is cheap and almost always recovers.
+        # Don't cache a pick the router did not make. That is the case when
+        # the LLM router times out, returns empty, or emits a response no
+        # token of which matches a known tool name: it gave up, and the
+        # keyword strategy (``routed_tools.degraded``) answered in its place.
+        # Pinning that pick for the rest of the conversation would keep a
+        # weaker allow-list than the router would give on its next try.
+        # The same holds for the "fall open to all tools" answer, which
+        # also pins ``allowed_tools`` to the full catalogue, overwhelms the
+        # planner (which then paraphrases tool steps as prose), and starves
+        # a small chat model into producing the empty-reply fallback.
+        # Re-rolling the router on the next turn is cheap and almost always
+        # recovers.
+        _router_gave_up = bool(getattr(routed_tools, "degraded", False))
         _router_returned_full_catalog = (
             routed_tools is not None
             and len(routed_tools) == len(_full_catalog_names)
             and set(routed_tools) == set(_full_catalog_names)
         )
+        if _router_gave_up:
+            debug_log("tool router gave up, keyword pick used for this turn only", "planning")
         if (
             dialogue_memory
             and hasattr(dialogue_memory, "hot_cache_put")
+            and not _router_gave_up
             and not _router_returned_full_catalog
         ):
             dialogue_memory.hot_cache_put(_router_cache_key, list(routed_tools or []))
@@ -1666,7 +1673,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 _stage("memory")
                 search_params = extract_search_params_for_memory(
                     _extractor_query, cfg, resolve_tool_router_model(cfg),
-                    timeout_sec=float(getattr(cfg, 'llm_tools_timeout_sec', 8.0)),
+                    timeout_sec=router_timeout_sec(cfg),
                     thinking=getattr(cfg, 'llm_thinking_enabled', False),
                     context_hint=context_hint,
                 )

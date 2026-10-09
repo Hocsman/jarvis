@@ -46,7 +46,7 @@ def test_enrichment_extractor_uses_router_model_chain():
             "hello",
             cfg.ollama_base_url,
             engine_mod.resolve_tool_router_model(cfg),
-            timeout_sec=cfg.llm_tools_timeout_sec,
+            timeout_sec=engine_mod.router_timeout_sec(cfg),
             thinking=cfg.llm_thinking_enabled,
             context_hint="",
         )

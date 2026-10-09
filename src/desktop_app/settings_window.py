@@ -165,7 +165,7 @@ def _build_field_metadata() -> List[FieldMeta]:
     f("llm_tools_timeout_sec", "Tools Timeout", "Max seconds for tool calls",
       "llm", "float", min_val=10, max_val=600, step=10, suffix="s")
     f("tool_router_timeout_sec", "Tool Router Timeout",
-      "Max seconds the tool router waits for its model before keyword matching answers",
+      "Max seconds tool routing and memory lookup wait for their model before falling back",
       "llm", "float", min_val=1, max_val=120, step=1, suffix="s")
     f("llm_embedding_timeout_sec", "Embedding Timeout", "Max seconds for embeddings",
       "llm", "float", min_val=5, max_val=300, step=5, suffix="s")
