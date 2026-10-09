@@ -32,6 +32,7 @@ def test_enrichment_extractor_uses_router_model_chain():
     cfg.intent_judge_model = "small-judge"
     cfg.tool_router_model = ""
     cfg.llm_tools_timeout_sec = 5.0
+    cfg.tool_router_timeout_sec = 5.0
     cfg.llm_thinking_enabled = False
     cfg.memory_enrichment_source = "diary"
     cfg.memory_enrichment_max_snippets = 3
@@ -45,7 +46,7 @@ def test_enrichment_extractor_uses_router_model_chain():
             "hello",
             cfg.ollama_base_url,
             engine_mod.resolve_tool_router_model(cfg),
-            timeout_sec=cfg.llm_tools_timeout_sec,
+            timeout_sec=engine_mod.router_timeout_sec(cfg),
             thinking=cfg.llm_thinking_enabled,
             context_hint="",
         )
