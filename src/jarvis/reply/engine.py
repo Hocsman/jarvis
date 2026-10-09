@@ -1357,6 +1357,9 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         dialogue_memory.hot_cache_get(_router_cache_key)
         if dialogue_memory and hasattr(dialogue_memory, "hot_cache_get") else None
     )
+    # True only when the LLM router was asked this turn and the keyword
+    # strategy answered in its place; it labels the printed tools line.
+    _router_gave_up = False
     if scope is not None:
         # A routine's catalogue is the envelope it was given. The router
         # is not consulted: it exists to narrow forty tools down for a
@@ -1901,7 +1904,10 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         action_plan, _full_catalog_names
     )
     allowed_tools = list(routed_tools)
-    _selection_source = strategy.value
+    # A keyword pick that stood in for a router that gave up must not read
+    # as `llm` in the printed tools line.
+    _base_source = f"{strategy.value}->keyword" if _router_gave_up else strategy.value
+    _selection_source = _base_source
 
     if _settled.approval is not None:
         # A resume turn does one thing: run the call the user approved and
@@ -1921,7 +1927,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         for _plan_name in tool_names_in_plan(action_plan, _full_catalog_names):
             if _plan_name not in allowed_tools:
                 allowed_tools.append(_plan_name)
-                _selection_source = f"{strategy.value}+plan"
+                _selection_source = f"{_base_source}+plan"
     if _carryover_names:
         _selection_source = f"{_selection_source}+carryover"
     if scope is not None:

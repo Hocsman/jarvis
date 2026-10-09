@@ -375,6 +375,8 @@ class TestLLMStrategy:
         assert "webSearch" in result
         assert "getWeather" in result
         assert "stop" in result
+        # A pick the router made itself is not a fallback.
+        assert result.degraded is False
 
     @pytest.mark.unit
     def test_none_response_returns_only_mandatory(self):
@@ -387,6 +389,7 @@ class TestLLMStrategy:
             llm_model="test",
         )
         assert result == ["stop"]
+        assert result.degraded is False
 
     @pytest.mark.unit
     def test_llm_failure_falls_back_to_keyword(self):
@@ -408,6 +411,8 @@ class TestLLMStrategy:
         assert "getWeather" in result
         assert "fetchMeals" not in result
         assert "homeassistant__turn_on" not in result
+        # The pick is flagged so a caller that caches picks leaves it out.
+        assert result.degraded is True
 
     @pytest.mark.unit
     def test_empty_response_falls_back_to_keyword(self):
@@ -423,6 +428,7 @@ class TestLLMStrategy:
         )
         assert "getWeather" in result
         assert "fetchMeals" not in result
+        assert result.degraded is True
 
     @pytest.mark.unit
     def test_no_llm_backend_falls_back_to_keyword(self):
@@ -436,6 +442,7 @@ class TestLLMStrategy:
         )
         assert "getWeather" in result
         assert "fetchMeals" not in result
+        assert result.degraded is True
 
     @pytest.mark.unit
     def test_unparseable_response_falls_back_to_keyword(self):
@@ -463,6 +470,7 @@ class TestLLMStrategy:
         # The full catalogue must NOT be returned — that's the regression we're
         # fixing (small-model 41-tool overload).
         assert len(result) < len(builtin) + len(mcp)
+        assert result.degraded is True
 
     @pytest.mark.unit
     def test_a_router_naming_only_a_mandatory_tool_is_trusted(self):
@@ -665,4 +673,5 @@ class TestLLMStrategy:
 
         assert not called, "backend.direct() should not be called when model is empty"
         assert "webSearch" in tools
+        assert tools.degraded is True
 

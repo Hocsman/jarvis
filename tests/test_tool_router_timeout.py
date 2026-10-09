@@ -296,40 +296,6 @@ def test_a_router_that_never_answers_is_given_up_on_at_its_deadline():
     assert "fetchMeals" not in selected
 
 
-# ── 4. A judge that never answers leaves the no-verdict path ──────────
-
-
-@pytest.mark.unit
-def test_a_judge_that_never_answers_gives_no_verdict_at_its_deadline():
-    from jarvis.listening.intent_judge import create_intent_judge
-    from jarvis.listening.transcript_buffer import TranscriptSegment
-
-    cfg = SimpleNamespace(
-        wake_word="yuba", wake_aliases=[], intent_judge_model="judge-model",
-        intent_judge_timeout_sec=0.4, intent_judge_thinking_enabled=False,
-        low_power_mode=False,
-    )
-    now = time.time()
-    segments = [TranscriptSegment("yuba, quelle heure est-il", now - 3.0, now - 1.0)]
-
-    with _server_that_never_answers() as server:
-        backend = _stalled_backend(server.port)
-        with patch("jarvis.listening.intent_judge.get_auxiliary_backend", return_value=backend):
-            judge = create_intent_judge(cfg)
-            started = time.monotonic()
-            verdict = judge.judge(
-                segments=segments, wake_timestamp=now - 3.0,
-                current_text="yuba, quelle heure est-il",
-            )
-            waited = time.monotonic() - started
-        delivered = len(server.held)
-
-    assert delivered >= 1, "the request never reached the silent server"
-    assert verdict is None
-    assert waited < 5.0, f"the judge held the audio loop for {waited:.1f}s past its 0.4s deadline"
-    assert judge.last_failure_reason, "the listener prints why the judge was unavailable"
-
-
 # ── 4. A pick that came from the fallback is not remembered ───────────
 
 
@@ -405,3 +371,71 @@ def test_the_selection_says_when_it_fell_back_and_when_it_did_not():
     assert selection_from("no such tool").degraded is True  # named nothing known
     assert selection_from("getWeather").degraded is False
     assert selection_from("none").degraded is False       # a real, deliberate answer
+
+
+@pytest.mark.unit
+def test_a_pick_the_router_did_not_make_is_labelled_as_such(
+    mock_config, db, dialogue_memory, capsys
+):
+    """The printed tools line says where the allow-list came from; a keyword
+    pick that stands in for a router that gave up must not read as `llm`."""
+    from unittest.mock import MagicMock
+
+    gave_up = MagicMock()
+    gave_up.direct.return_value = None
+
+    _router_asked_over_two_identical_turns(mock_config, db, dialogue_memory, gave_up)
+    printed = capsys.readouterr().out
+
+    assert "Tools (llm->keyword)" in printed
+    assert "Tools (llm)" not in printed
+
+
+@pytest.mark.unit
+def test_a_pick_the_router_made_keeps_the_plain_label(
+    mock_config, db, dialogue_memory, capsys
+):
+    from unittest.mock import MagicMock
+
+    answered = MagicMock()
+    answered.direct.return_value = "getWeather"
+
+    _router_asked_over_two_identical_turns(mock_config, db, dialogue_memory, answered)
+    printed = capsys.readouterr().out
+
+    assert "Tools (llm)" in printed
+    assert "->keyword" not in printed
+
+
+# ── 5. A judge that never answers leaves the no-verdict path ──────────
+
+
+@pytest.mark.unit
+def test_a_judge_that_never_answers_gives_no_verdict_at_its_deadline():
+    from jarvis.listening.intent_judge import create_intent_judge
+    from jarvis.listening.transcript_buffer import TranscriptSegment
+
+    cfg = SimpleNamespace(
+        wake_word="yuba", wake_aliases=[], intent_judge_model="judge-model",
+        intent_judge_timeout_sec=0.4, intent_judge_thinking_enabled=False,
+        low_power_mode=False,
+    )
+    now = time.time()
+    segments = [TranscriptSegment("yuba, quelle heure est-il", now - 3.0, now - 1.0)]
+
+    with _server_that_never_answers() as server:
+        backend = _stalled_backend(server.port)
+        with patch("jarvis.listening.intent_judge.get_auxiliary_backend", return_value=backend):
+            judge = create_intent_judge(cfg)
+            started = time.monotonic()
+            verdict = judge.judge(
+                segments=segments, wake_timestamp=now - 3.0,
+                current_text="yuba, quelle heure est-il",
+            )
+            waited = time.monotonic() - started
+        delivered = len(server.held)
+
+    assert delivered >= 1, "the request never reached the silent server"
+    assert verdict is None
+    assert waited < 5.0, f"the judge held the audio loop for {waited:.1f}s past its 0.4s deadline"
+    assert judge.last_failure_reason, "the listener prints why the judge was unavailable"

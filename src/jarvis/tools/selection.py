@@ -410,9 +410,10 @@ def _select_llm(
         return ToolSelection.fallback(_select_keyword(query, builtin_tools, mcp_tools))
 
     if not resp or not isinstance(resp, str):
-        # A deadline that expires lands here too: both backends answer None.
+        # A deadline that expires lands here too, and so do HTTP errors and
+        # empty bodies: both backends answer None for all of them.
         debug_log(
-            f"LLM tool selection got no answer within {llm_timeout_sec:g}s, "
+            f"LLM tool selection got no usable answer (deadline {llm_timeout_sec:g}s), "
             "falling back to keyword strategy",
             "planning",
         )
@@ -510,7 +511,11 @@ def select_tools(
         context_hint:       Optional facts/dialogue surface for the LLM router.
 
     Returns:
-        List of tool name strings.
+        List of tool name strings. The LLM strategy returns a ``ToolSelection``
+        (a list) whose ``degraded`` flag is true when the keyword strategy
+        answered in its place; the other strategies return plain lists, so a
+        caller reads the flag with ``getattr(selection, "degraded", False)``
+        and before copying the list, which drops it.
     """
     if strategy == ToolSelectionStrategy.KEYWORD:
         return _select_keyword(query, builtin_tools, mcp_tools)
