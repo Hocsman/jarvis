@@ -83,7 +83,7 @@ from .planner import (
     is_search_memory_step,
     resolve_next_tool_call as _resolve_plan_step,
 )
-from ..tools.selection import select_tools, ToolSelectionStrategy
+from ..tools.selection import router_timeout_sec, select_tools, ToolSelectionStrategy
 import json
 import re
 import uuid
@@ -1385,7 +1385,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
             strategy=strategy,
             llm_backend=get_auxiliary_backend(cfg, router_model),
             llm_model=router_model,
-            llm_timeout_sec=float(getattr(cfg, "llm_tools_timeout_sec", 8.0)),
+            llm_timeout_sec=router_timeout_sec(cfg),
             embedding_backend=get_embedding_backend(cfg),
             embed_model=cfg.embedding_model,
             embed_timeout_sec=float(getattr(cfg, "llm_embedding_timeout_sec", 10.0)),

@@ -287,7 +287,8 @@ Turn 4: LLM → {content: "Here's a comprehensive comparison of the iPhone 15 mo
 ### Configuration and Defaults
 - Timeouts (seconds):
 
-  - `llm_tools_timeout_sec` (default 300 s; tool router, memory extractor, `toolSearchTool`, weather place extractor)
+  - `llm_tools_timeout_sec` (default 300 s; memory extractor, weather place extractor)
+  - `tool_router_timeout_sec` (default 15 s; the tool router, in the reply engine and in `toolSearchTool`; falls back to the keyword strategy when it expires)
   - `llm_embedding_timeout_sec` (default 60 s; vector search)
   - `llm_chat_timeout_sec` (default 180 s; messages loop turn)
   - `llm_digest_timeout_sec` (default 8 s; memory digest, tool-result digest, max-turn digest)

@@ -37,6 +37,7 @@ def _mock_cfg():
     cfg.llm_api_key = ""
     cfg.voice_debug = False
     cfg.llm_tools_timeout_sec = 8.0
+    cfg.tool_router_timeout_sec = 8.0
     cfg.llm_embedding_timeout_sec = 10.0
     cfg.llm_chat_timeout_sec = 45.0
     cfg.llm_digest_timeout_sec = 8.0

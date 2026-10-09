@@ -160,6 +160,7 @@ def test_a_routine_turn_is_not_given_his_goals(tmp_path):
     cfg.tool_search_max_calls = 3
     cfg.llm_chat_timeout_sec = 45.0
     cfg.llm_tools_timeout_sec = 8.0
+    cfg.tool_router_timeout_sec = 8.0
     _write(cfg, OUVERT)
 
     seen = {}
@@ -210,6 +211,7 @@ def test_a_routine_turn_with_memoire_is_given_his_goals(tmp_path):
     cfg.tool_search_max_calls = 3
     cfg.llm_chat_timeout_sec = 45.0
     cfg.llm_tools_timeout_sec = 8.0
+    cfg.tool_router_timeout_sec = 8.0
     _write(cfg, OUVERT)
 
     seen = {}

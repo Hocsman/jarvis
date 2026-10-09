@@ -424,6 +424,7 @@ class TestExtractPlaceFromUserText:
         cfg.tool_router_model = ""
         cfg.intent_judge_model = ""
         cfg.llm_tools_timeout_sec = 8.0
+        cfg.tool_router_timeout_sec = 8.0
         return cfg
 
     def test_empty_text_returns_none(self):

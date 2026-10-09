@@ -434,6 +434,24 @@ def _select_llm(
 # Public API
 # ---------------------------------------------------------------------------
 
+# Used only when a config-like object carries no `tool_router_timeout_sec`
+# (a partial stand-in); a real Settings always has one.
+_DEFAULT_ROUTER_TIMEOUT_SEC = 15.0
+
+
+def router_timeout_sec(cfg) -> float:
+    """How long the LLM router may wait for its model before the keyword
+    strategy answers instead.
+
+    The router has a deadline of its own, apart from `llm_tools_timeout_sec`:
+    it is a classification call in front of the first token of the reply, and
+    sharing a ceiling of minutes would let one stalled provider hold the turn
+    for that long. The reply engine and `toolSearchTool` both resolve it here
+    so the two cannot drift.
+    """
+    return float(getattr(cfg, "tool_router_timeout_sec", _DEFAULT_ROUTER_TIMEOUT_SEC))
+
+
 def select_tools(
     query: str,
     builtin_tools: Dict[str, "Tool"],

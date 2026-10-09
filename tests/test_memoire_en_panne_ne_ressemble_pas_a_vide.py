@@ -175,6 +175,7 @@ def _tour(tmp_path, *, modele="test-large", digest=False, extracteur=None,
     cfg.tool_search_max_calls = 3
     cfg.llm_chat_timeout_sec = 45.0
     cfg.llm_tools_timeout_sec = 8.0
+    cfg.tool_router_timeout_sec = 8.0
 
     store = MagicMock()
     store.search_nodes.return_value = noeuds if noeuds is not None else []

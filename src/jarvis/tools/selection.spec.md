@@ -58,7 +58,7 @@ Note: embedding is **not** the default strategy because nomic-embed-text produce
 4. Apply a hard `_LLM_MAX_SELECTED` (5) cap regardless of what the router returned, to guard against chatty routers that echo the whole catalogue.
 5. Append always-included tools.
 6. If the router replies `"none"`, return only the always-included tools.
-7. On timeout, empty response, or parse failure (no token in the response matched a known tool name), fall back to the **keyword strategy** rather than to the full catalogue. Reasoning: the catalogue can grow to 30–40 tools once an MCP server like `chrome-devtools` is enabled, and exposing all of them to a small chat model (gemma4:e2b class) overwhelms tool selection, producing empty replies. Keyword scoring narrows on query/name overlap deterministically, and the engine's `toolSearchTool` escape hatch still lets the chat model widen mid-loop if the keyword pick missed.
+7. On timeout (the call waits at most `tool_router_timeout_sec`), empty response, or parse failure (no token in the response matched a known tool name), fall back to the **keyword strategy** rather than to the full catalogue. Reasoning: the catalogue can grow to 30–40 tools once an MCP server like `chrome-devtools` is enabled, and exposing all of them to a small chat model (gemma4:e2b class) overwhelms tool selection, producing empty replies. Keyword scoring narrows on query/name overlap deterministically, and the engine's `toolSearchTool` escape hatch still lets the chat model widen mid-loop if the keyword pick missed.
 
 #### Context-aware routing
 
@@ -101,3 +101,8 @@ Called from the reply engine (Step 6) before `generate_tools_json_schema()` and 
 - Type: `str`
 - Default: `""` (empty string — resolves to `intent_judge_model`, then `llm_chat_model`)
 - Effect: when `tool_selection_strategy == "llm"`, this model is used for the routing call. Resolution order for the empty default: `intent_judge_model` first (small, fast, already warm for wake-word paths and structurally the same classification job), then `llm_chat_model` as a last resort. Override `tool_router_model` explicitly to decouple routing from both — useful when you want routing on a dedicated third model.
+
+- Key: `tool_router_timeout_sec`
+- Type: `float`, clamped to 1–120 seconds
+- Default: `15.0`
+- Effect: the longest the routing call waits for its model before the selection falls back to the keyword strategy. The router is a classification call that stands between the user's sentence and the first token of the reply, so it has a deadline of its own rather than the minutes-long `llm_tools_timeout_sec` shared with other contexts: a provider that accepts the request and never answers costs the user this long and no longer. The reply engine and `toolSearchTool` both read it through `router_timeout_sec(cfg)`. It is the wait for the server as the HTTP client measures it (the connection and each read), not a wall-clock cap on the whole exchange; the router's call is not streamed, so the response arrives in one piece. Choose it near three times the model's healthy answer time: shorter turns a slow answer into a keyword selection, longer waits out stalls.
