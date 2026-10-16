@@ -31,6 +31,7 @@ from .intent_judge import (
     warm_up_chat_model,
 )
 from ..debug import debug_log
+from ..latency import get_latency_journal
 from ..state import JarvisState, get_jarvis_state
 from ..utils.location import is_location_available
 
@@ -532,6 +533,9 @@ class VoiceListener(threading.Thread):
 
         self.db = db
         self.cfg = cfg
+        # The journal times each spoken exchange from here: durations only,
+        # never text (latency.spec.md).
+        get_latency_journal().configure(db, cfg)
         self.tts = tts
         self.dialogue_memory = dialogue_memory
         self._should_stop = False
@@ -726,13 +730,17 @@ class VoiceListener(threading.Thread):
         debug_log(f"scheduling hot window activation (echo_tolerance={self.state_manager.echo_tolerance}s, hot_window={self.state_manager.hot_window_seconds}s)", "voice")
         self.state_manager.schedule_hot_window_activation(self.cfg.voice_debug)
 
-    def _process_transcript(self, text: str, utterance_energy: float = 0.0, utterance_start_time: float = 0.0, utterance_end_time: float = 0.0) -> None:  # noqa: E501
+    def _process_transcript(self, text: str, utterance_energy: float = 0.0, utterance_start_time: float = 0.0, utterance_end_time: float = 0.0, trailing_silence: float = 0.0) -> None:  # noqa: E501
         """
         Process a transcript from speech recognition.
 
         Args:
             text: Transcribed text from audio
             utterance_energy: Pre-calculated energy from the utterance frames
+            trailing_silence: Seconds of silence the voice detector waited
+                through before closing the utterance. ``utterance_end_time``
+                is when it was closed; the user stopped speaking this much
+                earlier, which is where the latency journal starts its clock.
         """
         # Kept whole. When a spoken question is waiting, the answer is
         # read from this rather than from the query the intent judge
@@ -740,6 +748,7 @@ class VoiceListener(threading.Thread):
         # the speech — there is a reply to read.
         if text and text.strip():
             self._last_transcript = text
+            get_latency_journal().note_heard(utterance_end_time - trailing_silence)
 
         if not text or not text.strip():
             # Check for timeouts
@@ -1006,7 +1015,7 @@ class VoiceListener(threading.Thread):
             last_tts_text = self.echo_detector._last_tts_text or ""
             last_tts_finish_time = self.echo_detector._last_tts_finish_time or 0.0
 
-            intent_judgment = self._intent_judge.judge(
+            intent_judgment = self._judge_timed(
                 segments=context_segments,
                 wake_timestamp=self._wake_timestamp,
                 last_tts_text=last_tts_text,
@@ -1449,6 +1458,28 @@ class VoiceListener(threading.Thread):
         else:
             debug_log(f"input ignored (no wake word{intent_info}): {text_lower}", "voice")
 
+    def _judge_timed(self, **kwargs):
+        """Ask the intent judge, and tell the latency journal how long it took
+        and what kind of answer it gave (an enumerated outcome, never text)."""
+        started = time.monotonic()
+        verdict = self._intent_judge.judge(**kwargs)
+        if verdict is None:
+            outcome = "no_verdict"
+        else:
+            outcome = "directed" if verdict.directed else "not_directed"
+        get_latency_journal().note_judge(time.monotonic() - started, outcome)
+        return verdict
+
+    def _latency_models(self) -> dict:
+        """The model identifiers a turn is timed against (names, not text)."""
+        from ..reply.engine import resolve_tool_router_model
+
+        return {
+            "judge": getattr(self.cfg, "intent_judge_model", None),
+            "router": resolve_tool_router_model(self.cfg),
+            "chat": getattr(self.cfg, "llm_chat_model", None),
+        }
+
     def _dispatch_query(self, query: str) -> None:
         """
         Dispatch a complete query to the reply engine.
@@ -1468,6 +1499,9 @@ class VoiceListener(threading.Thread):
         from ..reply.engine import run_reply_engine
         from ..daemon import query_lock
 
+        journal = get_latency_journal()
+        journal.begin_turn(self._latency_models())
+
         # Process the query (keep thinking tune playing during processing).
         # Hold the shared voice+text query lock so a voice query and a text
         # chat query cannot run the reply engine concurrently against the
@@ -1481,8 +1515,12 @@ class VoiceListener(threading.Thread):
                     origin="voix",
                     heard=getattr(self, "_last_transcript", None),
                     on_token=self._speak_as_it_comes(),
+                    on_stage=journal.on_stage,
                 )
         except Exception as e:
+            # The apology below is not this turn's reply, so its sound must
+            # not be taken for the turn's first sound.
+            journal.finish_turn(will_speak=False)
             # Log the error visibly - this should never happen silently
             print(f"\n  ❌ Reply engine error: {e}", flush=True)
             debug_log(f"reply engine exception: {e}", "voice")
@@ -1490,9 +1528,19 @@ class VoiceListener(threading.Thread):
             # Provide user feedback via TTS
             if self.tts and self.tts.enabled:
                 self.tts.speak("Sorry, I encountered an error processing your request.")
+            journal.flush()
             return
 
-        self._speak_reply(reply)
+        # Frozen now, written once the reply is queued: the write must not sit
+        # between "reply ready" and "start speaking". A sound that starts in
+        # between completes the row from memory; one that starts later
+        # updates it.
+        will_speak = bool(reply and self.tts and getattr(self.tts, "enabled", False))
+        journal.finish_turn(will_speak=will_speak)
+        try:
+            self._speak_reply(reply)
+        finally:
+            journal.flush()
 
     def _speak_reply(self, reply: Optional[str], on_spoken=None) -> None:
         """Say one reply, and do the echo bookkeeping that goes with it.
@@ -2860,6 +2908,15 @@ class VoiceListener(threading.Thread):
                     # Check for query timeouts
                     self._check_query_timeout()
 
+    def _trailing_silence_seconds(self) -> float:
+        """The silence at the end of the utterance being closed, in seconds."""
+        frames = getattr(self, "_silence_frames", 0)
+        frame_samples = getattr(self, "_frame_samples", 0)
+        rate = getattr(self, "_samplerate", 0)
+        if not (frames and frame_samples and rate):
+            return 0.0
+        return frames * frame_samples / rate
+
     def _finalize_utterance(self) -> None:
         """Process completed utterance through speech recognition."""
         if np is None or not self._utterance_frames:
@@ -2870,6 +2927,8 @@ class VoiceListener(threading.Thread):
 
         # Track when utterance ends - but don't overwrite global timing yet
         utterance_end_time = time.time()
+        # Read before the reset below: how long the detector waited in silence.
+        trailing_silence = self._trailing_silence_seconds()
         utterance_start_time = self.echo_detector._utterance_start_time
 
         if self.cfg.voice_debug:
@@ -3043,4 +3102,7 @@ class VoiceListener(threading.Thread):
         )
 
         # Process the transcript with pre-calculated energy and utterance timing
-        self._process_transcript(text, utterance_energy, utterance_start_time, utterance_end_time)
+        self._process_transcript(
+            text, utterance_energy, utterance_start_time, utterance_end_time,
+            trailing_silence=trailing_silence,
+        )

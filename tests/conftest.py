@@ -211,6 +211,30 @@ def _isolate_jarvis_state(_bac_a_sable, request, monkeypatch):
     assert patched, "neither jarvis state module could be imported"
 
 
+@pytest.fixture(autouse=True)
+def _isolate_latency_journal():
+    """Give each test an unconfigured latency journal, in both module copies.
+
+    The journal is a process-wide recorder that a listener binds to its
+    database when it is built, so a test that builds a listener would leave
+    the next one writing to a closed or mocked database. The suite imports
+    modules as ``jarvis.x`` and as ``src.jarvis.x``, which are two distinct
+    module objects with a journal each; both are reset before and after.
+    """
+    import importlib
+
+    def reset_all():
+        for path in ("jarvis.latency", "src.jarvis.latency"):
+            try:
+                importlib.import_module(path).get_latency_journal().reset()
+            except ImportError:
+                continue
+
+    reset_all()
+    yield
+    reset_all()
+
+
 def _foyer_des_donnees() -> Path:
     """The user's own data home: the parent of the database's default path."""
     from jarvis.config import _default_db_path

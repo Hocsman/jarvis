@@ -57,6 +57,12 @@ replaces, and the text reaching the user is unchanged.
 
 If the stream ends with an unterminated tail, that tail is spoken as-is.
 
+A sentence closes only when something follows its punctuation, so the last
+sentence of a reply, and the only one of a short reply, is not spoken while
+the reply is generated: the listener speaks it as the tail once the engine
+returns. The latency journal relies on this (`jarvis/latency.spec.md`): the
+first sound of a short reply arrives after the engine returned.
+
 ## What must not change
 
 **One reply is still one turn.** The completion callback that opens the

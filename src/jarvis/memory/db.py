@@ -55,6 +55,38 @@ CREATE TABLE IF NOT EXISTS action_log (
 
 CREATE INDEX IF NOT EXISTS idx_action_log_ts ON action_log(ts_utc DESC);
 
+-- How long a spoken exchange took, stage by stage. Durations and
+-- enumerations only: there is deliberately no column for anything the user
+-- said or the assistant answered, so the journal can stay on by default, and
+-- the checks below make the table itself refuse a text column's contents
+-- that is not an enumerated outcome or a short model identifier.
+-- See jarvis/latency.spec.md.
+CREATE TABLE IF NOT EXISTS latency_log (
+  id              INTEGER PRIMARY KEY,
+  ts_utc          TEXT NOT NULL,   -- the end of the user's speech
+  origin          TEXT CHECK (origin IS NULL OR origin = 'voice'),
+  transcribed_ms  INTEGER,
+  judge_ms        INTEGER,
+  judge_outcome   TEXT CHECK (judge_outcome IS NULL
+                              OR judge_outcome IN ('directed', 'not_directed', 'no_verdict')),
+  dispatch_ms     INTEGER,
+  prepare_ms      INTEGER,
+  route_ms        INTEGER,
+  plan_ms         INTEGER,
+  memory_ms       INTEGER,
+  tools_ms        INTEGER,
+  generate_ms     INTEGER,
+  first_sound_ms  INTEGER,
+  total_ms        INTEGER,
+  router_degraded INTEGER,
+  tool_calls      INTEGER,
+  judge_model     TEXT CHECK (judge_model IS NULL OR length(judge_model) <= 120),
+  router_model    TEXT CHECK (router_model IS NULL OR length(router_model) <= 120),
+  chat_model      TEXT CHECK (chat_model IS NULL OR length(chat_model) <= 120)
+);
+
+CREATE INDEX IF NOT EXISTS idx_latency_log_ts ON latency_log(ts_utc DESC);
+
 -- Promises: things to say at a time, kept across restarts.
 --
 -- The one part of the assistant that MUST reach disk. A pending
@@ -544,6 +576,72 @@ class Database:
         """Erase the ledger at the user's request."""
         with self._lock:
             self.conn.execute("DELETE FROM action_log")
+            self.conn.commit()
+
+    # ── Latency journal ───────────────────────────────────────────────
+    #
+    # One row per spoken exchange: durations and enumerations, never text.
+    # Written by ``jarvis.latency``; see ``jarvis/latency.spec.md``.
+
+    _LATENCY_COLUMNS = (
+        "ts_utc", "origin", "transcribed_ms", "judge_ms", "judge_outcome",
+        "dispatch_ms", "prepare_ms", "route_ms", "plan_ms", "memory_ms", "tools_ms",
+        "generate_ms", "first_sound_ms", "total_ms", "router_degraded",
+        "tool_calls", "judge_model", "router_model", "chat_model",
+    )
+
+    def record_latency(self, row: dict) -> Optional[int]:
+        """Store one exchange and return its id, or ``None`` on failure.
+
+        Only the journal's own columns are read from ``row``: anything else
+        in the dict is dropped, so a caller cannot widen the table by
+        accident.
+        """
+        try:
+            columns = [c for c in self._LATENCY_COLUMNS if c in row]
+            with self._lock:
+                cur = self.conn.execute(
+                    f"INSERT INTO latency_log ({', '.join(columns)}) "
+                    f"VALUES ({', '.join('?' for _ in columns)})",
+                    [row[c] for c in columns],
+                )
+                self.conn.commit()
+                return cur.lastrowid
+        except Exception as e:
+            debug_log(f"latency journal write failed (non-fatal): {e}", "jarvis")
+            return None
+
+    def set_latency_first_sound(self, row_id: int, first_sound_ms: int) -> None:
+        """Fill in the first sound of a row written before it was heard."""
+        with self._lock:
+            self.conn.execute(
+                "UPDATE latency_log SET first_sound_ms = ? "
+                "WHERE id = ? AND first_sound_ms IS NULL",
+                (int(first_sound_ms), int(row_id)),
+            )
+            self.conn.commit()
+
+    def recent_latency(self, limit: int = 500) -> list:
+        """The most recent exchanges, newest first, as plain dicts."""
+        with self._lock:
+            cur = self.conn.execute(
+                "SELECT * FROM latency_log ORDER BY ts_utc DESC, id DESC LIMIT ?",
+                (int(limit),),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+    def prune_latency(self, max_age_days: int = 30) -> int:
+        """Drop rows older than the retention window."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+        with self._lock:
+            cur = self.conn.execute("DELETE FROM latency_log WHERE ts_utc < ?", (cutoff,))
+            self.conn.commit()
+            return cur.rowcount
+
+    def clear_latency(self) -> None:
+        """Erase the journal at the user's request."""
+        with self._lock:
+            self.conn.execute("DELETE FROM latency_log")
             self.conn.commit()
 
     # ── Reminders ─────────────────────────────────────────────────────

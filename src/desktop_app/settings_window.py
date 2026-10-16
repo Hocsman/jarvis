@@ -527,6 +527,12 @@ def _build_field_metadata() -> List[FieldMeta]:
     f("echo_tolerance", "Echo Tolerance",
       "Time tolerance for echo detection",
       "advanced", "float", min_val=0.0, max_val=2.0, step=0.05, suffix="s")
+    f("latency_journal_enabled", "Latency Journal",
+      "Record how long each spoken exchange takes, stage by stage (durations only, never text)",
+      "advanced", "bool")
+    f("latency_journal_days", "Latency Journal Retention",
+      "Days to keep the latency journal",
+      "advanced", "int", min_val=1, max_val=365, step=1, suffix="days")
 
     return fields
 

@@ -353,6 +353,10 @@ If the intent judge later rejects the query (and no hot window override applies)
 
 **LISTENING is not published early during TTS** — the beep is suppressed while TTS is playing to avoid self-triggering.
 
+## Timing Marks (Latency Journal)
+
+The listener feeds the latency journal (`src/jarvis/latency.py`, see `latency.spec.md`). It binds the journal to its database and the user's settings when it is built; notes every non-empty transcript with the moment the user stopped speaking (the close of the utterance less the trailing silence the voice detector waited through); times the intent judge call and records what kind of answer it gave; opens the turn when it dispatches the query, hands the journal's stage callback to the reply engine, freezes the turn when the engine returns, and writes it once the reply has been queued for speech. The marks hold durations and enumerations, never text, and cannot change what the listener does: none raises, and with the journal off each costs a lock and a clock read.
+
 ## Configuration
 
 ```json

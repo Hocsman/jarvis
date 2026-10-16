@@ -22,6 +22,7 @@ from ..tools.confirmation import (
     utterance_channel_available,
 )
 from ..debug import debug_log
+from ..latency import get_latency_journal
 from ..state import JarvisState, get_jarvis_state
 from ..llm import (
     extract_text_from_response,
@@ -1414,6 +1415,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         )
         if _router_gave_up:
             debug_log("tool router gave up, keyword pick used for this turn only", "planning")
+            get_latency_journal().note_router_degraded()
         if (
             dialogue_memory
             and hasattr(dialogue_memory, "hot_cache_put")
@@ -2695,6 +2697,11 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         # tools API not supported).
         _dump_tools_schema = None if use_text_tools else tools_json_schema
         _chat_model = cfg.llm_chat_model
+        if turn > 1:
+            # A model call after a tool result writes the answer. Saying so
+            # keeps its time out of the tool that just ran, in the chat
+            # window's label and in the latency journal.
+            _stage("generating")
         try:
             llm_resp = chat_with_messages(
                 cfg=cfg,

@@ -259,6 +259,11 @@ class Settings:
     confirmation_model: str
     confirmation_timeout_sec: float
 
+    # Latency journal: how long each spoken exchange takes, stage by stage.
+    # Durations and enumerations only, never text (see jarvis/latency.spec.md).
+    latency_journal_enabled: bool
+    latency_journal_days: int
+
     # Intent Judge (LLM-based intent classification)
     # Always used when available, falls back to simple wake word detection
     intent_judge_model: str
@@ -863,6 +868,11 @@ def get_default_config() -> Dict[str, Any]:
         "confirmation_model": "",
         "confirmation_timeout_sec": 8.0,
 
+        # Latency journal: durations of each spoken exchange, never text.
+        # Rows older than the retention are dropped when the daemon starts.
+        "latency_journal_enabled": True,
+        "latency_journal_days": 30,
+
         # Audio Wake Word Detection
         # Intent Judge (LLM-based intent classification)
         # Always used when available, falls back to simple wake word detection
@@ -1189,6 +1199,9 @@ def load_settings() -> Settings:
     confirmation_model = str(merged.get("confirmation_model", ""))
     confirmation_timeout_sec = min(max(float(merged.get("confirmation_timeout_sec", 8.0)), 2.0), 30.0)
 
+    latency_journal_enabled = _as_bool(merged.get("latency_journal_enabled", True))
+    latency_journal_days = min(max(int(merged.get("latency_journal_days", 30)), 1), 365)
+
     # Intent Judge - always used when available
     intent_judge_model = str(merged.get("intent_judge_model", "gemma4:e2b"))
     intent_judge_model = _cloud_safe_model(
@@ -1418,6 +1431,9 @@ def load_settings() -> Settings:
         confirmation_hot_window_sec=confirmation_hot_window_sec,
         confirmation_model=confirmation_model,
         confirmation_timeout_sec=confirmation_timeout_sec,
+        # Latency journal
+        latency_journal_enabled=latency_journal_enabled,
+        latency_journal_days=latency_journal_days,
         # Intent Judge - always used when available
         intent_judge_model=intent_judge_model,
         intent_judge_timeout_sec=intent_judge_timeout_sec,
