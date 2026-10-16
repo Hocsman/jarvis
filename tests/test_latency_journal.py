@@ -500,28 +500,277 @@ def test_publishing_the_speaking_state_is_not_the_first_sound(db, engine):
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("engine", "playback_starts"),
+    ("engine", "playback_starts", "outside_the_locks"),
     [
-        ("ChatterboxTTS", "pygame.mixer.music.play()"),
-        ("PiperTTS", "self._audio_stream.start()"),
-        ("KokoroTTS", "self._audio_stream.start()"),
+        ("ChatterboxTTS", "pygame.mixer.music.play()", False),   # no audio lock in that engine
+        ("PiperTTS", "self._audio_stream.start()", True),
+        ("KokoroTTS", "self._audio_stream.start()", True),
     ],
 )
-def test_each_speech_engine_marks_the_sound_once_playback_has_started(engine, playback_starts):
-    """The call has to follow the moment the stream starts, and sit outside
-    the audio locks (a journal write must never hold playback up)."""
+def test_each_speech_engine_marks_the_sound_once_playback_has_started(
+    engine, playback_starts, outside_the_locks
+):
+    """The call follows the moment the stream starts, and where the stream is
+    started under audio locks it sits outside them (a journal write must never
+    hold playback up). Indentation is what tells the two apart."""
     import inspect
 
     from jarvis.output import tts as tts_module
 
-    source = inspect.getsource(getattr(tts_module, engine))
+    lines = inspect.getsource(getattr(tts_module, engine)).splitlines()
+    start_at = next(i for i, l in enumerate(lines) if playback_starts in l)
+    call_at = next(i for i, l in enumerate(lines) if l.strip() == "_sound_started()")
 
-    assert playback_starts in source
-    assert "_sound_started()" in source
-    assert source.index(playback_starts) < source.index("_sound_started()")
-    line = next(l for l in source.splitlines() if "_sound_started()" in l)
-    started_at = source.index(playback_starts)
-    before_call = source[started_at: source.index("_sound_started()")]
-    # No `with ...lock` opened between the start and the call that is still open.
-    assert before_call.count("with self._audio_lock") + before_call.count("with portaudio_lock") == 0
-    assert line.strip() == "_sound_started()"
+    def indent(line):
+        return len(line) - len(line.lstrip())
+
+    assert start_at < call_at
+    if outside_the_locks:
+        assert indent(lines[call_at]) < indent(lines[start_at])
+    else:
+        assert indent(lines[call_at]) <= indent(lines[start_at])
+
+
+# ── 6. Time that belongs to no engine stage ───────────────────────────
+
+
+@pytest.mark.unit
+def test_time_before_the_engines_first_stage_is_booked_as_preparation(db):
+    """Redaction, the MCP refresh, the approval judge for a spoken answer and
+    the wait for the query lock all come before the first announcement."""
+    clock = _Clock()
+    journal = _journal(db, clock)
+    clock.now = 1000.3
+    journal.note_heard(1000.0)
+    clock.now = 1001.0
+    journal.begin_turn({})
+    clock.now = 1004.0
+    journal.on_stage("routing")                    # 3 s went to preparation
+    clock.now = 1004.5
+    journal.end_turn()
+
+    row = _only_row(db)
+    assert row["prepare_ms"] == 3000
+    assert row["route_ms"] == 500
+
+
+@pytest.mark.unit
+def test_a_turn_that_never_reached_a_stage_is_all_preparation(db):
+    """A spoken refusal returns before the engine announces anything."""
+    clock = _Clock()
+    journal = _journal(db, clock)
+    clock.now = 1000.3
+    journal.note_heard(1000.0)
+    clock.now = 1001.0
+    journal.begin_turn({})
+    clock.now = 1003.5
+    journal.end_turn()
+
+    assert _only_row(db)["prepare_ms"] == 2500
+
+
+# ── 7. Which sound belongs to which turn ──────────────────────────────
+
+
+def _a_turn(journal, clock, *, start, sound_at=None, will_speak=True):
+    clock.now = start + 0.3
+    journal.note_heard(start)
+    clock.now = start + 1.0
+    journal.begin_turn({})
+    if sound_at is not None:
+        clock.now = sound_at
+        journal.mark_first_sound()
+    clock.now = (sound_at or start + 1.0) + 1.0
+    journal.end_turn(will_speak=will_speak)
+
+
+@pytest.mark.unit
+def test_a_turn_whose_reply_will_not_be_spoken_takes_no_late_sound(db):
+    """A dismissal returns nothing to say; a reminder a few seconds later is
+    not its first sound."""
+    clock = _Clock()
+    journal = _journal(db, clock)
+    _a_turn(journal, clock, start=1000.0, will_speak=False)
+
+    clock.now = 1008.0
+    journal.mark_first_sound()
+
+    assert _only_row(db)["first_sound_ms"] is None
+
+
+@pytest.mark.unit
+def test_a_sound_of_a_later_reply_does_not_fill_an_earlier_silent_row(db):
+    """Turn A got no sound; turn B streams and its tail is spoken after B's row
+    is written. That tail must not be written into A's row."""
+    clock = _Clock()
+    journal = _journal(db, clock)
+    _a_turn(journal, clock, start=1000.0)                          # silent, armed
+    _a_turn(journal, clock, start=1008.0, sound_at=1010.0)         # streamed
+
+    clock.now = 1014.0                                             # B's tail
+    journal.mark_first_sound()
+
+    rows = {r["ts_utc"][:19]: r for r in db.recent_latency()}
+    first, second = sorted(rows)
+    assert rows[first]["first_sound_ms"] is None
+    assert rows[second]["first_sound_ms"] == 2000
+
+
+# ── 8. Writing after the reply is queued ──────────────────────────────
+
+
+@pytest.mark.unit
+def test_finishing_a_turn_does_no_io_and_flushing_writes_it(db):
+    clock = _Clock()
+    journal = _journal(db, clock)
+    clock.now = 1000.3
+    journal.note_heard(1000.0)
+    clock.now = 1001.0
+    journal.begin_turn({})
+    clock.now = 1002.0
+    journal.finish_turn(will_speak=True)
+
+    assert db.recent_latency() == []               # nothing written yet
+
+    journal.flush()
+    assert len(db.recent_latency()) == 1
+    journal.flush()                                # idempotent
+    assert len(db.recent_latency()) == 1
+
+
+@pytest.mark.unit
+def test_a_sound_between_finishing_and_flushing_lands_in_the_row(db):
+    clock = _Clock()
+    journal = _journal(db, clock)
+    clock.now = 1000.3
+    journal.note_heard(1000.0)
+    clock.now = 1001.0
+    journal.begin_turn({})
+    clock.now = 1002.0
+    journal.finish_turn(will_speak=True)
+    clock.now = 1002.5
+    journal.mark_first_sound()
+    journal.flush()
+
+    assert _only_row(db)["first_sound_ms"] == 2500
+
+
+@pytest.mark.unit
+def test_the_next_turn_flushes_a_row_nobody_flushed(db):
+    clock = _Clock()
+    journal = _journal(db, clock)
+    clock.now = 1000.3
+    journal.note_heard(1000.0)
+    clock.now = 1001.0
+    journal.begin_turn({})
+    clock.now = 1002.0
+    journal.finish_turn(will_speak=False)
+
+    clock.now = 1010.3
+    journal.note_heard(1010.0)
+    clock.now = 1011.0
+    journal.begin_turn({})
+
+    assert len(db.recent_latency()) == 1
+
+
+# ── 9. Marks never raise, durations never go negative ─────────────────
+
+
+@pytest.mark.unit
+def test_no_mark_raises_even_when_the_clock_does(db):
+    def broken_clock():
+        raise RuntimeError("clock failed")
+
+    from jarvis.latency import LatencyJournal
+
+    journal = LatencyJournal(clock=broken_clock)
+    journal.configure(db, SimpleNamespace(latency_journal_enabled=True))
+
+    journal.note_heard(1000.0)
+    journal.note_judge(1.0, "directed")
+    journal.begin_turn({})
+    journal.on_stage("routing")
+    journal.note_router_degraded()
+    journal.mark_first_sound()
+    journal.end_turn()
+    journal.flush()
+
+
+@pytest.mark.unit
+def test_a_clock_that_steps_back_never_gives_a_negative_duration(db):
+    clock = _Clock()
+    journal = _journal(db, clock)
+    clock.now = 1000.3
+    journal.note_heard(1000.0)
+    clock.now = 1001.0
+    journal.begin_turn({})
+    clock.now = 990.0                              # the clock was set back mid-turn
+    journal.mark_first_sound()
+    journal.end_turn()
+
+    row = _only_row(db)
+    assert row["first_sound_ms"] >= 0 and row["total_ms"] >= 0
+
+
+# ── 10. The table refuses text, whoever writes it ─────────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("column,value", [
+    ("judge_outcome", "my private diagnosis"),
+    ("origin", "my private diagnosis"),
+    ("chat_model", "x" * 500),
+])
+def test_the_table_itself_refuses_text_it_was_not_built_for(db, column, value):
+    row = {"ts_utc": datetime.now(timezone.utc).isoformat(), "origin": "voice", column: value}
+
+    stored = db.record_latency(row)
+
+    assert stored is None
+    assert db.recent_latency() == []
+
+
+@pytest.mark.unit
+def test_a_database_written_before_the_journal_gains_the_table_and_keeps_its_rows(tmp_path):
+    import sqlite3
+
+    from jarvis.memory.db import Database
+
+    path = tmp_path / "old.db"
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE action_log (id INTEGER PRIMARY KEY, ts_utc TEXT NOT NULL, origin TEXT, "
+                "tool TEXT NOT NULL, args TEXT, risk TEXT NOT NULL, verdict TEXT NOT NULL, "
+                "outcome TEXT NOT NULL, duration_ms INTEGER, query TEXT, request_id TEXT)")
+    con.execute("INSERT INTO action_log (ts_utc, tool, risk, verdict, outcome) "
+                "VALUES ('2026-10-01T10:00:00+00:00', 'getWeather', 'lecture', 'libre', 'ok')")
+    con.execute("PRAGMA user_version = 5")
+    con.commit()
+    con.close()
+
+    database = Database(str(path))
+    try:
+        assert database.record_latency({"ts_utc": datetime.now(timezone.utc).isoformat(),
+                                        "origin": "voice"}) is not None
+        assert [a["tool"] for a in database.recent_actions()] == ["getWeather"]
+    finally:
+        database.close()
+
+
+@pytest.mark.unit
+def test_a_hand_written_false_in_quotes_really_turns_the_journal_off(tmp_path, monkeypatch):
+    for spelling in ("false", "False", "0", "off", "no"):
+        settings = _settings_from(tmp_path, monkeypatch, {"latency_journal_enabled": spelling})
+        assert settings.latency_journal_enabled is False, spelling
+
+
+@pytest.mark.unit
+def test_turning_the_journal_off_erases_what_it_kept_at_the_next_start(db):
+    from jarvis.daemon import _apply_latency_retention
+
+    db.record_latency({"ts_utc": datetime.now(timezone.utc).isoformat(), "origin": "voice"})
+
+    _apply_latency_retention(
+        db, SimpleNamespace(latency_journal_enabled=False, latency_journal_days=30))
+
+    assert db.recent_latency() == []

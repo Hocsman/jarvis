@@ -233,3 +233,219 @@ def test_start_up_retention_never_raises(db):
     broken.prune_latency.side_effect = RuntimeError("locked")
 
     _apply_latency_retention(broken, SimpleNamespace(latency_journal_days=30))
+
+
+# ── The stages the engine announces ───────────────────────────────────
+
+
+@pytest.mark.unit
+def test_the_answer_written_after_a_tool_is_announced_as_generating(mock_config, db, dialogue_memory):
+    """The model call that follows a tool result writes the spoken answer. If it
+    is not announced, its time is booked to the tool that just ran and the
+    report blames the tools for what the model cost."""
+    from jarvis.reply.engine import run_reply_engine
+    from jarvis.tools.types import ToolExecutionResult
+
+    announced: list[str] = []
+    calls = {"n": 0}
+
+    def fake_chat(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"message": {"content": "", "role": "assistant", "tool_calls": [
+                {"id": "call_1", "function": {"name": "getWeather", "arguments": {"location": "here"}}},
+            ]}}
+        return {"message": {"content": "Il fait beau.", "role": "assistant"}}
+
+    with patch("jarvis.reply.engine.plan_query", return_value=[]), \
+         patch("jarvis.reply.engine.run_tool_with_retries",
+               return_value=ToolExecutionResult(success=True, reply_text="20C sunny")), \
+         patch("jarvis.reply.engine.chat_with_messages", side_effect=fake_chat), \
+         patch("jarvis.reply.engine.extract_search_params_for_memory", return_value={"keywords": []}), \
+         patch("jarvis.reply.engine.select_tools", return_value=["getWeather", "stop"]):
+        run_reply_engine(
+            db=db, cfg=mock_config, tts=None, text="what is the weather",
+            dialogue_memory=dialogue_memory,
+            on_stage=lambda stage, detail=None: announced.append(stage),
+        )
+
+    assert "tool" in announced
+    last_tool = max(i for i, s in enumerate(announced) if s == "tool")
+    assert "generating" in announced[last_tool + 1:], announced
+
+
+@pytest.mark.unit
+def test_every_stage_the_engine_announces_has_a_column():
+    """A stage id with no column silently loses its time."""
+    import re
+    from pathlib import Path
+
+    from jarvis.latency import _STAGE_COLUMNS
+
+    source = (Path(__file__).resolve().parent.parent / "src" / "jarvis" / "reply" / "engine.py").read_text(
+        encoding="utf-8")
+    announced = set(re.findall(r'_stage\("(\w+)"', source))
+
+    assert announced, "no stage announcement found: the scan is broken"
+    assert announced <= set(_STAGE_COLUMNS), announced - set(_STAGE_COLUMNS)
+
+
+# ── The clock zero, and what is written when ──────────────────────────
+
+
+@pytest.mark.unit
+@patch("builtins.print")
+def test_the_end_of_speech_is_the_end_of_the_utterance_less_its_trailing_silence(_print, db, journal):
+    """The utterance is finalised after the endpoint silence has gone by; the
+    user stopped speaking when that silence began."""
+    clock = journal.test_clock
+    listener, _tts = _a_listener_timed_against(db, journal)
+    _install_intent_judge(listener, _make_judgment(directed=True, query="what time is it"))
+
+    clock.now = 1000.4
+    listener._process_transcript(
+        "jarvis what time is it", utterance_energy=0.01,
+        utterance_start_time=999.0, utterance_end_time=1000.0, trailing_silence=0.8,
+    )
+    clock.now = 1006.0
+    with patch("jarvis.reply.engine.run_reply_engine", return_value="ok"), \
+         patch.object(listener, "_speak_reply"):
+        listener._dispatch_query("what time is it")
+
+    row = _only_row(db)
+    assert row["transcribed_ms"] == 1200           # 999.2 -> 1000.4
+    assert row["dispatch_ms"] == 6800
+    listener.state_manager.stop()
+
+
+@pytest.mark.unit
+def test_the_trailing_silence_is_what_the_voice_detector_counted():
+    from jarvis.listening.listener import VoiceListener
+
+    listener = object.__new__(VoiceListener)
+    listener._silence_frames = 40
+    listener._frame_samples = 320
+    listener._samplerate = 16000
+
+    assert listener._trailing_silence_seconds() == pytest.approx(0.8)
+
+
+@pytest.mark.unit
+@patch("builtins.print")
+def test_the_row_is_written_after_the_reply_has_been_queued(_print, db, journal):
+    """The write must not sit between "reply ready" and "start speaking"."""
+    clock = journal.test_clock
+    listener, _tts = _a_listener_timed_against(db, journal)
+    clock.now = 1000.4
+    listener._process_transcript(
+        "jarvis hello", utterance_energy=0.01,
+        utterance_start_time=999.0, utterance_end_time=1000.0,
+    )
+    clock.now = 1001.0
+    seen_while_speaking: list[int] = []
+
+    def speaking(reply):
+        seen_while_speaking.append(len(db.recent_latency()))
+
+    with patch("jarvis.reply.engine.run_reply_engine", return_value="hello"), \
+         patch.object(listener, "_speak_reply", side_effect=speaking):
+        listener._dispatch_query("hello")
+
+    assert seen_while_speaking == [0]
+    assert len(db.recent_latency()) == 1
+    listener.state_manager.stop()
+
+
+@pytest.mark.unit
+@patch("builtins.print")
+def test_a_sound_that_starts_while_the_reply_is_queued_lands_in_the_row(_print, db, journal):
+    from jarvis.output import tts as tts_module
+
+    clock = journal.test_clock
+    listener, _tts = _a_listener_timed_against(db, journal)
+    clock.now = 1000.4
+    listener._process_transcript(
+        "jarvis hello", utterance_energy=0.01,
+        utterance_start_time=999.0, utterance_end_time=1000.0,
+    )
+    clock.now = 1001.0
+
+    def speaking(reply):
+        clock.now = 1001.5
+        tts_module._sound_started()
+
+    with patch("jarvis.reply.engine.run_reply_engine", return_value="hello"), \
+         patch.object(listener, "_speak_reply", side_effect=speaking):
+        listener._dispatch_query("hello")
+
+    assert _only_row(db)["first_sound_ms"] == 1500
+    listener.state_manager.stop()
+
+
+@pytest.mark.unit
+@patch("builtins.print")
+def test_an_apology_after_a_failed_turn_is_not_its_first_sound(_print, db, journal):
+    from jarvis.output import tts as tts_module
+
+    clock = journal.test_clock
+    listener, _tts = _a_listener_timed_against(db, journal)
+    clock.now = 1000.4
+    listener._process_transcript(
+        "jarvis hello", utterance_energy=0.01,
+        utterance_start_time=999.0, utterance_end_time=1000.0,
+    )
+    clock.now = 1001.0
+    with patch("jarvis.reply.engine.run_reply_engine", side_effect=RuntimeError("boom")):
+        listener._dispatch_query("hello")
+    clock.now = 1002.0
+    tts_module._sound_started()                    # the apology starts
+
+    assert _only_row(db)["first_sound_ms"] is None
+    listener.state_manager.stop()
+
+
+@pytest.mark.unit
+@patch("builtins.print")
+def test_a_reply_with_nothing_to_say_arms_no_late_sound(_print, db, journal):
+    from jarvis.output import tts as tts_module
+
+    clock = journal.test_clock
+    listener, _tts = _a_listener_timed_against(db, journal)
+    clock.now = 1000.4
+    listener._process_transcript(
+        "jarvis stop", utterance_energy=0.01,
+        utterance_start_time=999.0, utterance_end_time=1000.0,
+    )
+    clock.now = 1001.0
+    with patch("jarvis.reply.engine.run_reply_engine", return_value=None), \
+         patch.object(listener, "_speak_reply"):
+        listener._dispatch_query("stop")
+    clock.now = 1005.0
+    tts_module._sound_started()                    # a reminder, say
+
+    assert _only_row(db)["first_sound_ms"] is None
+    listener.state_manager.stop()
+
+
+@pytest.mark.unit
+@patch("builtins.print")
+def test_a_journal_turned_off_in_the_settings_records_nothing_through_the_listener(_print, db, journal):
+    clock = journal.test_clock
+    listener, _tts = _create_listener()
+    listener.cfg.latency_journal_enabled = False
+    journal.configure(db, listener.cfg)
+    _install_intent_judge(listener, _make_judgment(directed=True, query="hello"))
+
+    clock.now = 1000.4
+    listener._process_transcript(
+        "jarvis hello", utterance_energy=0.01,
+        utterance_start_time=999.0, utterance_end_time=1000.0,
+    )
+    clock.now = 1001.0
+    with patch("jarvis.reply.engine.run_reply_engine", return_value="hello"), \
+         patch.object(listener, "_speak_reply"):
+        listener._dispatch_query("hello")
+
+    assert db.recent_latency() == []
+    assert journal.enabled is False
+    listener.state_manager.stop()

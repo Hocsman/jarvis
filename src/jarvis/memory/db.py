@@ -57,16 +57,20 @@ CREATE INDEX IF NOT EXISTS idx_action_log_ts ON action_log(ts_utc DESC);
 
 -- How long a spoken exchange took, stage by stage. Durations and
 -- enumerations only: there is deliberately no column for anything the user
--- said or the assistant answered, so the journal can stay on by default.
+-- said or the assistant answered, so the journal can stay on by default, and
+-- the checks below make the table itself refuse a text column's contents
+-- that is not an enumerated outcome or a short model identifier.
 -- See jarvis/latency.spec.md.
 CREATE TABLE IF NOT EXISTS latency_log (
   id              INTEGER PRIMARY KEY,
-  ts_utc          TEXT NOT NULL,   -- when the user stopped speaking
-  origin          TEXT,            -- voice
+  ts_utc          TEXT NOT NULL,   -- the end of the user's speech
+  origin          TEXT CHECK (origin IS NULL OR origin = 'voice'),
   transcribed_ms  INTEGER,
   judge_ms        INTEGER,
-  judge_outcome   TEXT,            -- directed / not_directed / no_verdict
+  judge_outcome   TEXT CHECK (judge_outcome IS NULL
+                              OR judge_outcome IN ('directed', 'not_directed', 'no_verdict')),
   dispatch_ms     INTEGER,
+  prepare_ms      INTEGER,
   route_ms        INTEGER,
   plan_ms         INTEGER,
   memory_ms       INTEGER,
@@ -76,9 +80,9 @@ CREATE TABLE IF NOT EXISTS latency_log (
   total_ms        INTEGER,
   router_degraded INTEGER,
   tool_calls      INTEGER,
-  judge_model     TEXT,
-  router_model    TEXT,
-  chat_model      TEXT
+  judge_model     TEXT CHECK (judge_model IS NULL OR length(judge_model) <= 120),
+  router_model    TEXT CHECK (router_model IS NULL OR length(router_model) <= 120),
+  chat_model      TEXT CHECK (chat_model IS NULL OR length(chat_model) <= 120)
 );
 
 CREATE INDEX IF NOT EXISTS idx_latency_log_ts ON latency_log(ts_utc DESC);
@@ -581,7 +585,7 @@ class Database:
 
     _LATENCY_COLUMNS = (
         "ts_utc", "origin", "transcribed_ms", "judge_ms", "judge_outcome",
-        "dispatch_ms", "route_ms", "plan_ms", "memory_ms", "tools_ms",
+        "dispatch_ms", "prepare_ms", "route_ms", "plan_ms", "memory_ms", "tools_ms",
         "generate_ms", "first_sound_ms", "total_ms", "router_degraded",
         "tool_calls", "judge_model", "router_model", "chat_model",
     )

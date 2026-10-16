@@ -1088,11 +1088,16 @@ def _apply_ledger_retention(db) -> None:
 
 
 def _apply_latency_retention(db, cfg) -> None:
-    """Drop latency-journal rows older than the user's retention at start-up."""
+    """Keep the latency journal to the user's retention at start-up, and empty
+    it when the user has turned it off: switching a recorder off should leave
+    nothing of what it recorded."""
     try:
-        db.prune_latency(int(getattr(cfg, "latency_journal_days", 30)))
+        if not getattr(cfg, "latency_journal_enabled", True):
+            db.clear_latency()
+        else:
+            db.prune_latency(int(getattr(cfg, "latency_journal_days", 30)))
     except Exception as e:  # noqa: BLE001
-        debug_log(f"startup latency journal prune skipped: {e}", "jarvis")
+        debug_log(f"startup latency journal retention skipped: {e}", "jarvis")
 
 
 def build_tts_engine(cfg):

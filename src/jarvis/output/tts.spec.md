@@ -131,6 +131,15 @@ the engine calls it bare and speech never depends on it. Nothing in this
 module clears the state when speech ends; whoever owns the transitions
 does.
 
+**First sound.** Once an item's audio stream is running (Piper and
+Kokoro: after the output stream starts; Chatterbox: after playback
+begins), the engine calls `_sound_started()`, which marks the latency
+journal (`jarvis/latency.spec.md`). That is not where SPEAKING is
+published: SPEAKING goes out when an item starts being synthesised, before
+anything is audible, so marking there would understate the wait by the
+synthesis time of the first chunk. The call sits outside the audio locks,
+never raises, and an engine added later has to make it.
+
 ## Interrupting
 
 `interrupt()` is what a spoken stop word calls, and it means stop
@@ -378,6 +387,8 @@ language.
   there is nothing to fall back to.
 - Each listed language gets a voice trained for it, in any spelling, and
   an unlisted one gets the fallback.
+- Each engine marks the first sound once its audio stream is running, and
+  not when SPEAKING is published.
 - A regional variant (`fr-FR`, `fr_FR`, `pt_BR`) chooses the same default
   voice as its base language, and a variant of an unlisted language still
   gets the fallback. The map and the default voice read one value as the

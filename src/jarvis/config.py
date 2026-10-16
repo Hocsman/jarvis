@@ -259,7 +259,7 @@ class Settings:
     confirmation_model: str
     confirmation_timeout_sec: float
 
-    # Latency journal — how long each spoken exchange takes, stage by stage.
+    # Latency journal: how long each spoken exchange takes, stage by stage.
     # Durations and enumerations only, never text (see jarvis/latency.spec.md).
     latency_journal_enabled: bool
     latency_journal_days: int
@@ -1199,7 +1199,7 @@ def load_settings() -> Settings:
     confirmation_model = str(merged.get("confirmation_model", ""))
     confirmation_timeout_sec = min(max(float(merged.get("confirmation_timeout_sec", 8.0)), 2.0), 30.0)
 
-    latency_journal_enabled = bool(merged.get("latency_journal_enabled", True))
+    latency_journal_enabled = _as_bool(merged.get("latency_journal_enabled", True))
     latency_journal_days = min(max(int(merged.get("latency_journal_days", 30)), 1), 365)
 
     # Intent Judge - always used when available

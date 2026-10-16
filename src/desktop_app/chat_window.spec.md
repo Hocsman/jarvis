@@ -384,6 +384,12 @@ a disabled planner emits nothing, since a label that flashes for zero seconds
 is noise rather than progress. Reporting is advisory and fail-open
 throughout: a raising consumer is logged and ignored.
 
+The latency journal (`jarvis/latency.spec.md`) is a second consumer of these
+announcements: it books the time between two announcements to the stage
+announced first. A phase that does work must therefore announce itself, a new
+stage id needs a column there, and the model call that follows a tool result
+is announced as `generating` again so its time is not booked to the tool.
+
 ## What the system does not do
 
 - **No per-tool-call visibility.** The `on_tool_call` callback and the

@@ -2697,6 +2697,11 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         # tools API not supported).
         _dump_tools_schema = None if use_text_tools else tools_json_schema
         _chat_model = cfg.llm_chat_model
+        if turn > 1:
+            # A model call after a tool result writes the answer. Saying so
+            # keeps its time out of the tool that just ran, in the chat
+            # window's label and in the latency journal.
+            _stage("generating")
         try:
             llm_resp = chat_with_messages(
                 cfg=cfg,

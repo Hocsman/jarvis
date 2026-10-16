@@ -291,15 +291,21 @@ is ready. The first LLM-backed request after startup or idle may be slower.
 Jarvis keeps one line per voice turn with the duration of each stage (speech
 recognition, intent judge, waiting for you to carry on, tool router, planner,
 reply) and the delay until the first sound. It holds durations and counts only,
-never what you said or what was answered, and it stays on your machine. Read it with:
+never what you said or what was answered, and it stays on your machine. From a
+source checkout with the project's environment active (the installer build has
+no viewer for it yet), read it with the first command and erase it with the
+second:
 
 ```bash
 python scripts/latency_report.py --days 7
+python scripts/latency_report.py --clear
 ```
+
+The settings are under **⚙️ Settings → 🔧 Advanced**:
 
 ```json
 {
-  "latency_journal_enabled": true,   // set to false to stop recording
+  "latency_journal_enabled": true,   // set to false to stop recording; it is erased at the next start
   "latency_journal_days": 30         // older lines are dropped at start-up
 }
 ```
