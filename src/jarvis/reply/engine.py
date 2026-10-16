@@ -83,7 +83,7 @@ from .planner import (
     is_search_memory_step,
     resolve_next_tool_call as _resolve_plan_step,
 )
-from ..tools.selection import select_tools, ToolSelectionStrategy
+from ..tools.selection import router_timeout_sec, select_tools, ToolSelectionStrategy
 import json
 import re
 import uuid
@@ -1357,6 +1357,9 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         dialogue_memory.hot_cache_get(_router_cache_key)
         if dialogue_memory and hasattr(dialogue_memory, "hot_cache_get") else None
     )
+    # True only when the LLM router was asked this turn and the keyword
+    # strategy answered in its place; it labels the printed tools line.
+    _router_gave_up = False
     if scope is not None:
         # A routine's catalogue is the envelope it was given. The router
         # is not consulted: it exists to narrow forty tools down for a
@@ -1385,29 +1388,36 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
             strategy=strategy,
             llm_backend=get_auxiliary_backend(cfg, router_model),
             llm_model=router_model,
-            llm_timeout_sec=float(getattr(cfg, "llm_tools_timeout_sec", 8.0)),
+            llm_timeout_sec=router_timeout_sec(cfg),
             embedding_backend=get_embedding_backend(cfg),
             embed_model=cfg.embedding_model,
             embed_timeout_sec=float(getattr(cfg, "llm_embedding_timeout_sec", 10.0)),
             context_hint=context_hint,
         )
-        # Don't cache the router's "fall open to all tools" fallback. That
-        # path fires when the LLM router times out, returns empty, or emits
-        # a response no token of which matches a known tool name — i.e. the
-        # router gave up. Caching its "give up = expose everything" output
-        # for the rest of the conversation pins ``allowed_tools`` to the
-        # full catalogue, overwhelms the planner (which then paraphrases
-        # tool steps as prose), and starves a small chat model into
-        # producing the empty-reply fallback. Re-rolling the router on the
-        # next turn is cheap and almost always recovers.
+        # Don't cache a pick the router did not make. That is the case when
+        # the LLM router times out, returns empty, or emits a response no
+        # token of which matches a known tool name: it gave up, and the
+        # keyword strategy (``routed_tools.degraded``) answered in its place.
+        # Pinning that pick for the rest of the conversation would keep a
+        # weaker allow-list than the router would give on its next try.
+        # The same holds for the "fall open to all tools" answer, which
+        # also pins ``allowed_tools`` to the full catalogue, overwhelms the
+        # planner (which then paraphrases tool steps as prose), and starves
+        # a small chat model into producing the empty-reply fallback.
+        # Re-rolling the router on the next turn is cheap and almost always
+        # recovers.
+        _router_gave_up = bool(getattr(routed_tools, "degraded", False))
         _router_returned_full_catalog = (
             routed_tools is not None
             and len(routed_tools) == len(_full_catalog_names)
             and set(routed_tools) == set(_full_catalog_names)
         )
+        if _router_gave_up:
+            debug_log("tool router gave up, keyword pick used for this turn only", "planning")
         if (
             dialogue_memory
             and hasattr(dialogue_memory, "hot_cache_put")
+            and not _router_gave_up
             and not _router_returned_full_catalog
         ):
             dialogue_memory.hot_cache_put(_router_cache_key, list(routed_tools or []))
@@ -1666,7 +1676,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 _stage("memory")
                 search_params = extract_search_params_for_memory(
                     _extractor_query, cfg, resolve_tool_router_model(cfg),
-                    timeout_sec=float(getattr(cfg, 'llm_tools_timeout_sec', 8.0)),
+                    timeout_sec=router_timeout_sec(cfg),
                     thinking=getattr(cfg, 'llm_thinking_enabled', False),
                     context_hint=context_hint,
                 )
@@ -1894,7 +1904,10 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         action_plan, _full_catalog_names
     )
     allowed_tools = list(routed_tools)
-    _selection_source = strategy.value
+    # A keyword pick that stood in for a router that gave up must not read
+    # as `llm` in the printed tools line.
+    _base_source = f"{strategy.value}->keyword" if _router_gave_up else strategy.value
+    _selection_source = _base_source
 
     if _settled.approval is not None:
         # A resume turn does one thing: run the call the user approved and
@@ -1914,7 +1927,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         for _plan_name in tool_names_in_plan(action_plan, _full_catalog_names):
             if _plan_name not in allowed_tools:
                 allowed_tools.append(_plan_name)
-                _selection_source = f"{strategy.value}+plan"
+                _selection_source = f"{_base_source}+plan"
     if _carryover_names:
         _selection_source = f"{_selection_source}+carryover"
     if scope is not None:

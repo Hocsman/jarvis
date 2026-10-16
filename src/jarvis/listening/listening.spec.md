@@ -387,7 +387,7 @@ a guard that ate an emphatic repeat would cost real sentences. Each
 hallucination that survives costs an intent-judge call on the cloud model
 to be told it is not directed.
 
-Note: the intent judge has no enable flag. A connection error puts it in a 30-second back-off during which `judge()` returns without calling the backend; the listener still takes its no-verdict path, so the hot-window override keeps the follow-up and the unavailability is printed to standard output. Outside a hot window, text-based wake detection answers as usual.
+Note: the intent judge has no enable flag. A connection error puts it in a 30-second back-off during which `judge()` returns without calling the backend; the listener still takes its no-verdict path, so the hot-window override keeps the follow-up and the unavailability is printed to standard output. Outside a hot window, text-based wake detection answers as usual. A request that outlives `intent_judge_timeout_sec` gives no verdict either, without the back-off, so the next engagement asks the judge again. The audio loop waits at most that long for a server that goes quiet; as with every request timeout here it is the HTTP client's connection and per-read wait, not a wall-clock cap on the whole exchange.
 
 ## State Transitions
 

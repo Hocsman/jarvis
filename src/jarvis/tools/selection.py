@@ -30,6 +30,26 @@ class ToolSelectionStrategy(Enum):
     LLM = "llm"
 
 
+class ToolSelection(list):
+    """The tool names a strategy picked, and whether the pick is a fallback.
+
+    A plain list in every other respect, so callers that only read names are
+    unaffected. ``degraded`` is True when the LLM router could not answer
+    (it expired, came back empty, named nothing known, or had no backend or
+    model) and the keyword strategy answered in its place. A degraded pick is
+    good enough for the turn in hand and not worth remembering: the caller
+    that caches picks leaves it out, so the next turn asks the router again.
+    """
+
+    degraded: bool = False
+
+    @classmethod
+    def fallback(cls, names: List[str]) -> "ToolSelection":
+        picked = cls(names)
+        picked.degraded = True
+        return picked
+
+
 # Tools that must always be available regardless of selection strategy.
 _ALWAYS_INCLUDED = {"stop", "remember", "forget"}
 
@@ -295,7 +315,7 @@ def _select_llm(
     """
     if not (llm_model or "").strip():
         debug_log("LLM tool selection skipped: no model configured, falling back to keyword strategy", "planning")
-        return _select_keyword(query, builtin_tools, mcp_tools)
+        return ToolSelection.fallback(_select_keyword(query, builtin_tools, mcp_tools))
 
     catalogue_lines: List[str] = []
     for name, tool in builtin_tools.items():
@@ -387,16 +407,22 @@ def _select_llm(
         )
     except Exception as e:
         debug_log(f"LLM tool selection failed: {e}, falling back to keyword strategy", "planning")
-        return _select_keyword(query, builtin_tools, mcp_tools)
+        return ToolSelection.fallback(_select_keyword(query, builtin_tools, mcp_tools))
 
     if not resp or not isinstance(resp, str):
-        debug_log("LLM tool selection returned empty, falling back to keyword strategy", "planning")
-        return _select_keyword(query, builtin_tools, mcp_tools)
+        # A deadline that expires lands here too, and so do HTTP errors and
+        # empty bodies: both backends answer None for all of them.
+        debug_log(
+            f"LLM tool selection got no usable answer (deadline {llm_timeout_sec:g}s), "
+            "falling back to keyword strategy",
+            "planning",
+        )
+        return ToolSelection.fallback(_select_keyword(query, builtin_tools, mcp_tools))
 
     resp_lower = resp.strip().lower()
     if resp_lower == "none":
         debug_log("LLM tool selection returned 'none' — including only mandatory tools", "planning")
-        return [t for t in _ALWAYS_INCLUDED if t in builtin_tools or t in mcp_tools]
+        return ToolSelection(t for t in _ALWAYS_INCLUDED if t in builtin_tools or t in mcp_tools)
 
     known = set(builtin_tools.keys()) | set(mcp_tools.keys())
     selected: List[str] = []
@@ -422,17 +448,35 @@ def _select_llm(
     # small model then fails to pick from.
     if not selected:
         debug_log("LLM tool selection matched nothing, falling back to keyword strategy", "planning")
-        return _select_keyword(query, builtin_tools, mcp_tools)
+        return ToolSelection.fallback(_select_keyword(query, builtin_tools, mcp_tools))
 
     selected = _ensure_always_included(selected, builtin_tools, mcp_tools)
 
     debug_log(f"LLM tool selection: {len(selected)}/{len(known)} tools selected", "planning")
-    return selected
+    return ToolSelection(selected)
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+# Used only when a config-like object carries no `tool_router_timeout_sec`
+# (a partial stand-in); a real Settings always has one.
+_DEFAULT_ROUTER_TIMEOUT_SEC = 15.0
+
+
+def router_timeout_sec(cfg) -> float:
+    """How long the LLM router may wait for its model before the keyword
+    strategy answers instead.
+
+    The router has a deadline of its own, apart from `llm_tools_timeout_sec`:
+    it is a classification call in front of the first token of the reply, and
+    sharing a ceiling of minutes would let one stalled provider hold the turn
+    for that long. The reply engine and `toolSearchTool` both resolve it here
+    so the two cannot drift.
+    """
+    return float(getattr(cfg, "tool_router_timeout_sec", _DEFAULT_ROUTER_TIMEOUT_SEC))
+
 
 def select_tools(
     query: str,
@@ -467,7 +511,11 @@ def select_tools(
         context_hint:       Optional facts/dialogue surface for the LLM router.
 
     Returns:
-        List of tool name strings.
+        List of tool name strings. The LLM strategy returns a ``ToolSelection``
+        (a list) whose ``degraded`` flag is true when the keyword strategy
+        answered in its place; the other strategies return plain lists, so a
+        caller reads the flag with ``getattr(selection, "degraded", False)``
+        and before copying the list, which drops it.
     """
     if strategy == ToolSelectionStrategy.KEYWORD:
         return _select_keyword(query, builtin_tools, mcp_tools)
@@ -482,7 +530,7 @@ def select_tools(
     elif strategy == ToolSelectionStrategy.LLM:
         if llm_backend is None:
             debug_log("LLM tool selection: no backend supplied, falling back to keyword strategy", "planning")
-            return _select_keyword(query, builtin_tools, mcp_tools)
+            return ToolSelection.fallback(_select_keyword(query, builtin_tools, mcp_tools))
         return _select_llm(
             query, builtin_tools, mcp_tools,
             llm_backend, llm_model, llm_timeout_sec,

@@ -113,6 +113,7 @@ class TestReplyEngineDialogueMemory:
         mock_cfg.llm_chat_model = "test"
         mock_cfg.voice_debug = False
         mock_cfg.llm_tools_timeout_sec = 8.0
+        mock_cfg.tool_router_timeout_sec = 8.0
         mock_cfg.llm_embedding_timeout_sec = 10.0
         mock_cfg.llm_chat_timeout_sec = 45.0
         mock_cfg.memory_enrichment_max_results = 5
@@ -177,6 +178,7 @@ class TestReplyEngineDialogueMemory:
         mock_cfg.llm_chat_model = "test"
         mock_cfg.voice_debug = False
         mock_cfg.llm_tools_timeout_sec = 8.0
+        mock_cfg.tool_router_timeout_sec = 8.0
         mock_cfg.llm_embedding_timeout_sec = 10.0
         mock_cfg.llm_chat_timeout_sec = 45.0
         mock_cfg.memory_enrichment_max_results = 5

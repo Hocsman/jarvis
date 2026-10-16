@@ -136,6 +136,12 @@ class Settings:
     ollama_chat_model: str
     llm_chat_timeout_sec: float
     llm_tools_timeout_sec: float
+    # The tool router's own deadline, shared by the memory extractor that
+    # rides the same model chain and backend. Routing is a classification
+    # call that sits in front of the first token of the reply, so it cannot
+    # inherit the minutes-long ceiling above: a stalled provider would hold
+    # the turn.
+    tool_router_timeout_sec: float
     # Tight deadline for the cheap distil passes used by memory_digest and
     # tool_result_digest. Separate from `llm_tools_timeout_sec` because
     # those paths run a small classification-shaped LLM call, not a
@@ -709,6 +715,10 @@ def get_default_config() -> Dict[str, Any]:
         "ollama_chat_model": DEFAULT_CHAT_MODEL,
         "llm_chat_timeout_sec": 180.0,
         "llm_tools_timeout_sec": 300.0,
+        # Routing waits for its model at most this long, then the keyword
+        # strategy answers. Healthy cloud routers answer in about a second;
+        # this leaves room for a cold local model and not for a stall.
+        "tool_router_timeout_sec": 15.0,
         # Cheap distil passes should fail fast — a hung digest call would
         # block the reply loop per tool call, amplified by agentic turns.
         "llm_digest_timeout_sec": 8.0,
@@ -1281,6 +1291,7 @@ def load_settings() -> Settings:
     whisper_min_word_length = int(merged.get("whisper_min_word_length", 2))
     llm_chat_timeout_sec = float(merged.get("llm_chat_timeout_sec", 180.0))
     llm_tools_timeout_sec = float(merged.get("llm_tools_timeout_sec", 300.0))
+    tool_router_timeout_sec = min(max(float(merged.get("tool_router_timeout_sec", 15.0)), 1.0), 120.0)
     llm_digest_timeout_sec = float(merged.get("llm_digest_timeout_sec", 8.0))
     llm_embedding_timeout_sec = float(merged.get("llm_embedding_timeout_sec", 60.0))
     llm_profile_select_timeout_sec = float(merged.get("llm_profile_select_timeout_sec", 30.0))
@@ -1307,6 +1318,7 @@ def load_settings() -> Settings:
         ollama_chat_model=ollama_chat_model,
         llm_chat_timeout_sec=llm_chat_timeout_sec,
         llm_tools_timeout_sec=llm_tools_timeout_sec,
+        tool_router_timeout_sec=tool_router_timeout_sec,
         llm_digest_timeout_sec=llm_digest_timeout_sec,
         llm_embedding_timeout_sec=llm_embedding_timeout_sec,
         llm_profile_select_timeout_sec=llm_profile_select_timeout_sec,

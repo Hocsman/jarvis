@@ -11,7 +11,7 @@ from typing import Any, Dict, Optional
 
 from ..base import Tool, ToolContext
 from ..types import ToolExecutionResult
-from ..selection import select_tools, ToolSelectionStrategy
+from ..selection import router_timeout_sec, select_tools, ToolSelectionStrategy
 from ...debug import debug_log
 from ...llm import get_auxiliary_backend, get_embedding_backend
 
@@ -105,7 +105,7 @@ class ToolSearchTool(Tool):
                 strategy=strategy,
                 llm_backend=get_auxiliary_backend(cfg, router_model),
                 llm_model=router_model,
-                llm_timeout_sec=float(getattr(cfg, "llm_tools_timeout_sec", 8.0)),
+                llm_timeout_sec=router_timeout_sec(cfg),
                 embedding_backend=get_embedding_backend(cfg),
                 embed_model=cfg.embedding_model,
                 embed_timeout_sec=float(getattr(cfg, "llm_embedding_timeout_sec", 10.0)),
