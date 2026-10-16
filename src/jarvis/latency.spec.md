@@ -56,7 +56,7 @@ A reply is streamed to speech sentence by sentence, but a sentence closes only w
 
 - If it arrives before the turn is frozen (a longer, streamed reply), the stage columns are frozen at that moment.
 - If it arrives after, it completes the row: from memory when the row has not been written yet, by an update when it has, within 30 seconds.
-- Only a turn whose reply is going to be spoken accepts a late sound (`will_speak`). A dismissal, an empty reply or a failed turn does not, so a reminder or the error apology cannot become its first sound; and the next turn's dispatch ends any claim an earlier row had.
+- Only a turn whose reply is going to be spoken accepts a late sound (`will_speak`). A dismissal, an empty reply or a failed turn does not, so a reminder or the error apology cannot become its first sound; and each turn's freezing replaces whatever claim an earlier row had, so a later reply's sound never completes an earlier row.
 - A sound that arrives later than 30 seconds, or after the row already holds one, belongs to something else and is ignored.
 
 ## Failure

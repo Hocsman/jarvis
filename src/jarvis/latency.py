@@ -202,9 +202,6 @@ class LatencyJournal:
             return
         with self._lock:
             self._flush_locked()
-            # A sound belongs to the reply it follows; the next reply starts
-            # a new claim, so an earlier row can no longer be completed.
-            self._late = None
             if self._turn is not None:
                 debug_log("latency journal: a turn was left open, dropped", "jarvis")
             now = self._clock()
