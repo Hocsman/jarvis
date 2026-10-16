@@ -287,6 +287,23 @@ Low Power Mode skips LLM startup warmup and shortens Ollama model residency for
 the intent judge from 30 minutes to 1 minute. Whisper still warms so voice input
 is ready. The first LLM-backed request after startup or idle may be slower.
 
+**Latency journal.** To find out where the time goes in a spoken exchange,
+Jarvis keeps one line per voice turn with the duration of each stage (speech
+recognition, intent judge, waiting for you to carry on, tool router, planner,
+reply) and the delay until the first sound. It holds durations and counts only,
+never what you said or what was answered, and it stays on your machine. Read it with:
+
+```bash
+python scripts/latency_report.py --days 7
+```
+
+```json
+{
+  "latency_journal_enabled": true,   // set to false to stop recording
+  "latency_journal_days": 30         // older lines are dropped at start-up
+}
+```
+
 </details>
 
 <details>
@@ -718,6 +735,7 @@ provider can't run out the voice-assistant latency budget.
 - **Auto-redaction** - Emails, tokens, passwords automatically removed
 - **Local storage** - Everything in `~/.local/share/jarvis`
 - **No record of what it read** - The action log has no column for tool output, structurally. A log that kept results would accumulate the contents of every page fetched and every file opened, somewhere you read casually
+- **No record of what you said in the timing log** - The latency journal has no free-text column either: durations, counts and model names only
 - **Permissions are yours to set** - `~/.local/share/jarvis/yuba/outils.md` lists your own tools by name, in three sections you move lines between. Written once, never rewritten. A tool that appears later is unclassified, and therefore asked about
 
 ## License

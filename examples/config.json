@@ -116,6 +116,8 @@
   "confirmation_hot_window_sec": 12.0,
   "confirmation_model": "",
   "confirmation_timeout_sec": 8.0,
+  "latency_journal_enabled": true,
+  "latency_journal_days": 30,
   "llm_thinking_enabled": false,
   "intent_judge_model": "gemma4:e2b",
   "intent_judge_timeout_sec": 15.0,

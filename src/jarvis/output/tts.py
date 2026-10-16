@@ -17,8 +17,21 @@ from typing import Any, Callable, Mapping, Optional
 from urllib.parse import urlparse
 
 from ..debug import debug_log
+from ..latency import get_latency_journal
 from ..state import JarvisState, get_jarvis_state
 from ..utils.audio_lock import portaudio_lock
+
+
+def _sound_started() -> None:
+    """The audio stream is running: the user can hear the reply from here on.
+
+    The first call of a turn is the moment the latency journal measures to
+    (``jarvis/latency.spec.md``). ``SPEAKING`` is published earlier, when a
+    chunk begins to be synthesised, so marking there would understate the
+    wait by the synthesis time of the first chunk. Called outside the audio
+    locks so a journal write can never hold playback up.
+    """
+    get_latency_journal().mark_first_sound()
 
 
 # ============================================================================
@@ -703,6 +716,7 @@ class ChatterboxTTS:
                 pygame.mixer.init(frequency=self._model.sr, size=-16, channels=1, buffer=1024)
                 pygame.mixer.music.load(tmp_path)
                 pygame.mixer.music.play()
+                _sound_started()
 
                 # Wait for playback to complete or interruption
                 while pygame.mixer.music.get_busy():
@@ -1231,6 +1245,7 @@ class PiperTTS:
                         )
                         self._audio_stream.start()
 
+                _sound_started()
                 # Wait for playback to complete
                 while self._audio_stream is not None and self._audio_stream.active:
                     if self._should_interrupt.is_set():
@@ -1593,6 +1608,7 @@ class KokoroTTS:
                         )
                         self._audio_stream.start()
 
+                _sound_started()
                 while self._audio_stream is not None and self._audio_stream.active:
                     if self._should_interrupt.is_set():
                         interrupted = True

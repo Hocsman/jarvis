@@ -1087,6 +1087,14 @@ def _apply_ledger_retention(db) -> None:
         debug_log(f"startup ledger prune skipped: {e}", "tools")
 
 
+def _apply_latency_retention(db, cfg) -> None:
+    """Drop latency-journal rows older than the user's retention at start-up."""
+    try:
+        db.prune_latency(int(getattr(cfg, "latency_journal_days", 30)))
+    except Exception as e:  # noqa: BLE001
+        debug_log(f"startup latency journal prune skipped: {e}", "jarvis")
+
+
 def build_tts_engine(cfg):
     """The speech engine the settings ask for, not yet started.
 
@@ -1146,6 +1154,7 @@ def main() -> None:
     _global_cfg = cfg
     _global_db = db
     _apply_ledger_retention(db)
+    _apply_latency_retention(db, cfg)
 
     debug_log("daemon started", "jarvis")
     print("✓ Daemon started", flush=True)
