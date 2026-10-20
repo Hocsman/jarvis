@@ -1119,6 +1119,12 @@ class ChatWindow(QMainWindow):
             self._settle_confirmation(data if isinstance(data, dict) else {})
         elif kind == "confirm_nack":
             self._confirmation_not_taken(data if isinstance(data, dict) else {})
+        elif kind == "delegation_done":
+            # A Claude Code report: it lands with no turn of its own, so it
+            # cannot ride the `complete` that ends a reply.
+            texte = data.get("texte") if isinstance(data, dict) else None
+            if isinstance(texte, str) and texte.strip():
+                self._append_assistant(texte)
         elif kind in ("rewound", "rewind_nack"):
             user_index = data.get("user_index") if isinstance(data, dict) else None
             if isinstance(user_index, int):

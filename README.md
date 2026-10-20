@@ -166,12 +166,13 @@ Jarvis starts listening automatically — just say "Jarvis" and talk!
 - **Unlimited Memory** - Never forgets. Searches across all your conversation history. Memory Viewer GUI included.
 - **Adaptive Tone** - Automatically surgical for code, pragmatic for business, encouraging for wellbeing — no manual mode switching
 - **Smart Tool Selection** - Embedding-based relevance filtering picks only the tools needed per query — add unlimited MCP tools without performance degradation
-- **Built-in Tools** - Screenshot OCR, web search (DuckDuckGo → Brave → Wikipedia fallback chain with auto-fetch), weather, time & timezones, file access, nutrition tracking, location awareness, remembering things you ask it to, plus a tool-discovery escape hatch the agent uses to widen its own toolset mid-reply
+- **Built-in Tools** - Screenshot OCR, web search (DuckDuckGo → Brave → Wikipedia fallback chain with auto-fetch), weather, time & timezones, file access, nutrition tracking, location awareness, remembering things you ask it to, handing a project to Claude Code, plus a tool-discovery escape hatch the agent uses to widen its own toolset mid-reply
 - **Memory You Can Read** - Say "remember that…" or correct a mistake, and it goes into two plain Markdown files you can open, edit, and back up. Nothing is written by inference: only what you actually said, dated and attributed, and a correction strikes the old line through instead of erasing it
 - **Reminders That Survive a Restart** - "Remind me in twenty minutes to take the dish out", "on Thursday, remind me to call the accountant". Says the time back so you can catch a misheard day in the same turn, in any language. A laptop shut through the due time still gets told — late, and saying how late. See and cancel them in the Memory Viewer, and switch the whole thing off under **⚙️ Settings → ⏰ Rappels**. Set `reminder_model` to a local model there if you want the sentence you dictated kept off the network
 - **It Proposes, You Decide** - Ask what it has noticed about you and it reads your own diary for things you never said outright, then writes each one as a question in `yuba/appris.md`. Nothing there is a belief: no reply ever reads that file, and a proposal sitting in it for six months changes nothing. Tick a box and it moves into your profile marked `confirmé`; cross a line out and it is never offered again. You can rewrite the sentence before agreeing to it, which is the point: what gets saved is your wording, not its guess. Only ever runs when you ask, never on a schedule and never while you sleep. There is an Appris tab in the Memory Viewer too, where a click lands straight away instead of waiting for your next question
 - **Goals It Keeps Track Of** - "I'm preparing for an interview at Datadog, done when I have their answer." It goes into `yuba/objectifs.md`, another plain file you own, and one line per open goal sits in its context so it recognises the subject when it comes up weeks later. Progress is whatever you tell it, dated and attributed to you; it never writes down what it inferred on its own. It can say a goal *might* be finished and ask, and it cannot say it *is*. Closing one is your word, never its conclusion. A goal is something it remembers and brings up, not something it runs: no schedule, no tools, nothing happens unattended. See them in the Objectifs tab
 - **Routines That Run While You Sleep** - "Every morning at 7, summarise my mail." Creating one asks your permission first, because it is a standing grant rather than a single action, and she reads the tool names back so you can narrow them on the spot. Each routine gets its own envelope of tools, written in a Markdown file you own: it can only ever read, only inside that envelope, and only tools you already let it run freely. Delete the block and the routine is suspended; an empty tool list means nothing, never everything. Every morning writes a dated page in `yuba/journal/`, including what it was stopped from reaching and why, and a routine that produces nothing several runs running stops itself and says so. Stop one by asking, or from the Routines tab
+- **Hands Your Projects to Claude Code** - "Ask Claude Code to add a logout button to chantipay", "ask it how authentication works in nikahscore". Any sub-folder of the folder you name becomes a project, found from the name you say. Claude Code works on it in the background and Jarvis tells you what it did when it is done, aloud or in the chat window; a follow-up within half an hour continues the same session. A change needs a click on a card showing the exact task, a question does not. **This is the one feature that sends your code to a cloud**: Claude Code runs on Anthropic's models under your own Claude Code account, so it is off until you name a folder under **⚙️ Settings → 🛠️ Projets**. Needs the `claude` command installed
 - **Asks Before It Acts** - Every tool declares what it does to the world, and a plain-text file you own decides which ones run freely and which need your say-so. It is generated once from the tools you actually have installed, then belongs to you. A tool nobody classified is treated as destructive, so it asks
 - **Destructive Actions Need a Click** - Reads and recoverable changes can be approved by answering out loud, in any language. Anything that may not come back is approved on a card showing the exact call, or not at all — a mis-heard word must never be able to delete a file
 - **A Record of What It Did** - One line per tool call: what ran, what it cost, what you allowed and what you refused. Deliberately no record of what it *saw* — no page contents, no file contents, no tool output
@@ -233,6 +234,24 @@ It is generated at first start from the tools you actually have installed — yo
 **What it records.** Every tool call leaves one line in the **📋 Activity** tab of the Memory Viewer: what ran, its risk, what you allowed, what you refused, and how long it took. There is deliberately no record of what it *saw*.
 
 Timings and the model that reads a spoken answer live under **⚙️ Settings → 🙋 Permissions**. Set `confirmation_model` to a local model if you want that reading kept off the network.
+
+</details>
+
+<details>
+<summary><strong>Projects — handing work to Claude Code</strong></summary>
+
+Install [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and sign in once in a terminal, then name the folder that holds your projects:
+
+```json
+{ "claude_code_projects_dir": "C:/Users/you/Projets" }
+```
+
+- Every sub-folder is a project, matched from what you say ("nikah score" finds `nikahscore`). Two close matches, and it asks which one.
+- A task that changes code shows a card with the project and the exact task, and runs only on a click. A question runs read-only, without asking; write `- claudeCode` under `## Demande` in `outils.md` if you want to be asked every time.
+- One task at a time, stopped after `claude_code_timeout_sec` (30 minutes by default). Ask "how is Claude Code doing?" at any point.
+- `claude_code_command` takes the full path of the executable if `claude` is not on the `PATH` Jarvis sees.
+
+The task and whatever files Claude Code reads go to Anthropic, under your Claude Code account. Routines can never use it.
 
 </details>
 
@@ -745,6 +764,7 @@ provider can't run out the voice-assistant latency budget.
 - **Local storage** - Everything in `~/.local/share/jarvis`
 - **No record of what it read** - The action log has no column for tool output, structurally. A log that kept results would accumulate the contents of every page fetched and every file opened, somewhere you read casually
 - **No record of what you said in the timing log** - The latency journal has no free-text column either: durations, counts and model names only
+- **One exception, off by default** - Handing a project to Claude Code sends the task and the code it reads to Anthropic. Nothing reaches it until you name a projects folder (`claude_code_projects_dir`)
 - **Permissions are yours to set** - `~/.local/share/jarvis/yuba/outils.md` lists your own tools by name, in three sections you move lines between. Written once, never rewritten. A tool that appears later is unclassified, and therefore asked about
 
 ## License

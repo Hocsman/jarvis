@@ -68,8 +68,9 @@ The settings window uses a sidebar navigation pattern: a fixed-width `QListWidge
 15. 🙋 Permissions
 16. ⏰ Rappels
 17. 🌅 Routines
-18. MCP Servers
-19. Advanced
+18. 🛠️ Projets
+19. MCP Servers
+20. Advanced
 
 ### 🙋 Permissions
 
@@ -91,6 +92,14 @@ sentence about one promise, not a number that applies to all of them.
 The master switch and the two limits that decide when she gives up on an
 occurrence and when she gives up on a routine. What each routine may
 reach lives in `yuba/routines.md`, one block per routine.
+
+### 🛠️ Projets
+
+The folder whose sub-folders can be handed to Claude Code, the executable,
+and how long a job may run (`src/jarvis/projets/projets.spec.md`). The
+folder is empty by default, which keeps the feature off: it sends the
+user's code to Anthropic, so it belongs where he can see it and switch it
+off, not only in `config.json`.
 
 ### Piper TTS
 

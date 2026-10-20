@@ -130,8 +130,8 @@ def test_an_empty_envelope_reaches_nothing():
     assert tool.ran == []
 
 
-@pytest.mark.parametrize("name", ["toolSearchTool", "refreshMCPTools", "stop"])
-def test_the_three_names_no_envelope_can_hold_do_not_run_either(name):
+@pytest.mark.parametrize("name", ["toolSearchTool", "refreshMCPTools", "stop", "claudeCode"])
+def test_the_names_no_envelope_can_hold_do_not_run_either(name):
     """They are kept out of the catalogue, so a well-behaved turn never
     reaches for one. The gate is what happens when the turn is not
     well-behaved: a model emitting a name it was never shown, or a

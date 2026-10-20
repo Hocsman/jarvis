@@ -253,6 +253,11 @@ class Settings:
     routine_late_grace_sec: float
     routine_max_steriles: int
 
+    # Projets — handing a project folder to Claude Code
+    claude_code_projects_dir: str
+    claude_code_command: str
+    claude_code_timeout_sec: float
+
     # Confirmation — how long a question waits, and who reads the answer
     confirmation_ttl_sec: float
     confirmation_hot_window_sec: float
@@ -855,6 +860,12 @@ def get_default_config() -> Dict[str, Any]:
         # does not, since that is the routine working.
         "routine_max_steriles": 5,
 
+        # Projets. Empty folder = off: the feature sends the user's code
+        # to Anthropic, so nothing reaches it until a folder is named.
+        "claude_code_projects_dir": "",
+        "claude_code_command": "claude",
+        "claude_code_timeout_sec": 1800.0,
+
         # Confirmation. The click window is generous because walking to
         # the machine takes longer than answering aloud. The spoken window
         # is wider than `hot_window_seconds`, which is tuned for
@@ -1191,6 +1202,12 @@ def load_settings() -> Settings:
     routine_late_grace_sec = min(max(float(merged.get("routine_late_grace_sec", 14400.0)), 0.0), 86400.0)
     routine_max_steriles = min(max(int(merged.get("routine_max_steriles", 5)), 1), 100)
 
+    # Projets. The deadline is clamped: zero would kill every job at birth,
+    # and an unbounded one would let a stuck agent hold the only slot.
+    claude_code_projects_dir = str(merged.get("claude_code_projects_dir", "") or "").strip()
+    claude_code_command = str(merged.get("claude_code_command", "claude") or "").strip() or "claude"
+    claude_code_timeout_sec = min(max(float(merged.get("claude_code_timeout_sec", 1800.0)), 60.0), 7200.0)
+
     # Confirmation. Clamped rather than trusted: a TTL of zero would
     # expire every question before it could be read, and an unbounded one
     # would leave a destructive action answerable days later.
@@ -1426,6 +1443,10 @@ def load_settings() -> Settings:
         routine_tick_sec=routine_tick_sec,
         routine_late_grace_sec=routine_late_grace_sec,
         routine_max_steriles=routine_max_steriles,
+        # Projets
+        claude_code_projects_dir=claude_code_projects_dir,
+        claude_code_command=claude_code_command,
+        claude_code_timeout_sec=claude_code_timeout_sec,
         # Confirmation
         confirmation_ttl_sec=confirmation_ttl_sec,
         confirmation_hot_window_sec=confirmation_hot_window_sec,

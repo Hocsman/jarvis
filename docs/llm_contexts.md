@@ -243,6 +243,16 @@ Every distinct LLM call in Jarvis, what feeds it, what consumes it, and how it i
 - **Failure**: `appelee=False` on no model, a timeout, an answer with no bracket, a JSON error, or a non-list. Then **nothing is recorded as read**, so a single failure never skips those days permanently, and the tool's reply forbids saying there was nothing new. Seven deterministic guards drop items afterwards, each counted and each reported out loud.
 - **Cost**: one call per ask. Asking twice in a day costs one call the first time and none the second, because every row is already digested. The rate limit is a property of the artefact, not a timer.
 
+## 21. Claude Code delegation (an external coding agent)
+
+- **File**: [src/jarvis/projets/claude_code.py](src/jarvis/projets/claude_code.py) — `Delegations.start()`, called by the `claudeCode` tool in [src/jarvis/tools/builtin/claude_code.py](src/jarvis/tools/builtin/claude_code.py). Spec: [src/jarvis/projets/projets.spec.md](src/jarvis/projets/projets.spec.md).
+- **Trigger**: a `claudeCode` call carrying a task, once per call, after the gate: a task that may change files is `destructif` and costs a click on a card, a question is `lecture`. Never from a routine (`JAMAIS_EN_ROUTINE`). A call with no task reads the job's state from memory and calls nothing.
+- **Model**: not ours. Claude Code runs on Anthropic's models, under the user's own Claude Code account and settings; `llm_provider` and the model settings play no part. It is the one context whose destination is fixed and remote: the task, and whatever project files the agent reads, go to Anthropic. Off until `claude_code_projects_dir` names a folder.
+- **Inputs**: the task, written by #1 from the redacted conversation, on standard input (never on the command line, which `cmd.exe` parses on Windows); the project folder as working directory; `--resume` with the last session on that project when it ended within `_RESUME_WINDOW_SEC` (1800 s).
+- **System prompt**: Claude Code's own, with `_REPORT_RULE` appended through `--append-system-prompt`: it runs unattended, asks nothing, and ends with two or three plain sentences in the language of the task, since that message is read aloud.
+- **Output**: the JSON result object. Its `result` is scrubbed of secrets and delivered by `deliver_delegation` as one message, written by code around the report: added to the dialogue memory (so it reaches #1 on the following turns), sent to the chat window, and spoken unless the task was typed.
+- **Limits**: `claude_code_timeout_sec` (1800 s, clamped 60–7200), after which the whole process tree is killed. One job at a time. `--permission-mode acceptEdits` for a change, `default` for a question, which headless means reading only.
+
 ---
 
 ## Frequency / Size Summary
@@ -271,6 +281,7 @@ Every distinct LLM call in Jarvis, what feeds it, what consumes it, and how it i
 | 18 | Goal completion judge | 0-1 | only inside noteGoal | SMALL (reuses #16's chain) |
 | 19 | Journal proposal reader | 0-1 | only inside reviewLearnings | SMALL (appris_model → reminder chain; the chat model is only the last link) |
 | 20 | Dictation cleanup | 0-1 | only when `dictation_filler_removal` is on | chat model, pinned to the local backend |
+| 21 | Claude Code delegation | 0-1 | only inside claudeCode, off until a folder is named | Claude Code's own (Anthropic), not configurable here |
 
 `LARGE` names the chat model (`llm_chat_model`), whatever its size class: the default `gemma4:e2b` is SMALL under `detect_model_size`, so out of the box every `LARGE` row runs on a SMALL model. `via router chain` means `resolve_tool_router_model(cfg)`: `tool_router_model → intent_judge_model → llm_chat_model`.
 
@@ -300,9 +311,9 @@ The size class comes from the model name, and the default chat model is SMALL, s
 ## Config keys
 
 - Models: `llm_chat_model`, `intent_judge_model`, `tool_router_model`, `planner_model`, `confirmation_model`, `reminder_model`, `appris_model`, `embedding_model` (`ollama_chat_model` is the authoritative model key on the Ollama provider, and the fallback for an empty `llm_chat_model` on an OpenAI-compatible one)
-- Provider and destination: `llm_provider`, `llm_base_url`, `llm_api_key`, `llm_api_key_env`, `llm_extra_body`, `embedding_provider`, `embedding_base_url`, `auto_redact_before_cloud`. `llm_base_url` also decides local from remote: a bare auxiliary pin is honoured on a loopback or private-network endpoint, and on a remote one while local Ollama is reachable; it is replaced by the chat model only on a remote endpoint with local Ollama unreachable.
+- Provider and destination: `llm_provider`, `llm_base_url`, `llm_api_key`, `llm_api_key_env`, `llm_extra_body`, `embedding_provider`, `embedding_base_url`, `auto_redact_before_cloud`. `llm_base_url` also decides local from remote: a bare auxiliary pin is honoured on a loopback or private-network endpoint, and on a remote one while local Ollama is reachable; it is replaced by the chat model only on a remote endpoint with local Ollama unreachable. `claude_code_projects_dir` and `claude_code_command` decide whether #21 runs at all and with which executable; its destination is Anthropic whatever the provider.
 - Flags: `memory_digest_enabled`, `tool_result_digest_enabled`, `llm_thinking_enabled`, `intent_judge_thinking_enabled`, `tool_selection_strategy`, `low_power_mode`, `planner_enabled`, `reminders_enabled`, `routines_enabled`, `dictation_filler_removal`, `dictation_thinking_enabled`, `response_language`
-- Timeouts: `llm_chat_timeout_sec` (180s; #1, #9, logMeal in #14), `llm_tools_timeout_sec` (300s; the weather extractor in #14), `tool_router_timeout_sec` (15s; #3, #7, #8), `llm_digest_timeout_sec` (8s, shared across #4/#5/#6), `planner_timeout_sec` (6s; #12, #13), `intent_judge_timeout_sec` (15s), `confirmation_timeout_sec` (8s), `reminder_timeout_sec` (8s; #16-#18), `appris_timeout_sec` (30s), `confirmation_ttl_sec` (180s)
+- Timeouts: `llm_chat_timeout_sec` (180s; #1, #9, logMeal in #14), `llm_tools_timeout_sec` (300s; the weather extractor in #14), `tool_router_timeout_sec` (15s; #3, #7, #8), `llm_digest_timeout_sec` (8s, shared across #4/#5/#6), `planner_timeout_sec` (6s; #12, #13), `intent_judge_timeout_sec` (15s), `confirmation_timeout_sec` (8s), `reminder_timeout_sec` (8s; #16-#18), `appris_timeout_sec` (30s), `confirmation_ttl_sec` (180s), `claude_code_timeout_sec` (1800s; #21)
 - Caps: `agentic_max_turns` (8), `tool_search_max_calls` (3), `_LLM_MAX_SELECTED` (5), `MAX_STEPS` (5), `_DIGEST_MAX_CHARS` (500), `_TOOL_DIGEST_MAX_CHARS` (600), `SPLIT_THRESHOLD` (1500)
 - Runtime residency: `low_power_mode` skips startup LLM warmups and shortens Ollama `keep_alive` for intent judge and warmup calls from `"30m"` to `"1m"`. It does not change prompts, model selection, timeouts, or context limits; with the warm-ups skipped, the router's first call has to load its model, so raise `tool_router_timeout_sec` if that load exceeds it.
 - Startup warm-ups: unless `low_power_mode` is on, the listener pages the chat, intent-judge and (under the `llm` strategy, when distinct) router models in with one minimal request each (`warm_up_chat_model()`), overlapping Whisper's initialisation, each given at least 60 s. They carry no prompt and are not contexts.
@@ -340,6 +351,8 @@ user input
                                       │    └─ [14] weather place extractor / logMeal
                                       │    └─ [16] inside setReminder, [17] inside setRoutine,
                                       │       [18] inside noteGoal, [19] inside reviewLearnings
+                                      │    └─ [21] inside claudeCode: starts a background job whose
+                                      │       report later joins the dialogue memory read by [1]
                                       └─ content → deliver immediately
                                       └─ if max turns → [6] Max-turn digest
                           └─▶ TTS / output

@@ -1,0 +1,124 @@
+"""The report of a Claude Code job reaches the user, in both builds.
+
+A job ends minutes after the turn that started it, so its report arrives
+with no turn of its own. It has to land in the conversation (so a
+follow-up can refer to it), on both buses (a surface wired to one of them
+exists in exactly half the builds), and in the user's ear unless the task
+was typed. And it must not cut across a reply the user is waiting for.
+
+See src/jarvis/projets/projets.spec.md, *Delivering the report*.
+"""
+
+from __future__ import annotations
+
+import json
+import threading
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+
+from src.jarvis import daemon
+from src.jarvis.memory.conversation import DialogueMemory
+from src.jarvis.projets.claude_code import Job, Outcome
+
+
+@pytest.fixture(autouse=True)
+def wired(monkeypatch):
+    daemon.set_confirmation_callbacks()
+    dm = DialogueMemory()
+    spoken = []
+    monkeypatch.setattr(daemon, "_global_dialogue_memory", dm)
+    monkeypatch.setattr(daemon, "_speak_from_worker",
+                        lambda text, on_spoken=None: spoken.append(text) or True)
+    yield dm, spoken
+    daemon.set_confirmation_callbacks()
+
+
+def _outcome(origin="voix", ok=True, report="J'ai ajouté le bouton."):
+    job = Job(
+        id="job1", projet="chantipay", path=Path("/p/chantipay"),
+        tache="Ajoute un bouton.", modifier=True, origin=origin,
+        risk="destructif", started_at=datetime.now(timezone.utc),
+        started=time.monotonic(),
+    )
+    return Outcome(job=job, ok=ok, report=report, session_id=None, duration_s=12.0)
+
+
+def _events(capsys, kind):
+    out = capsys.readouterr().out
+    return [
+        json.loads(line[len(daemon.CHAT_IPC_PREFIX):])
+        for line in out.splitlines()
+        if line.startswith(daemon.CHAT_IPC_PREFIX)
+        and json.loads(line[len(daemon.CHAT_IPC_PREFIX):]).get("type") == kind
+    ]
+
+
+def test_the_report_joins_the_conversation(wired):
+    dm, _ = wired
+
+    daemon.deliver_delegation(_outcome())
+
+    (message,) = dm.get_recent_messages()
+    assert message["role"] == "assistant"
+    assert "chantipay" in message["content"]
+    assert "J'ai ajouté le bouton." in message["content"]
+
+
+def test_the_report_reaches_the_stdout_bus(wired, capsys):
+    daemon.deliver_delegation(_outcome())
+
+    (event,) = _events(capsys, "delegation_done")
+    assert event["data"]["projet"] == "chantipay"
+    assert event["data"]["ok"] is True
+    assert "J'ai ajouté le bouton." in event["data"]["texte"]
+
+
+def test_the_report_reaches_a_bundled_build_too(wired):
+    told = []
+    daemon.set_confirmation_callbacks(on_delegation_done=told.append)
+
+    daemon.deliver_delegation(_outcome())
+
+    (data,) = told
+    assert "J'ai ajouté le bouton." in data["texte"]
+
+
+def test_a_spoken_task_gets_a_spoken_report(wired):
+    _, spoken = wired
+
+    daemon.deliver_delegation(_outcome(origin="voix"))
+
+    (said,) = spoken
+    assert "J'ai ajouté le bouton." in said
+
+
+def test_a_typed_task_is_never_answered_aloud(wired):
+    _, spoken = wired
+
+    daemon.deliver_delegation(_outcome(origin="chat"))
+
+    assert spoken == []
+
+
+def test_it_waits_for_the_reply_in_flight(wired, monkeypatch):
+    """Cutting across a reply the user is waiting for is worse than a
+    few seconds late."""
+    dm, spoken = wired
+    lock = threading.Lock()
+    monkeypatch.setattr(daemon, "_chat_query_lock", lock)
+    lock.acquire()
+    done = threading.Event()
+    threading.Thread(
+        target=lambda: (daemon.deliver_delegation(_outcome()), done.set()),
+        daemon=True,
+    ).start()
+
+    time.sleep(0.6)
+    assert spoken == [] and dm.get_recent_messages() == []
+
+    lock.release()
+    assert done.wait(5.0)
+    assert len(spoken) == 1

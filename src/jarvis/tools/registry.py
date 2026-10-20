@@ -25,6 +25,7 @@ from .builtin.set_reminder import SetReminderTool
 from .builtin.set_routine import SetRoutineTool
 from .builtin.cancel_routine import CancelRoutineTool
 from .builtin.review_learnings import ReviewLearningsTool
+from .builtin.claude_code import ClaudeCodeTool
 from .builtin.goals import (
     CloseGoalTool,
     ListGoalsTool,
@@ -62,6 +63,7 @@ BUILTIN_TOOLS = {
     "closeGoal": CloseGoalTool(),
     "listGoals": ListGoalsTool(),
     "reviewLearnings": ReviewLearningsTool(),
+    "claudeCode": ClaudeCodeTool(),
     "stop": StopTool(),
     "toolSearchTool": ToolSearchTool(),
 }
