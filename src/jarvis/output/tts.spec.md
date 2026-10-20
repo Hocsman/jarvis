@@ -66,8 +66,12 @@ The three engines are interchangeable to the listener. Each exposes:
 `speak` starts the worker if nobody has. Calling `start` on Piper loads
 the voice on the calling thread (downloading it if absent) so the wait
 happens at launch rather than at the first word. Kokoro warms its
-pipeline on a background thread named `kokoro-init`; a `speak` that
-arrives before the load finishes waits on the same lock. On Windows
+pipeline on a background thread named `kokoro-init`, ending with one
+throwaway synthesis whose audio is discarded, so the model's first-call
+cost (CUDA kernel loading can take tens of seconds) is paid at startup
+rather than on the first reply; a warm-up failure leaves the pipeline
+loaded and the error surfaces at speak time. A `speak` that arrives
+before the load finishes waits on the same lock. On Windows
 Kokoro first imports its package on the calling thread, because loading
 PyTorch, SciPy and OpenBLAS DLLs concurrently deadlocks the Windows
 loader. Chatterbox loads its model on `start`.
@@ -389,6 +393,9 @@ language.
   an unlisted one gets the fallback.
 - Each engine marks the first sound once its audio stream is running, and
   not when SPEAKING is published.
+- Kokoro's initialisation ends with one throwaway synthesis (audio
+  discarded, nothing queued or played), and a warm-up failure leaves the
+  pipeline loaded rather than failing init.
 - A regional variant (`fr-FR`, `fr_FR`, `pt_BR`) chooses the same default
   voice as its base language, and a variant of an unlisted language still
   gets the fallback. The map and the default voice read one value as the

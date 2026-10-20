@@ -121,6 +121,53 @@ class TestKokoroInterface:
         assert ("import", "KPipeline") not in events
         assert ("thread", "kokoro-init") in events
 
+    def test_init_warms_the_synthesis_path(self, monkeypatch):
+        """Initialisation ends with one throwaway synthesis, so the first
+        real reply does not pay the model's first-call cost (CUDA kernel
+        loading alone can take tens of seconds). The warm-up audio is
+        discarded: nothing is queued, played or remembered."""
+        calls = []
+
+        class FakePipeline:
+            def __init__(self, lang_code=None):
+                pass
+
+            def __call__(self, text, voice=None, speed=None):
+                calls.append((text, voice, speed))
+                yield None, None, [0.0] * 2400
+
+        fake_kokoro = types.ModuleType("kokoro")
+        fake_kokoro.KPipeline = FakePipeline
+        monkeypatch.setitem(sys.modules, "kokoro", fake_kokoro)
+
+        tts = KokoroTTS(enabled=True, voice="ff_siwis,af_bella", lang_code="f", speed=1.1)
+        assert tts._ensure_initialized() is True
+
+        assert calls == [(tts._WARMUP_TEXT, "ff_siwis,af_bella", 1.1)]
+        assert tts.get_last_spoken_text() == ""
+        assert tts.is_speaking() is False
+
+    def test_a_failed_warmup_does_not_fail_init(self, monkeypatch):
+        """A warm-up that raises leaves the pipeline loaded: synthesis
+        errors keep surfacing at speak time, as without the warm-up."""
+
+        class BrokenPipeline:
+            def __init__(self, lang_code=None):
+                pass
+
+            def __call__(self, text, voice=None, speed=None):
+                raise RuntimeError("boom")
+                yield
+
+        fake_kokoro = types.ModuleType("kokoro")
+        fake_kokoro.KPipeline = BrokenPipeline
+        monkeypatch.setitem(sys.modules, "kokoro", fake_kokoro)
+
+        tts = KokoroTTS(enabled=True)
+        assert tts._ensure_initialized() is True
+        assert tts._pipe is not None
+        assert tts._init_error is None
+
 
 class TestEngineSelection:
     def test_kokoro_engine_resolves_to_kokoro(self):

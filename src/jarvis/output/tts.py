@@ -1341,6 +1341,8 @@ class KokoroTTS:
     callbacks behave identically regardless of engine.
     """
 
+    _WARMUP_TEXT = "Bonjour."
+
     def __init__(
         self,
         enabled: bool = True,
@@ -1398,6 +1400,18 @@ class KokoroTTS:
 
                 debug_log(f"Kokoro TTS loading pipeline (lang={self.lang_code})", "tts")
                 self._pipe = KPipeline(lang_code=self.lang_code)
+                # Absorb the model's first-call cost (CUDA kernel loading
+                # alone can take tens of seconds) here, in the warm-up
+                # thread, rather than on the first reply. The audio is
+                # discarded; a failure leaves the pipeline loaded and
+                # surfaces at speak time, as without the warm-up.
+                try:
+                    for _gs, _ps, _audio in self._pipe(
+                        self._WARMUP_TEXT, voice=self.voice, speed=self.speed
+                    ):
+                        pass
+                except Exception as e:
+                    debug_log(f"Kokoro warm-up synthesis failed: {e}", "tts")
                 debug_log("Kokoro TTS initialized", "tts")
 
             except ImportError as e:
