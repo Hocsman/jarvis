@@ -23,12 +23,28 @@ Controlled by `tool_selection_strategy` in config:
 | `"embedding"` | Rank tools by cosine similarity of embeddings via nomic-embed-text. | No        | numpy            |
 | `"llm"`       | Ask a lightweight LLM call to pick the top 3–5 relevant tool names (default). | Yes | None |
 
+### The catalogue
+
+The builtins handed to the strategies are those a tool's own settings leave on (`offered_builtin_tools`, from `Tool.offered`): `claudeCode` with no projects folder can only refuse, and shown anyway it would cost every routing call its description. The reply engine and `toolSearchTool` both select from this catalogue, and the router cache key names it, so switching a tool on or off takes effect on the next turn. A call to a tool that was not offered still reaches it, and it says it is off.
+
 ### Always-included Tools
 
 Regardless of strategy, these tools are **always** included:
 - `stop` — needed so the user can dismiss the assistant at any time.
 - `remember` — an explicit "remember that…" must never be silently dropped because the router failed to offer the tool. Being always available is safe here because the tool is inert unless the user asked for it, and because every write lands in a plain-text file the user can read and edit.
 - `forget` — same argument, with more at stake: a user asking for something to be removed and being told "done" while it stays in every later prompt is the worst outcome the core can produce.
+
+### URL cue
+
+Independently of any strategy, a query carrying a URL (`http://`, `https://`
+or `www.`) unions `fetchWebPage` into the selection, when the catalogue has
+it. The router is a small model and a pasted address does not always read as
+a fetch to it ("what do you think of https://…" scores as opinion); the cue
+is deterministic and language-agnostic, so the page tool never depends on the
+router having understood. It applies to every strategy's result, including a
+degraded keyword fallback, and mutates the list in place so a `ToolSelection`
+keeps its `degraded` flag. A dotted word that is not an address
+(`requirements.txt`) does not trigger it.
 
 ### Keyword Strategy
 

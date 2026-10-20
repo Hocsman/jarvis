@@ -397,6 +397,23 @@ class TestPiperTTSFactory:
         tts = create_tts_engine(engine="chatterbox", enabled=False)
         assert isinstance(tts, ChatterboxTTS)
 
+    def test_chatterbox_without_the_package_speaks_nothing(self, monkeypatch):
+        """chatterbox-tts is an optional manual install (its torch==2.6.0 pin
+        conflicts with the CUDA torch builds Kokoro uses). With the package
+        absent the engine must warn, speak nothing and never raise."""
+        import sys
+        import pytest
+        from src.jarvis.output.tts import create_tts_engine
+
+        monkeypatch.setitem(sys.modules, "chatterbox", None)
+        tts = create_tts_engine(engine="chatterbox", enabled=True)
+        with pytest.warns(UserWarning, match="ChatterboxTTS initialization failed"):
+            tts.start()
+        tts.speak("hello")  # the worker must skip it without raising
+        tts.stop()
+        assert tts.is_speaking() is False
+        assert tts._model_error is not None
+
 
 class TestPiperTTSAutoDownload:
     """Tests for Piper TTS auto-download functionality."""

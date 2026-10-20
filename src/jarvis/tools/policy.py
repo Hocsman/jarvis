@@ -40,9 +40,10 @@ NEVER = "jamais"
 # between "she would not" and "I would not".
 OUTCOME_OK = "ok"
 OUTCOME_FAILED = "échec"
-# A routine run that has begun. It exists to be found *unclosed*: a run
-# that took the process down with it leaves this row and nothing after
-# it, which is the only trace of it that would exist anywhere.
+# A routine run or a Claude Code job that has begun. It exists to be
+# found *unclosed*: a run that took the process down with it leaves this
+# row and nothing after it, which is the only trace of it that would
+# exist anywhere.
 OUTCOME_STARTED = "démarré"
 OUTCOME_REFUSED = "refusé"
 OUTCOME_ASKED = "demandé"

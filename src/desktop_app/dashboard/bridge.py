@@ -109,6 +109,10 @@ def dispatch_chat_ipc_line(line: str, bridge) -> bool:
         bridge.deliver_reply(data)
     elif kind == "busy":
         bridge.deliver_busy()
+    elif kind == "delegation_done":
+        texte = data.get("texte") if isinstance(data, dict) else None
+        if isinstance(texte, str) and texte.strip():
+            bridge.deliver_report(texte)
     return True
 
 
@@ -122,6 +126,7 @@ class DashboardBridge(QObject):
     tokenReceived = pyqtSignal(str)    # content delta while the reply generates
     replyReceived = pyqtSignal(str)    # assistant reply text (authoritative)
     busy = pyqtSignal()                # daemon busy with another query
+    reportReceived = pyqtSignal(str)   # a Claude Code report, with no turn of its own
 
     def __init__(
         self,
@@ -218,6 +223,13 @@ class DashboardBridge(QObject):
         self._emit_state(force=True)  # settle the orb out of THINKING
         if text:
             self.replyReceived.emit(str(text))
+
+    def deliver_report(self, text: Optional[str]) -> None:
+        """A Claude Code job ended. Its report arrives with no turn of its
+        own, so it neither settles nor starts anything: a task typed here
+        is never spoken, and this is where it is read."""
+        if text:
+            self.reportReceived.emit(str(text))
 
     def deliver_busy(self) -> None:
         self._chat_pending = False

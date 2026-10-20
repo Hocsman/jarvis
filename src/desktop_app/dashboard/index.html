@@ -544,6 +544,7 @@
     if (jarvis.stageChanged) jarvis.stageChanged.connect(showStage);
     if (jarvis.tokenReceived) jarvis.tokenReceived.connect(streamToken);
     jarvis.replyReceived.connect(settleReply);
+    if (jarvis.reportReceived) jarvis.reportReceived.connect(t => addMsg(t, "bot"));
     jarvis.busy.connect(() => { clearStream(); addMsg("Jarvis est déjà occupé sur une autre requête.", "bot"); });
     jarvis.stateChanged.connect(s => {
       try { const o = JSON.parse(s); setAccent(o.accent); if (o.status) setStatus(o.status); } catch(e){}

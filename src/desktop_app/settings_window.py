@@ -72,6 +72,7 @@ CATEGORIES = [
     ("confirmation", "🙋 Permissions"),
     ("reminders", "⏰ Rappels"),
     ("routines", "🌅 Routines"),
+    ("projets", "🛠️ Projets"),
     ("mcps", "🔌 MCP Servers"),
     ("advanced", "🔧 Advanced"),
 ]
@@ -266,7 +267,8 @@ def _build_field_metadata() -> List[FieldMeta]:
       "piper", "int", min_val=0, max_val=99, nullable=True)
 
     # --- Kokoro TTS ---
-    f("tts_kokoro_voice", "Voice", "Kokoro voice ID (e.g. ff_siwis)",
+    f("tts_kokoro_voice", "Voice", "Kokoro voice ID or blend (e.g. ff_siwis, "
+      "ff_siwis,af_bella or weighted ff_siwis:0.8,af_bella:0.2)",
       "kokoro", "str")
     f("tts_kokoro_lang_code", "Language Code",
       "Kokoro language code — must match the voice's language "
@@ -519,6 +521,21 @@ def _build_field_metadata() -> List[FieldMeta]:
       "s'arrêter. « Rien à signaler » ne compte pas : c'est elle qui "
       "fonctionne",
       "routines", "int", min_val=1, max_val=100, step=1)
+
+    # --- Projets ---
+    #
+    # Handing a project to Claude Code sends its code to Anthropic, so the
+    # folder is empty, and the feature off, until he names one here.
+    f("claude_code_projects_dir", "Dossier des projets",
+      "Ses sous-dossiers peuvent être confiés à Claude Code, qui lit et "
+      "modifie leur code chez Anthropic. Vide = désactivé",
+      "projets", "str")
+    f("claude_code_command", "Commande Claude Code",
+      "Le nom de l'exécutable (claude) ou son chemin complet",
+      "projets", "str")
+    f("claude_code_timeout_sec", "Durée maximale d'une tâche",
+      "Au-delà, le travail est arrêté et elle te dit pourquoi",
+      "projets", "float", min_val=60, max_val=7200, step=60, suffix="s")
 
     # --- Advanced ---
     f("echo_energy_threshold", "Echo Energy Threshold",

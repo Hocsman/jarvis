@@ -109,7 +109,7 @@ its own — and since the last block of a name wins, a routine the user had
 tightened comes back widened, with `mémoire: oui`, sending their whole
 profile to a remote model every morning.
 
-Three names no envelope can hold, whatever the file says
+Four names no envelope can hold, whatever the file says
 (`JAMAIS_EN_ROUTINE`):
 
 - `toolSearchTool` appends any name in the registry to the running turn's
@@ -118,6 +118,8 @@ Three names no envelope can hold, whatever the file says
 - `refreshMCPTools` rediscovers servers mid-run, so the catalogue would
   change underneath the envelope.
 - `stop` ends a conversation, and a routine is not one.
+- `claudeCode` delivers its report aloud minutes after it starts, to
+  someone who has to be in the room (`src/jarvis/projets/projets.spec.md`).
 
 ## Reading a spoken schedule
 

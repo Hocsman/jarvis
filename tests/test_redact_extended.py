@@ -127,3 +127,37 @@ class TestContainsRedactionPlaceholder:
 
         assert contains_redaction_placeholder("") is False
         assert contains_redaction_placeholder(None) is False
+
+
+@pytest.mark.unit
+class TestKeysClaudeCodeMightReport:
+    """A report from Claude Code is read aloud and kept in the
+    conversation. These are the shapes a `.env` it edited would carry."""
+
+    @pytest.mark.parametrize("line, secret", [
+        ("ANTHROPIC_API_KEY=sk-ant-api03-" + "Ab1_-" * 12, "sk-ant-api03-"),
+        ("j'ai mis sk-ant-api03-" + "Zz9-_" * 12 + " dans le fichier", "sk-ant-api03-"),
+        ("OPENAI_API_KEY=sk-proj-" + "Q1w_E" * 10, "sk-proj-"),
+        ("DB_PASSWORD=hunter2hunter2", "hunter2hunter2"),
+        ("SECRET_KEY=django-insecure-abcdef123456", "django-insecure-abcdef123456"),
+        ("STRIPE_WEBHOOK_SECRET=whsec_abcdef1234567890", "whsec_abcdef1234567890"),
+    ])
+    def test_a_key_is_not_kept(self, line, secret):
+        assert secret not in scrub_secrets(line)
+        assert secret not in redact(line)
+
+    def test_a_private_key_block_is_not_kept(self):
+        block = ("-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA1234\n"
+                 "abcdEFGH5678\n-----END RSA PRIVATE KEY-----")
+        out = scrub_secrets(f"voici la clé :\n{block}\nfin")
+        assert "MIIEpAIBAAKCAQEA1234" not in out
+        assert "fin" in out
+
+    @pytest.mark.parametrize("line", [
+        "the passage: it was long",
+        "compass=north",
+        "Password reset worked fine",
+        "TOKEN_COUNT is a number",
+    ])
+    def test_ordinary_text_is_left_alone(self, line):
+        assert scrub_secrets(line) == line

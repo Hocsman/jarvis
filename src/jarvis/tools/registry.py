@@ -25,6 +25,7 @@ from .builtin.set_reminder import SetReminderTool
 from .builtin.set_routine import SetRoutineTool
 from .builtin.cancel_routine import CancelRoutineTool
 from .builtin.review_learnings import ReviewLearningsTool
+from .builtin.claude_code import ClaudeCodeTool
 from .builtin.goals import (
     CloseGoalTool,
     ListGoalsTool,
@@ -62,6 +63,7 @@ BUILTIN_TOOLS = {
     "closeGoal": CloseGoalTool(),
     "listGoals": ListGoalsTool(),
     "reviewLearnings": ReviewLearningsTool(),
+    "claudeCode": ClaudeCodeTool(),
     "stop": StopTool(),
     "toolSearchTool": ToolSearchTool(),
 }
@@ -349,6 +351,23 @@ def generate_tools_description(allowed_tools: Optional[List[str]] = None, mcp_to
 _POLICY_CACHE: Dict[str, Any] = {"stamp": None, "policy": None}
 
 
+def offered_builtin_tools(cfg) -> Dict[str, Any]:
+    """The builtins the router and the model are shown, given ``cfg``.
+
+    A tool switched off in the settings is left out; calling it anyway
+    still reaches it, and it says it is off.
+    """
+    offered = {}
+    for name, tool in BUILTIN_TOOLS.items():
+        try:
+            if not tool.offered(cfg):
+                continue
+        except Exception as e:
+            debug_log(f"{name}.offered failed, offering it: {e}", "tools")
+        offered[name] = tool
+    return offered
+
+
 def load_tool_policy(cfg: Settings):
     """Read the user's tool policy, cached on the file's mtime.
 
@@ -427,6 +446,7 @@ def ensure_policy_file(cfg: Settings, *, discovery_failed: bool = False) -> None
         builtin_risks = {
             name: resolve_risk(name, tool, {})
             for name, tool in BUILTIN_TOOLS.items()
+            if not getattr(tool, "classified_per_call", False)
         }
         mcp_risks = {
             name: resolve_risk(name, spec, {})

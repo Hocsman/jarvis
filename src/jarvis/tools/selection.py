@@ -53,6 +53,12 @@ class ToolSelection(list):
 # Tools that must always be available regardless of selection strategy.
 _ALWAYS_INCLUDED = {"stop", "remember", "forget"}
 
+# A pasted URL is a deterministic cue that the page-fetching tool belongs in
+# the selection, whichever strategy answered: the router is a small model and
+# can miss it ("what do you think of https://…" reads as opinion, not fetch).
+_URL_RE = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
+_URL_TOOL = "fetchWebPage"
+
 # Minimum number of tools to return from similarity-based strategies.
 # Prevents overly aggressive filtering that would leave the model with nothing useful.
 _MIN_SELECTED = 3
@@ -127,6 +133,25 @@ def _ensure_always_included(
     for t in _ALWAYS_INCLUDED:
         if t not in selected and (t in builtin_tools or t in mcp_tools):
             selected.append(t)
+    return selected
+
+
+def _include_url_tool(
+    selected: List[str],
+    query: str,
+    builtin_tools: Dict[str, "Tool"],
+    mcp_tools: Dict[str, "ToolSpec"],
+) -> List[str]:
+    """Append the page-fetching tool when the query carries a URL.
+
+    Mutates in place like ``_ensure_always_included`` so a ``ToolSelection``
+    keeps its ``degraded`` flag. A no-op when the tool is not in the
+    catalogue.
+    """
+    if _URL_TOOL in selected or not _URL_RE.search(query or ""):
+        return selected
+    if _URL_TOOL in builtin_tools or _URL_TOOL in mcp_tools:
+        selected.append(_URL_TOOL)
     return selected
 
 
@@ -518,23 +543,26 @@ def select_tools(
         and before copying the list, which drops it.
     """
     if strategy == ToolSelectionStrategy.KEYWORD:
-        return _select_keyword(query, builtin_tools, mcp_tools)
+        selected = _select_keyword(query, builtin_tools, mcp_tools)
     elif strategy == ToolSelectionStrategy.EMBEDDING:
         if embedding_backend is None:
             debug_log("Embedding tool selection: no backend supplied, falling back to all tools", "planning")
-            return _all_tool_names(builtin_tools, mcp_tools)
-        return _select_embedding(
-            query, builtin_tools, mcp_tools,
-            embedding_backend, embed_model, embed_timeout_sec,
-        )
+            selected = _all_tool_names(builtin_tools, mcp_tools)
+        else:
+            selected = _select_embedding(
+                query, builtin_tools, mcp_tools,
+                embedding_backend, embed_model, embed_timeout_sec,
+            )
     elif strategy == ToolSelectionStrategy.LLM:
         if llm_backend is None:
             debug_log("LLM tool selection: no backend supplied, falling back to keyword strategy", "planning")
-            return ToolSelection.fallback(_select_keyword(query, builtin_tools, mcp_tools))
-        return _select_llm(
-            query, builtin_tools, mcp_tools,
-            llm_backend, llm_model, llm_timeout_sec,
-            context_hint=context_hint,
-        )
+            selected = ToolSelection.fallback(_select_keyword(query, builtin_tools, mcp_tools))
+        else:
+            selected = _select_llm(
+                query, builtin_tools, mcp_tools,
+                llm_backend, llm_model, llm_timeout_sec,
+                context_hint=context_hint,
+            )
     else:
-        return _all_tool_names(builtin_tools, mcp_tools)
+        selected = _all_tool_names(builtin_tools, mcp_tools)
+    return _include_url_tool(selected, query, builtin_tools, mcp_tools)

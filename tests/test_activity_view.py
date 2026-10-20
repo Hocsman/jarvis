@@ -112,6 +112,18 @@ def test_they_are_styled_differently(viewer):
     assert ".activity-expiré" in page
 
 
+def test_a_run_bracket_is_not_shown_as_a_question(viewer):
+    """`routine:<nom>` and `claudeCode:<projet>` rows share an id to pair
+    their opening and closing rows, not because anybody was asked."""
+    from src.desktop_app.memory_viewer import index
+
+    _db, client = viewer
+    script = client.get("/viewer.js").get_data(as_text=True)
+
+    assert ".activity-démarré" in index()
+    assert "a.tool.includes(':')" in script
+
+
 def test_the_page_explains_the_difference(viewer):
     """The vocabulary is the point of the tab, and nowhere else says it."""
     from src.desktop_app.memory_viewer import index

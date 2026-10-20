@@ -69,6 +69,8 @@ _confirmation_callbacks: dict = {
     # Callable[[str, str, str], None] — texte, due_local, raison
     "on_reminder_failed": None,
     "on_confirm_reply": None,  # Callable[[Optional[str]], None] - narration of a confirmed action
+    # Callable[[dict], None] — projet, ok, texte: a Claude Code report
+    "on_delegation_done": None,
 }
 
 # Shutdown timeout for diary update (shorter than normal to allow reasonable quit time)
@@ -881,6 +883,55 @@ def nudge_routines() -> None:
             debug_log(f"routine nudge failed: {e}", "tools")
 
 
+# How often a finished Claude Code job looks again for a gap between
+# replies to deliver its report in.
+_DELIVERY_POLL_SEC = 0.25
+
+
+def deliver_delegation(outcome) -> None:
+    """Tell the user what a Claude Code job did, once it has ended.
+
+    Runs on the job's own thread, minutes after the turn that started it,
+    so the report has no turn of its own. It waits for the reply in
+    flight, like a reminder: the lock is inspected, never taken. Then it
+    joins the conversation (a follow-up can refer to it), reaches both
+    buses, and is spoken unless the task was typed. See
+    projets/projets.spec.md.
+    """
+    from .projets.delegation import compose_announcement
+
+    while _chat_query_lock.locked() and not is_stop_requested():
+        time.sleep(_DELIVERY_POLL_SEC)
+    if is_stop_requested():
+        debug_log("Claude Code report dropped: shutting down", "tools")
+        return
+
+    texte = compose_announcement(outcome)
+    dm = _global_dialogue_memory
+    if dm is not None:
+        try:
+            dm.add_message("assistant", texte)
+        except Exception as e:
+            debug_log(f"Claude Code report not added to the conversation: {e}", "tools")
+
+    data = {"projet": outcome.job.projet, "ok": bool(outcome.ok), "texte": texte}
+    try:
+        _emit_chat_event("delegation_done", data)
+    except Exception as e:
+        debug_log(f"Claude Code report not sent on the bus: {e}", "chat_ipc")
+    # Bundled mode pipes no stdout, so the event above reaches nobody there.
+    callback = _confirmation_callbacks.get("on_delegation_done")
+    if callback is not None:
+        try:
+            callback(data)
+        except Exception as e:
+            debug_log(f"Claude Code report callback failed: {e}", "chat_ipc")
+
+    if getattr(outcome.job, "origin", None) != "chat":
+        _speak_from_worker(texte)
+    debug_log(f"    🛠️ Claude Code report delivered for {outcome.job.projet}", "tools")
+
+
 def revoke_pending_confirmation() -> None:
     """Drop a waiting question on shutdown.
 
@@ -903,13 +954,15 @@ def revoke_pending_confirmation() -> None:
 def set_confirmation_callbacks(*, on_confirm=None, on_confirm_settled=None,
                                on_confirm_reply=None,
                                on_routine_trouble=None,
-                               on_reminder_failed=None) -> None:
+                               on_reminder_failed=None,
+                               on_delegation_done=None) -> None:
     """Wire the desktop app's surfaces in bundled mode."""
     _confirmation_callbacks["on_confirm"] = on_confirm
     _confirmation_callbacks["on_confirm_settled"] = on_confirm_settled
     _confirmation_callbacks["on_confirm_reply"] = on_confirm_reply
     _confirmation_callbacks["on_routine_trouble"] = on_routine_trouble
     _confirmation_callbacks["on_reminder_failed"] = on_reminder_failed
+    _confirmation_callbacks["on_delegation_done"] = on_delegation_done
 
 
 def is_stop_requested() -> bool:
@@ -1392,6 +1445,18 @@ def main() -> None:
     else:
         print("🌅 Routines off", flush=True)
 
+    # Projets. A Claude Code job ends minutes after the turn that started
+    # it, and its report is delivered from the job's own thread. Opening
+    # starts fresh, which matters when the desktop restarts the daemon
+    # inside its own process.
+    from .projets.delegation import DELEGATIONS
+
+    DELEGATIONS.open(deliver_delegation)
+    if str(getattr(cfg, "claude_code_projects_dir", "") or "").strip():
+        print("🛠️ Claude Code projects on", flush=True)
+    else:
+        print("🛠️ Claude Code projects off", flush=True)
+
     # Initialize dictation engine (hold-to-dictate)
     dictation = None
     if bool(getattr(cfg, "dictation_enabled", True)):
@@ -1547,6 +1612,16 @@ def main() -> None:
         if _global_routine_runner is not None:
             debug_log("waiting for the routine in flight...", "jarvis")
             _global_routine_runner.stop()
+
+        # Closed before the voice thread and the chat worker are waited
+        # on: a turn still in flight must not start a job that outlives
+        # the daemon, and a job still running has nobody left to report to.
+        try:
+            from .projets.delegation import DELEGATIONS
+
+            DELEGATIONS.close()
+        except Exception as e:
+            debug_log(f"Claude Code job not stopped: {e}", "jarvis")
 
         if voice_thread is not None:
             debug_log("stopping voice thread...", "jarvis")

@@ -134,3 +134,29 @@ class TestIpcRouting:
         # Consumed (True) so the caller doesn't re-handle it as a log line.
         assert dispatch_chat_ipc_line(CHAT_IPC_PREFIX + "not json", rec) is True
         assert rec.calls == []
+
+
+class TestClaudeCodeReport:
+    """A task typed in the dashboard is never spoken, so its report has to
+    reach the dashboard's own transcript."""
+
+    def test_the_report_is_routed_to_the_bridge(self):
+        from desktop_app.dashboard.bridge import dispatch_chat_ipc_line
+
+        seen = []
+
+        class _Bridge:
+            def deliver_report(self, text):
+                seen.append(text)
+
+        line = _line(type="delegation_done",
+                     data={"projet": "chantipay", "ok": True, "texte": "Fait."})
+        assert dispatch_chat_ipc_line(line, _Bridge()) is True
+        assert seen == ["Fait."]
+
+    def test_the_page_shows_it(self):
+        from pathlib import Path
+
+        page = (Path(__file__).resolve().parent.parent / "src" / "desktop_app"
+                / "dashboard" / "index.html").read_text(encoding="utf-8")
+        assert "reportReceived" in page

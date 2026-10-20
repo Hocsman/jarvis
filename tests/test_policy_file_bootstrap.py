@@ -56,8 +56,26 @@ def test_the_generated_file_lists_the_tools_actually_installed(cfg):
     ensure_policy_file(cfg)
     text = _policy_path(cfg).read_text(encoding="utf-8")
 
-    for name in BUILTIN_TOOLS:
+    for name, tool in BUILTIN_TOOLS.items():
+        if getattr(tool, "classified_per_call", False):
+            continue
         assert f"- {name}\n" in text, f"{name} absent du fichier généré"
+
+
+def test_a_tool_whose_empty_call_is_harmless_is_left_out(cfg):
+    """claudeCode's empty call asks how a job is going, so classified from
+    `{}` it would land under ## Libre, and an exact line there frees every
+    call of it, a change to the user's code included. Left out, each call
+    is judged at its own risk: a change still costs a card."""
+    from src.jarvis.tools.registry import ensure_policy_file
+
+    ensure_policy_file(cfg)
+    text = _policy_path(cfg).read_text(encoding="utf-8")
+    policy = ToolPolicy.parse(text)
+
+    assert "- claudeCode\n" not in text
+    assert policy.verdict("claudeCode", "destructif") == "demande"
+    assert policy.verdict("claudeCode", "lecture") == "libre"
 
 
 def test_discovered_mcp_tools_are_listed_too(cfg):

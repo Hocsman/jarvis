@@ -9,7 +9,7 @@ from typing import Optional, TYPE_CHECKING
 
 from ..utils.redact import redact
 from ..system_prompt import build_system_prompt
-from ..tools.registry import run_tool_with_retries, generate_tools_description, generate_tools_json_schema, BUILTIN_TOOLS
+from ..tools.registry import run_tool_with_retries, generate_tools_description, generate_tools_json_schema, BUILTIN_TOOLS, offered_builtin_tools
 from ..tools.builtin.stop import STOP_SIGNAL
 from ..tools.confirmation import (
     Approval,
@@ -861,6 +861,9 @@ _DIGEST_SKIP_TOOLS = frozenset({
     # exactly the part the user needs verbatim to find it in their file.
     "setRoutine",
     "cancelRoutine",
+    # Written by code and bounded, carrying project names the user must
+    # repeat word for word, and Claude Code's report quoted as its words.
+    "claudeCode",
 })
 
 
@@ -1317,7 +1320,8 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
     # A positive single-step ``["Reply to the user."]`` plan is NOT the
     # same as ``[]``: it's the planner deciding no memory or tools are
     # needed. Both cases are preserved for the engine to distinguish.
-    _all_builtin_names = list(BUILTIN_TOOLS.keys())
+    _offered_builtins = offered_builtin_tools(cfg)
+    _all_builtin_names = list(_offered_builtins.keys())
     _all_mcp_names = list(mcp_tools.keys())
     _full_catalog_names = _all_builtin_names + _all_mcp_names
 
@@ -1351,7 +1355,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
     _router_cache_key = (
         f"router:{redacted}|"
         f"{strategy.value}|"
-        f"{','.join(sorted(BUILTIN_TOOLS.keys()))}|"
+        f"{','.join(sorted(_offered_builtins.keys()))}|"
         f"{','.join(sorted((mcp_tools or {}).keys()))}"
     )
     _cached_routed = (
@@ -1384,7 +1388,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         router_model = resolve_tool_router_model(cfg)
         routed_tools = select_tools(
             query=redacted,
-            builtin_tools=BUILTIN_TOOLS,
+            builtin_tools=_offered_builtins,
             mcp_tools=mcp_tools,
             strategy=strategy,
             llm_backend=get_auxiliary_backend(cfg, router_model),

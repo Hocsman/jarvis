@@ -675,3 +675,106 @@ class TestLLMStrategy:
         assert "webSearch" in tools
         assert tools.degraded is True
 
+
+
+# ---------------------------------------------------------------------------
+# URL cue
+# ---------------------------------------------------------------------------
+
+class TestUrlCue:
+    """A pasted URL is a deterministic cue the small router can miss: the
+    page-fetching tool joins the selection whichever strategy answered."""
+
+    def _with_fetch(self):
+        tools = _builtin()
+        tools["fetchWebPage"] = FakeTool(
+            "fetchWebPage", "Fetch and read the content of a page from an address.")
+        return tools
+
+    @pytest.mark.unit
+    def test_a_router_miss_still_offers_the_page_tool_on_a_url(self):
+        backend = _llm_backend(return_value="webSearch")
+        result = select_tools(
+            "qu'est-ce que tu penses de https://example.com ?",
+            self._with_fetch(), {},
+            strategy=ToolSelectionStrategy.LLM,
+            llm_backend=backend,
+            llm_model="test",
+        )
+        assert "fetchWebPage" in result
+        assert "webSearch" in result
+        assert result.degraded is False
+
+    @pytest.mark.unit
+    def test_no_url_means_no_forced_page_tool(self):
+        backend = _llm_backend(return_value="webSearch")
+        result = select_tools(
+            "qu'est-ce que tu penses de cette idée ?",
+            self._with_fetch(), {},
+            strategy=ToolSelectionStrategy.LLM,
+            llm_backend=backend,
+            llm_model="test",
+        )
+        assert "fetchWebPage" not in result
+
+    @pytest.mark.unit
+    def test_keyword_strategy_gets_the_cue_too(self):
+        # "weather" narrows keyword scoring to getWeather alone; the URL adds
+        # the page tool on top of what scoring picked.
+        result = select_tools(
+            "weather on https://example.com",
+            self._with_fetch(), {},
+            strategy=ToolSelectionStrategy.KEYWORD,
+        )
+        assert "getWeather" in result
+        assert "logMeal" not in result  # the pick really was narrow
+        assert "fetchWebPage" in result
+
+    @pytest.mark.unit
+    def test_www_prefix_counts_as_a_url(self):
+        backend = _llm_backend(return_value="none")
+        result = select_tools(
+            "lis www.example.com",
+            self._with_fetch(), {},
+            strategy=ToolSelectionStrategy.LLM,
+            llm_backend=backend,
+            llm_model="test",
+        )
+        assert "fetchWebPage" in result
+
+    @pytest.mark.unit
+    def test_a_dotted_word_is_not_a_url(self):
+        backend = _llm_backend(return_value="none")
+        result = select_tools(
+            "ouvre requirements.txt",
+            self._with_fetch(), {},
+            strategy=ToolSelectionStrategy.LLM,
+            llm_backend=backend,
+            llm_model="test",
+        )
+        assert "fetchWebPage" not in result
+
+    @pytest.mark.unit
+    def test_the_cue_survives_a_degraded_router(self):
+        backend = _llm_backend(raises=TimeoutError("router down"))
+        result = select_tools(
+            "search the web for https://example.com",
+            self._with_fetch(), {},
+            strategy=ToolSelectionStrategy.LLM,
+            llm_backend=backend,
+            llm_model="test",
+        )
+        assert result.degraded is True
+        assert "fetchWebPage" in result
+
+    @pytest.mark.unit
+    def test_the_cue_is_a_noop_without_the_tool_in_the_catalogue(self):
+        backend = _llm_backend(return_value="webSearch")
+        result = select_tools(
+            "lis https://example.com",
+            _builtin(), {},
+            strategy=ToolSelectionStrategy.LLM,
+            llm_backend=backend,
+            llm_model="test",
+        )
+        assert "fetchWebPage" not in result

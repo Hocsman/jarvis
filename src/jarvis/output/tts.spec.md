@@ -66,8 +66,14 @@ The three engines are interchangeable to the listener. Each exposes:
 `speak` starts the worker if nobody has. Calling `start` on Piper loads
 the voice on the calling thread (downloading it if absent) so the wait
 happens at launch rather than at the first word. Kokoro warms its
-pipeline on a background thread named `kokoro-init`; a `speak` that
-arrives before the load finishes waits on the same lock. On Windows
+pipeline on a background thread named `kokoro-init`, ending with one
+throwaway synthesis whose audio is discarded (of a digit, which has a
+reading in every language, where a word belongs to one), so the
+model's first-call cost (CUDA kernel loading can take tens of seconds)
+is paid at startup rather than on the first reply; a warm-up failure
+leaves the pipeline loaded and the error surfaces at speak time. A
+`speak` that arrives
+before the load finishes waits on the same lock. On Windows
 Kokoro first imports its package on the calling thread, because loading
 PyTorch, SciPy and OpenBLAS DLLs concurrently deadlocks the Windows
 loader. Chatterbox loads its model on `start`.
@@ -322,15 +328,26 @@ sentence.
 
 **Kokoro** takes its voice from `tts_kokoro_voice` (default `ff_siwis`)
 and its language from `tts_kokoro_lang_code` (default `f`, French), and
-nothing else: `response_language` does not reach it. The model weights
+nothing else: `response_language` does not reach it. The voice may be a
+single voice, a comma blend (`ff_siwis,af_bella`, which Kokoro itself
+blends in equal parts), or a weighted blend (`ff_siwis:0.8,af_bella:0.2`)
+— weights need not sum to one, they are normalised by their sum, a voice
+without a weight counts as 1, and the blend is built as the weighted
+mean of the voice packs at initialisation, before the warm-up synthesis
+that already rides it. A spec whose weights cannot be parsed, or whose
+packs cannot be loaded, is handed to Kokoro as the raw string, failing
+the way an unknown voice name would. The model weights
 download once from Hugging Face on first use. Non-English phonemisation
 needs `libespeak-ng`; `PHONEMIZER_ESPEAK_LIBRARY` is pointed at a known
 install location when the user has not set it. Initialisation is
 attempted once, as for Piper.
 
 **Chatterbox** takes no language and speaks English. It loads on CUDA
-when asked and available, on CPU otherwise. If its dependencies or model
-are missing it warns and every item is skipped.
+when asked and available, on CPU otherwise. The `chatterbox-tts` package
+is not in `requirements.txt` — it pins `torch==2.6.0`, which cannot
+coexist with the newer CUDA torch builds Kokoro uses on recent GPUs — so
+running the engine means installing it by hand; if its dependencies or
+model are missing it warns and every item is skipped.
 
 ## Language
 
@@ -389,6 +406,13 @@ language.
   an unlisted one gets the fallback.
 - Each engine marks the first sound once its audio stream is running, and
   not when SPEAKING is published.
+- Kokoro's initialisation ends with one throwaway synthesis (audio
+  discarded, nothing queued or played), and a warm-up failure leaves the
+  pipeline loaded rather than failing init.
+- A weighted voice blend is the normalised weighted mean of its packs
+  (weights need not sum to one; a part without a weight counts as 1),
+  the warm-up rides it, an equal blend stays a raw string for Kokoro,
+  and an unparseable weight falls back to the raw string.
 - A regional variant (`fr-FR`, `fr_FR`, `pt_BR`) chooses the same default
   voice as its base language, and a variant of an unlisted language still
   gets the fallback. The map and the default voice read one value as the

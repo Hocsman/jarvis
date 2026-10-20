@@ -103,6 +103,28 @@ class Tool(ABC):
     # room to hear it and say no.
     reads_his_life: bool = False
 
+    # Whether the generated `outils.md` must leave this tool out, so each
+    # call is judged at its own risk.
+    #
+    # The generator classifies a tool from its empty call. That is safe
+    # when the empty call is the dangerous one (`localFiles` with no
+    # operation is destructive) and wrong when it is the harmless one:
+    # `claudeCode` with no task only asks how a job is going, so it would
+    # land under `## Libre`, and a line there frees every call of it, a
+    # change to the user's code included. Left out, it falls back to the
+    # default for each call's own risk.
+    classified_per_call: bool = False
+
+    def offered(self, cfg) -> bool:
+        """Whether the router and the model are shown this tool at all.
+
+        False for a tool switched off in the settings: shown, it would
+        cost every routing call its description and could only refuse.
+        Not a gate: a call that arrives anyway still runs the tool, which
+        says it is off.
+        """
+        return True
+
     @property
     @abstractmethod
     def name(self) -> str:

@@ -2795,6 +2795,10 @@ class JarvisSystemTray:
                             self._confirm_signals.reminder_failed.emit(
                                 {"texte": texte, "due_local": quand, "raison": raison}
                             ),
+                        on_delegation_done=lambda data:
+                            self._chat_ipc_signals.line_received.emit(
+                                _chat_event_line("delegation_done", data)
+                            ),
                     )
                 except Exception as exc:
                     debug_log(f"confirmation callbacks not wired: {exc}", "desktop")

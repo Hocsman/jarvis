@@ -83,7 +83,7 @@ class ToolSearchTool(Tool):
 
         cfg = context.cfg
         # Local imports to avoid circulars at module load time.
-        from ..registry import BUILTIN_TOOLS, get_cached_mcp_tools
+        from ..registry import BUILTIN_TOOLS, get_cached_mcp_tools, offered_builtin_tools
 
         try:
             strategy = ToolSelectionStrategy(getattr(cfg, "tool_selection_strategy", "llm"))
@@ -100,7 +100,7 @@ class ToolSearchTool(Tool):
             router_model = _resolve_router_model(cfg)
             selected = select_tools(
                 query=query,
-                builtin_tools=BUILTIN_TOOLS,
+                builtin_tools=offered_builtin_tools(cfg),
                 mcp_tools=mcp_tools,
                 strategy=strategy,
                 llm_backend=get_auxiliary_backend(cfg, router_model),
