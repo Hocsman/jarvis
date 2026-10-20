@@ -864,6 +864,7 @@ _DIGEST_SKIP_TOOLS = frozenset({
     # Written by code and bounded, carrying project names the user must
     # repeat word for word, and Claude Code's report quoted as its words.
     "claudeCode",
+    "stopClaudeCode",
 })
 
 

@@ -2,7 +2,7 @@
 
 Yuba can talk about the user's code, but a small voice model cannot safely change it. Claude Code can. This feature lets her hand a task on one of the user's project folders to Claude Code, which works on its own in that folder, and tell the user what it did once it has finished.
 
-Implemented in [delegation.py](delegation.py) (finding the project, running the agent, keeping the job) and [claude_code.py](../tools/builtin/claude_code.py) (the `claudeCode` tool). Wired into the daemon, which opens the job keeper with the delivery it uses and closes it when it stops.
+Implemented in [delegation.py](delegation.py) (finding the project, running the agent, keeping the job), [claude_code.py](../tools/builtin/claude_code.py) (the `claudeCode` tool) and [stop_claude_code.py](../tools/builtin/stop_claude_code.py) (the `stopClaudeCode` tool). Wired into the daemon, which opens the job keeper with the delivery it uses and closes it when it stops.
 
 ## What leaves the machine
 
@@ -48,7 +48,7 @@ Small models do not reliably tell a question from a change; on `gemma4:e2b` a re
 
 A `tache` whose project cannot be found, because `projet` is empty or names no folder and nothing else names one, starts nothing. The reply says how the last job went (a small model files "how is Claude Code doing?" as a task with no project) and lists the projects so she can ask which one; the call fails, so the tool stays offered on the next turn, when the answer comes.
 
-**One job at a time.** A second task while one is running is refused, and the refusal says which project is being worked on and for how long. Two agents editing at once, perhaps the same project, is not a speed-up. A running job cannot be cancelled except by stopping Yuba.
+**One job at a time.** A second task while one is running is refused, and the refusal says which project is being worked on and for how long. Two agents editing at once, perhaps the same project, is not a speed-up. A running job can be stopped early (*Stopping a job*).
 
 **A routine never reaches it** (`JAMAIS_EN_ROUTINE`, `src/jarvis/routines/routines.spec.md`): the report is delivered aloud to someone who has to be in the room, and a routine runs while nobody is.
 
@@ -81,6 +81,7 @@ When the job ends, the daemon delivers one message, written by code around Claud
 
 - success: `Claude Code a fini sur <projet> : « <report> »`
 - failure: `Claude Code n'a pas pu finir sur <projet> : <reason>`
+- stopped by the user, when the stop's own reply could not say so (*Stopping a job*): `Claude Code a été arrêté sur <projet>, à ta demande`, followed for a change by `; ce qu'il avait déjà modifié reste modifié`. Nothing is quoted: it said nothing.
 
 The frame is French, like every sentence this fork's code speaks on its own (a reminder, a confirmation question); the report inside it is in the language of the task.
 
@@ -91,13 +92,28 @@ The frame is French, like every sentence this fork's code speaks on its own (a r
 - It is spoken unless the task came from a window, which never speaks.
 - It is not delivered once Yuba is stopping.
 
-Asking how it is going (`tache` empty) answers from memory: the job running, with its project and elapsed time; or the last job's outcome and report; or that there is none.
+Asking how it is going (`tache` empty) answers from memory: the job running, with its project and elapsed time; or the last job's outcome and report (for a stopped job, that it was stopped and whether its edits stay); or that there is none.
 
-The tool's replies are written by code, bounded, and carry project names the user must repeat word for word, so they skip the tool-result digest (`_DIGEST_SKIP_TOOLS`).
+The replies of both tools are written by code, bounded, and carry project names the user must repeat word for word, so they skip the tool-result digest (`_DIGEST_SKIP_TOOLS`).
+
+## Stopping a job
+
+A wrong job (a misheard project, a change approved by mistake) would otherwise keep editing until `claude_code_timeout_sec` and hold the only slot. `stopClaudeCode` stops it without stopping Yuba.
+
+- **A tool of its own, with no properties.** One job runs at a time, so there is nothing to name. And small models misfile extra arguments (see `modifier` above): a stop filed as an argument of `claudeCode` would be read as a task.
+- **Shown only while a job runs** (`Tool.offered`), and only once the feature is on. The rest of the time there is nothing to stop, and a tool shown to the router is one more place for a bare "stop", which ends the conversation (`stop`), to land. A call that arrives anyway stops nothing and says how the last job went.
+- **Its risk is `action`.** It changes something outside Yuba's own store, a process working on the user's project, and asking again restarts the work. With the default verdicts she asks first, aloud or on a card, so a call misfiled here costs a question rather than the job. A user who wants it immediate writes `- stopClaudeCode` under `## Libre`. No routine reaches it: a routine only ever reads.
+- **A call carrying text stops nothing** (`carried_instruction`). The tool has no properties, so text in a call is an instruction the model is passing on, in any language: with a job running, `gemma4:e2b` files "ask Claude Code to stop the login page from crashing" here most of the time, and a third of those calls carry the instruction, where no request to stop the running task ever did. Such a call is `lecture`, since it changes nothing, so it costs no question, and its reply points at `claudeCode` and says to call again with no arguments if the user did mean the running task. The misfiled calls that carry nothing still meet the question, which names the tool.
+- **What it does** (`Delegations.cancel`): marks the job cancelled, kills its whole process tree as the deadline does, and waits up to `_CANCEL_WAIT_SEC` (10 s) for the job's thread to record its end. A job whose process has not started yet is killed the moment it does.
+- **She says it has stopped only once it has.** The reply is written by code from the end the job's thread recorded: stopped after how long and, for a change, that the files it had already changed are not undone. Stopping is not undoing, and the user may want to look at them. A job that finished with its report before the stop reached it is not a cancellation: the reply carries its report, and its session is kept as for any finished job. A job that has not ended within the wait gets a reply saying the stop is not confirmed, and its end is delivered when it lands, like any other, so nobody is left believing it still runs.
+- **An end the stop's reply reported is not delivered again**: the same news a second later is noise.
+- **A stopped job leaves no session to continue.** The conversation it carried is the one the user stopped, so the next task on that project starts fresh.
+- Its bracket in the ledger closes with `annulé`, not `échec`: nothing broke, the user said stop.
+- Stopping Yuba still kills a running job and delivers nothing, a stop already asked included.
 
 ## The ledger
 
-The gate writes the `claudeCode` call like any other. The job adds its own bracket, as a routine run does: a `démarré` row when the job is launched and an `ok` or `échec` row when it ends, both under `claudeCode:<projet>`, sharing the job's id as `request_id`, with the verdict read once at launch, the second carrying the real duration. A job whose thread cannot start closes its bracket at once with `échec`. The call row says the job was launched; only the bracket says whether the code was actually changed, and an unclosed `démarré` is the trace of a job the process took down with it. The Activity tab shows bracket rows without the "asked" badge: they share an id to pair, not because anybody was asked. As everywhere, no output is recorded.
+The gate writes the `claudeCode` call like any other. The job adds its own bracket, as a routine run does: a `démarré` row when the job is launched and an `ok`, `échec` or `annulé` (stopped by the user) row when it ends, both under `claudeCode:<projet>`, sharing the job's id as `request_id`, with the verdict read once at launch, the second carrying the real duration. A job whose thread cannot start closes its bracket at once with `échec`. The call row says the job was launched; only the bracket says whether the code was actually changed, and an unclosed `démarré` is the trace of a job the process took down with it. The Activity tab shows bracket rows without the "asked" badge: they share an id to pair, not because anybody was asked. As everywhere, no output is recorded.
 
 ## Settings
 

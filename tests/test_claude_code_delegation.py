@@ -472,6 +472,207 @@ def test_reopening_starts_fresh(tmp_path, projects, fake_claude, delegations):
     assert "--resume" not in second["argv"]
 
 
+# ── Cancelling ────────────────────────────────────────────────────────
+
+
+def _until_running(fake_claude, timeout=10.0):
+    """Wait until the stand-in has started, and return what it logged."""
+    deadline = time.monotonic() + timeout
+    while not fake_claude() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    (call,) = fake_claude()
+    return call
+
+
+def _gone(pid, timeout=10.0):
+    deadline = time.monotonic() + timeout
+    while psutil.pid_exists(pid) and time.monotonic() < deadline:
+        try:
+            if psutil.Process(pid).status() == psutil.STATUS_ZOMBIE:
+                return True
+        except psutil.NoSuchProcess:
+            return True
+        time.sleep(0.1)
+    return not psutil.pid_exists(pid)
+
+
+def test_cancelling_kills_the_job_and_frees_the_slot(
+        tmp_path, projects, fake_claude, delegations, monkeypatch):
+    """A wrong job (a misheard project, a change approved by mistake)
+    must not keep editing until its deadline, holding the only slot."""
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "sleep")
+    cfg = make_cfg(tmp_path, projects)
+    _launch(delegations, cfg, projects)
+    call = _until_running(fake_claude)
+
+    job, outcome = delegations.cancel()
+
+    assert job.projet == "chantipay"
+    assert outcome.cancelled is True
+    assert outcome.ok is False
+    assert outcome.job is job
+    assert delegations.running() is None
+    assert _gone(call["pid"])
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ok")
+    started, _job = _launch(delegations, cfg, projects, name="nikahscore")
+    assert started is True
+
+
+def test_what_a_cancelled_job_started_dies_with_it(
+        tmp_path, projects, fake_claude, delegations, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "grandchild")
+    _launch(delegations, make_cfg(tmp_path, projects), projects)
+    marker = Path(str(fake_claude.log) + ".grandchild")
+    deadline = time.monotonic() + 10
+    while not marker.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    pid = int(marker.read_text(encoding="utf-8"))
+
+    delegations.cancel()
+
+    assert _gone(pid)
+
+
+def test_a_stop_the_instant_after_the_start_still_stops_it(
+        tmp_path, projects, fake_claude, delegations, monkeypatch):
+    """The job's process may not exist yet when the stop arrives."""
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "sleep")
+    _launch(delegations, make_cfg(tmp_path, projects), projects)
+
+    _job, outcome = delegations.cancel()
+
+    assert outcome is not None and outcome.cancelled is True
+    assert delegations.running() is None
+    for call in fake_claude():
+        assert _gone(call["pid"])
+
+
+def test_a_cancelled_job_closes_its_bracket_as_cancelled(
+        tmp_path, projects, fake_claude, delegations, monkeypatch):
+    """Not `échec`: nothing broke, the user stopped it."""
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "sleep")
+    db = Ledger()
+    _launch(delegations, make_cfg(tmp_path, projects), projects, db=db)
+    _until_running(fake_claude)
+
+    delegations.cancel()
+    assert delegations.wait(10.0)
+
+    opened, closed = db.rows
+    assert [opened["outcome"], closed["outcome"]] == ["démarré", "annulé"]
+    assert opened["request_id"] == closed["request_id"]
+    assert closed["duration_ms"] is not None
+
+
+def test_a_stop_confirmed_in_the_turn_is_not_announced_again(
+        tmp_path, projects, fake_claude, delegations, monkeypatch):
+    """The reply to the stop already said so: a second message saying
+    the same thing a second later is noise."""
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "sleep")
+    _launch(delegations, make_cfg(tmp_path, projects), projects)
+    _until_running(fake_claude)
+
+    _job, outcome = delegations.cancel()
+    assert outcome is not None
+    assert delegations.wait(10.0)
+
+    assert delegations.delivered == []
+    assert delegations.last().cancelled is True
+
+
+def test_a_stop_not_confirmed_in_time_is_announced_when_it_lands(
+        tmp_path, projects, fake_claude, delegations, monkeypatch):
+    """The turn could not say it had stopped, so the end is delivered
+    like any other: nobody is left believing it still runs."""
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "sleep")
+    real_kill = dl._kill_tree
+    monkeypatch.setattr(dl, "_kill_tree", lambda proc: threading.Timer(
+        1.5, real_kill, args=(proc,)).start())
+    _launch(delegations, make_cfg(tmp_path, projects), projects)
+    _until_running(fake_claude)
+
+    job, outcome = delegations.cancel(timeout=0.2)
+    assert job.projet == "chantipay"
+    assert outcome is None, "not stopped yet, so not said to be"
+    assert delegations.wait(20.0)
+
+    (outcome,) = delegations.delivered
+    assert outcome.cancelled is True
+    said = dl.compose_announcement(outcome)
+    assert "chantipay" in said
+    assert "«" not in said, "nothing Claude Code said is quoted: it said nothing"
+
+
+def test_a_job_that_finished_before_the_stop_reached_it_reports_its_work(
+        tmp_path, projects, fake_claude, delegations, monkeypatch):
+    """Its edits are done and its report is real: calling that a
+    cancellation would hide what changed."""
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "slow")
+    monkeypatch.setenv("FAKE_CLAUDE_DELAY", "1")
+    monkeypatch.setattr(dl, "_kill_tree", lambda proc: None)
+    _launch(delegations, make_cfg(tmp_path, projects), projects)
+    _until_running(fake_claude)
+
+    _job, outcome = delegations.cancel(timeout=15.0)
+
+    assert outcome is not None
+    assert outcome.cancelled is False
+    assert outcome.ok is True
+    assert outcome.report == "J'ai ajouté le bouton de déconnexion."
+    assert delegations.wait(10.0)
+    assert delegations.delivered == []
+
+
+def test_cancelling_with_nothing_running_stops_nothing(delegations):
+    assert delegations.cancel() == (None, None)
+    assert delegations.last() is None
+
+
+def test_a_cancelled_job_leaves_no_session_to_continue(
+        tmp_path, projects, fake_claude, delegations, monkeypatch):
+    """The conversation it carried is the one the user stopped: the next
+    task on that project must not pick it up again."""
+    cfg = make_cfg(tmp_path, projects)
+    _launch(delegations, cfg, projects)
+    _wait(delegations)
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "sleep")
+    _launch(delegations, cfg, projects, tache="Supprime tout le module de paiement.")
+    deadline = time.monotonic() + 10
+    while len(fake_claude()) < 2 and time.monotonic() < deadline:
+        time.sleep(0.05)
+    delegations.cancel()
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ok")
+
+    _launch(delegations, cfg, projects, tache="Ajoute un test.")
+    _wait(delegations)
+
+    _first, stopped, after = fake_claude()
+    assert "--resume" in stopped["argv"]
+    assert "--resume" not in after["argv"]
+
+
+def test_closing_after_a_stop_was_asked_still_delivers_nothing(
+        tmp_path, projects, fake_claude, monkeypatch):
+    """Stopping the daemon wins over a stop still landing: nothing is
+    left to deliver to."""
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "sleep")
+    real_kill = dl._kill_tree
+    monkeypatch.setattr(dl, "_kill_tree", lambda proc: None)
+    d = dl.Delegations()
+    delivered = []
+    d.open(delivered.append)
+    _launch(d, make_cfg(tmp_path, projects), projects)
+    call = _until_running(fake_claude)
+    assert d.cancel(timeout=0.1)[1] is None
+    monkeypatch.setattr(dl, "_kill_tree", real_kill)
+
+    d.close()
+
+    assert d.wait(10.0)
+    assert delivered == []
+    assert _gone(call["pid"])
+
+
 # ── What the next one remembers ───────────────────────────────────────
 
 

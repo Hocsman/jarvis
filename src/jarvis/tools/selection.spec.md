@@ -25,7 +25,7 @@ Controlled by `tool_selection_strategy` in config:
 
 ### The catalogue
 
-The builtins handed to the strategies are those a tool's own settings leave on (`offered_builtin_tools`, from `Tool.offered`): `claudeCode` with no projects folder can only refuse, and shown anyway it would cost every routing call its description. The reply engine and `toolSearchTool` both select from this catalogue, and the router cache key names it, so switching a tool on or off takes effect on the next turn. A call to a tool that was not offered still reaches it, and it says it is off.
+The builtins handed to the strategies are those a tool's own settings and state leave on (`offered_builtin_tools`, from `Tool.offered`): `claudeCode` with no projects folder can only refuse, and shown anyway it would cost every routing call its description; `stopClaudeCode` is shown only while a job runs, since otherwise there is nothing to stop and it would only be one more place for a bare "stop" to land. The reply engine and `toolSearchTool` both select from this catalogue, and the router cache key names it, so switching a tool on or off takes effect on the next turn. A call to a tool that was not offered still reaches it, and it says it is off.
 
 ### Always-included Tools
 
