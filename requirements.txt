@@ -21,6 +21,10 @@ pytest==8.3.2
 pytest-repeat==0.9.3
 pyyaml>=6.0
 mcp==1.13.1
+# mcp 1.13.1 imports eval_type_backport from pydantic's private internals,
+# which pydantic 2.14 no longer provides: with it, importing the MCP client
+# (and so the daemon) fails. Bounded until mcp moves past that import.
+pydantic<2.14
 # Chatterbox TTS is an optional, English-only engine and is deliberately not
 # installed by default: chatterbox-tts pins torch==2.6.0, which cannot coexist
 # with the newer CUDA torch builds Kokoro uses on recent GPUs. The engine
