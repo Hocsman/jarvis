@@ -21,7 +21,11 @@ pytest==8.3.2
 pytest-repeat==0.9.3
 pyyaml>=6.0
 mcp==1.13.1
-chatterbox-tts==0.1.2
+# Chatterbox TTS is an optional, English-only engine and is deliberately not
+# installed by default: chatterbox-tts pins torch==2.6.0, which cannot coexist
+# with the newer CUDA torch builds Kokoro uses on recent GPUs. The engine
+# warns and stays silent when the package is missing; to use it, install it
+# by hand: pip install chatterbox-tts
 piper-tts>=1.3.0
 pygame>=2.1.0
 faiss-cpu>=1.7.4

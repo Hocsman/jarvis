@@ -34,7 +34,6 @@ is compared case-insensitively.
 | `piper` (default) | `PiperTTS` | Light local neural voice, one `.onnx` model per voice, fetched on first use |
 | `kokoro` | `KokoroTTS` | Kokoro-82M, more natural, real time on CPU, multilingual through espeak-ng |
 | `chatterbox` | `ChatterboxTTS` | Heavy PyTorch voice with emotion control and cloning, runs from source only |
-
 Any other name yields Piper. The config layer lowercases `tts_engine` and
 falls back to `piper` for a value that is not one of the three, so the
 factory only ever sees a valid name from the daemon.
@@ -333,8 +332,11 @@ install location when the user has not set it. Initialisation is
 attempted once, as for Piper.
 
 **Chatterbox** takes no language and speaks English. It loads on CUDA
-when asked and available, on CPU otherwise. If its dependencies or model
-are missing it warns and every item is skipped.
+when asked and available, on CPU otherwise. The `chatterbox-tts` package
+is not in `requirements.txt` — it pins `torch==2.6.0`, which cannot
+coexist with the newer CUDA torch builds Kokoro uses on recent GPUs — so
+running the engine means installing it by hand; if its dependencies or
+model are missing it warns and every item is skipped.
 
 ## Language
 

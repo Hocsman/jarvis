@@ -464,7 +464,10 @@ To have the voice follow the language of each reply, list a voice per language (
 - Multilingual; non-English voices need `espeak-ng` installed (`brew install espeak-ng` on macOS)
 - Model weights download once from Hugging Face (~330MB)
 
-**Chatterbox** - AI voice with emotion control (requires running from source):
+**Chatterbox** - AI voice with emotion control (requires running from source). Not installed by default: `chatterbox-tts` pins `torch==2.6.0`, which conflicts with the newer CUDA torch builds Kokoro uses on recent GPUs. To use it, install it by hand first:
+```bash
+pip install chatterbox-tts
+```
 ```json
 { "tts_engine": "chatterbox" }
 ```
