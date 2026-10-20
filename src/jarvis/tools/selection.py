@@ -50,8 +50,15 @@ class ToolSelection(list):
         return picked
 
 
-# Tools that must always be available regardless of selection strategy.
-_ALWAYS_INCLUDED = {"stop", "remember", "forget"}
+# Tools that must always be available regardless of selection strategy;
+# those a strategy did not pick are appended in this order. A tuple, not
+# a set: the planner reads the catalogue in order, and a set's order is
+# the process's hash seed, so the same sentence planned differently from
+# one start to the next. `remember` goes last. Measured on gemma4:e2b,
+# planner only, 30 calls a cell: the planner restated a delegation as a
+# `remember` step 12 times in 30 with this order, against 18 to 21 in 30
+# for the five others.
+_ALWAYS_INCLUDED = ("stop", "forget", "remember")
 
 # A pasted URL is a deterministic cue that the page-fetching tool belongs in
 # the selection, whichever strategy answered: the router is a small model and

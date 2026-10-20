@@ -17,6 +17,8 @@ inside the task, or on a near miss, is sent back with the exact name, and
 the model may call again within the loop, as it would in production.
 Nothing is started: what runs is measured in
 tests/test_claude_code_delegation.py, with a real child process.
+`remember` is not stubbed: it writes into a core under `tmp_path`, so a
+task the turn filed as a memory of the user shows up in the files.
 
 See src/jarvis/projets/projets.spec.md.
 
@@ -103,11 +105,15 @@ def _run(case, mock_config, eval_db, eval_dialogue_memory, tmp_path):
     call again, as it would in production; nothing is started."""
     from jarvis.reply.engine import run_reply_engine
     from jarvis.tools.builtin.claude_code import ClaudeCodeTool, vet_call
+    from jarvis.tools.registry import BUILTIN_TOOLS
     from jarvis.tools.types import ToolExecutionResult
 
     mock_config.ollama_base_url = JUDGE_BASE_URL
     mock_config.ollama_chat_model = JUDGE_MODEL
     mock_config.claude_code_projects_dir = str(_projects_root(tmp_path))
+    # The core lives beside the database: a fresh one per case, so what
+    # it holds afterwards is what this turn wrote.
+    mock_config.db_path = str(tmp_path / "jarvis.db")
     capture = ToolCallCapture()
     started = []
 
@@ -127,6 +133,14 @@ def _run(case, mock_config, eval_db, eval_dialogue_memory, tmp_path):
                     f"it has started."
                 ),
             )
+        if tool_name == "remember":
+            # The real tool, so a write shows up in the files rather
+            # than as a call a stub answered "OK".
+            return BUILTIN_TOOLS["remember"].execute(
+                db=db, cfg=cfg, tool_args=tool_args, system_prompt="",
+                original_prompt="", redacted_text=kwargs.get("redacted_text", ""),
+                max_retries=1, user_print=lambda _m: None,
+            )
         return ToolExecutionResult(success=True, reply_text="OK")
 
     with patch("jarvis.reply.engine.run_tool_with_retries", side_effect=_runner):
@@ -143,6 +157,16 @@ def _report(case, capture, response):
     for c in capture.calls:
         print(f"    - {c['name']}({c['args']})")
     print(f"  Response: {(response or '')[:200]}")
+
+
+def _written(mock_config):
+    """Everything the core believes, both sections."""
+    from jarvis.memory.core import SECTION_PROFILE, SECTION_RULES, MemoryCore
+
+    core = MemoryCore.for_config(mock_config)
+    return [e.text for e in core.active(SECTION_PROFILE)] + [
+        e.text for e in core.active(SECTION_RULES)
+    ]
 
 
 @pytest.mark.eval
@@ -180,6 +204,51 @@ class TestTheReplyCallsIt:
         projet, args = started[-1]
         assert projet == case.projet
         assert str(args.get("tache") or "").strip(), "the task arrived empty"
+
+    @pytest.mark.parametrize("case", CHANGES + QUESTIONS)
+    def test_a_task_writes_nothing_into_the_core(
+        self, mock_config, eval_db, eval_dialogue_memory, case, tmp_path,
+    ):
+        """A task handed over is neither a fact about the user nor a rule
+        for her. Filed in the core as "the user wants a bug fixed", it is
+        injected into every later prompt until he finds it in a file.
+
+        The write comes from the planner, which restates the delegation as
+        a `remember that the user wants ...` step that direct execution
+        runs. Nothing in `remember`'s description past its first 120
+        characters reaches the planner, so the fix is not there: it is
+        `claudeCode` opening with what the user wants done, and `remember`
+        read last among the mandatory tools in an order that does not
+        change with the process (projets.spec.md, selection.spec.md).
+
+        Measured on gemma4:e2b, end to end, the three changes, arms
+        interleaved call by call, 21 calls an arm against a description
+        opening "Hand a task on one of the user's code projects to Claude
+        Code" with the order drawn at random per call, as a set's hash
+        seed draws it per process: 2 writes with that opening and order
+        against 17 (Fisher p = 5.8e-6), and the four requests to remember
+        of test_remember_tool_is_called.py reached the tool 14 times in 28
+        on both sides (p = 1.0). The two left were on the English
+        sentence, both planned before the delegation: "remember that
+        Jarvis needs to use the Claude Code tool", "remember that Jarvis
+        is an assistant". In a separate run, adding "done" to
+        `remember`'s list of things wanted right now wrote 15 times in 21
+        against 14 (p = 1.0): that clause is past what the planner reads.
+
+        So this can still fail on the small canary, about once in ten
+        delegations and mostly on the English one (2 in 7 there), and is
+        left failing rather than marked expected: what it catches is a
+        false standing entry about the user."""
+        capture, response, _started = _run(
+            case, mock_config, eval_db, eval_dialogue_memory, tmp_path)
+        written = _written(mock_config)
+        _report(case, capture, response)
+        print(f"  Core now believes: {written}")
+
+        assert written == [], (
+            f"A task for Claude Code was stored as a durable entry about the "
+            f"user: {written!r}"
+        )
 
     @pytest.mark.parametrize("case", CHANGES + QUESTIONS)
     def test_a_change_and_a_question_are_told_apart(

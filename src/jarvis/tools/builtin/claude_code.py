@@ -148,15 +148,33 @@ class ClaudeCodeTool(Tool):
 
     @property
     def description(self) -> str:
-        # Whole sentences, restriction first: the router reads only the
-        # opening of this.
+        # The router reads the first sentence, the planner the first 120
+        # characters, so both are given the whole condition there. It is
+        # worded as what the user wants done because that is how a small
+        # planner restates a delegation: "the user wants a bug fixed in a
+        # project". With no tool holding that phrase it filed it under
+        # `remember`, as a fact about the user, and the core carried the
+        # task into every later prompt. Measured on gemma4:e2b, planner
+        # only, 180 calls an arm across the six orders the mandatory tools
+        # can be read in: 81 such steps with this wording, 110 with one
+        # opening "Hand a task on one of the user's code projects to
+        # Claude Code", which also planned the delegation itself less
+        # often (93 against 162).
+        # The progress clause comes after those 120 characters, which the
+        # planner is that sensitive to (ending them on ", and answ" instead
+        # of " and says " took its stray steps from 5 to 21 in 80), and
+        # names Claude Code: worded "and says how that work is going", the
+        # router offered nothing for "où en est Claude Code ?" in 20 calls,
+        # and 20 in 20 as it stands. The coding-agent clause stays in the
+        # first sentence too: without it, "c'est quoi la différence entre
+        # Claude Code et Cursor ?" was offered the tool.
         return (
-            "Hand a task on one of the user's code projects to Claude Code, "
-            "a coding agent that works on its own in the project folder and "
-            "reports back later, ONLY when the user asks for work on a "
-            "project (change, fix, add, explain or review its code) or asks "
-            "how that work is going. It runs in the background: say it has "
-            "started, never that it is done."
+            "Claude Code does what the user wants done in one of their code "
+            "projects (fix, add, explain or review its code) and says how it "
+            "went, and answers when the user asks how Claude Code's work is "
+            "going: a coding agent that works on its own in the project "
+            "folder and reports back later. It runs in the background: say "
+            "it has started, never that it is done."
         )
 
     @property
