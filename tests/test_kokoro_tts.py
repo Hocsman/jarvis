@@ -169,6 +169,67 @@ class TestKokoroInterface:
         assert tts._init_error is None
 
 
+class TestKokoroVoiceBlends:
+    """``tts_kokoro_voice`` syntax: a plain name, an equal blend
+    (``a,b``, handled by Kokoro itself), or a weighted blend
+    (``a:0.8,b:0.2``, built by the engine as a weighted mean of the voice
+    packs, normalised by the sum of the weights)."""
+
+    def _fake_kokoro(self, monkeypatch, voices_seen, packs=None):
+        class FakePipeline:
+            def __init__(self, lang_code=None):
+                pass
+
+            def load_single_voice(self, name):
+                return (packs or {}).get(name, 1.0)
+
+            def __call__(self, text, voice=None, speed=None):
+                voices_seen.append(voice)
+                yield None, None, [0.0] * 2400
+
+        fake_kokoro = types.ModuleType("kokoro")
+        fake_kokoro.KPipeline = FakePipeline
+        monkeypatch.setitem(sys.modules, "kokoro", fake_kokoro)
+
+    def test_plain_voice_stays_a_string(self, monkeypatch):
+        seen = []
+        self._fake_kokoro(monkeypatch, seen)
+        tts = KokoroTTS(enabled=True, voice="ff_siwis,af_bella")
+        assert tts._ensure_initialized() is True
+        assert seen == ["ff_siwis,af_bella"]
+        assert tts._voice_blend is None
+
+    def test_weighted_blend_is_the_normalised_weighted_mean(self, monkeypatch):
+        seen = []
+        self._fake_kokoro(monkeypatch, seen, packs={"ff_siwis": 10.0, "af_bella": 20.0})
+        tts = KokoroTTS(enabled=True, voice="ff_siwis:0.8,af_bella:0.2")
+        assert tts._ensure_initialized() is True
+        # (0.8*10 + 0.2*20) / 1.0 — and the warm-up already rides the blend
+        assert seen == [pytest.approx(12.0)]
+
+    def test_weights_need_not_sum_to_one(self, monkeypatch):
+        seen = []
+        self._fake_kokoro(monkeypatch, seen, packs={"ff_siwis": 10.0, "af_bella": 20.0})
+        tts = KokoroTTS(enabled=True, voice="ff_siwis:4,af_bella:1")
+        assert tts._ensure_initialized() is True
+        assert seen == [pytest.approx(12.0)]  # (4*10 + 1*20) / 5
+
+    def test_a_part_without_weight_counts_as_one(self, monkeypatch):
+        seen = []
+        self._fake_kokoro(monkeypatch, seen, packs={"ff_siwis": 10.0, "af_bella": 20.0})
+        tts = KokoroTTS(enabled=True, voice="ff_siwis:3,af_bella")
+        assert tts._ensure_initialized() is True
+        assert seen == [pytest.approx(12.5)]  # (3*10 + 1*20) / 4
+
+    def test_an_unparseable_weight_falls_back_to_the_raw_string(self, monkeypatch):
+        seen = []
+        self._fake_kokoro(monkeypatch, seen)
+        tts = KokoroTTS(enabled=True, voice="ff_siwis:abc")
+        assert tts._ensure_initialized() is True
+        assert seen == ["ff_siwis:abc"]
+        assert tts._voice_blend is None
+
+
 class TestEngineSelection:
     def test_kokoro_engine_resolves_to_kokoro(self):
         tts = create_tts_engine(

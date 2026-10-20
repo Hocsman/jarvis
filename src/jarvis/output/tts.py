@@ -1367,6 +1367,7 @@ class KokoroTTS:
 
         # Kokoro pipeline (lazy loaded).
         self._pipe = None
+        self._voice_blend = None  # weighted-blend voice, built at init
         self._sample_rate: int = 24000  # Kokoro's fixed output rate
         self._initialized = False
         self._init_lock = threading.Lock()
@@ -1400,6 +1401,7 @@ class KokoroTTS:
 
                 debug_log(f"Kokoro TTS loading pipeline (lang={self.lang_code})", "tts")
                 self._pipe = KPipeline(lang_code=self.lang_code)
+                self._voice_blend = self._build_voice_blend()
                 # Absorb the model's first-call cost (CUDA kernel loading
                 # alone can take tens of seconds) here, in the warm-up
                 # thread, rather than on the first reply. The audio is
@@ -1407,7 +1409,7 @@ class KokoroTTS:
                 # surfaces at speak time, as without the warm-up.
                 try:
                     for _gs, _ps, _audio in self._pipe(
-                        self._WARMUP_TEXT, voice=self.voice, speed=self.speed
+                        self._WARMUP_TEXT, voice=self._resolved_voice(), speed=self.speed
                     ):
                         pass
                 except Exception as e:
@@ -1423,6 +1425,59 @@ class KokoroTTS:
 
             self._initialized = True
             return self._pipe is not None
+
+    def _parse_voice_spec(self) -> Optional[list]:
+        """Parse a weighted voice blend ("a:0.8,b:0.2").
+
+        Returns a list of (name, weight) pairs when any part carries a
+        weight, else None — a plain name or an equal blend ("a,b") is
+        handed to Kokoro as-is, which blends equally on its own. A part
+        without a weight counts as 1. An unparseable weight yields None,
+        so a malformed spec fails the way an unknown voice name would.
+        """
+        parts = [p.strip() for p in self.voice.split(",") if p.strip()]
+        if not any(":" in p for p in parts):
+            return None
+        parsed = []
+        for part in parts:
+            if ":" not in part:
+                parsed.append((part, 1.0))
+                continue
+            name, _, weight = part.rpartition(":")
+            try:
+                parsed.append((name.strip(), float(weight)))
+            except ValueError:
+                return None
+        if any(not name or weight <= 0 for name, weight in parsed):
+            return None
+        return parsed
+
+    def _build_voice_blend(self):
+        """Build the weighted mean of the voice packs named in the spec.
+
+        Returns None when the spec is not weighted or the packs cannot be
+        loaded; the raw string then goes to Kokoro unchanged.
+        """
+        spec = self._parse_voice_spec()
+        if spec is None:
+            return None
+        try:
+            blend, total = None, 0.0
+            for name, weight in spec:
+                pack = self._pipe.load_single_voice(name)
+                blend = pack * weight if blend is None else blend + pack * weight
+                total += weight
+            blend = blend / total
+            debug_log(f"Kokoro TTS weighted voice blend: {self.voice}", "tts")
+            return blend
+        except Exception as e:
+            debug_log(f"Kokoro voice blend failed, using raw voice '{self.voice}': {e}", "tts")
+            return None
+
+    def _resolved_voice(self):
+        """The voice argument for the pipeline: the blend when the spec is
+        weighted, the configured string otherwise."""
+        return self._voice_blend if self._voice_blend is not None else self.voice
 
     def start(self) -> None:
         if not self.enabled or self._thread is not None:
@@ -1566,7 +1621,7 @@ class KokoroTTS:
             # sentence; collect the waveform, converting torch tensors to a
             # float32 numpy array for sounddevice.
             audio_chunks = []
-            for _gs, _ps, audio in self._pipe(text, voice=self.voice, speed=self.speed):
+            for _gs, _ps, audio in self._pipe(text, voice=self._resolved_voice(), speed=self.speed):
                 if self._should_interrupt.is_set():
                     return
                 arr = audio.detach().cpu().numpy() if hasattr(audio, "detach") else np.asarray(audio)

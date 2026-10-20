@@ -266,7 +266,8 @@ def _build_field_metadata() -> List[FieldMeta]:
       "piper", "int", min_val=0, max_val=99, nullable=True)
 
     # --- Kokoro TTS ---
-    f("tts_kokoro_voice", "Voice", "Kokoro voice ID (e.g. ff_siwis)",
+    f("tts_kokoro_voice", "Voice", "Kokoro voice ID or blend (e.g. ff_siwis, "
+      "ff_siwis,af_bella or weighted ff_siwis:0.8,af_bella:0.2)",
       "kokoro", "str")
     f("tts_kokoro_lang_code", "Language Code",
       "Kokoro language code — must match the voice's language "

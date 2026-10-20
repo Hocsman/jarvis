@@ -325,7 +325,15 @@ sentence.
 
 **Kokoro** takes its voice from `tts_kokoro_voice` (default `ff_siwis`)
 and its language from `tts_kokoro_lang_code` (default `f`, French), and
-nothing else: `response_language` does not reach it. The model weights
+nothing else: `response_language` does not reach it. The voice may be a
+single voice, a comma blend (`ff_siwis,af_bella`, which Kokoro itself
+blends in equal parts), or a weighted blend (`ff_siwis:0.8,af_bella:0.2`)
+— weights need not sum to one, they are normalised by their sum, a voice
+without a weight counts as 1, and the blend is built as the weighted
+mean of the voice packs at initialisation, before the warm-up synthesis
+that already rides it. A spec whose weights cannot be parsed, or whose
+packs cannot be loaded, is handed to Kokoro as the raw string, failing
+the way an unknown voice name would. The model weights
 download once from Hugging Face on first use. Non-English phonemisation
 needs `libespeak-ng`; `PHONEMIZER_ESPEAK_LIBRARY` is pointed at a known
 install location when the user has not set it. Initialisation is
@@ -398,6 +406,10 @@ language.
 - Kokoro's initialisation ends with one throwaway synthesis (audio
   discarded, nothing queued or played), and a warm-up failure leaves the
   pipeline loaded rather than failing init.
+- A weighted voice blend is the normalised weighted mean of its packs
+  (weights need not sum to one; a part without a weight counts as 1),
+  the warm-up rides it, an equal blend stays a raw string for Kokoro,
+  and an unparseable weight falls back to the raw string.
 - A regional variant (`fr-FR`, `fr_FR`, `pt_BR`) chooses the same default
   voice as its base language, and a variant of an unlisted language still
   gets the fallback. The map and the default voice read one value as the
