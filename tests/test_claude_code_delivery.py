@@ -14,14 +14,13 @@ from __future__ import annotations
 import json
 import threading
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from src.jarvis import daemon
 from src.jarvis.memory.conversation import DialogueMemory
-from src.jarvis.projets.claude_code import Job, Outcome
+from src.jarvis.projets.delegation import Job, Outcome
 
 
 @pytest.fixture(autouse=True)
@@ -40,8 +39,7 @@ def _outcome(origin="voix", ok=True, report="J'ai ajouté le bouton."):
     job = Job(
         id="job1", projet="chantipay", path=Path("/p/chantipay"),
         tache="Ajoute un bouton.", modifier=True, origin=origin,
-        risk="destructif", started_at=datetime.now(timezone.utc),
-        started=time.monotonic(),
+        risk="destructif", verdict="demande", started=time.monotonic(),
     )
     return Outcome(job=job, ok=ok, report=report, session_id=None, duration_s=12.0)
 
@@ -122,3 +120,25 @@ def test_it_waits_for_the_reply_in_flight(wired, monkeypatch):
     lock.release()
     assert done.wait(5.0)
     assert len(spoken) == 1
+
+
+def test_nothing_is_delivered_once_yuba_is_stopping(wired, monkeypatch):
+    """Nothing is left to hear it, and the shutdown diary pass is about to
+    read the memory it would land in."""
+    dm, spoken = wired
+    monkeypatch.setattr(daemon, "_global_stop_requested", True)
+
+    daemon.deliver_delegation(_outcome())
+
+    assert spoken == [] and dm.get_recent_messages() == []
+
+
+def test_the_bundled_build_wires_the_report_to_the_chat_window():
+    """Both routes, or the report exists in exactly half the builds."""
+    import inspect
+
+    from src.desktop_app import app as desktop
+
+    source = inspect.getsource(desktop)
+    assert "on_delegation_done=" in source
+    assert '_chat_event_line("delegation_done"' in source

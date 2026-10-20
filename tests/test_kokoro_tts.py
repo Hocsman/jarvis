@@ -221,6 +221,29 @@ class TestKokoroVoiceBlends:
         assert tts._ensure_initialized() is True
         assert seen == [pytest.approx(12.5)]  # (3*10 + 1*20) / 4
 
+    def test_a_pack_that_cannot_load_falls_back_to_the_raw_string(self, monkeypatch):
+        seen = []
+
+        class FakePipeline:
+            def __init__(self, lang_code=None):
+                pass
+
+            def load_single_voice(self, name):
+                raise FileNotFoundError(name)
+
+            def __call__(self, text, voice=None, speed=None):
+                seen.append(voice)
+                yield None, None, [0.0] * 2400
+
+        fake_kokoro = types.ModuleType("kokoro")
+        fake_kokoro.KPipeline = FakePipeline
+        monkeypatch.setitem(sys.modules, "kokoro", fake_kokoro)
+
+        tts = KokoroTTS(enabled=True, voice="ff_siwis:0.8,af_nope:0.2")
+        assert tts._ensure_initialized() is True
+        assert seen == ["ff_siwis:0.8,af_nope:0.2"]
+        assert tts._voice_blend is None
+
     def test_an_unparseable_weight_falls_back_to_the_raw_string(self, monkeypatch):
         seen = []
         self._fake_kokoro(monkeypatch, seen)

@@ -1123,7 +1123,8 @@ class ChatWindow(QMainWindow):
             # A Claude Code report: it lands with no turn of its own, so it
             # cannot ride the `complete` that ends a reply.
             texte = data.get("texte") if isinstance(data, dict) else None
-            if isinstance(texte, str) and texte.strip():
+            if (isinstance(texte, str) and texte.strip()
+                    and not self._first_show_will_seed(texte)):
                 self._append_assistant(texte)
         elif kind in ("rewound", "rewind_nack"):
             user_index = data.get("user_index") if isinstance(data, dict) else None
@@ -1447,6 +1448,22 @@ class ChatWindow(QMainWindow):
         super().keyPressEvent(event)
 
     # --- Lifecycle ------------------------------------------------------
+
+    def _first_show_will_seed(self, texte: str) -> bool:
+        """Whether the first show will bring this message in from the hot
+        window. In bundled mode the report is already in the dialogue
+        memory the window seeds from: appending it now as well would show
+        it twice, the first copy above the turns that led to it."""
+        if self._hot_window_seeded or not self._daemon_available:
+            return False
+        try:
+            return any(
+                m.get("role") == "assistant"
+                and (m.get("content") or "").strip() == texte.strip()
+                for m in get_hot_window_messages()
+            )
+        except Exception:
+            return False
 
     def showEvent(self, event: QShowEvent) -> None:
         # The orb lives in the introductory panel, which only an empty

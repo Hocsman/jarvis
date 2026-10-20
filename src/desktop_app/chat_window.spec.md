@@ -129,7 +129,18 @@ Event shapes (mirrors the diary IPC):
 {"type": "confirm_nack", "data": {"request_id": "...", "outcome": "..."}}
 {"type": "rewound", "data": {"user_index": 2}}      // the daemon's verdict on a __CHAT_REWIND__: line
 {"type": "rewind_nack", "data": {"user_index": 2}}
+{"type": "delegation_done", "data": {"projet": "...", "ok": true, "texte": "..."}}  // a Claude Code report
 ```
+
+`delegation_done` carries the report of a Claude Code job, which ends
+minutes after the turn that started it and so has no turn of its own: it
+is shown as an assistant message, not through the `complete` that ends a
+reply. Bundled mode delivers it through the `on_delegation_done` callback
+of `set_confirmation_callbacks`, which the desktop app turns into the same
+line. A window not yet shown does not append it when its first show will
+seed it from the dialogue memory that already holds it (bundled mode);
+otherwise the transcript would show it twice, the first copy above the
+turns that led to it. See `src/jarvis/projets/projets.spec.md`.
 
 `__CHAT__:` lines must never contain unredacted user text. The `start` event
 carries the already-redacted query (redaction happens before the worker thread

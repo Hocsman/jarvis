@@ -13,10 +13,10 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from ...debug import debug_log
-from ...projets import claude_code as cc
+from ...projets import delegation as dl
 from ..base import Tool, ToolContext
 from ..types import ToolExecutionResult
 
@@ -26,7 +26,8 @@ from ..types import ToolExecutionResult
 _READ_ONLY_VALUES = (False, 0, "false", "0")
 
 
-def _wants_changes(args: Optional[Dict[str, Any]]) -> bool:
+def wants_changes(args: Optional[Dict[str, Any]]) -> bool:
+    """Whether the call may edit the project, read as the gate reads it."""
     value = (args or {}).get("modifier", True)
     if isinstance(value, str):
         value = value.strip().lower()
@@ -49,8 +50,82 @@ def _minutes_since(started: float) -> int:
     return max(0, int((time.monotonic() - started) // 60))
 
 
+def _status_text() -> str:
+    """How the job is going, from memory: nothing here touches a project."""
+    job = dl.DELEGATIONS.running()
+    if job is not None:
+        return (
+            f"Claude Code is still working on {job.projet}, started "
+            f"{_minutes_since(job.started)} min ago. Its report will be "
+            f"delivered when it finishes."
+        )
+    last = dl.DELEGATIONS.last()
+    if last is not None:
+        ago = _minutes_since(last.job.started + last.duration_s)
+        return (
+            f"Nothing is running. The last task, on {last.job.projet}, "
+            f"{'finished' if last.ok else 'failed'} {ago} min ago. "
+            f"Its report: « {last.report} »"
+        )
+    return "Claude Code has not been given any task since Yuba started."
+
+
+def _holds_yubas_store(cfg, project: Path) -> bool:
+    """Whether the project contains Yuba's own files, or lies inside them."""
+    try:
+        from ...memory.core import MemoryCore
+
+        core = MemoryCore.for_config(cfg).directory.resolve()
+        project = project.resolve()
+    except Exception:
+        return False
+    return core == project or project in core.parents or core in project.parents
+
+
+def vet_call(args: Optional[Dict[str, Any]], cfg) -> Tuple[Optional[str], Optional[Path]]:
+    """Decide whether a call carrying a task may start, and where.
+
+    Returns (reason it may not, None) or (None, project folder). A call
+    that may edit runs only on a project its `projet` names exactly, the
+    name on the card the user approves; a near miss or a project named
+    only inside the task is sent back with the exact name to use.
+    """
+    projet = _project(args)
+    root = str(getattr(cfg, "claude_code_projects_dir", "") or "").strip()
+    if not root:
+        return ("handing projects to Claude Code is switched off: the setting "
+                "claude_code_projects_dir names no folder"), None
+    root_path = Path(root).expanduser()
+    if not root_path.is_dir():
+        return f"the projects folder {root} does not exist", None
+
+    found = dl.choose_project(root_path, projet, _texts(args))
+    if found.reason == dl.AMBIGUOUS:
+        return (f"the project could be any of {', '.join(found.candidates)}. "
+                f"Ask the user which one"), None
+    if found.path is None:
+        named = f"there is no project called '{projet}'" if projet else "no project was named"
+        return (f"{named}. {_status_text()} If the user asked for work on a "
+                f"project, ask which one; the projects are: "
+                f"{', '.join(found.candidates) or 'none'}"), None
+    if _holds_yubas_store(cfg, found.path):
+        return (f"the project {found.path.name} holds or lies inside Yuba's own "
+                f"files (profile, rules, tool permissions), which no tool may "
+                f"edit"), None
+    if wants_changes(args) and not found.exact:
+        return (f"to change code, the project must be named exactly as its "
+                f"folder, so the user approves the one that runs: call the tool "
+                f"again with projet='{found.path.name}'"), None
+    return None, found.path
+
+
 class ClaudeCodeTool(Tool):
     """Give one of the user's projects to Claude Code, and report back."""
+
+    # Its empty call asks how a job is going, which reads. Classified from
+    # `{}`, the generated outils.md would free it, and a line there frees
+    # every call, a change to the user's code included.
+    classified_per_call = True
 
     def risk_for(self, args):
         """Asking how it is going, or a question Claude Code answers by
@@ -59,13 +134,17 @@ class ClaudeCodeTool(Tool):
         whose project is only named inside the task."""
         from ..policy import RISK_DESTRUCTIVE, RISK_READ
 
-        if not _task(args) or not _wants_changes(args):
+        if not _task(args) or not wants_changes(args):
             return RISK_READ
         return RISK_DESTRUCTIVE
 
+    def offered(self, cfg) -> bool:
+        """Only once a projects folder is named: off, every call refuses."""
+        return bool(str(getattr(cfg, "claude_code_projects_dir", "") or "").strip())
+
     @property
     def name(self) -> str:
-        return cc.TOOL_NAME
+        return dl.TOOL_NAME
 
     @property
     def description(self) -> str:
@@ -113,65 +192,29 @@ class ClaudeCodeTool(Tool):
             context: ToolContext) -> ToolExecutionResult:
         cfg = context.cfg
         tache = _task(args)
-        projet = _project(args)
-
         if not tache:
-            return self._status()
+            return ToolExecutionResult(success=True, reply_text=_status_text())
 
-        root = str(getattr(cfg, "claude_code_projects_dir", "") or "").strip()
-        if not root:
-            return self._refuse(
-                "handing projects to Claude Code is switched off: the "
-                "setting claude_code_projects_dir names no folder"
-            )
-        root_path = Path(root).expanduser()
-        if not root_path.is_dir():
-            return self._refuse(f"the projects folder {root} does not exist")
+        refusal, path = vet_call(args, cfg)
+        if refusal:
+            return self._refuse(refusal)
 
-        found = cc.resolve_project(root_path, projet) if projet else None
-        if found is None or found.reason == "unknown":
-            # Only what the card shows is searched: the arguments, never
-            # the sentence behind them.
-            mention = cc.mentioned_project(root_path, *_texts(args))
-            if mention.reason in ("ok", "ambiguous"):
-                found = mention
-            elif found is None:
-                return self._refuse(
-                    f"no project was named. {self._status().reply_text} If "
-                    f"the user asked for work on a project, ask which one; "
-                    f"the projects are: {', '.join(mention.candidates) or 'none'}"
-                )
-        if found.reason == "ambiguous":
-            return self._refuse(
-                f"the project could be any of {', '.join(found.candidates)}. "
-                f"Ask the user which one"
-            )
-        if found.path is None:
-            return self._refuse(
-                f"there is no project called '{projet}'. The projects are: "
-                f"{', '.join(found.candidates) or 'none'}"
-            )
-
-        if self._holds_yubas_store(cfg, found.path):
-            return self._refuse(
-                f"the project {found.path.name} holds Yuba's own files "
-                f"(profile, rules, tool permissions), which no tool may edit"
-            )
-
-        modifier = _wants_changes(args)
+        modifier = wants_changes(args)
         try:
-            started, job = cc.DELEGATIONS.start(
-                cfg=cfg, db=context.db, projet=found.path.name, path=found.path,
+            started, job = dl.DELEGATIONS.start(
+                cfg=cfg, db=context.db, projet=path.name, path=path,
                 tache=tache, modifier=modifier, origin=context.origin,
                 risk=self.risk_for(args),
             )
-        except cc.ClaudeCodeMissing:
+        except dl.ClaudeCodeMissing:
             return self._refuse(
                 "Claude Code is not installed on this machine (the command "
                 f"'{getattr(cfg, 'claude_code_command', 'claude')}' was not "
                 "found). The user can install it, or set "
                 "claude_code_command to its full path"
             )
+        except dl.DelegationsClosed:
+            return self._refuse("Yuba is stopping, so nothing new starts")
 
         if not started:
             return self._refuse(
@@ -191,44 +234,6 @@ class ClaudeCodeTool(Tool):
                 f"and do not guess what it will find."
             ),
         )
-
-    def _status(self) -> ToolExecutionResult:
-        job = cc.DELEGATIONS.running()
-        if job is not None:
-            return ToolExecutionResult(
-                success=True,
-                reply_text=(
-                    f"Claude Code is still working on {job.projet}, started "
-                    f"{_minutes_since(job.started)} min ago. Its report will "
-                    f"be delivered when it finishes."
-                ),
-            )
-        last = cc.DELEGATIONS.last()
-        if last is not None:
-            ago = _minutes_since(last.job.started + last.duration_s)
-            return ToolExecutionResult(
-                success=True,
-                reply_text=(
-                    f"Nothing is running. The last task, on {last.job.projet}, "
-                    f"{'finished' if last.ok else 'failed'} {ago} min ago. "
-                    f"Its report: « {last.report} »"
-                ),
-            )
-        return ToolExecutionResult(
-            success=True,
-            reply_text="Claude Code has not been given any task since Yuba started.",
-        )
-
-    @staticmethod
-    def _holds_yubas_store(cfg, project: Path) -> bool:
-        try:
-            from ...memory.core import MemoryCore
-
-            core = MemoryCore.for_config(cfg).directory.resolve()
-            project = project.resolve()
-        except Exception:
-            return False
-        return core == project or project in core.parents
 
     @staticmethod
     def _refuse(reason: str) -> ToolExecutionResult:

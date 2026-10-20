@@ -3,9 +3,9 @@
 
 Claude Code works on its own in the project's folder, for minutes, so the
 job runs on its own thread and its report is handed to a delivery the
-daemon wires in. The reply engine runs on the listener's thread while
-holding the query lock: a tool that waited for the job would leave Yuba
-deaf for its whole length.
+daemon wires in when it opens the keeper. The reply engine runs on the
+listener's thread while holding the query lock: a tool that waited for
+the job would leave Yuba deaf for its whole length.
 
 See projets.spec.md beside this file.
 """
@@ -23,11 +23,11 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
 
 from ..debug import debug_log
+from ..tools.policy import OUTCOME_FAILED, OUTCOME_OK, OUTCOME_STARTED
 from ..utils.redact import scrub_secrets
 
 TOOL_NAME = "claudeCode"
@@ -35,23 +35,45 @@ TOOL_NAME = "claudeCode"
 # Ledger rows bracketing a job, one per project: `claudeCode:chantipay`.
 LEDGER_PREFIX = f"{TOOL_NAME}:"
 
+# Why a name does or does not designate a project.
+FOUND = "ok"
+AMBIGUOUS = "ambiguous"
+UNKNOWN = "unknown"
+NO_ROOT = "no_root"
+
 # How close a transcribed name must be to a folder's to count as it.
 _MATCH_CUTOFF = 0.8
 
 # How long after a job on a project a new task there continues its session.
 _RESUME_WINDOW_SEC = 1800.0
 
-# What a session id may look like before it goes on a command line.
-_SESSION_RE = re.compile(r"^[A-Za-z0-9-]{8,64}$")
+# What a session id may look like before it goes on a command line: the
+# shape Claude Code prints, which can never be read as a flag.
+_SESSION_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
 
-# How long a project's normalised name must be to be found inside a
-# sentence, so a short folder name does not turn up inside other words.
+# How long a project's normalised name must be to be found inside free
+# text, and how many consecutive words one spoken name may span.
 _MIN_MENTION = 4
+_MAX_MENTION_WORDS = 5
 
 # Everything that is not a letter or a digit, in any script.
 _NON_WORD = re.compile(r"[\W_]+", re.UNICODE)
 
 _STDERR_TAIL = 300
+
+# The report is spoken, kept in the conversation and quoted back. The
+# rule below asks for three sentences; this is what is kept if it is not
+# obeyed.
+_REPORT_MAX_CHARS = 600
+_SENTENCE_END = re.compile(r"[.!?…。！？](?=\s|$)")
+
+# Tools Claude Code may not use, by kind of job. Deny rules outrank the
+# allow rules in the user's and the project's own settings, which headless
+# `default` mode would otherwise honour without asking anyone.
+_READ_ONLY_DENIED = ("Bash", "Edit", "Write", "MultiEdit", "NotebookEdit",
+                     "WebFetch", "WebSearch")
+_CHANGE_DENIED = ("Bash",)
 
 # Appended to Claude Code's system prompt. It travels on the command line,
 # which `cmd.exe` parses when Claude Code is an npm `.cmd`, so it must not
@@ -72,20 +94,28 @@ class ClaudeCodeMissing(RuntimeError):
     """No Claude Code executable could be found."""
 
 
+class DelegationsClosed(RuntimeError):
+    """The daemon is stopping: nothing new starts."""
+
+
 # ── Finding the project ───────────────────────────────────────────────
 
 
 @dataclass(frozen=True)
 class Resolution:
-    """Which folder a spoken name designates, or why none does.
+    """Which folder a name designates, or why none does.
 
-    ``reason`` is ``ok``, ``ambiguous`` (``candidates`` are the matches),
-    ``unknown`` (``candidates`` are every project) or ``no_root``.
+    ``reason`` is ``FOUND``, ``AMBIGUOUS`` (``candidates`` are the
+    matches), ``UNKNOWN`` (``candidates`` are every project) or
+    ``NO_ROOT``. ``exact`` is true only when the name, normalised, is the
+    folder's: what the user approves on a card then names the folder that
+    runs.
     """
 
     path: Optional[Path]
     reason: str
     candidates: Tuple[str, ...] = ()
+    exact: bool = False
 
 
 def _normalise(name: str) -> str:
@@ -120,6 +150,13 @@ def list_projects(root: Path) -> List[Path]:
     return projects
 
 
+def _by_key(projects: List[Path]) -> Dict[str, List[Path]]:
+    keys: Dict[str, List[Path]] = {}
+    for project in projects:
+        keys.setdefault(_normalise(project.name), []).append(project)
+    return keys
+
+
 def resolve_project(root, name: str) -> Resolution:
     """Find the project a transcribed name designates.
 
@@ -128,55 +165,81 @@ def resolve_project(root, name: str) -> Resolution:
     """
     root = Path(root)
     if not root.is_dir():
-        return Resolution(None, "no_root")
+        return Resolution(None, NO_ROOT)
     projects = list_projects(root)
     every_name = tuple(p.name for p in projects)
     wanted = _normalise(name)
     if not wanted:
-        return Resolution(None, "unknown", every_name)
+        return Resolution(None, UNKNOWN, every_name)
 
-    by_key: Dict[str, List[Path]] = {}
-    for project in projects:
-        by_key.setdefault(_normalise(project.name), []).append(project)
-
+    by_key = _by_key(projects)
     matched = by_key.get(wanted, [])
+    exact = bool(matched)
     if not matched:
         close = difflib.get_close_matches(wanted, list(by_key), n=5, cutoff=_MATCH_CUTOFF)
         matched = [p for key in close for p in by_key[key]]
 
     if len(matched) == 1:
-        return Resolution(matched[0], "ok")
+        return Resolution(matched[0], FOUND, exact=exact)
     if matched:
-        return Resolution(None, "ambiguous", tuple(p.name for p in matched))
-    return Resolution(None, "unknown", every_name)
+        return Resolution(None, AMBIGUOUS, tuple(p.name for p in matched))
+    return Resolution(None, UNKNOWN, every_name)
 
 
 def mentioned_project(root, *texts: str) -> Resolution:
     """Find the project named inside free text, such as the task.
 
-    Small models fold the project into the task and leave the project
-    field empty, or put something else in it. Project names are folder
-    names, not words of a language, so they are looked for as they are:
-    normalised, inside the normalised text. A name inside a longer
-    matching one ("relayer" in "relayer main") gives way to it. One match
-    is an answer, two are a question.
+    Project names are folder names, not words of a language, so they are
+    looked for as they are: a run of whole words of one text whose
+    normalised form is a project's. Never part of a word ("core" is not in
+    "score") and never across two texts. A name inside a longer matching
+    one ("relayer" in "relayer main") gives way to it. One match is an
+    answer, two are a question.
     """
     root = Path(root)
     if not root.is_dir():
-        return Resolution(None, "no_root")
+        return Resolution(None, NO_ROOT)
     projects = list_projects(root)
-    haystack = _normalise(" ".join(t for t in texts if t))
-    found = [(p, _normalise(p.name)) for p in projects]
-    found = [(p, key) for p, key in found if len(key) >= _MIN_MENTION and key in haystack]
-    keys = {key for _, key in found}
-    found = [(p, key) for p, key in found
-             if not any(key != other and key in other for other in keys)]
+    by_key = {key: paths for key, paths in _by_key(projects).items()
+              if len(key) >= _MIN_MENTION}
 
-    if len(found) == 1:
-        return Resolution(found[0][0], "ok")
-    if found:
-        return Resolution(None, "ambiguous", tuple(p.name for p, _ in found))
-    return Resolution(None, "unknown", tuple(p.name for p in projects))
+    found = set()
+    for text in texts:
+        words = [w for w in _NON_WORD.split((text or "").casefold()) if w]
+        for start in range(len(words)):
+            for end in range(start + 1, min(len(words), start + _MAX_MENTION_WORDS) + 1):
+                key = "".join(words[start:end])
+                if key in by_key:
+                    found.add(key)
+    found = {key for key in found
+             if not any(key != other and key in other for other in found)}
+    matched = [p for key in sorted(found) for p in by_key[key]]
+
+    if len(matched) == 1:
+        return Resolution(matched[0], FOUND)
+    if matched:
+        return Resolution(None, AMBIGUOUS, tuple(p.name for p in matched))
+    return Resolution(None, UNKNOWN, tuple(p.name for p in projects))
+
+
+def choose_project(root, projet: str, texts: List[str]) -> Resolution:
+    """The project a call designates.
+
+    A named `projet` is resolved, and if it names no folder, read as free
+    text, in case it carries the name among other words; it is never
+    replaced by a folder some other argument mentions. With no `projet`,
+    the other arguments are searched.
+    """
+    root = Path(root)
+    if not root.is_dir():
+        return Resolution(None, NO_ROOT)
+    if (projet or "").strip():
+        found = resolve_project(root, projet)
+        if found.reason != UNKNOWN:
+            return found
+        inside = mentioned_project(root, projet)
+        return inside if inside.reason in (FOUND, AMBIGUOUS) else found
+    return mentioned_project(root, *texts)
 
 
 # ── Running Claude Code ───────────────────────────────────────────────
@@ -213,6 +276,8 @@ def build_command(prefix: List[str], *, modifier: bool,
         "-p",
         "--output-format", "json",
         "--permission-mode", "acceptEdits" if modifier else "default",
+        "--disallowedTools", *(_CHANGE_DENIED if modifier else _READ_ONLY_DENIED),
+        "--strict-mcp-config",
         "--append-system-prompt", _REPORT_RULE,
     ]
     if resume and _SESSION_RE.match(resume):
@@ -222,16 +287,17 @@ def build_command(prefix: List[str], *, modifier: bool,
 
 def _stderr_reason(stderr: str) -> str:
     tail = (stderr or "").strip()[-_STDERR_TAIL:]
-    return scrub_secrets(" ".join(tail.split()))
+    return " ".join(tail.split())
 
 
 def parse_report(stdout: str, stderr: str,
                  returncode: Optional[int]) -> Tuple[bool, str, Optional[str]]:
     """Read what `claude -p --output-format json` printed.
 
-    Returns (ok, report, session id). The report is scrubbed of secrets:
-    it is read aloud and kept in the conversation. Nothing is invented:
-    a job that said nothing reports that it said nothing.
+    Returns (ok, report, session id). Accepts the result object, an array
+    whose last ``result`` entry is taken, or failing that the last line
+    that parses. Nothing is invented: a job that said nothing reports that
+    it said nothing.
     """
     data = None
     text = (stdout or "").strip()
@@ -260,7 +326,7 @@ def parse_report(stdout: str, stderr: str,
 
     sid = data.get("session_id")
     session = sid if isinstance(sid, str) and _SESSION_RE.match(sid) else None
-    report = scrub_secrets(str(data.get("result") or "").strip())
+    report = str(data.get("result") or "").strip()
     subtype = data.get("subtype")
     ok = (
         returncode == 0
@@ -273,6 +339,18 @@ def parse_report(stdout: str, stderr: str,
             f"Claude Code s'est arrêté sans rien dire ({subtype or returncode})"
         )
     return ok, report, session
+
+
+def _clean_report(report: str) -> str:
+    """Scrubbed of secrets, then cut at the last sentence that fits."""
+    report = scrub_secrets(report or "").strip()
+    if len(report) <= _REPORT_MAX_CHARS:
+        return report
+    head = report[:_REPORT_MAX_CHARS]
+    ends = [m.end() for m in _SENTENCE_END.finditer(head)]
+    if ends and ends[-1] >= _REPORT_MAX_CHARS // 3:
+        return head[:ends[-1]] + " […]"
+    return head.rstrip() + "…"
 
 
 def _kill_tree(proc: subprocess.Popen) -> None:
@@ -300,6 +378,85 @@ def _kill_tree(proc: subprocess.Popen) -> None:
         pass
 
 
+def _tie_to_this_process(proc: subprocess.Popen):
+    """Windows: put the job's process tree in a job object that dies with
+    this process, so a daemon killed rather than stopped leaves nothing
+    editing the user's code. Returns the job handle, or None.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _IoCounters(ctypes.Structure):
+            _fields_ = [(name, ctypes.c_ulonglong) for name in (
+                "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+                "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
+
+        class _BasicLimits(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_int64),
+                ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class _ExtendedLimits(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", _BasicLimits),
+                ("IoInfo", _IoCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.CreateJobObjectW.argtypes = (ctypes.c_void_p, wintypes.LPCWSTR)
+        kernel32.SetInformationJobObject.argtypes = (
+            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD)
+        kernel32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            raise ctypes.WinError(ctypes.get_last_error())
+        limits = _ExtendedLimits()
+        limits.BasicLimitInformation.LimitFlags = 0x2000  # KILL_ON_JOB_CLOSE
+        if not (kernel32.SetInformationJobObject(
+                    job, 9, ctypes.byref(limits), ctypes.sizeof(limits))  # extended limits
+                and kernel32.AssignProcessToJobObject(job, int(proc._handle))):
+            error = ctypes.get_last_error()
+            kernel32.CloseHandle(job)
+            raise ctypes.WinError(error)
+        return job
+    except Exception as e:
+        debug_log(f"Claude Code job not tied to this process: {e}", "tools")
+        return None
+
+
+def _release(job) -> None:
+    """Close the job object: whatever the agent left running goes too."""
+    if not job:
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle(job)
+    except Exception as e:
+        debug_log(f"Claude Code job object not closed: {e}", "tools")
+
+
 # ── The job ───────────────────────────────────────────────────────────
 
 
@@ -312,7 +469,7 @@ class Job:
     modifier: bool
     origin: Optional[str]
     risk: str
-    started_at: datetime
+    verdict: str
     started: float  # monotonic
 
 
@@ -320,26 +477,32 @@ class Job:
 class Outcome:
     job: Job
     ok: bool
-    report: str
+    report: str  # scrubbed of secrets and capped
     session_id: Optional[str]
     duration_s: float
 
 
+class _Session(NamedTuple):
+    id: str
+    finished: float  # monotonic
+    approved: bool  # last continued by a job that could edit, so approved on a card
+
+
 def compose_announcement(outcome: Outcome) -> str:
     """The message delivered when a job ends, written by code around
-    Claude Code's own report."""
-    report = scrub_secrets(outcome.report or "").strip()
+    Claude Code's own report, which is quoted as its words."""
     if outcome.ok:
-        return f"Claude Code a fini sur {outcome.job.projet}. {report}".strip()
-    return f"Claude Code n'a pas pu finir sur {outcome.job.projet} : {report}".strip()
+        return f"Claude Code a fini sur {outcome.job.projet} : « {outcome.report} »"
+    return f"Claude Code n'a pas pu finir sur {outcome.job.projet} : {outcome.report}"
 
 
 def _verdict(cfg, risk: str) -> str:
-    """What the user's policy says about the tool at this risk, for the
-    ledger's bracket rows."""
+    """What the user's policy says about the tool at this risk, read once
+    when the job starts so both bracket rows carry the same answer."""
     from ..tools.policy import ToolPolicy
 
     try:
+        # Imported here: the registry imports the tool, which imports this.
         from ..tools.registry import load_tool_policy
 
         return load_tool_policy(cfg).verdict(TOOL_NAME, risk)
@@ -347,14 +510,14 @@ def _verdict(cfg, risk: str) -> str:
         return ToolPolicy.empty().verdict(TOOL_NAME, risk)
 
 
-def _record(db, cfg, job: Job, outcome: str, duration_ms: Optional[int] = None) -> None:
+def _record(db, job: Job, outcome: str, duration_ms: Optional[int] = None) -> None:
     """One bracket row. Bookkeeping never breaks the job."""
     if db is None or not hasattr(db, "record_action"):
         return
     try:
         db.record_action(
             tool=f"{LEDGER_PREFIX}{job.projet}", args={"modifier": job.modifier},
-            risk=job.risk, verdict=_verdict(cfg, job.risk), outcome=outcome,
+            risk=job.risk, verdict=job.verdict, outcome=outcome,
             duration_ms=duration_ms, origin=job.origin, query=None,
             request_id=job.id,
         )
@@ -363,22 +526,48 @@ def _record(db, cfg, job: Job, outcome: str, duration_ms: Optional[int] = None) 
 
 
 class Delegations:
-    """The one Claude Code job allowed at a time, and what the last one said."""
+    """The one Claude Code job allowed at a time, and what the last one said.
+
+    The daemon opens it when it starts, with the delivery to use, and
+    closes it when it stops. Opening starts fresh: a daemon restarted
+    inside the same process keeps no session and no report from the last.
+    """
 
     def __init__(self):
         self._lock = threading.Lock()
         self._finished = threading.Condition(self._lock)
+        self._closed = False
         self._running: Optional[Job] = None
         self._proc: Optional[subprocess.Popen] = None
         self._thread: Optional[threading.Thread] = None
         self._active = 0  # jobs whose thread has not finished delivering
         self._cancelled: set = set()
         self._last: Optional[Outcome] = None
-        self._sessions: Dict[str, Tuple[str, float]] = {}
+        self._sessions: Dict[str, _Session] = {}
         self._deliver: Optional[Callable[[Outcome], None]] = None
 
-    def set_delivery(self, deliver: Optional[Callable[[Outcome], None]]) -> None:
-        self._deliver = deliver
+    def open(self, deliver: Optional[Callable[[Outcome], None]]) -> None:
+        with self._lock:
+            self._closed = False
+            self._deliver = deliver
+            self._sessions.clear()
+            self._last = None
+            self._cancelled.clear()
+
+    def close(self, timeout: float = 5.0) -> None:
+        """Refuse anything new and kill a running job: nothing would be
+        left to deliver its report."""
+        with self._lock:
+            self._closed = True
+            job, proc, thread = self._running, self._proc, self._thread
+            if job is not None:
+                self._cancelled.add(job.id)
+        if proc is not None:
+            _kill_tree(proc)
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout)
+        if job is not None:
+            debug_log(f"Claude Code job on {job.projet} stopped with the daemon", "tools")
 
     def running(self) -> Optional[Job]:
         with self._lock:
@@ -398,27 +587,37 @@ class Delegations:
               risk: str) -> Tuple[bool, Job]:
         """Start a job, or return the one already running.
 
-        Raises ``ClaudeCodeMissing`` when no executable can be found.
+        Raises ``DelegationsClosed`` once closed and ``ClaudeCodeMissing``
+        when no executable can be found.
         """
+        with self._lock:
+            if self._closed:
+                raise DelegationsClosed()
+            if self._running is not None:
+                return False, self._running
+
         prefix = resolve_claude_command(getattr(cfg, "claude_code_command", "claude"))
         if prefix is None:
             raise ClaudeCodeMissing(getattr(cfg, "claude_code_command", "claude"))
         timeout = float(getattr(cfg, "claude_code_timeout_sec", 1800.0))
+        verdict = _verdict(cfg, risk)
 
         with self._lock:
+            if self._closed:
+                raise DelegationsClosed()
             if self._running is not None:
                 return False, self._running
             job = Job(
                 id=f"cc_{uuid.uuid4().hex[:12]}", projet=projet, path=Path(path),
                 tache=tache, modifier=bool(modifier), origin=origin, risk=risk,
-                started_at=datetime.now(timezone.utc), started=time.monotonic(),
+                verdict=verdict, started=time.monotonic(),
             )
             argv = build_command(prefix, modifier=job.modifier,
-                                 resume=self._resume_for(job.path))
+                                 resume=self._resume_for(job.path, job.modifier))
             self._running = job
             self._active += 1
             thread = threading.Thread(
-                target=self._run, args=(job, argv, timeout, cfg, db),
+                target=self._run, args=(job, argv, timeout, db),
                 name="jarvis-claude-code", daemon=True,
             )
             self._thread = thread
@@ -429,7 +628,7 @@ class Delegations:
             f"{', resuming' if '--resume' in argv else ''})",
             "tools",
         )
-        _record(db, cfg, job, "démarré")
+        _record(db, job, OUTCOME_STARTED)
         try:
             thread.start()
         except Exception:
@@ -441,54 +640,49 @@ class Delegations:
                 self._thread = None
                 self._active -= 1
                 self._finished.notify_all()
-            _record(db, cfg, job, "échec", 0)
+            _record(db, job, OUTCOME_FAILED, 0)
             raise
         return True, job
 
-    def shutdown(self, timeout: float = 5.0) -> None:
-        """Kill a running job: nothing would be left to deliver its report."""
-        with self._lock:
-            job, proc, thread = self._running, self._proc, self._thread
-            if job is not None:
-                self._cancelled.add(job.id)
-        if proc is not None:
-            _kill_tree(proc)
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout)
-        if job is not None:
-            debug_log(f"Claude Code job on {job.projet} stopped with the daemon", "tools")
-
     # ── Inside the job's thread ──────────────────────────────────────
 
-    def _resume_for(self, path: Path) -> Optional[str]:
+    def _resume_for(self, path: Path, modifier: bool) -> Optional[str]:
         """The session to continue on this project, if one ended recently.
-        Caller holds the lock."""
-        held = self._sessions.get(_key(path))
-        if held and time.monotonic() - held[1] < _RESUME_WINDOW_SEC:
-            return held[0]
-        return None
 
-    def _run(self, job: Job, argv: List[str], timeout: float, cfg, db) -> None:
+        A job that may edit continues only a session a card approved: a
+        question runs without one, and its conversation must not ride into
+        a change. Caller holds the lock.
+        """
+        held = self._sessions.get(_key(path))
+        if not held or time.monotonic() - held.finished >= _RESUME_WINDOW_SEC:
+            return None
+        if modifier and not held.approved:
+            return None
+        return held.id
+
+    def _run(self, job: Job, argv: List[str], timeout: float, db) -> None:
         session = None
         try:
             stdout, stderr, code, timed_out = self._execute(job, argv, timeout)
             if timed_out:
                 ok = False
-                report = (f"délai dépassé ({int(timeout // 60) or 1} min), "
+                report = (f"délai dépassé ({max(1, int(timeout // 60))} min), "
                           f"le travail a été arrêté")
             else:
                 ok, report, session = parse_report(stdout, stderr, code)
         except Exception as e:
-            ok, report = False, f"impossible de lancer Claude Code : {e}"
+            ok, report = False, f"impossible de lancer Claude Code dans {job.projet} : {e}"
 
-        outcome = Outcome(job=job, ok=ok, report=report, session_id=session,
+        outcome = Outcome(job=job, ok=ok, report=_clean_report(report),
+                          session_id=session,
                           duration_s=time.monotonic() - job.started)
         with self._lock:
             cancelled = job.id in self._cancelled
             self._cancelled.discard(job.id)
             self._last = outcome
-            if session:
-                self._sessions[_key(job.path)] = (session, time.monotonic())
+            if outcome.session_id:
+                self._sessions[_key(job.path)] = _Session(
+                    outcome.session_id, time.monotonic(), job.modifier)
             self._running = None
             self._proc = None
 
@@ -497,7 +691,7 @@ class Delegations:
             f"after {outcome.duration_s:.0f}s",
             "tools",
         )
-        _record(db, cfg, job, "ok" if ok else "échec",
+        _record(db, job, OUTCOME_OK if ok else OUTCOME_FAILED,
                 int(outcome.duration_s * 1000))
         try:
             if not cancelled and self._deliver is not None:
@@ -517,24 +711,32 @@ class Delegations:
         )
         if os.name == "nt":
             kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            # An npm install of Claude Code is a .cmd that runs `node` by
+            # bare name, and cmd.exe looks in the current directory, the
+            # project, before PATH: a repository's own node.exe would run.
+            kwargs["env"] = {**os.environ, "NoDefaultCurrentDirectoryInExePath": "1"}
         else:
             kwargs["start_new_session"] = True
         proc = subprocess.Popen(argv, **kwargs)
-        with self._lock:
-            self._proc = proc
-            cancelled = job.id in self._cancelled
-        if cancelled:
-            _kill_tree(proc)
+        tie = _tie_to_this_process(proc)
         try:
-            stdout, stderr = proc.communicate(input=job.tache, timeout=timeout)
-            return stdout, stderr, proc.returncode, False
-        except subprocess.TimeoutExpired:
-            _kill_tree(proc)
+            with self._lock:
+                self._proc = proc
+                cancelled = job.id in self._cancelled
+            if cancelled:
+                _kill_tree(proc)
             try:
-                stdout, stderr = proc.communicate(timeout=15)
-            except Exception:
-                stdout, stderr = "", ""
-            return stdout, stderr, proc.returncode, True
+                stdout, stderr = proc.communicate(input=job.tache, timeout=timeout)
+                return stdout, stderr, proc.returncode, False
+            except subprocess.TimeoutExpired:
+                _kill_tree(proc)
+                try:
+                    stdout, stderr = proc.communicate(timeout=15)
+                except Exception:
+                    stdout, stderr = "", ""
+                return stdout, stderr, proc.returncode, True
+        finally:
+            _release(tie)
 
 
 def _key(path: Path) -> str:
@@ -544,5 +746,6 @@ def _key(path: Path) -> str:
         return str(path)
 
 
-# The process-wide keeper. The daemon wires its delivery and stops it.
+# The process-wide keeper. The daemon opens it when it starts and closes it
+# when it stops.
 DELEGATIONS = Delegations()

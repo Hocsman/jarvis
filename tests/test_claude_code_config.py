@@ -44,3 +44,12 @@ def test_the_deadline_is_bounded(tmp_path, monkeypatch, given, kept):
     settings = _load(tmp_path, monkeypatch, claude_code_timeout_sec=given)
 
     assert settings.claude_code_timeout_sec == kept
+
+
+def test_an_empty_command_means_claude_and_a_padded_folder_is_trimmed(tmp_path, monkeypatch):
+    settings = _load(tmp_path, monkeypatch,
+                     claude_code_command="  ",
+                     claude_code_projects_dir=f"  {tmp_path / 'Projets'}  ")
+
+    assert settings.claude_code_command == "claude"
+    assert settings.claude_code_projects_dir == str(tmp_path / "Projets")

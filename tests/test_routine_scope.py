@@ -152,15 +152,16 @@ def test_there_is_no_wildcard():
     assert scope.allows("chrome-devtools__take_snapshot") is False
 
 
-# ── Three names no envelope can hold ──────────────────────────────────
+# ── Four names no envelope can hold ───────────────────────────────────
 
 
-@pytest.mark.parametrize("name", ["toolSearchTool", "refreshMCPTools", "stop"])
+@pytest.mark.parametrize("name", ["toolSearchTool", "refreshMCPTools", "stop", "claudeCode"])
 def test_a_few_tools_are_refused_even_when_the_file_names_them(name):
     """`toolSearchTool` appends any name in the registry to the running
     turn's allow-list, so an envelope containing it can widen itself into
     every tool there is. `refreshMCPTools` changes what tools exist
     mid-run. `stop` ends a conversation, and a routine is not one.
+    `claudeCode` reports aloud, later, to someone who has to be there.
 
     Written into a block by hand, they still do not open."""
     assert RoutineScope(nom="x", outils=[name]).allows(name) is False

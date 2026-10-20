@@ -69,6 +69,8 @@ _confirmation_callbacks: dict = {
     # Callable[[str, str, str], None] — texte, due_local, raison
     "on_reminder_failed": None,
     "on_confirm_reply": None,  # Callable[[Optional[str]], None] - narration of a confirmed action
+    # Callable[[dict], None] — projet, ok, texte: a Claude Code report
+    "on_delegation_done": None,
 }
 
 # Shutdown timeout for diary update (shorter than normal to allow reasonable quit time)
@@ -896,7 +898,7 @@ def deliver_delegation(outcome) -> None:
     buses, and is spoken unless the task was typed. See
     projets/projets.spec.md.
     """
-    from .projets.claude_code import compose_announcement
+    from .projets.delegation import compose_announcement
 
     while _chat_query_lock.locked() and not is_stop_requested():
         time.sleep(_DELIVERY_POLL_SEC)
@@ -1444,10 +1446,12 @@ def main() -> None:
         print("🌅 Routines off", flush=True)
 
     # Projets. A Claude Code job ends minutes after the turn that started
-    # it, and its report is delivered from the job's own thread.
-    from .projets.claude_code import DELEGATIONS
+    # it, and its report is delivered from the job's own thread. Opening
+    # starts fresh, which matters when the desktop restarts the daemon
+    # inside its own process.
+    from .projets.delegation import DELEGATIONS
 
-    DELEGATIONS.set_delivery(deliver_delegation)
+    DELEGATIONS.open(deliver_delegation)
     if str(getattr(cfg, "claude_code_projects_dir", "") or "").strip():
         print("🛠️ Claude Code projects on", flush=True)
     else:
@@ -1609,11 +1613,13 @@ def main() -> None:
             debug_log("waiting for the routine in flight...", "jarvis")
             _global_routine_runner.stop()
 
-        # A Claude Code job still running has nobody left to report to.
+        # Closed before the voice thread and the chat worker are waited
+        # on: a turn still in flight must not start a job that outlives
+        # the daemon, and a job still running has nobody left to report to.
         try:
-            from .projets.claude_code import DELEGATIONS
+            from .projets.delegation import DELEGATIONS
 
-            DELEGATIONS.shutdown()
+            DELEGATIONS.close()
         except Exception as e:
             debug_log(f"Claude Code job not stopped: {e}", "jarvis")
 

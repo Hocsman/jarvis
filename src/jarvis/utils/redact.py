@@ -5,12 +5,19 @@ import re
 # vendor-shaped tokens are matched before generic catches so the more
 # informative label wins (e.g. "[REDACTED_AWS_KEY]" beats "[REDACTED_HEX]").
 _REDACTION_RULES: list[tuple[re.Pattern[str], str]] = [
+    # A whole private key block, first: the rules below would otherwise cut
+    # its body into pieces and leave most of it in place.
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
+     "[REDACTED_PRIVATE_KEY]"),
     (re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", re.IGNORECASE), "[REDACTED_EMAIL]"),
     (re.compile(r"\b(?:\d[ -]*?){13,19}\b"), "[REDACTED_CARD]"),
     # Vendor-specific access keys (bare, no surrounding keyword required).
     (re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), "[REDACTED_AWS_KEY]"),
     (re.compile(r"\b(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{16,}\b"), "[REDACTED_STRIPE_KEY]"),
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b"), "[REDACTED_GH_TOKEN]"),
+    # Before the plain `sk-` shape: these carry hyphens and underscores.
+    (re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{20,}"), "[REDACTED_ANTHROPIC_KEY]"),
+    (re.compile(r"\bsk-proj-[A-Za-z0-9_\-]{20,}"), "[REDACTED_OPENAI_KEY]"),
     (re.compile(r"\bsk-[A-Za-z0-9]{32,}\b"), "[REDACTED_OPENAI_KEY]"),
     (re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b"), "[REDACTED_GOOG_KEY]"),
     # Authorisation headers — Bearer/Basic carry credentials in line.
@@ -20,6 +27,14 @@ _REDACTION_RULES: list[tuple[re.Pattern[str], str]] = [
     # newer formats like gh[pousr]_ get a precise label first.
     (re.compile(r"\b(AWS|GH|GCP|AZURE|xox[abpcr]-)[A-Za-z0-9_\-]{10,}\b", re.IGNORECASE), "[REDACTED_TOKEN]"),
     (re.compile(r"\b(?:eyJ[0-9A-Za-z._\-]+)\b"), "[REDACTED_JWT]"),
+    # An environment variable holding a credential, the way a `.env`
+    # writes it: an upper-case name with the keyword anywhere in it
+    # (`DB_PASSWORD`, `STRIPE_WEBHOOK_SECRET`). Upper case only, so prose
+    # that happens to use one of these words is left alone.
+    (re.compile(
+        r"\b([A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|PRIVATE_KEY|ACCESS_KEY)[A-Z0-9_]*)"
+        r"\s*[:=]\s*\S+"
+    ), r"\1=[REDACTED]"),
     # Keyword-anchored credentials. Covers refresh/access/oauth/session
     # variants in addition to the original pass/secret/token/apikey set.
     (re.compile(

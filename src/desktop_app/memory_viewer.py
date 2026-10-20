@@ -1866,6 +1866,9 @@ def index() -> str:
         .activity-expiré   { color: var(--text-muted); border-color: var(--text-muted);
                              border-style: dashed; }
         .activity-demandé  { color: var(--accent-primary); border-color: var(--accent-primary); }
+        /* A run that began. Left alone, with nothing after it, it is the
+           trace of a run the process took down with it. */
+        .activity-démarré  { color: var(--text-secondary); border-color: var(--text-secondary); }
         .activity-asked    { opacity: 0.65; }
         .core-intro {
             background: var(--bg-card);
@@ -3859,8 +3862,11 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
                 const origin = a.origin ? escapeHtml(a.origin) : '—';
                 // On an outcome row, the badge says the episode began with
                 // a question. On the ask row itself it would just repeat
-                // the outcome beside it.
-                const asked = (a.request_id && a.outcome !== 'demandé')
+                // the outcome beside it. A run bracket (`routine:<nom>`,
+                // `claudeCode:<projet>`) shares an id only to pair its
+                // opening and closing rows: nobody was asked. No tool name
+                // carries a colon, so one marks a bracket.
+                const asked = (a.request_id && a.outcome !== 'demandé' && !a.tool.includes(':'))
                     ? '<span class="activity-badge activity-asked" title="Yuba a demandé ta permission">demandé</span>'
                     : '';
                 const row = elementFrom(`<div class="activity-row">

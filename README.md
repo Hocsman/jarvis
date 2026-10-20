@@ -238,7 +238,7 @@ Timings and the model that reads a spoken answer live under **⚙️ Settings �
 </details>
 
 <details>
-<summary><strong>Projects — handing work to Claude Code</strong></summary>
+<summary><strong>Projects: handing work to Claude Code</strong></summary>
 
 Install [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and sign in once in a terminal, then name the folder that holds your projects:
 
@@ -247,7 +247,7 @@ Install [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and sign i
 ```
 
 - Every sub-folder is a project, matched from what you say ("nikah score" finds `nikahscore`). Two close matches, and it asks which one.
-- A task that changes code shows a card with the project and the exact task, and runs only on a click. A question runs read-only, without asking; write `- claudeCode` under `## Demande` in `outils.md` if you want to be asked every time.
+- A task that changes code shows a card with the project and the exact task, and runs only on a click; Claude Code may edit files but not run commands. A question runs without asking, and Claude Code may then only read: editing, commands and web access are denied, whatever the project's own Claude Code settings allow. Write `- claudeCode` under `## Demande` in `outils.md` if you want to be asked every time.
 - One task at a time, stopped after `claude_code_timeout_sec` (30 minutes by default). Ask "how is Claude Code doing?" at any point.
 - `claude_code_command` takes the full path of the executable if `claude` is not on the `PATH` Jarvis sees.
 

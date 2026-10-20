@@ -115,6 +115,8 @@ The central controller that manages:
 - **Subprocess mode**: the hook writes a `__CHAT_QUERY__:` line to the daemon's stdin. The daemon's `__CHAT__:` lines come back through `_on_chat_ipc_line`, which feeds the dashboard as well as the chat window.
 - **Bundled mode**: the hook calls `jarvis.daemon.submit_text_query` with `on_start`, `on_token`, `on_stage`, `on_complete` and `on_busy`. The daemon calls back from its worker thread, so each event is rewritten as the `__CHAT__:` line the subprocess bus would have carried and emitted through a `ChatIpcSignals`, which queues it onto the Qt main thread; the dashboard then parses it as it parses a subprocess line. These events reach the dashboard alone. The chat window keeps calling the daemon with its own callbacks, and a reply it had also been handed as an event would show twice once it seeds its transcript from the dialogue memory on first show. The two windows share the daemon's one dialogue memory, not each other's transcript.
 
+A Claude Code report (`delegation_done`) reaches the dashboard on either route and is added to its transcript as a reply bubble without settling anything: a task typed in the dashboard is never spoken, and this is where its report is read.
+
 Nothing on this route logs the query text: the `start` event carries the redacted query, and the debug lines name no message.
 
 ### Orb
@@ -218,7 +220,7 @@ Chat has no stdout bus in this mode: the chat window and the dashboard each call
 
 In subprocess mode, the daemon runs as a separate process. IPC is achieved via stdout:
 - **Diary updates**: Daemon emits JSON events prefixed with `__DIARY__:` (e.g., `__DIARY__:{"type":"token","data":"Hello"}`)
-- **Chat events**: Daemon emits `__CHAT__:` events (start/token/stage/complete/busy, the confirmation events, the rewind verdicts); the desktop app writes queries, cancellations, rewinds and confirmation decisions to the daemon's stdin as `__CHAT_QUERY__:`, `__CHAT_CANCEL__`, `__CHAT_REWIND__:` and `__CHAT_DECISION__:` lines (see `chat_window.spec.md`). Chat lines never reach the log viewer, in either mode.
+- **Chat events**: Daemon emits `__CHAT__:` events (start/token/stage/complete/busy, the confirmation events, the rewind verdicts, `delegation_done` for a Claude Code report); the desktop app writes queries, cancellations, rewinds and confirmation decisions to the daemon's stdin as `__CHAT_QUERY__:`, `__CHAT_CANCEL__`, `__CHAT_REWIND__:` and `__CHAT_DECISION__:` lines (see `chat_window.spec.md`). Chat lines never reach the log viewer, in either mode.
 - Desktop app intercepts these lines from the log stream
 - DiaryUpdateDialog's `process_log_line()` parses and emits signals
 - Chat IPC lines are marshalled onto the Qt main thread via `ChatIpcSignals`, then `_on_chat_ipc_line()` forwards them to `ChatWindow.process_ipc_line()` and, when it is open, to `DashboardWindow.process_ipc_line()`
