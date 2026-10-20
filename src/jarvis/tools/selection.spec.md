@@ -34,6 +34,8 @@ Regardless of strategy, these tools are **always** included:
 - `remember` — an explicit "remember that…" must never be silently dropped because the router failed to offer the tool. Being always available is safe here because the tool is inert unless the user asked for it, and because every write lands in a plain-text file the user can read and edit.
 - `forget` — same argument, with more at stake: a user asking for something to be removed and being told "done" while it stays in every later prompt is the worst outcome the core can produce.
 
+Those the strategy did not pick itself are appended in a fixed order, `stop`, `forget`, `remember`, after whatever it did pick. The planner reads the catalogue in that order and a small one plans differently when `remember` moves, so the order is part of the behaviour: an order left to a set's hash seed made the same sentence plan differently from one start to the next, and made every eval measure one draw of it. `remember` goes last because it is the tool a small planner reaches for to restate a request it was given ("remember that the user wants a bug fixed"), and that step writes into the core; on `gemma4:e2b` this order did so 12 times in 30 on delegations to Claude Code, the five others 18 to 21.
+
 ### URL cue
 
 Independently of any strategy, a query carrying a URL (`http://`, `https://`

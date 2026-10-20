@@ -203,6 +203,42 @@ class TestKeywordStrategy:
         assert "stop" in result
 
     @pytest.mark.unit
+    def test_the_mandatory_tools_come_in_the_same_order_in_every_process(self):
+        """The planner reads the catalogue in this order, and a small one
+        plans differently when `remember` moves. An order that depended on
+        the process would make the same sentence behave differently from
+        one start of the assistant to the next, and an eval measure one
+        draw of it."""
+        import os
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        src = Path(__file__).resolve().parents[1] / "src"
+        script = (
+            "from jarvis.tools.selection import select_tools, ToolSelectionStrategy\n"
+            "class T:\n"
+            "    def __init__(self, n, d): self.name, self.description = n, d\n"
+            "tools = {n: T(n, d) for n, d in [\n"
+            "    ('getWeather', 'Get current weather conditions.'),\n"
+            "    ('stop', 'End the conversation.'),\n"
+            "    ('remember', 'Store a fact about the user.'),\n"
+            "    ('forget', 'Retire a stored fact.')]}\n"
+            "print(select_tools('weather', tools, {}, strategy=ToolSelectionStrategy.KEYWORD))\n"
+        )
+        orders = set()
+        for seed in ("1", "3", "6"):
+            done = subprocess.run(
+                [sys.executable, "-c", script],
+                env={**os.environ, "PYTHONHASHSEED": seed, "PYTHONPATH": str(src)},
+                capture_output=True, text=True, timeout=60,
+            )
+            assert done.returncode == 0, done.stderr
+            orders.add(done.stdout.strip().splitlines()[-1])
+
+        assert len(orders) == 1, f"the catalogue order depends on the process: {orders}"
+
+    @pytest.mark.unit
     def test_vague_query_falls_back_to_all(self):
         result = select_tools("hmm", _builtin(), {}, strategy=ToolSelectionStrategy.KEYWORD)
         assert len(result) == len(_builtin())
