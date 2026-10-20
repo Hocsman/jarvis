@@ -45,6 +45,9 @@ OUTCOME_FAILED = "échec"
 # row and nothing after it, which is the only trace of it that would
 # exist anywhere.
 OUTCOME_STARTED = "démarré"
+# A Claude Code job the user stopped before it ended. Kept apart from
+# `échec`, which says something broke: here nothing did, he said stop.
+OUTCOME_CANCELLED = "annulé"
 OUTCOME_REFUSED = "refusé"
 OUTCOME_ASKED = "demandé"
 OUTCOME_DECLINED = "décliné"

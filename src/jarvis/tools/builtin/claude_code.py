@@ -50,7 +50,15 @@ def _minutes_since(started: float) -> int:
     return max(0, int((time.monotonic() - started) // 60))
 
 
-def _status_text() -> str:
+def edits_kept(job) -> str:
+    """What a stopped job leaves behind: stopping is not undoing."""
+    if not job.modifier:
+        return "It was only reading, so nothing in the project changed."
+    return ("Files it had already changed are not undone, so do not claim "
+            "the project is back as it was: the user may want to look at them.")
+
+
+def status_text() -> str:
     """How the job is going, from memory: nothing here touches a project."""
     job = dl.DELEGATIONS.running()
     if job is not None:
@@ -62,6 +70,12 @@ def _status_text() -> str:
     last = dl.DELEGATIONS.last()
     if last is not None:
         ago = _minutes_since(last.job.started + last.duration_s)
+        if last.cancelled:
+            return (
+                f"Nothing is running. The last task, on {last.job.projet}, "
+                f"was stopped at the user's request {ago} min ago. "
+                f"{edits_kept(last.job)}"
+            )
         return (
             f"Nothing is running. The last task, on {last.job.projet}, "
             f"{'finished' if last.ok else 'failed'} {ago} min ago. "
@@ -105,7 +119,7 @@ def vet_call(args: Optional[Dict[str, Any]], cfg) -> Tuple[Optional[str], Option
                 f"Ask the user which one"), None
     if found.path is None:
         named = f"there is no project called '{projet}'" if projet else "no project was named"
-        return (f"{named}. {_status_text()} If the user asked for work on a "
+        return (f"{named}. {status_text()} If the user asked for work on a "
                 f"project, ask which one; the projects are: "
                 f"{', '.join(found.candidates) or 'none'}"), None
     if _holds_yubas_store(cfg, found.path):
@@ -193,7 +207,7 @@ class ClaudeCodeTool(Tool):
         cfg = context.cfg
         tache = _task(args)
         if not tache:
-            return ToolExecutionResult(success=True, reply_text=_status_text())
+            return ToolExecutionResult(success=True, reply_text=status_text())
 
         refusal, path = vet_call(args, cfg)
         if refusal:

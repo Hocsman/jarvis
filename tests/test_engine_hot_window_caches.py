@@ -160,8 +160,7 @@ def test_router_fallback_to_all_tools_is_not_cached(
     chat model produced an empty reply ("Sorry, I had trouble processing
     that"). Pre-#281 this didn't happen because the router re-rolled per turn.
     """
-    from src.jarvis.tools.registry import BUILTIN_TOOLS
-    full_catalogue = list(BUILTIN_TOOLS.keys())
+    from src.jarvis.tools.registry import offered_builtin_tools
 
     mock_chat.side_effect = [
         {"message": {"content": "hello"}},
@@ -172,6 +171,9 @@ def test_router_fallback_to_all_tools_is_not_cached(
     db = Mock()
     cfg = _mock_cfg()
     dm = DialogueMemory()
+    # The catalogue the router is handed: what the tools' settings and
+    # state leave on, not every tool registered.
+    full_catalogue = list(offered_builtin_tools(cfg).keys())
 
     with patch(
         "src.jarvis.reply.engine.select_tools",

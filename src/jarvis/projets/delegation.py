@@ -27,7 +27,9 @@ from pathlib import Path
 from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
 
 from ..debug import debug_log
-from ..tools.policy import OUTCOME_FAILED, OUTCOME_OK, OUTCOME_STARTED
+from ..tools.policy import (
+    OUTCOME_CANCELLED, OUTCOME_FAILED, OUTCOME_OK, OUTCOME_STARTED,
+)
 from ..utils.redact import scrub_secrets
 
 TOOL_NAME = "claudeCode"
@@ -61,6 +63,11 @@ _MAX_MENTION_WORDS = 5
 _NON_WORD = re.compile(r"[\W_]+", re.UNICODE)
 
 _STDERR_TAIL = 300
+
+# How long a stop waits for the job to end before its turn replies. Past
+# it the reply says the stop is not confirmed, and the end is delivered
+# when it lands.
+_CANCEL_WAIT_SEC = 10.0
 
 # The report is spoken, kept in the conversation and quoted back. The
 # rule below asks for three sentences; this is what is kept if it is not
@@ -477,9 +484,10 @@ class Job:
 class Outcome:
     job: Job
     ok: bool
-    report: str  # scrubbed of secrets and capped
+    report: str  # scrubbed of secrets and capped; empty for a cancelled job
     session_id: Optional[str]
     duration_s: float
+    cancelled: bool = False  # the user stopped it before it ended
 
 
 class _Session(NamedTuple):
@@ -490,7 +498,11 @@ class _Session(NamedTuple):
 
 def compose_announcement(outcome: Outcome) -> str:
     """The message delivered when a job ends, written by code around
-    Claude Code's own report, which is quoted as its words."""
+    Claude Code's own report, which is quoted as its words. A cancelled
+    job said nothing, so nothing is quoted."""
+    if outcome.cancelled:
+        kept = " ; ce qu'il avait déjà modifié reste modifié" if outcome.job.modifier else ""
+        return f"Claude Code a été arrêté sur {outcome.job.projet}, à ta demande{kept}."
     if outcome.ok:
         return f"Claude Code a fini sur {outcome.job.projet} : « {outcome.report} »"
     return f"Claude Code n'a pas pu finir sur {outcome.job.projet} : {outcome.report}"
@@ -531,6 +543,7 @@ class Delegations:
     The daemon opens it when it starts, with the delivery to use, and
     closes it when it stops. Opening starts fresh: a daemon restarted
     inside the same process keeps no session and no report from the last.
+    The user can stop the running job without stopping Yuba (`cancel`).
     """
 
     def __init__(self):
@@ -541,7 +554,11 @@ class Delegations:
         self._proc: Optional[subprocess.Popen] = None
         self._thread: Optional[threading.Thread] = None
         self._active = 0  # jobs whose thread has not finished delivering
-        self._cancelled: set = set()
+        self._cancelled: set = set()  # stopped by the user
+        self._silenced: set = set()  # stopped with the daemon: delivered to nobody
+        # Jobs whose end a waiting `cancel()` reports in its own turn, and
+        # that end once it is known.
+        self._reported: Dict[str, Optional[Outcome]] = {}
         self._last: Optional[Outcome] = None
         self._sessions: Dict[str, _Session] = {}
         self._deliver: Optional[Callable[[Outcome], None]] = None
@@ -553,6 +570,8 @@ class Delegations:
             self._sessions.clear()
             self._last = None
             self._cancelled.clear()
+            self._silenced.clear()
+            self._reported.clear()
 
     def close(self, timeout: float = 5.0) -> None:
         """Refuse anything new and kill a running job: nothing would be
@@ -561,13 +580,41 @@ class Delegations:
             self._closed = True
             job, proc, thread = self._running, self._proc, self._thread
             if job is not None:
-                self._cancelled.add(job.id)
+                self._silenced.add(job.id)
         if proc is not None:
             _kill_tree(proc)
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout)
         if job is not None:
             debug_log(f"Claude Code job on {job.projet} stopped with the daemon", "tools")
+
+    def cancel(self, timeout: float = _CANCEL_WAIT_SEC
+               ) -> Tuple[Optional[Job], Optional[Outcome]]:
+        """Stop the running job, and wait at most ``timeout`` for it to end.
+
+        Returns (None, None) when nothing runs. (job, outcome) when it
+        ended in time: the caller reports it, so it is not delivered again,
+        and it is not a cancellation when the job had finished with its
+        report before the stop reached it. (job, None) when it had not
+        ended yet: its end is then delivered like any other, so nobody is
+        left believing it still runs.
+        """
+        with self._lock:
+            job, proc = self._running, self._proc
+            if job is None:
+                return None, None
+            self._cancelled.add(job.id)
+            self._reported.setdefault(job.id, None)
+        debug_log(f"    🛑 Claude Code on {job.projet}: stop asked", "tools")
+        if proc is not None:
+            _kill_tree(proc)
+        with self._finished:
+            self._finished.wait_for(lambda: self._reported.get(job.id) is not None, timeout)
+            outcome = self._reported.pop(job.id, None)
+        if outcome is None:
+            debug_log(f"    🛑 Claude Code on {job.projet}: stop not confirmed "
+                      f"after {timeout:.0f}s, its end will be delivered", "tools")
+        return job, outcome
 
     def running(self) -> Optional[Job]:
         with self._lock:
@@ -673,28 +720,41 @@ class Delegations:
         except Exception as e:
             ok, report = False, f"impossible de lancer Claude Code dans {job.projet} : {e}"
 
-        outcome = Outcome(job=job, ok=ok, report=_clean_report(report),
-                          session_id=session,
-                          duration_s=time.monotonic() - job.started)
-        with self._lock:
-            cancelled = job.id in self._cancelled
+        report = _clean_report(report)
+        with self._finished:
+            # A job that finished with its report before the stop reached
+            # it is not a cancellation: its edits are done.
+            cancelled = job.id in self._cancelled and not ok
+            silenced = job.id in self._silenced
             self._cancelled.discard(job.id)
+            self._silenced.discard(job.id)
+            outcome = Outcome(job=job, ok=ok, report="" if cancelled else report,
+                              session_id=None if cancelled else session,
+                              duration_s=time.monotonic() - job.started,
+                              cancelled=cancelled)
             self._last = outcome
-            if outcome.session_id:
+            if cancelled:
+                # The conversation it carried is the one the user stopped.
+                self._sessions.pop(_key(job.path), None)
+            elif outcome.session_id:
                 self._sessions[_key(job.path)] = _Session(
                     outcome.session_id, time.monotonic(), job.modifier)
             self._running = None
             self._proc = None
+            reported = job.id in self._reported
+            if reported:
+                self._reported[job.id] = outcome
+            self._finished.notify_all()
 
+        state = "cancelled" if cancelled else "ok" if ok else "failed"
         debug_log(
-            f"    🛠️ Claude Code on {job.projet}: {'ok' if ok else 'failed'} "
-            f"after {outcome.duration_s:.0f}s",
+            f"    🛠️ Claude Code on {job.projet}: {state} after {outcome.duration_s:.0f}s",
             "tools",
         )
-        _record(db, job, OUTCOME_OK if ok else OUTCOME_FAILED,
+        _record(db, job, OUTCOME_CANCELLED if cancelled else OUTCOME_OK if ok else OUTCOME_FAILED,
                 int(outcome.duration_s * 1000))
         try:
-            if not cancelled and self._deliver is not None:
+            if not (silenced or reported) and self._deliver is not None:
                 self._deliver(outcome)
         except Exception as e:
             debug_log(f"Claude Code report not delivered: {e}", "tools")
@@ -722,8 +782,8 @@ class Delegations:
         try:
             with self._lock:
                 self._proc = proc
-                cancelled = job.id in self._cancelled
-            if cancelled:
+                stopped = job.id in self._cancelled or job.id in self._silenced
+            if stopped:
                 _kill_tree(proc)
             try:
                 stdout, stderr = proc.communicate(input=job.tache, timeout=timeout)

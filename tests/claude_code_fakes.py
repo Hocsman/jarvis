@@ -31,6 +31,8 @@ if mode == "grandchild":
     time.sleep(120)
 if mode == "sleep":
     time.sleep(120)
+if mode == "slow":
+    time.sleep(float(os.environ.get("FAKE_CLAUDE_DELAY", "1")))
 if mode == "garbage":
     sys.stderr.write("boom: not logged in\n")
     sys.exit(1)

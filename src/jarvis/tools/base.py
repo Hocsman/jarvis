@@ -118,8 +118,9 @@ class Tool(ABC):
     def offered(self, cfg) -> bool:
         """Whether the router and the model are shown this tool at all.
 
-        False for a tool switched off in the settings: shown, it would
-        cost every routing call its description and could only refuse.
+        False for a tool switched off in the settings, or with nothing to
+        act on (`stopClaudeCode` while no job runs): shown, it would cost
+        every routing call its description and could only refuse.
         Not a gate: a call that arrives anyway still runs the tool, which
         says it is off.
         """

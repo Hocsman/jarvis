@@ -1869,6 +1869,9 @@ def index() -> str:
         /* A run that began. Left alone, with nothing after it, it is the
            trace of a run the process took down with it. */
         .activity-démarré  { color: var(--text-secondary); border-color: var(--text-secondary); }
+        /* A Claude Code job you stopped. Nothing broke, so not red. */
+        .activity-annulé   { color: var(--text-secondary); border-color: var(--text-secondary);
+                             border-style: dashed; }
         .activity-asked    { opacity: 0.65; }
         .core-intro {
             background: var(--bg-card);
