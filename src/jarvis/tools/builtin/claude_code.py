@@ -162,12 +162,12 @@ class ClaudeCodeTool(Tool):
 
     @property
     def description(self) -> str:
-        # The planner reads the first 120 characters, the router the first
-        # sentence. The 120 hold a small planner's own restatement of a
-        # delegation ("the user wants a bug fixed in a project"), which
-        # otherwise lands on `remember`, and the planner reacts to every
-        # character of them; the rest of the sentence is for the router.
-        # Measurements, and what each clause guards against:
+        # The planner reads the first 120 characters; the router reads whole
+        # sentences within 200, here the first sentence alone. The 120 hold
+        # a small planner's own restatement of a delegation ("the user
+        # wants a bug fixed in a project"), which otherwise lands on
+        # `remember`, and small changes to them move the planner; the rest
+        # of the sentence is for the router. Measurements:
         # src/jarvis/projets/projets.spec.md.
         return (
             "Claude Code does what the user wants done in one of their code "
