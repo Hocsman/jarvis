@@ -34,6 +34,7 @@ is compared case-insensitively.
 | `piper` (default) | `PiperTTS` | Light local neural voice, one `.onnx` model per voice, fetched on first use |
 | `kokoro` | `KokoroTTS` | Kokoro-82M, more natural, real time on CPU, multilingual through espeak-ng |
 | `chatterbox` | `ChatterboxTTS` | Heavy PyTorch voice with emotion control and cloning, runs from source only |
+
 Any other name yields Piper. The config layer lowercases `tts_engine` and
 falls back to `piper` for a value that is not one of the three, so the
 factory only ever sees a valid name from the daemon.
@@ -66,10 +67,12 @@ The three engines are interchangeable to the listener. Each exposes:
 the voice on the calling thread (downloading it if absent) so the wait
 happens at launch rather than at the first word. Kokoro warms its
 pipeline on a background thread named `kokoro-init`, ending with one
-throwaway synthesis whose audio is discarded, so the model's first-call
-cost (CUDA kernel loading can take tens of seconds) is paid at startup
-rather than on the first reply; a warm-up failure leaves the pipeline
-loaded and the error surfaces at speak time. A `speak` that arrives
+throwaway synthesis whose audio is discarded (of a digit, which has a
+reading in every language, where a word belongs to one), so the
+model's first-call cost (CUDA kernel loading can take tens of seconds)
+is paid at startup rather than on the first reply; a warm-up failure
+leaves the pipeline loaded and the error surfaces at speak time. A
+`speak` that arrives
 before the load finishes waits on the same lock. On Windows
 Kokoro first imports its package on the calling thread, because loading
 PyTorch, SciPy and OpenBLAS DLLs concurrently deadlocks the Windows

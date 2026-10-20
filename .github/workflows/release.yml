@@ -148,10 +148,10 @@ jobs:
       - name: 📦 Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # Install requirements but skip heavy optional packages (PyTorch, etc.)
-          # Filter out chatterbox-tts, mlx-whisper, and nvidia-* (CUDA libs are
+          # Install requirements but skip packages the build does not bundle:
+          # mlx-whisper (Apple Silicon only) and nvidia-* (CUDA libs are
           # downloaded by the installer on-demand, not bundled in the build)
-          Get-Content requirements.txt | Where-Object { $_ -notmatch '^(chatterbox-tts|mlx-whisper|nvidia-)' } | Set-Content requirements-desktop.txt
+          Get-Content requirements.txt | Where-Object { $_ -notmatch '^(mlx-whisper|nvidia-)' } | Set-Content requirements-desktop.txt
           pip install -r requirements-desktop.txt
           pip install pyinstaller
 
@@ -234,12 +234,11 @@ jobs:
       - name: 📦 Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # Install requirements but skip heavy optional packages (PyTorch/Chatterbox)
           # MLX Whisper is only included on arm64 - it requires Apple Silicon
           if [ "${{ matrix.arch }}" = "arm64" ]; then
-            grep -v -E '^chatterbox-tts' requirements.txt > requirements-desktop.txt
+            cp requirements.txt requirements-desktop.txt
           else
-            grep -v -E '^(chatterbox-tts|mlx-whisper)' requirements.txt > requirements-desktop.txt
+            grep -v -E '^mlx-whisper' requirements.txt > requirements-desktop.txt
           fi
           pip install -r requirements-desktop.txt
           pip install pyinstaller
@@ -330,8 +329,8 @@ jobs:
       - name: 📦 Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          # Install requirements but skip heavy optional packages (PyTorch, etc.)
-          grep -v -E '^(chatterbox-tts|mlx-whisper)' requirements.txt > requirements-desktop.txt
+          # Install requirements but skip mlx-whisper, which needs Apple Silicon
+          grep -v -E '^mlx-whisper' requirements.txt > requirements-desktop.txt
           pip install -r requirements-desktop.txt
           pip install pyinstaller
 

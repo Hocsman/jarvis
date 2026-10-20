@@ -1341,7 +1341,9 @@ class KokoroTTS:
     callbacks behave identically regardless of engine.
     """
 
-    _WARMUP_TEXT = "Bonjour."
+    # A digit rather than a word: a digit has a reading in every language
+    # the pipeline can be set to, where a word belongs to one of them.
+    _WARMUP_TEXT = "1."
 
     def __init__(
         self,
