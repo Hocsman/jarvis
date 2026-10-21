@@ -198,7 +198,7 @@ Every distinct LLM call in Jarvis, what feeds it, what consumes it, and how it i
 - **Inputs**: the user's utterance, and nothing else. The pinned action is deliberately **not** in the prompt — the judge does not need to know what is being approved in order to read whether the sentence approves, and the blindness keeps injected page text out of this context and keeps the action off the network.
 - **System prompt**: `_JUDGE_SYSTEM` in the same file. Names no language, because the user may answer in any. Ternary output, one bare token.
 - **Output**: `oui` / `non` / `flou`. Only the exact token grants; a conditional yes is `flou`, because the judge cannot see what the condition refers to.
-- **Limits**: `confirmation_timeout_sec` (default 8 s, clamped 2–30). **Fails closed**, unlike every other judge here: a timeout, an exception, an empty body, a model that explains itself, or an unrecognised word all come back as `flou`, which grants nothing and is not written to the ledger as a refusal (an empty utterance never reaches the model and reads as `non`). A false no costs a turn; a false yes runs something.
+- **Limits**: `confirmation_timeout_sec` (default 8 s, clamped 2–30). **Fails closed**, unlike every other judge here: a timeout, an exception, an empty body, a model that explains itself, or an unrecognised word all come back as `flou`, which grants nothing and is written to the ledger as `illisible`, not as a refusal (an empty utterance never reaches the model and reads as `non`). A false no costs a turn; a false yes runs something.
 
 ## 16. Reminder time extractor (turns a spoken time into an instant)
 
