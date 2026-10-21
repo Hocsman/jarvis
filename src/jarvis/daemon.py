@@ -892,14 +892,18 @@ def deliver_delegation(outcome) -> None:
     """Tell the user what a Claude Code job did, once it has ended.
 
     Runs on the job's own thread, minutes after the turn that started it,
-    so the report has no turn of its own. It waits for the reply in
-    flight, like a reminder: the lock is inspected, never taken. Then it
+    so the report has no turn of its own. A stop question still waiting
+    about it is withdrawn first. It waits for the reply in flight, like a
+    reminder: the lock is inspected, never taken. Then it
     joins the conversation (a follow-up can refer to it), reaches both
     buses, and is spoken unless the task was typed. See
     projets/projets.spec.md.
     """
     from .projets.delegation import compose_announcement
 
+    # Before waiting for a gap: a new job could start in a reply that
+    # runs first, and a stop question about this one must not reach it.
+    withdraw_stop_question()
     while _chat_query_lock.locked() and not is_stop_requested():
         time.sleep(_DELIVERY_POLL_SEC)
     if is_stop_requested():
@@ -930,6 +934,26 @@ def deliver_delegation(outcome) -> None:
     if getattr(outcome.job, "origin", None) != "chat":
         _speak_from_worker(texte)
     debug_log(f"    🛠️ Claude Code report delivered for {outcome.job.projet}", "tools")
+
+
+def withdraw_stop_question() -> None:
+    """Close a waiting stopClaudeCode question once its job has ended.
+
+    Approved later, it would stop whatever runs then: a job the user was
+    never asked about. Settled as `expiré`, like any question that can no
+    longer be answered.
+    """
+    from .projets.delegation import STOP_TOOL_NAME
+
+    dm = _global_dialogue_memory
+    if dm is None or not hasattr(dm, "take_pending_for_tool"):
+        return
+    action = dm.take_pending_for_tool(STOP_TOOL_NAME)
+    if action is None:
+        return
+    _settle(action, "expiré")
+    _announce_settled(action, "expiré")
+    debug_log(f"    🙋 withdrew {action.tool}: the job it was about has ended", "tools")
 
 
 def revoke_pending_confirmation() -> None:

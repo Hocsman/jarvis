@@ -592,6 +592,7 @@ def test_a_stop_not_confirmed_in_time_is_announced_when_it_lands(
     real_kill = dl._kill_tree
     monkeypatch.setattr(dl, "_kill_tree", lambda proc: threading.Timer(
         1.5, real_kill, args=(proc,)).start())
+    monkeypatch.setattr(dl, "_terminate_job", lambda job: False)
     _launch(delegations, make_cfg(tmp_path, projects), projects)
     wait_for_calls(fake_claude)
 
@@ -613,6 +614,7 @@ def test_a_job_that_finished_before_the_stop_reached_it_reports_its_work(
     cancellation would hide what changed."""
     monkeypatch.setenv("FAKE_CLAUDE_DELAY", "1")
     monkeypatch.setattr(dl, "_kill_tree", lambda proc: None)
+    monkeypatch.setattr(dl, "_terminate_job", lambda job: False)
     _launch(delegations, make_cfg(tmp_path, projects), projects)
     wait_for_calls(fake_claude)
 
@@ -744,6 +746,76 @@ def test_a_job_that_printed_its_report_before_the_stop_keeps_it(
     assert "--resume" in follow_up["argv"]
 
 
+def test_a_hung_kill_does_not_hold_the_turn_past_the_wait(
+        tmp_path, projects, fake_claude, delegations, monkeypatch):
+    """The reply engine holds the query lock through the stop. taskkill
+    has its own 15 s limit; the turn must not wait for it."""
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "sleep")
+    real_kill, real_terminate = dl._kill_tree, dl._terminate_job
+    hung = threading.Event()
+    monkeypatch.setattr(dl, "_kill_tree", lambda proc: hung.wait(10))
+    monkeypatch.setattr(dl, "_terminate_job", lambda job: False)
+    _launch(delegations, make_cfg(tmp_path, projects), projects)
+    wait_for_calls(fake_claude)
+    began = time.monotonic()
+
+    job, outcome = delegations.cancel(timeout=0.5)
+
+    took = time.monotonic() - began
+    hung.set()
+    monkeypatch.setattr(dl, "_kill_tree", real_kill)
+    monkeypatch.setattr(dl, "_terminate_job", real_terminate)
+    assert took < 2.0
+    assert job.projet == "chantipay"
+    assert outcome is None, "not stopped yet, so not said to be"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the Windows job object")
+def test_a_stop_reaches_a_descendant_whose_parent_has_exited(
+        tmp_path, projects, fake_claude, delegations, monkeypatch):
+    """taskkill /T walks parents from the top, and a grandchild whose
+    parent exited is on no such path. The job object holds it anyway."""
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "orphan")
+    _launch(delegations, make_cfg(tmp_path, projects), projects)
+    marker = wait_for_file(Path(str(fake_claude.log) + ".orphan"))
+    pid = int(marker.read_text(encoding="utf-8"))
+    assert psutil.pid_exists(pid)
+
+    _job, outcome = delegations.cancel()
+
+    assert outcome is not None and outcome.cancelled is True
+    assert _gone(pid)
+
+
+def test_a_job_outliving_a_restart_leaves_nothing_in_the_new_daemon(
+        tmp_path, projects, fake_claude, monkeypatch):
+    """Closing gave up waiting for it and the keeper was opened again in
+    the same process: its end belongs to the daemon that closed. Nothing
+    is delivered, and no report or session rides into the new one."""
+    monkeypatch.setenv("FAKE_CLAUDE_DELAY", "1.5")
+    monkeypatch.setattr(dl, "_kill_tree", lambda proc, *a, **k: None)
+    monkeypatch.setattr(dl, "_terminate_job", lambda job: False)
+    cfg = make_cfg(tmp_path, projects)
+    d = dl.Delegations()
+    d.open(lambda outcome: None)
+    _launch(d, cfg, projects)
+    wait_for_calls(fake_claude)
+    d.close(timeout=0.1)
+
+    delivered = []
+    d.open(delivered.append)
+    assert d.wait(20.0)
+
+    assert delivered == []
+    assert d.last() is None
+    monkeypatch.setenv("FAKE_CLAUDE_DELAY", "0")
+    _launch(d, cfg, projects)
+    assert d.wait(20.0)
+    _straggler, fresh = fake_claude()
+    assert "--resume" not in fresh["argv"]
+    d.close()
+
+
 def test_cancelling_with_nothing_running_stops_nothing(delegations):
     assert delegations.cancel() == (None, None)
     assert delegations.last() is None
@@ -775,8 +847,9 @@ def test_closing_after_a_stop_was_asked_still_delivers_nothing(
     """Stopping the daemon wins over a stop still landing: nothing is
     left to deliver to."""
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "sleep")
-    real_kill = dl._kill_tree
+    real_kill, real_terminate = dl._kill_tree, dl._terminate_job
     monkeypatch.setattr(dl, "_kill_tree", lambda proc: None)
+    monkeypatch.setattr(dl, "_terminate_job", lambda job: False)
     d = dl.Delegations()
     delivered = []
     d.open(delivered.append)
@@ -784,6 +857,7 @@ def test_closing_after_a_stop_was_asked_still_delivers_nothing(
     (call,) = wait_for_calls(fake_claude)
     assert d.cancel(timeout=0.1)[1] is None
     monkeypatch.setattr(dl, "_kill_tree", real_kill)
+    monkeypatch.setattr(dl, "_terminate_job", real_terminate)
 
     d.close()
 

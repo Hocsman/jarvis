@@ -142,3 +142,53 @@ def test_the_bundled_build_wires_the_report_to_the_chat_window():
     source = inspect.getsource(desktop)
     assert "on_delegation_done=" in source
     assert '_chat_event_line("delegation_done"' in source
+
+
+# ── A stop question outlives nothing ──────────────────────────────────
+
+
+def _question(dm, tool, args):
+    from src.jarvis.tools.confirmation import CHANNEL_GESTE, PendingAction
+
+    dm.begin_turn()
+    action = PendingAction.create(
+        tool=tool, args=args, risk="action", channel=CHANNEL_GESTE,
+        origin="voix", query_redacted="arrête", raised_at_turn=dm.current_turn(),
+        ttl_sec=180.0,
+    )
+    dm.raise_pending(action)
+    return action
+
+
+def test_a_stop_question_still_waiting_when_the_job_ends_is_withdrawn(
+        wired, monkeypatch, capsys):
+    """Approved later, it would stop whatever runs then: a job the user
+    never saw a question about."""
+    from unittest.mock import MagicMock
+
+    from src.jarvis.projets.delegation import STOP_TOOL_NAME
+
+    dm, _ = wired
+    db = MagicMock()
+    monkeypatch.setattr(daemon, "_global_db", db)
+    action = _question(dm, STOP_TOOL_NAME, {})
+
+    daemon.deliver_delegation(_outcome())
+
+    assert dm.peek_pending() is None
+    assert db.record_action.call_args.kwargs["outcome"] == "expiré"
+    assert db.record_action.call_args.kwargs["request_id"] == action.request_id
+    (settled,) = _events(capsys, "confirm_settled")
+    assert settled["data"]["request_id"] == action.request_id
+
+
+def test_any_other_question_is_left_waiting(wired, monkeypatch):
+    from unittest.mock import MagicMock
+
+    dm, _ = wired
+    monkeypatch.setattr(daemon, "_global_db", MagicMock())
+    action = _question(dm, "localFiles", {"operation": "delete", "path": "/a"})
+
+    daemon.deliver_delegation(_outcome())
+
+    assert dm.peek_pending() == action

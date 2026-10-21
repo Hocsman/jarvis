@@ -901,6 +901,20 @@ class DialogueMemory:
             self._pending = None
             return held
 
+    def take_pending_for_tool(self, tool: str):
+        """Claim the held question if it is about ``tool``.
+
+        For a question whose context is gone: a stop asked about a job
+        that has since ended would, approved later, stop whatever runs
+        then. Atomic, so a click racing the withdrawal runs nothing twice.
+        """
+        with self._lock:
+            held = self._pending
+            if held is None or held.tool != tool:
+                return None
+            self._pending = None
+            return held
+
     def clear_pending(self) -> None:
         """Drop the waiting question, unanswered."""
         with self._lock:

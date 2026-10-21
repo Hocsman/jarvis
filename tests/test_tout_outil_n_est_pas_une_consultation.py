@@ -62,6 +62,7 @@ def test_an_mcp_tool_counts():
     "toolSearchTool",   # rend des noms d'outils
     "stop",             # sentinelle de fin
     "refreshMCPTools",  # recharge un catalogue
+    "stopClaudeCode",   # arrête un travail ; le rapport qu'il répète vient du travail
     "remember", "forget",                      # écrivent le noyau
     "logMeal", "deleteMeal",                   # écrivent
     "setReminder", "setRoutine", "cancelRoutine",

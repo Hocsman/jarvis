@@ -204,6 +204,7 @@ def test_a_job_that_had_already_finished_reports_its_work(
         tmp_path, projects, fake_claude, jobs, monkeypatch):
     monkeypatch.setenv("FAKE_CLAUDE_DELAY", "1")
     monkeypatch.setattr(dl, "_kill_tree", lambda proc: None)
+    monkeypatch.setattr(dl, "_terminate_job", lambda job: False)
     cfg = make_cfg(tmp_path, projects)
     _delegate(cfg, projet="chantipay", tache="Ajoute un bouton.")
     wait_for_calls(fake_claude)
