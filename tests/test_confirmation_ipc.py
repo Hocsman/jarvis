@@ -268,7 +268,7 @@ def test_the_announcement_never_carries_unredacted_user_text(waiting, capsys):
     """`__CHAT__:` lines are logged. The query rides along redacted, as
     everywhere else on this bus."""
     dm = daemon._global_dialogue_memory
-    dm.clear_pending()
+    dm.take_pending()
     dm.begin_turn()
     action = PendingAction.create(
         tool="localFiles", args={"path": "/a"}, risk="destructif",

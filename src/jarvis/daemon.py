@@ -219,7 +219,7 @@ def rewind_chat_to_user(user_index: int, content: str) -> bool:
         held = dm.take_pending()
         if held is not None:
             _settle(held, "expiré")
-            _announce_settled(held, "expiré")
+            announce_settled(held, "expiré")
             debug_log(f"    🙋 {held.tool} expired by a chat rewind", "tools")
         debug_log(f"chat rewound to user message {user_index}", "chat")
         return True
@@ -668,7 +668,9 @@ def _settle(action, outcome: str) -> None:
         debug_log(f"confirmation outcome not recorded: {e}", "tools")
 
 
-def _announce_settled(action, outcome: str) -> None:
+def announce_settled(action, outcome: str) -> None:
+    """Tell every surface showing a question that it is over, so its card
+    comes down and says how it ended."""
     try:
         _emit_chat_event("confirm_settled", {
             "request_id": action.request_id, "outcome": outcome,
@@ -706,7 +708,7 @@ def resolve_confirmation(request_id: str, approved: bool) -> str:
         if action is None:
             return "inconnue"
         _settle(action, "décliné")
-        _announce_settled(action, "décliné")
+        announce_settled(action, "décliné")
         debug_log(f"    🙋 declined {action.tool} ({request_id})", "tools")
         return "décliné"
 
@@ -722,7 +724,7 @@ def resolve_confirmation(request_id: str, approved: bool) -> str:
         _chat_query_lock.release()
         return "inconnue"
 
-    _announce_settled(action, "accordé")
+    announce_settled(action, "accordé")
     try:
         threading.Thread(
             target=_resume_after_confirmation, args=(action,),
@@ -735,7 +737,7 @@ def resolve_confirmation(request_id: str, approved: bool) -> str:
         debug_log(f"confirmation resume thread failed to start: {e}", "tools")
         _chat_query_lock.release()
         _settle(action, "expiré")
-        _announce_settled(action, "expiré")
+        announce_settled(action, "expiré")
         return "arrêt"
     return "ok"
 
@@ -961,7 +963,7 @@ def withdraw_stop_question() -> None:
     if action is None:
         return
     _settle(action, "expiré")
-    _announce_settled(action, "expiré")
+    announce_settled(action, "expiré")
     debug_log(f"    🙋 withdrew {action.tool}: the job it was about has ended", "tools")
 
 
@@ -979,7 +981,7 @@ def revoke_pending_confirmation() -> None:
     if action is None:
         return
     _settle(action, "expiré")
-    _announce_settled(action, "expiré")
+    announce_settled(action, "expiré")
     debug_log(f"    🙋 revoked {action.tool} on shutdown", "tools")
 
 

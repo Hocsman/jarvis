@@ -917,17 +917,12 @@ class DialogueMemory:
             return held
 
     def take_pending(self):
-        """Claim whatever question is waiting, for a shutdown or a rewind
-        that closes it unanswered. Read and cleared in one step, so nothing
-        racing it settles the same question as well."""
+        """Claim whatever question is waiting, for a shutdown, a rewind or
+        a new conversation that closes it unanswered. Read and cleared in
+        one step, so nothing racing it settles the same question as well."""
         with self._lock:
             held, self._pending = self._pending, None
             return held
-
-    def clear_pending(self) -> None:
-        """Drop the waiting question, unanswered."""
-        with self._lock:
-            self._pending = None
 
     def _next_ts(self) -> float:
         """Return a strictly-monotonic timestamp.
