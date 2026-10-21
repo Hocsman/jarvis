@@ -10,14 +10,14 @@ See src/jarvis/projets/projets.spec.md.
 
 from __future__ import annotations
 
-import time
-
 import pytest
 
-from claude_code_fakes import install_fake_claude, make_cfg, make_projects
+from claude_code_fakes import (
+    install_fake_claude, make_cfg, make_projects, wait_for_calls, wait_for_file,
+)
 from jarvis.projets import delegation as dl
-from jarvis.tools.builtin.claude_code import ClaudeCodeTool
-from jarvis.tools.builtin.stop_claude_code import StopClaudeCodeTool
+from jarvis.tools.builtin.claude_code import ClaudeCodeTool, edits_kept, status_text
+from jarvis.tools.builtin.stop_claude_code import StopClaudeCodeTool, unconfirmed_stop_text
 from jarvis.tools.policy import RISK_ACTION, RISK_READ
 
 
@@ -59,13 +59,6 @@ def _stop(cfg, **args):
 
 def _delegate(cfg, **args):
     return ClaudeCodeTool().run(args, _context(cfg))
-
-
-def _running(fake_claude, timeout=10.0):
-    deadline = time.monotonic() + timeout
-    while not fake_claude() and time.monotonic() < deadline:
-        time.sleep(0.05)
-    assert fake_claude(), "the job never started"
 
 
 # ── What it costs, and who sees it ────────────────────────────────────
@@ -141,7 +134,7 @@ def test_a_stop_kills_the_job_and_says_which_one(
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "sleep")
     cfg = make_cfg(tmp_path, projects)
     _delegate(cfg, projet="chantipay", tache="Ajoute un bouton.", modifier=True)
-    _running(fake_claude)
+    wait_for_calls(fake_claude)
 
     result = _stop(cfg)
 
@@ -158,18 +151,19 @@ def test_stopping_a_change_says_its_edits_stay(
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "sleep")
     cfg = make_cfg(tmp_path, projects)
     _delegate(cfg, projet="chantipay", tache="Ajoute un bouton.", modifier=True)
-    _running(fake_claude)
+    wait_for_calls(fake_claude)
     change = _stop(cfg).reply_text
 
-    monkeypatch.setenv("FAKE_CLAUDE_MODE", "sleep")
-    _delegate(cfg, projet="chantipay", tache="Explique l'auth.", modifier=False)
-    deadline = time.monotonic() + 10
-    while len(fake_claude()) < 2 and time.monotonic() < deadline:
-        time.sleep(0.05)
-    question = _stop(cfg).reply_text
+    stopped_change = jobs.last().job
 
-    assert "not undone" in change
-    assert "not undone" not in question
+    _delegate(cfg, projet="chantipay", tache="Explique l'auth.", modifier=False)
+    wait_for_calls(fake_claude, 2)
+    question = _stop(cfg).reply_text
+    stopped_question = jobs.last().job
+
+    assert edits_kept(stopped_change) in change
+    assert edits_kept(stopped_question) in question
+    assert edits_kept(stopped_change) not in question
 
 
 def test_a_call_carrying_an_instruction_stops_nothing_and_points_at_claude_code(
@@ -180,12 +174,15 @@ def test_a_call_carrying_an_instruction_stops_nothing_and_points_at_claude_code(
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "sleep")
     cfg = make_cfg(tmp_path, projects)
     _delegate(cfg, projet="chantipay", tache="Ajoute un bouton.")
-    _running(fake_claude)
+    wait_for_calls(fake_claude)
 
-    result = _stop(cfg, task="stop the login page from crashing in chantipay")
+    instruction = "stop the login page from crashing in chantipay"
 
-    assert result.success is False
-    assert "claudeCode" in result.reply_text
+    result = _stop(cfg, task=instruction)
+
+    assert result.success is True, "nothing failed: the call was not a stop"
+    assert ClaudeCodeTool().name in result.reply_text
+    assert instruction not in result.reply_text, "the model's own text is not relayed"
     assert jobs.running() is not None
     assert jobs.last() is None
 
@@ -199,23 +196,44 @@ def test_with_nothing_running_it_stops_nothing_and_says_how_the_last_went(
     result = _stop(cfg)
 
     assert result.success is True
-    assert "Nothing" in result.reply_text
-    assert "J'ai ajouté le bouton de déconnexion." in result.reply_text
+    assert status_text() in result.reply_text
+    assert jobs.last().report in result.reply_text
 
 
 def test_a_job_that_had_already_finished_reports_its_work(
         tmp_path, projects, fake_claude, jobs, monkeypatch):
-    monkeypatch.setenv("FAKE_CLAUDE_MODE", "slow")
     monkeypatch.setenv("FAKE_CLAUDE_DELAY", "1")
     monkeypatch.setattr(dl, "_kill_tree", lambda proc: None)
     cfg = make_cfg(tmp_path, projects)
     _delegate(cfg, projet="chantipay", tache="Ajoute un bouton.")
-    _running(fake_claude)
+    wait_for_calls(fake_claude)
 
     result = _stop(cfg)
 
-    assert "J'ai ajouté le bouton de déconnexion." in result.reply_text
     assert jobs.last().cancelled is False
+    assert jobs.last().report in result.reply_text
+
+
+def test_a_job_that_had_already_failed_says_why(
+        tmp_path, projects, fake_claude, jobs, monkeypatch):
+    """It ended on its own before the stop reached it, so its reason is
+    what the user needs, not a stop that never happened."""
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "sleep")
+    cfg = make_cfg(tmp_path, projects)
+    _delegate(cfg, projet="chantipay", tache="Ajoute un bouton.")
+    wait_for_calls(fake_claude)
+    job = jobs.running()
+    failed = dl.Outcome(job=job, ok=False, report="Le build a échoué.",
+                        session_id=None, duration_s=12.0)
+    real_cancel = jobs.cancel
+    monkeypatch.setattr(jobs, "cancel", lambda timeout=None: (job, failed))
+
+    result = _stop(cfg)
+
+    assert result.success is True
+    assert failed.report in result.reply_text
+    assert edits_kept(job) not in result.reply_text
+    real_cancel()
 
 
 def test_a_stop_it_could_not_confirm_is_not_claimed(
@@ -225,14 +243,34 @@ def test_a_stop_it_could_not_confirm_is_not_claimed(
     monkeypatch.setattr(jobs, "cancel", lambda timeout=None: (jobs.running(), None))
     cfg = make_cfg(tmp_path, projects)
     _delegate(cfg, projet="chantipay", tache="Ajoute un bouton.")
-    _running(fake_claude)
+    wait_for_calls(fake_claude)
 
     result = _stop(cfg)
 
-    assert result.success is False
-    assert "chantipay" in result.reply_text
-    assert "not confirmed" in result.reply_text
+    assert result.success is True, "nothing failed: the stop is on its way"
+    assert unconfirmed_stop_text(jobs.running()) in result.reply_text
+    assert edits_kept(jobs.running()) not in result.reply_text
     real_cancel()
+
+
+def test_a_stop_that_cut_short_a_job_already_reported_says_both(
+        tmp_path, projects, fake_claude, jobs, monkeypatch):
+    """Its work was done and reported, and the stop ended what was still
+    exiting (hooks, a slow exit): the report stands, and for a change the
+    user must not believe nothing was touched."""
+    from pathlib import Path
+
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "linger")
+    cfg = make_cfg(tmp_path, projects)
+    _delegate(cfg, projet="chantipay", tache="Ajoute un bouton.", modifier=True)
+    wait_for_file(Path(str(fake_claude.log) + ".printed"))
+
+    result = _stop(cfg)
+
+    last = jobs.last()
+    assert last.interrupted is True and last.cancelled is False
+    assert last.report in result.reply_text
+    assert edits_kept(last.job) in result.reply_text
 
 
 def test_asking_how_it_went_after_a_stop_says_it_was_stopped(
@@ -241,13 +279,13 @@ def test_asking_how_it_went_after_a_stop_says_it_was_stopped(
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "sleep")
     cfg = make_cfg(tmp_path, projects)
     _delegate(cfg, projet="chantipay", tache="Ajoute un bouton.")
-    _running(fake_claude)
+    wait_for_calls(fake_claude)
     _stop(cfg)
 
     result = _delegate(cfg)
 
     assert "chantipay" in result.reply_text
-    assert "stopped" in result.reply_text
+    assert edits_kept(jobs.last().job) in result.reply_text
     assert "«" not in result.reply_text
 
 
@@ -256,7 +294,7 @@ def test_a_new_task_runs_once_the_wrong_one_is_stopped(
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "sleep")
     cfg = make_cfg(tmp_path, projects)
     _delegate(cfg, projet="chantipay", tache="Ajoute un bouton.")
-    _running(fake_claude)
+    wait_for_calls(fake_claude)
     _stop(cfg)
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ok")
 

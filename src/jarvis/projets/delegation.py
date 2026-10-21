@@ -297,15 +297,10 @@ def _stderr_reason(stderr: str) -> str:
     return " ".join(tail.split())
 
 
-def parse_report(stdout: str, stderr: str,
-                 returncode: Optional[int]) -> Tuple[bool, str, Optional[str]]:
-    """Read what `claude -p --output-format json` printed.
-
-    Returns (ok, report, session id). Accepts the result object, an array
-    whose last ``result`` entry is taken, or failing that the last line
-    that parses. Nothing is invented: a job that said nothing reports that
-    it said nothing.
-    """
+def _result_object(stdout: str) -> Optional[dict]:
+    """The result object `claude -p --output-format json` printed: the
+    object itself, an array's last ``result`` entry, or failing that the
+    last line that parses. None when it printed none."""
     data = None
     text = (stdout or "").strip()
     if text:
@@ -324,8 +319,19 @@ def parse_report(stdout: str, stderr: str,
     if isinstance(data, list):
         results = [d for d in data if isinstance(d, dict) and d.get("type") == "result"]
         data = results[-1] if results else None
+    return data if isinstance(data, dict) else None
 
-    if not isinstance(data, dict):
+
+def parse_report(stdout: str, stderr: str,
+                 returncode: Optional[int]) -> Tuple[bool, str, Optional[str]]:
+    """Read what `claude -p --output-format json` printed.
+
+    Returns (ok, report, session id). Nothing is invented: a job that said
+    nothing reports that it said nothing. Only ``ok`` depends on the exit
+    code.
+    """
+    data = _result_object(stdout)
+    if data is None:
         reason = _stderr_reason(stderr) or (
             f"Claude Code s'est arrêté sans rien dire (code {returncode})"
         )
@@ -488,6 +494,9 @@ class Outcome:
     session_id: Optional[str]
     duration_s: float
     cancelled: bool = False  # the user stopped it before it ended
+    # Its result was out and its process still exiting (hooks, a slow
+    # exit) when a stop ended it: the result stands.
+    interrupted: bool = False
 
 
 class _Session(NamedTuple):
@@ -554,7 +563,7 @@ class Delegations:
         self._proc: Optional[subprocess.Popen] = None
         self._thread: Optional[threading.Thread] = None
         self._active = 0  # jobs whose thread has not finished delivering
-        self._cancelled: set = set()  # stopped by the user
+        self._stopped: set = set()  # a stop reached it while its process ran or had not started
         self._silenced: set = set()  # stopped with the daemon: delivered to nobody
         # Jobs whose end a waiting `cancel()` reports in its own turn, and
         # that end once it is known.
@@ -569,7 +578,7 @@ class Delegations:
             self._deliver = deliver
             self._sessions.clear()
             self._last = None
-            self._cancelled.clear()
+            self._stopped.clear()
             self._silenced.clear()
             self._reported.clear()
 
@@ -594,16 +603,18 @@ class Delegations:
 
         Returns (None, None) when nothing runs. (job, outcome) when it
         ended in time: the caller reports it, so it is not delivered again,
-        and it is not a cancellation when the job had finished with its
-        report before the stop reached it. (job, None) when it had not
-        ended yet: its end is then delivered like any other, so nobody is
-        left believing it still runs.
+        and it is a cancellation only when the stop ended it. (job, None)
+        when it had not ended yet: its end is then delivered like any
+        other, so nobody is left believing it still runs.
         """
         with self._lock:
             job, proc = self._running, self._proc
             if job is None:
                 return None, None
-            self._cancelled.add(job.id)
+            # A process already gone ended on its own: the stop waits for
+            # that end and reports it, without claiming it.
+            if proc is None or proc.poll() is None:
+                self._stopped.add(job.id)
             self._reported.setdefault(job.id, None)
         debug_log(f"    🛑 Claude Code on {job.projet}: stop asked", "tools")
         if proc is not None:
@@ -709,6 +720,8 @@ class Delegations:
 
     def _run(self, job: Job, argv: List[str], timeout: float, db) -> None:
         session = None
+        launched = True
+        printed = said_ok = False
         try:
             stdout, stderr, code, timed_out = self._execute(job, argv, timeout)
             if timed_out:
@@ -717,21 +730,31 @@ class Delegations:
                           f"le travail a été arrêté")
             else:
                 ok, report, session = parse_report(stdout, stderr, code)
+                # Whether its result object is out, and how that result
+                # reads with the exit code left aside: under a stop, the
+                # kill can reach a process still finishing after it.
+                printed = _result_object(stdout) is not None
+                said_ok = ok or (printed and parse_report(stdout, stderr, 0)[0])
         except Exception as e:
+            launched = False
             ok, report = False, f"impossible de lancer Claude Code dans {job.projet} : {e}"
 
         report = _clean_report(report)
         with self._finished:
-            # A job that finished with its report before the stop reached
-            # it is not a cancellation: its edits are done.
-            cancelled = job.id in self._cancelled and not ok
+            stopped = job.id in self._stopped
+            # The stop ended neither a job whose result was out, which
+            # finished on its own terms, nor one that never launched.
+            interrupted = stopped and printed and not ok
+            if interrupted:
+                ok = said_ok
+            cancelled = stopped and launched and not printed
             silenced = job.id in self._silenced
-            self._cancelled.discard(job.id)
+            self._stopped.discard(job.id)
             self._silenced.discard(job.id)
             outcome = Outcome(job=job, ok=ok, report="" if cancelled else report,
                               session_id=None if cancelled else session,
                               duration_s=time.monotonic() - job.started,
-                              cancelled=cancelled)
+                              cancelled=cancelled, interrupted=interrupted)
             self._last = outcome
             if cancelled:
                 # The conversation it carried is the one the user stopped.
@@ -747,6 +770,8 @@ class Delegations:
             self._finished.notify_all()
 
         state = "cancelled" if cancelled else "ok" if ok else "failed"
+        if interrupted:
+            state += ", its exit cut short by the stop"
         debug_log(
             f"    🛠️ Claude Code on {job.projet}: {state} after {outcome.duration_s:.0f}s",
             "tools",
@@ -782,7 +807,7 @@ class Delegations:
         try:
             with self._lock:
                 self._proc = proc
-                stopped = job.id in self._cancelled or job.id in self._silenced
+                stopped = job.id in self._stopped or job.id in self._silenced
             if stopped:
                 _kill_tree(proc)
             try:
