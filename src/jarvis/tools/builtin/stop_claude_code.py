@@ -42,9 +42,9 @@ def carried_instruction(args: Optional[Dict[str, Any]]) -> str:
 class StopClaudeCodeTool(Tool):
     """Stop the Claude Code job that is running, and say what it leaves."""
 
-    # Its calls differ in risk: the empty one stops the job, one carrying
-    # text stops nothing. A line in the generated outils.md would decide
-    # both, and under ## Demande the harmless one would ask too.
+    # Its harmless call is a misfiled instruction that stops nothing. A
+    # generated line under ## Demande would make it raise a card asking
+    # to approve a stop that will not happen.
     classified_per_call = True
 
     def risk_for(self, args):
@@ -113,10 +113,8 @@ class StopClaudeCodeTool(Tool):
             return ToolExecutionResult(
                 success=True,
                 reply_text=(
-                    f"The stop was asked but is not confirmed yet: Claude Code "
-                    f"is still ending its task on {job.projet}. Its end will be "
-                    f"announced when it lands. Tell the user exactly that, in "
-                    f"their language; do not claim it has stopped."
+                    f"{unconfirmed_stop_text(job)} Tell the user exactly that, "
+                    f"in their language; do not claim it has stopped."
                 ),
             )
 
@@ -124,13 +122,18 @@ class StopClaudeCodeTool(Tool):
             debug_log(f"    🛑 Claude Code on {job.projet} had already ended", "tools")
             said = (f"It had finished, and its report says: « {outcome.report} »"
                     if outcome.ok else f"It had failed: {outcome.report}")
+            if outcome.interrupted:
+                ended = (f"Claude Code's task on {job.projet} had already ended "
+                         f"and reported, but its process was still exiting "
+                         f"(hooks, cleanup) and the stop ended that. {said} "
+                         f"{edits_kept(job)}")
+            else:
+                ended = (f"Nothing was stopped: Claude Code's task on "
+                         f"{job.projet} had already ended before the stop "
+                         f"reached it. {said}")
             return ToolExecutionResult(
                 success=True,
-                reply_text=(
-                    f"Nothing was stopped: Claude Code's task on {job.projet} "
-                    f"had already ended before the stop reached it. {said} "
-                    f"Tell the user, in their language."
-                ),
+                reply_text=f"{ended} Tell the user, in their language.",
             )
 
         return ToolExecutionResult(
@@ -141,6 +144,13 @@ class StopClaudeCodeTool(Tool):
                 f"user, in their language."
             ),
         )
+
+
+def unconfirmed_stop_text(job) -> str:
+    """What a stop whose job has not ended yet says: asked, not done."""
+    return (f"The stop was asked but is not confirmed yet: Claude Code is still "
+            f"ending its task on {job.projet}. Its end will be announced when "
+            f"it lands.")
 
 
 def _elapsed(seconds: float) -> str:

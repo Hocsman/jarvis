@@ -23,7 +23,7 @@ import psutil
 import pytest
 
 from claude_code_fakes import (
-    Ledger, install_fake_claude, make_cfg, make_projects, wait_for_calls,
+    Ledger, install_fake_claude, make_cfg, make_projects, wait_for_calls, wait_for_file,
 )
 from jarvis.projets import delegation as dl
 
@@ -398,10 +398,7 @@ def test_a_job_does_not_outlive_a_killed_yuba(tmp_path, projects, fake_claude, m
     host = subprocess.Popen([sys.executable, str(script)], stdout=subprocess.PIPE, text=True)
     try:
         assert host.stdout.readline().strip() == "started"
-        deadline = time.monotonic() + 15
-        while not fake_claude() and time.monotonic() < deadline:
-            time.sleep(0.1)
-        (call,) = fake_claude()
+        (call,) = wait_for_calls(fake_claude, timeout=15.0)
         host.kill()
         host.wait(10)
         deadline = time.monotonic() + 10
@@ -436,9 +433,7 @@ def test_closing_kills_a_running_job_and_delivers_nothing(
     delivered = []
     d.open(delivered.append)
     _launch(d, make_cfg(tmp_path, projects), projects)
-    deadline = time.monotonic() + 10
-    while not fake_claude() and time.monotonic() < deadline:
-        time.sleep(0.05)
+    wait_for_calls(fake_claude)
 
     d.close()
 
@@ -515,10 +510,7 @@ def test_what_a_cancelled_job_started_dies_with_it(
         tmp_path, projects, fake_claude, delegations, monkeypatch):
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "grandchild")
     _launch(delegations, make_cfg(tmp_path, projects), projects)
-    marker = Path(str(fake_claude.log) + ".grandchild")
-    deadline = time.monotonic() + 10
-    while not marker.exists() and time.monotonic() < deadline:
-        time.sleep(0.05)
+    marker = wait_for_file(Path(str(fake_claude.log) + ".grandchild"))
     pid = int(marker.read_text(encoding="utf-8"))
 
     delegations.cancel()
@@ -526,11 +518,30 @@ def test_what_a_cancelled_job_started_dies_with_it(
     assert _gone(pid)
 
 
-def test_a_stop_the_instant_after_the_start_still_stops_it(
+def _until_stop_asked(keeper, timeout=10.0):
+    """Hold the job's launch until a stop has reached it."""
+    deadline = time.monotonic() + timeout
+    while not keeper._stopped and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+
+def test_a_stop_before_the_process_starts_still_stops_it(
         tmp_path, projects, fake_claude, delegations, monkeypatch):
-    """The job's process may not exist yet when the stop arrives."""
+    """The job's process may not exist yet when the stop arrives: it is
+    killed the moment it does."""
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "sleep")
+    launching = threading.Event()
+    release = threading.Event()
+    real_popen = dl.subprocess.Popen
+
+    def held_popen(*args, **kwargs):
+        launching.set()
+        _until_stop_asked(delegations)
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(dl.subprocess, "Popen", held_popen)
     _launch(delegations, make_cfg(tmp_path, projects), projects)
+    assert launching.wait(10)
 
     _job, outcome = delegations.cancel()
 
@@ -609,6 +620,7 @@ def test_a_job_that_finished_before_the_stop_reached_it_reports_its_work(
 
     assert outcome is not None
     assert outcome.cancelled is False
+    assert outcome.interrupted is False, "it exited on its own"
     assert outcome.ok is True
     assert outcome.report == "J'ai ajouté le bouton de déconnexion."
     assert delegations.wait(10.0)
@@ -632,10 +644,11 @@ def test_a_job_that_failed_before_the_stop_reached_it_keeps_its_failure(
         return real_parse(*args, **kwargs)
 
     monkeypatch.setattr(dl, "parse_report", held_parse)
+    real_kill = dl._kill_tree
+    monkeypatch.setattr(dl, "_kill_tree", lambda proc: (release.set(), real_kill(proc)))
     db = Ledger()
     _launch(delegations, make_cfg(tmp_path, projects), projects, db=db)
     assert exited.wait(10)
-    threading.Timer(0.3, release.set).start()
 
     job, outcome = delegations.cancel()
 
@@ -645,29 +658,85 @@ def test_a_job_that_failed_before_the_stop_reached_it_keeps_its_failure(
     assert "Le build a échoué." in outcome.report
     assert delegations.wait(10.0)
     assert [row["outcome"] for row in db.rows] == ["démarré", "échec"]
+    assert delegations.delivered == [], "the stop's reply already said it"
+
+
+def test_an_error_printed_before_the_stop_keeps_its_failure(
+        tmp_path, projects, fake_claude, delegations, monkeypatch):
+    """Its failure was out, and only its exit was cut short: the reason
+    stands, and nothing was cancelled."""
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "linger_error")
+    db = Ledger()
+    _launch(delegations, make_cfg(tmp_path, projects), projects, db=db)
+    wait_for_file(Path(str(fake_claude.log) + ".printed"))
+
+    _job, outcome = delegations.cancel()
+
+    assert outcome.cancelled is False
+    assert outcome.interrupted is True
+    assert outcome.ok is False
+    assert "Le build a échoué." in outcome.report
+    assert delegations.wait(10.0)
+    assert [row["outcome"] for row in db.rows] == ["démarré", "échec"]
+
+
+def test_a_launch_that_fails_during_a_stop_keeps_its_reason(
+        tmp_path, projects, fake_claude, delegations, monkeypatch):
+    """The stop ended nothing: Claude Code never ran."""
+
+    def failing_popen(*args, **kwargs):
+        _until_stop_asked(delegations)
+        raise OSError("introuvable")
+
+    monkeypatch.setattr(dl.subprocess, "Popen", failing_popen)
+    db = Ledger()
+    _launch(delegations, make_cfg(tmp_path, projects), projects, db=db)
+
+    _job, outcome = delegations.cancel()
+
+    assert outcome.cancelled is False
+    assert outcome.ok is False
+    assert "introuvable" in outcome.report
+    assert delegations.wait(10.0)
+    assert [row["outcome"] for row in db.rows] == ["démarré", "échec"]
+
+
+def test_a_result_followed_by_a_failure_is_a_failure_without_a_stop(
+        tmp_path, projects, fake_claude, delegations, monkeypatch):
+    """Only a stop's kill excuses a failing exit code after a printed
+    result. Nobody stopped this one: something after the result failed."""
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "printed_then_fail")
+    db = Ledger()
+    _launch(delegations, make_cfg(tmp_path, projects), projects, db=db)
+    _wait(delegations)
+
+    (outcome,) = delegations.delivered
+    assert outcome.ok is False
+    assert outcome.interrupted is False
+    assert [row["outcome"] for row in db.rows] == ["démarré", "échec"]
 
 
 def test_a_job_that_printed_its_report_before_the_stop_keeps_it(
         tmp_path, projects, fake_claude, delegations, monkeypatch):
     """Claude Code can still be running after its result is out (hooks, a
     slow exit). The kill gives it a failing exit code, but the work was
-    done and reported: that is a finished job, session included."""
+    done and reported: that is a finished job, session included. That the
+    stop cut short what was still exiting is kept too."""
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "linger")
     cfg = make_cfg(tmp_path, projects)
     db = Ledger()
     _launch(delegations, cfg, projects, db=db)
-    printed = Path(str(fake_claude.log) + ".printed")
-    deadline = time.monotonic() + 10
-    while not printed.exists() and time.monotonic() < deadline:
-        time.sleep(0.05)
+    wait_for_file(Path(str(fake_claude.log) + ".printed"))
 
     _job, outcome = delegations.cancel()
 
     assert outcome.cancelled is False
+    assert outcome.interrupted is True
     assert outcome.ok is True
     assert outcome.report == "J'ai ajouté le bouton de déconnexion."
     assert delegations.wait(10.0)
     assert [row["outcome"] for row in db.rows] == ["démarré", "ok"]
+    assert delegations.delivered == [], "the stop's reply already said it"
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ok")
     _launch(delegations, cfg, projects, tache="Ajoute un test.")
     _wait(delegations)

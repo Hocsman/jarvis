@@ -227,7 +227,7 @@ It is generated at first start from the tools you actually have installed — yo
 
 - `## Libre` runs without asking. `## Demande` asks first. `## Jamais` is refused whatever happens, with no way to override.
 - `- server__*` covers a whole MCP server; an exact name beats a wildcard, so you can free a server and pull one tool back out of it.
-- A tool that appears after the file was written is absent from it, therefore unclassified, therefore treated as destructive — so it asks.
+- A tool that appears after the file was written is absent from it, so it falls back to the risk it declares, and a tool declaring none counts as destructive: a read runs freely, anything else asks.
 
 **How it asks.** Reads and recoverable changes can be answered out loud, in whatever language you speak; a small model reads the answer, and anything it cannot read plainly is treated as "not an answer" rather than as a yes. Anything destructive is different: it shows a card with the exact call — full path, nothing truncated — and needs a click. No setting relaxes that. A false no costs you a turn; a false yes costs you a file, and speech recognition plus a language model are two lossy layers to put in front of that.
 
@@ -249,7 +249,7 @@ Install [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and sign i
 - Every sub-folder is a project, matched from what you say ("nikah score" finds `nikahscore`). Two close matches, and it asks which one.
 - A task that changes code shows a card with the project and the exact task, and runs only on a click; Claude Code may edit files but not run commands. A question runs without asking, and Claude Code may then only read: editing, commands and web access are denied, whatever the project's own Claude Code settings allow. Write `- claudeCode` under `## Demande` in `outils.md` if you want to be asked every time.
 - One task at a time, stopped after `claude_code_timeout_sec` (30 minutes by default). Ask "how is Claude Code doing?" at any point.
-- Say "stop Claude Code" to stop a task early, without stopping Jarvis: it asks first, then tells you once the task has actually stopped. What Claude Code already changed stays changed. Write `- stopClaudeCode` under `## Libre` in `outils.md` to skip the question.
+- Say "stop Claude Code" to stop a task early, without stopping Jarvis: it asks first, then tells you once the task has actually stopped. What Claude Code already changed stays changed. Put `- stopClaudeCode` under `## Libre` in `outils.md` to skip the question (if your file already lists it under `## Demande`, move that line rather than adding one).
 - `claude_code_command` takes the full path of the executable if `claude` is not on the `PATH` Jarvis sees.
 
 The task and whatever files Claude Code reads go to Anthropic, under your Claude Code account. Routines can never use it.
@@ -766,7 +766,7 @@ provider can't run out the voice-assistant latency budget.
 - **No record of what it read** - The action log has no column for tool output, structurally. A log that kept results would accumulate the contents of every page fetched and every file opened, somewhere you read casually
 - **No record of what you said in the timing log** - The latency journal has no free-text column either: durations, counts and model names only
 - **One exception, off by default** - Handing a project to Claude Code sends the task and the code it reads to Anthropic. Nothing reaches it until you name a projects folder (`claude_code_projects_dir`)
-- **Permissions are yours to set** - `~/.local/share/jarvis/yuba/outils.md` lists your own tools by name, in three sections you move lines between. Written once, never rewritten. A tool that appears later is unclassified, and therefore asked about
+- **Permissions are yours to set** - `~/.local/share/jarvis/yuba/outils.md` lists your own tools by name, in three sections you move lines between. Written once, never rewritten. A tool that appears later falls back to the risk it declares, so a read runs and anything else asks
 
 ## License
 

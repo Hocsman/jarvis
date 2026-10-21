@@ -79,12 +79,12 @@ def test_a_tool_whose_empty_call_is_harmless_is_left_out(cfg):
     assert policy.verdict("claudeCode", "lecture") == "libre"
 
 
-def test_a_tool_whose_calls_differ_in_risk_is_left_out(cfg):
+def test_a_tool_whose_harmless_call_is_a_misfile_is_left_out(cfg):
     """stopClaudeCode's empty call stops the job and asks first; a call
-    carrying text stops nothing. One line in the file would decide both:
-    under ## Demande the harmless call would ask too. Left out, each call
-    is judged at its own risk, and a line the user writes under ## Libre
-    is the only one there is."""
+    carrying text is a misfiled instruction that stops nothing. Under
+    ## Demande that call would raise a card asking to approve a stop that
+    will not happen. Left out, each call is judged at its own risk, and a
+    line the user writes under ## Libre is the only one there is."""
     from src.jarvis.tools.registry import ensure_policy_file
 
     ensure_policy_file(cfg)

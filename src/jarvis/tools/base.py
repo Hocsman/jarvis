@@ -107,16 +107,17 @@ class Tool(ABC):
     # call is judged at its own risk.
     #
     # The generator classifies a tool from its empty call, and one line in
-    # the file then decides every call of it. That is safe when the empty
-    # call is the dangerous one (`localFiles` with no operation is
-    # destructive) and wrong in two cases. When the empty call is the
-    # harmless one: `claudeCode` with no task only asks how a job is going,
-    # so it would land under `## Libre`, and a line there frees every call
-    # of it, a change to the user's code included. And when one call that
-    # changes nothing sits beside one that acts: `stopClaudeCode` with no
-    # arguments stops the job, with text it stops nothing, and a line under
-    # `## Demande` would make the harmless call ask too. Left out, each
-    # call falls back to the default for its own risk.
+    # the file then decides every call of it. That suits most tools, even
+    # one whose calls range in risk: `localFiles` with no operation is
+    # destructive, so it lands under `## Demande`, and a read that asks too
+    # raises a card describing exactly the read that will run. It does not
+    # suit two. `claudeCode` with no task only asks how a job is going, so
+    # it would land under `## Libre`, and a line there frees every call of
+    # it, a change to the user's code included. `stopClaudeCode`'s harmless
+    # call is a misfiled instruction that stops nothing, and under
+    # `## Demande` it would raise a card asking to approve a stop that will
+    # not happen. Left out, each call falls back to the default for its own
+    # risk.
     classified_per_call: bool = False
 
     def offered(self, cfg) -> bool:

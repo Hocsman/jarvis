@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import pytest
 
-from claude_code_fakes import install_fake_claude, make_cfg, make_projects, wait_for_calls
+from claude_code_fakes import (
+    install_fake_claude, make_cfg, make_projects, wait_for_calls, wait_for_file,
+)
 from jarvis.projets import delegation as dl
 from jarvis.tools.builtin.claude_code import ClaudeCodeTool, edits_kept, status_text
-from jarvis.tools.builtin.stop_claude_code import StopClaudeCodeTool
+from jarvis.tools.builtin.stop_claude_code import StopClaudeCodeTool, unconfirmed_stop_text
 from jarvis.tools.policy import RISK_ACTION, RISK_READ
 
 
@@ -246,9 +248,29 @@ def test_a_stop_it_could_not_confirm_is_not_claimed(
     result = _stop(cfg)
 
     assert result.success is True, "nothing failed: the stop is on its way"
-    assert jobs.running().projet in result.reply_text
+    assert unconfirmed_stop_text(jobs.running()) in result.reply_text
     assert edits_kept(jobs.running()) not in result.reply_text
     real_cancel()
+
+
+def test_a_stop_that_cut_short_a_job_already_reported_says_both(
+        tmp_path, projects, fake_claude, jobs, monkeypatch):
+    """Its work was done and reported, and the stop ended what was still
+    exiting (hooks, a slow exit): the report stands, and for a change the
+    user must not believe nothing was touched."""
+    from pathlib import Path
+
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "linger")
+    cfg = make_cfg(tmp_path, projects)
+    _delegate(cfg, projet="chantipay", tache="Ajoute un bouton.", modifier=True)
+    wait_for_file(Path(str(fake_claude.log) + ".printed"))
+
+    result = _stop(cfg)
+
+    last = jobs.last()
+    assert last.interrupted is True and last.cancelled is False
+    assert last.report in result.reply_text
+    assert edits_kept(last.job) in result.reply_text
 
 
 def test_asking_how_it_went_after_a_stop_says_it_was_stopped(

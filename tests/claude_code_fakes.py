@@ -37,14 +37,21 @@ if mode == "garbage":
     sys.stderr.write("boom: not logged in\n")
     sys.exit(1)
 session = os.environ.get("FAKE_CLAUDE_SESSION", "aaaaaaaa-0000-4000-8000-000000000001")
-if mode == "error":
+if mode in ("error", "linger_error"):
     print(json.dumps({"type": "result", "subtype": "error_during_execution",
                       "is_error": True, "result": "Le build a échoué.",
-                      "session_id": session}))
+                      "session_id": session}), flush=True)
+    if mode == "linger_error":
+        with open(os.environ["FAKE_CLAUDE_LOG"] + ".printed", "w", encoding="utf-8") as f:
+            f.write("1")
+        time.sleep(120)
     sys.exit(1)
 report = os.environ.get("FAKE_CLAUDE_REPORT", "J'ai ajouté le bouton de déconnexion.")
 print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
                   "result": report, "session_id": session}), flush=True)
+if mode == "printed_then_fail":
+    # Its result is out, then something after it fails on its own.
+    sys.exit(1)
 if mode == "linger":
     # Its result is printed, and it is still running: hooks, a slow exit.
     with open(os.environ["FAKE_CLAUDE_LOG"] + ".printed", "w", encoding="utf-8") as f:
@@ -81,6 +88,16 @@ def wait_for_calls(calls, count: int = 1, timeout: float = 10.0) -> list:
     logged = calls()
     assert len(logged) >= count, f"the stand-in started {len(logged)} times, not {count}"
     return logged
+
+
+def wait_for_file(path: Path, timeout: float = 10.0) -> Path:
+    """Wait until the stand-in has written ``path``, a marker it leaves
+    at a known point of its run."""
+    deadline = time.monotonic() + timeout
+    while not path.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert path.exists(), f"the stand-in never wrote {path.name}"
+    return path
 
 
 def make_projects(tmp_path: Path, names) -> Path:
