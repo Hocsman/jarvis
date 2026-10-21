@@ -117,10 +117,10 @@ class _Settled:
 
     ``approval`` grants the pinned call for this turn and this turn only.
     ``reply`` short-circuits the turn with a fixed sentence. ``action`` is
-    the claimed request, for the ledger. All three absent means there was
-    nothing to settle, or the answer settled nothing — the utterance is
-    then an ordinary query, so a question the user ignored never locks
-    them out.
+    the claimed request, for the ledger and the card. All three absent
+    means there was nothing to settle, or the answer settled nothing —
+    the utterance is then an ordinary query, so a question the user
+    ignored never locks them out.
     """
 
     __slots__ = ("approval", "action", "reply", "declined")
@@ -266,32 +266,43 @@ def _end_turn_with_question(result, dialogue_memory, redacted, *, tts, cfg,
     return reply
 
 
-def _record_settled_action(db, cfg, settled, *, origin, redacted) -> None:
-    """Close a question's ledger episode, whichever way it ended.
+def _close_answered_question(db, settled, *, origin, redacted) -> None:
+    """End the question a spoken answer claimed, however it was read.
 
-    Every ending except a grant writes here. A grant is settled by the
-    call itself, which writes `ok` or `échec` under the same id.
+    It was claimed before the judge ran, so nothing else can end it: the
+    ledger and the surfaces showing its card hear it here or never. The
+    surfaces hear every ending, as they do after a click. The ledger
+    hears all but a grant, which the call settles itself with `ok` or
+    `échec` under the same id.
 
-    An answer she could not read closes the episode too: the card was
-    claimed and is gone, so nothing else can close it before the next
-    daemon start, and the sweep there would call it `expiré` — a word the
-    spec defines as never answered. He did answer.
+    An answer she could not read ends `illisible`. Left open, the episode
+    waits for the next daemon start, and the sweep there would call it
+    `expiré` — a word the spec defines as never answered. He did answer.
     """
-    if settled.action is None or settled.approval is not None:
+    action = settled.action
+    if action is None:
         return
+    if settled.approval is not None:
+        # The surfaces' word for a grant, as a click announces it. The
+        # ledger's comes from the call.
+        _publish_settled(action, "accordé")
+        return
+
+    from ..tools.policy import OUTCOME_DECLINED, OUTCOME_UNREADABLE
+
+    outcome = OUTCOME_DECLINED if settled.declined else OUTCOME_UNREADABLE
     try:
-        from ..tools.policy import OUTCOME_DECLINED, OUTCOME_UNREADABLE
         from ..tools.registry import _log_action
 
-        action = settled.action
         _log_action(
             db, tool=action.tool, args=action.args, risk=action.risk,
-            verdict="demande",
-            outcome=OUTCOME_DECLINED if settled.declined else OUTCOME_UNREADABLE,
+            verdict="demande", outcome=outcome,
             query=redacted, origin=origin, request_id=action.request_id,
         )
     except Exception as e:
         debug_log(f"confirmation outcome not recorded: {e}", "tools")
+    _publish_settled(action, outcome)
+    debug_log(f"    🙋 {action.tool} ended {outcome} by a spoken answer", "tools")
 
 
 def settle_pending_confirmation(*, cfg, dialogue_memory, utterance, origin) -> _Settled:
@@ -351,8 +362,8 @@ def settle_pending_confirmation(*, cfg, dialogue_memory, utterance, origin) -> _
             action=action,
         )
     if verdict == UNCLEAR:
-        # Answered as an ordinary turn. If it re-proposes the same tool,
-        # the gate asks again with the same request id.
+        # Answered as an ordinary turn. The question is over: if the turn
+        # proposes the same call again, the gate asks a new question.
         return _Settled(action=action)
     return _Settled(action=action, reply=DECLINED_REPLY, declined=True)
 
@@ -1301,11 +1312,13 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         except Exception as e:
             debug_log(f"confirmation settle failed, treating as unanswered: {e}", "tools")
             _settled = _Settled()
+        # Not on the click branch above: the daemon ended that question
+        # itself when it claimed it.
+        _close_answered_question(db, _settled, origin=origin, redacted=redacted)
 
     if _settled.reply is not None:
         # Declined. Fixed words, no model: handing a refusal back to it
         # invites it to re-propose the thing just refused.
-        _record_settled_action(db, cfg, _settled, origin=origin, redacted=redacted)
         try:
             print(f"\n🤖 Jarvis\n  {_indent_text(_settled.reply)}\n", flush=True)
         except Exception:

@@ -6,20 +6,17 @@ writes a second row under the same id — `ok`, `échec`, `refusé`,
 together.
 
 `settle_pending_confirmation` claims the card *before* asking the judge
-what the sentence meant. On an unreadable answer it hands the turn back
-with the card already gone and writes nothing, so the episode stays open
-for the rest of the session: the sweep that closes orphans only runs at
-the next daemon start, and by then it labels it `expiré`, a word the spec
-defines as never answered and no longer answerable. He did answer. She
-could not read it.
+what the sentence meant, so on an unreadable answer nothing else will
+ever close the episode. Left open, it would wait for the sweep at the
+next daemon start, which labels it `expiré`, a word the spec defines as
+never answered and no longer answerable. He did answer. She could not
+read it.
 
 `expiré` is wrong for the same reason `décliné` would be: it puts his
 name on a decision he did not make. The word for this is its own.
 """
 
 from __future__ import annotations
-
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -46,10 +43,9 @@ def _lignes(db, request_id):
 
 
 def _regle(db, settled, origin="voix"):
-    from src.jarvis.reply.engine import _record_settled_action
+    from src.jarvis.reply.engine import _close_answered_question
 
-    _record_settled_action(db, MagicMock(), settled, origin=origin,
-                           redacted="euh attends")
+    _close_answered_question(db, settled, origin=origin, redacted="euh attends")
 
 
 def test_an_answer_she_could_not_read_closes_the_episode(tmp_path):

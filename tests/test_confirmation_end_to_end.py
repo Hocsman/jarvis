@@ -23,7 +23,7 @@ import pytest
 from src.jarvis.memory.conversation import DialogueMemory
 from src.jarvis.reply.engine import run_reply_engine
 from src.jarvis.tools.base import Tool
-from src.jarvis.tools.confirmation import DENIED, GRANTED, SPOKEN_TEMPLATE
+from src.jarvis.tools.confirmation import DENIED, GRANTED, SPOKEN_TEMPLATE, UNCLEAR
 from src.jarvis.tools.policy import ToolPolicy
 from src.jarvis.tools.types import ToolExecutionResult
 
@@ -396,3 +396,156 @@ def test_inside_the_conversation_the_next_turn_leaves_the_question_open(scene, t
 
     assert dm.peek_pending() is asked
     assert _ledger(db, asked.request_id) == ["demandé"]
+
+
+# ── A spoken answer: how its question ends ────────────────────────────
+
+
+def _ask(cfg, dm, db=None):
+    _turn(cfg, dm, "lance sabotage sur /a", db=db, chat_responses=[
+        _tool_call_response("sabotage", {"cible": "/a"}),
+    ])
+    return dm.peek_pending()
+
+
+# What he says for each reading of it, and what the model says back when
+# the turn reaches it. A no ends the turn before any model is called.
+_SPOKEN = {
+    GRANTED: ("vas-y", "Voilà, c'est fait."),
+    DENIED: ("surtout pas", None),
+    UNCLEAR: ("euh attends, quelle heure est-il", "Il est midi."),
+}
+
+
+def _answer(cfg, dm, verdict, *, db=None, then=None):
+    words, said = _SPOKEN[verdict]
+    responses = list(then or []) + ([{"message": {"content": said}}] if said else [])
+    with patch("src.jarvis.reply.engine.read_approval", return_value=verdict):
+        return _turn(cfg, dm, words, db=db, extract=said or "",
+                     chat_responses=responses)
+
+
+@pytest.fixture
+def cards():
+    """What the surfaces showing a card are told is over, through the
+    callback a bundled desktop wires."""
+    from src.jarvis import daemon
+
+    settled = []
+    daemon.set_confirmation_callbacks(
+        on_confirm_settled=lambda rid, outcome: settled.append((rid, outcome))
+    )
+    yield settled
+    daemon.set_confirmation_callbacks()
+
+
+@pytest.mark.parametrize("verdict, ending", [
+    pytest.param(UNCLEAR, "illisible", id="unreadable"),
+    pytest.param(DENIED, "décliné", id="no"),
+    pytest.param(GRANTED, "ok", id="yes"),
+])
+def test_a_spoken_answer_ends_its_episode(scene, tmp_path, verdict, ending):
+    """The question is claimed before the judge reads the answer, so
+    nothing else can close it in this session. An answer she could not
+    read left open is swept at the next start-up as `expiré`, a word for
+    silence: he did answer."""
+    from src.jarvis.memory.db import Database
+
+    tool, dm, cfg = scene
+    db = Database(str(tmp_path / "ledger.db"))
+    asked = _ask(cfg, dm, db)
+
+    _answer(cfg, dm, verdict, db=db)
+
+    assert dm.peek_pending() is None
+    assert _ledger(db, asked.request_id) == ["demandé", ending]
+
+
+def test_after_an_answer_she_could_not_read_the_turn_is_answered(scene):
+    """Not an answer she can act on, it is still something he said, and
+    it gets the reply any query would."""
+    tool, dm, cfg = scene
+    _ask(cfg, dm)
+
+    reply, _ = _answer(cfg, dm, UNCLEAR)
+
+    assert reply == _SPOKEN[UNCLEAR][1]
+    assert tool.fired == []
+
+
+@pytest.mark.parametrize("verdict, outcome", [
+    pytest.param(UNCLEAR, "illisible", id="unreadable"),
+    pytest.param(DENIED, "décliné", id="no"),
+    pytest.param(GRANTED, "accordé", id="yes"),
+])
+def test_a_spoken_answer_takes_its_card_down(scene, cards, capsys, verdict, outcome):
+    """The card keeps no time of its own: left up, it waits for a click on
+    a question that no longer exists. Both surfaces are told, once, and
+    told how it ended, as they are after a click."""
+    tool, dm, cfg = scene
+    asked = _ask(cfg, dm)
+
+    _answer(cfg, dm, verdict)
+
+    assert cards == [(asked.request_id, outcome)]
+    assert _settled_events(capsys) == [
+        {"request_id": asked.request_id, "outcome": outcome},
+    ]
+
+
+def test_asked_again_after_an_unreadable_answer_is_a_new_episode(scene, tmp_path, cards):
+    """The model may propose the same call again on the turn that could
+    not be read. The first question is over by then, so this one is a new
+    question with its own id and its own card, not the old one reopened."""
+    from src.jarvis.memory.db import Database
+
+    tool, dm, cfg = scene
+    db = Database(str(tmp_path / "ledger.db"))
+    asked = _ask(cfg, dm, db)
+
+    _answer(cfg, dm, UNCLEAR, db=db, then=[
+        _tool_call_response("sabotage", {"cible": "/a"}),
+    ])
+
+    again = dm.peek_pending()
+    assert again is not None and again.request_id != asked.request_id
+    assert _ledger(db, asked.request_id) == ["demandé", "illisible"]
+    assert _ledger(db, again.request_id) == ["demandé"]
+    assert cards == [(asked.request_id, "illisible")]
+    assert tool.fired == []
+
+
+def test_a_click_takes_its_card_down_once(scene, tmp_path, cards):
+    """The control for the spoken door. A click is announced by the daemon
+    as it claims the question; the turn that then runs the call must not
+    announce it again."""
+    from src.jarvis import daemon
+    from src.jarvis.memory.db import Database
+
+    tool, dm, cfg = scene
+    db = Database(str(tmp_path / "ledger.db"))
+    asked = _ask(cfg, dm, db)
+
+    saved = (daemon._global_dialogue_memory, daemon._global_db,
+             daemon._global_cfg, daemon._global_stop_requested)
+    resume = daemon._resume_after_confirmation
+    daemon._global_dialogue_memory, daemon._global_db = dm, db
+    daemon._global_cfg, daemon._global_stop_requested = cfg, False
+    try:
+        # The click, with its worker thread held back so the call runs
+        # here, where the test can wait for it.
+        with patch.object(daemon, "_resume_after_confirmation"):
+            assert daemon.resolve_confirmation(asked.request_id, True) == "ok"
+        with patch("src.jarvis.reply.engine.chat_with_messages") as chat, \
+             patch("src.jarvis.reply.engine.extract_text_from_response",
+                   return_value="Voilà, c'est fait."):
+            chat.side_effect = [{"message": {"content": "Voilà, c'est fait."}}]
+            resume(asked)
+    finally:
+        (daemon._global_dialogue_memory, daemon._global_db,
+         daemon._global_cfg, daemon._global_stop_requested) = saved
+        if daemon._chat_query_lock.locked():
+            daemon._chat_query_lock.release()
+
+    assert tool.fired == [{"cible": "/a"}]
+    assert cards == [(asked.request_id, "accordé")]
