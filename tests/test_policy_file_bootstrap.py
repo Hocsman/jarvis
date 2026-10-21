@@ -13,6 +13,7 @@ the same failure as having no file at all, only slower to notice.
 
 from __future__ import annotations
 
+import re
 from unittest.mock import patch
 
 import pytest
@@ -76,6 +77,27 @@ def test_a_tool_whose_empty_call_is_harmless_is_left_out(cfg):
     assert "- claudeCode\n" not in text
     assert policy.verdict("claudeCode", "destructif") == "demande"
     assert policy.verdict("claudeCode", "lecture") == "libre"
+
+
+def test_a_tool_whose_calls_differ_in_risk_is_left_out(cfg):
+    """stopClaudeCode's empty call stops the job and asks first; a call
+    carrying text stops nothing. One line in the file would decide both:
+    under ## Demande the harmless call would ask too. Left out, each call
+    is judged at its own risk, and a line the user writes under ## Libre
+    is the only one there is."""
+    from src.jarvis.tools.registry import ensure_policy_file
+
+    ensure_policy_file(cfg)
+    text = _policy_path(cfg).read_text(encoding="utf-8")
+    policy = ToolPolicy.parse(text)
+
+    assert "- stopClaudeCode\n" not in text
+    assert policy.verdict("stopClaudeCode", "action") == "demande"
+    assert policy.verdict("stopClaudeCode", "lecture") == "libre"
+    # The real heading, not the one quoted in the file's own explanation.
+    freed = ToolPolicy.parse(
+        re.sub(r"^## Libre$", "## Libre\n\n- stopClaudeCode", text, count=1, flags=re.M))
+    assert freed.verdict("stopClaudeCode", "action") == "libre"
 
 
 def test_discovered_mcp_tools_are_listed_too(cfg):

@@ -106,13 +106,17 @@ class Tool(ABC):
     # Whether the generated `outils.md` must leave this tool out, so each
     # call is judged at its own risk.
     #
-    # The generator classifies a tool from its empty call. That is safe
-    # when the empty call is the dangerous one (`localFiles` with no
-    # operation is destructive) and wrong when it is the harmless one:
-    # `claudeCode` with no task only asks how a job is going, so it would
-    # land under `## Libre`, and a line there frees every call of it, a
-    # change to the user's code included. Left out, it falls back to the
-    # default for each call's own risk.
+    # The generator classifies a tool from its empty call, and one line in
+    # the file then decides every call of it. That is safe when the empty
+    # call is the dangerous one (`localFiles` with no operation is
+    # destructive) and wrong in two cases. When the empty call is the
+    # harmless one: `claudeCode` with no task only asks how a job is going,
+    # so it would land under `## Libre`, and a line there frees every call
+    # of it, a change to the user's code included. And when one call that
+    # changes nothing sits beside one that acts: `stopClaudeCode` with no
+    # arguments stops the job, with text it stops nothing, and a line under
+    # `## Demande` would make the harmless call ask too. Left out, each
+    # call falls back to the default for its own risk.
     classified_per_call: bool = False
 
     def offered(self, cfg) -> bool:
@@ -122,7 +126,7 @@ class Tool(ABC):
         act on (`stopClaudeCode` while no job runs): shown, it would cost
         every routing call its description and could only refuse.
         Not a gate: a call that arrives anyway still runs the tool, which
-        says it is off.
+        says why it cannot act.
         """
         return True
 

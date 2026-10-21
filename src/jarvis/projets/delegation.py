@@ -594,16 +594,18 @@ class Delegations:
 
         Returns (None, None) when nothing runs. (job, outcome) when it
         ended in time: the caller reports it, so it is not delivered again,
-        and it is not a cancellation when the job had finished with its
-        report before the stop reached it. (job, None) when it had not
-        ended yet: its end is then delivered like any other, so nobody is
-        left believing it still runs.
+        and it is a cancellation only when the stop ended it. (job, None)
+        when it had not ended yet: its end is then delivered like any
+        other, so nobody is left believing it still runs.
         """
         with self._lock:
             job, proc = self._running, self._proc
             if job is None:
                 return None, None
-            self._cancelled.add(job.id)
+            # A process already gone ended on its own: the stop waits for
+            # that end and reports it, without claiming it.
+            if proc is None or proc.poll() is None:
+                self._cancelled.add(job.id)
             self._reported.setdefault(job.id, None)
         debug_log(f"    🛑 Claude Code on {job.projet}: stop asked", "tools")
         if proc is not None:
@@ -709,6 +711,7 @@ class Delegations:
 
     def _run(self, job: Job, argv: List[str], timeout: float, db) -> None:
         session = None
+        done = None
         try:
             stdout, stderr, code, timed_out = self._execute(job, argv, timeout)
             if timed_out:
@@ -717,14 +720,23 @@ class Delegations:
                           f"le travail a été arrêté")
             else:
                 ok, report, session = parse_report(stdout, stderr, code)
+                if not ok:
+                    # The output read with its exit code left aside: a
+                    # result printed in full before a stop's kill reached
+                    # a process still finishing (hooks, a slow exit).
+                    said, said_report, said_session = parse_report(stdout, stderr, 0)
+                    if said:
+                        done = (_clean_report(said_report), said_session)
         except Exception as e:
             ok, report = False, f"impossible de lancer Claude Code dans {job.projet} : {e}"
 
         report = _clean_report(report)
         with self._finished:
-            # A job that finished with its report before the stop reached
-            # it is not a cancellation: its edits are done.
-            cancelled = job.id in self._cancelled and not ok
+            stopped = job.id in self._cancelled
+            if stopped and done is not None:
+                # Its work was done and reported: a finished job.
+                ok, (report, session) = True, done
+            cancelled = stopped and not ok
             silenced = job.id in self._silenced
             self._cancelled.discard(job.id)
             self._silenced.discard(job.id)

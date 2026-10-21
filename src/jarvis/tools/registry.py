@@ -356,8 +356,8 @@ _POLICY_CACHE: Dict[str, Any] = {"stamp": None, "policy": None}
 def offered_builtin_tools(cfg) -> Dict[str, Any]:
     """The builtins the router and the model are shown, given ``cfg``.
 
-    A tool switched off in the settings is left out; calling it anyway
-    still reaches it, and it says it is off.
+    A tool its settings or state leave off is left out; calling it anyway
+    still reaches it, and it says why it cannot act.
     """
     offered = {}
     for name, tool in BUILTIN_TOOLS.items():

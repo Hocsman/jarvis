@@ -22,7 +22,9 @@ from pathlib import Path
 import psutil
 import pytest
 
-from claude_code_fakes import Ledger, install_fake_claude, make_cfg, make_projects
+from claude_code_fakes import (
+    Ledger, install_fake_claude, make_cfg, make_projects, wait_for_calls,
+)
 from jarvis.projets import delegation as dl
 
 NAMES = ("chantipay", "nikahscore", "france-carte-grise", "Relayer")
@@ -475,15 +477,6 @@ def test_reopening_starts_fresh(tmp_path, projects, fake_claude, delegations):
 # ── Cancelling ────────────────────────────────────────────────────────
 
 
-def _until_running(fake_claude, timeout=10.0):
-    """Wait until the stand-in has started, and return what it logged."""
-    deadline = time.monotonic() + timeout
-    while not fake_claude() and time.monotonic() < deadline:
-        time.sleep(0.05)
-    (call,) = fake_claude()
-    return call
-
-
 def _gone(pid, timeout=10.0):
     deadline = time.monotonic() + timeout
     while psutil.pid_exists(pid) and time.monotonic() < deadline:
@@ -503,7 +496,7 @@ def test_cancelling_kills_the_job_and_frees_the_slot(
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "sleep")
     cfg = make_cfg(tmp_path, projects)
     _launch(delegations, cfg, projects)
-    call = _until_running(fake_claude)
+    (call,) = wait_for_calls(fake_claude)
 
     job, outcome = delegations.cancel()
 
@@ -553,7 +546,7 @@ def test_a_cancelled_job_closes_its_bracket_as_cancelled(
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "sleep")
     db = Ledger()
     _launch(delegations, make_cfg(tmp_path, projects), projects, db=db)
-    _until_running(fake_claude)
+    wait_for_calls(fake_claude)
 
     delegations.cancel()
     assert delegations.wait(10.0)
@@ -570,7 +563,7 @@ def test_a_stop_confirmed_in_the_turn_is_not_announced_again(
     the same thing a second later is noise."""
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "sleep")
     _launch(delegations, make_cfg(tmp_path, projects), projects)
-    _until_running(fake_claude)
+    wait_for_calls(fake_claude)
 
     _job, outcome = delegations.cancel()
     assert outcome is not None
@@ -589,7 +582,7 @@ def test_a_stop_not_confirmed_in_time_is_announced_when_it_lands(
     monkeypatch.setattr(dl, "_kill_tree", lambda proc: threading.Timer(
         1.5, real_kill, args=(proc,)).start())
     _launch(delegations, make_cfg(tmp_path, projects), projects)
-    _until_running(fake_claude)
+    wait_for_calls(fake_claude)
 
     job, outcome = delegations.cancel(timeout=0.2)
     assert job.projet == "chantipay"
@@ -607,11 +600,10 @@ def test_a_job_that_finished_before_the_stop_reached_it_reports_its_work(
         tmp_path, projects, fake_claude, delegations, monkeypatch):
     """Its edits are done and its report is real: calling that a
     cancellation would hide what changed."""
-    monkeypatch.setenv("FAKE_CLAUDE_MODE", "slow")
     monkeypatch.setenv("FAKE_CLAUDE_DELAY", "1")
     monkeypatch.setattr(dl, "_kill_tree", lambda proc: None)
     _launch(delegations, make_cfg(tmp_path, projects), projects)
-    _until_running(fake_claude)
+    wait_for_calls(fake_claude)
 
     _job, outcome = delegations.cancel(timeout=15.0)
 
@@ -621,6 +613,66 @@ def test_a_job_that_finished_before_the_stop_reached_it_reports_its_work(
     assert outcome.report == "J'ai ajouté le bouton de déconnexion."
     assert delegations.wait(10.0)
     assert delegations.delivered == []
+
+
+def test_a_job_that_failed_before_the_stop_reached_it_keeps_its_failure(
+        tmp_path, projects, fake_claude, delegations, monkeypatch):
+    """Its process had already exited: the stop killed nothing, so the
+    failure and its reason are what happened, not a cancellation."""
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "error")
+    exited = threading.Event()
+    release = threading.Event()
+    real_parse = dl.parse_report
+
+    def held_parse(*args, **kwargs):
+        # The process is gone by now; hold the job here so the stop
+        # arrives while the job is still the running one.
+        exited.set()
+        release.wait(10)
+        return real_parse(*args, **kwargs)
+
+    monkeypatch.setattr(dl, "parse_report", held_parse)
+    db = Ledger()
+    _launch(delegations, make_cfg(tmp_path, projects), projects, db=db)
+    assert exited.wait(10)
+    threading.Timer(0.3, release.set).start()
+
+    job, outcome = delegations.cancel()
+
+    assert job.projet == "chantipay"
+    assert outcome.cancelled is False
+    assert outcome.ok is False
+    assert "Le build a échoué." in outcome.report
+    assert delegations.wait(10.0)
+    assert [row["outcome"] for row in db.rows] == ["démarré", "échec"]
+
+
+def test_a_job_that_printed_its_report_before_the_stop_keeps_it(
+        tmp_path, projects, fake_claude, delegations, monkeypatch):
+    """Claude Code can still be running after its result is out (hooks, a
+    slow exit). The kill gives it a failing exit code, but the work was
+    done and reported: that is a finished job, session included."""
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "linger")
+    cfg = make_cfg(tmp_path, projects)
+    db = Ledger()
+    _launch(delegations, cfg, projects, db=db)
+    printed = Path(str(fake_claude.log) + ".printed")
+    deadline = time.monotonic() + 10
+    while not printed.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+    _job, outcome = delegations.cancel()
+
+    assert outcome.cancelled is False
+    assert outcome.ok is True
+    assert outcome.report == "J'ai ajouté le bouton de déconnexion."
+    assert delegations.wait(10.0)
+    assert [row["outcome"] for row in db.rows] == ["démarré", "ok"]
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ok")
+    _launch(delegations, cfg, projects, tache="Ajoute un test.")
+    _wait(delegations)
+    _first, follow_up = fake_claude()
+    assert "--resume" in follow_up["argv"]
 
 
 def test_cancelling_with_nothing_running_stops_nothing(delegations):
@@ -637,9 +689,7 @@ def test_a_cancelled_job_leaves_no_session_to_continue(
     _wait(delegations)
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "sleep")
     _launch(delegations, cfg, projects, tache="Supprime tout le module de paiement.")
-    deadline = time.monotonic() + 10
-    while len(fake_claude()) < 2 and time.monotonic() < deadline:
-        time.sleep(0.05)
+    wait_for_calls(fake_claude, 2)
     delegations.cancel()
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ok")
 
@@ -662,7 +712,7 @@ def test_closing_after_a_stop_was_asked_still_delivers_nothing(
     delivered = []
     d.open(delivered.append)
     _launch(d, make_cfg(tmp_path, projects), projects)
-    call = _until_running(fake_claude)
+    (call,) = wait_for_calls(fake_claude)
     assert d.cancel(timeout=0.1)[1] is None
     monkeypatch.setattr(dl, "_kill_tree", real_kill)
 
