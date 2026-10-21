@@ -117,10 +117,11 @@ class _Settled:
 
     ``approval`` grants the pinned call for this turn and this turn only.
     ``reply`` short-circuits the turn with a fixed sentence. ``action`` is
-    the claimed request, for the ledger and the card. All three absent
-    means there was nothing to settle, or the answer settled nothing —
-    the utterance is then an ordinary query, so a question the user
-    ignored never locks them out.
+    the claimed request, ended in the ledger and on its card whatever the
+    answer said. With no approval and no reply the utterance is an
+    ordinary query: either nothing was waiting for it, or ``action`` holds
+    a question it answered with neither a yes nor a no, so a question the
+    user ignored never locks them out.
     """
 
     __slots__ = ("approval", "action", "reply", "declined")
@@ -165,6 +166,23 @@ def _publish_settled(action, outcome: str) -> None:
         debug_log(f"settlement not announced: {e}", "tools")
 
 
+def _end_question(db, action, outcome: str) -> None:
+    """Close a claimed question's episode, in the ledger and on its card.
+
+    The row keeps the request she asked about, not whatever ended it: it
+    is what the Activity tab shows to answer "did I ask for this?".
+    """
+    from ..tools.registry import _log_action
+
+    _log_action(
+        db, tool=action.tool, args=action.args, risk=action.risk,
+        verdict="demande", outcome=outcome,
+        query=action.query_redacted, origin=action.origin,
+        request_id=action.request_id,
+    )
+    _publish_settled(action, outcome)
+
+
 def _expire_forgotten_question(db, dialogue_memory) -> None:
     """Close the question a new conversation leaves behind.
 
@@ -182,15 +200,8 @@ def _expire_forgotten_question(db, dialogue_memory) -> None:
         return
 
     from ..tools.policy import OUTCOME_EXPIRED
-    from ..tools.registry import _log_action
 
-    _log_action(
-        db, tool=held.tool, args=held.args, risk=held.risk,
-        verdict="demande", outcome=OUTCOME_EXPIRED,
-        query=held.query_redacted, origin=held.origin,
-        request_id=held.request_id,
-    )
-    _publish_settled(held, OUTCOME_EXPIRED)
+    _end_question(db, held, OUTCOME_EXPIRED)
     debug_log(f"    🙋 {held.tool} expired: a new conversation began", "tools")
 
 
@@ -266,7 +277,7 @@ def _end_turn_with_question(result, dialogue_memory, redacted, *, tts, cfg,
     return reply
 
 
-def _close_answered_question(db, settled, *, origin, redacted) -> None:
+def _close_answered_question(db, settled) -> None:
     """End the question a spoken answer claimed, however it was read.
 
     It was claimed before the judge ran, so nothing else can end it: the
@@ -275,9 +286,10 @@ def _close_answered_question(db, settled, *, origin, redacted) -> None:
     hears all but a grant, which the call settles itself with `ok` or
     `échec` under the same id.
 
-    An answer she could not read ends `illisible`. Left open, the episode
-    waits for the next daemon start, and the sweep there would call it
-    `expiré` — a word the spec defines as never answered. He did answer.
+    Words the judge reads as neither a yes nor a no end `illisible`,
+    whether they were unclear or about something else. Left open, the
+    episode waits for the next daemon start, and the sweep there would
+    call it `expiré`, the word for a question no turn came to answer.
     """
     action = settled.action
     if action is None:
@@ -290,19 +302,9 @@ def _close_answered_question(db, settled, *, origin, redacted) -> None:
 
     from ..tools.policy import OUTCOME_DECLINED, OUTCOME_UNREADABLE
 
-    outcome = OUTCOME_DECLINED if settled.declined else OUTCOME_UNREADABLE
-    try:
-        from ..tools.registry import _log_action
-
-        _log_action(
-            db, tool=action.tool, args=action.args, risk=action.risk,
-            verdict="demande", outcome=outcome,
-            query=redacted, origin=origin, request_id=action.request_id,
-        )
-    except Exception as e:
-        debug_log(f"confirmation outcome not recorded: {e}", "tools")
-    _publish_settled(action, outcome)
-    debug_log(f"    🙋 {action.tool} ended {outcome} by a spoken answer", "tools")
+    _end_question(
+        db, action, OUTCOME_DECLINED if settled.declined else OUTCOME_UNREADABLE,
+    )
 
 
 def settle_pending_confirmation(*, cfg, dialogue_memory, utterance, origin) -> _Settled:
@@ -1314,7 +1316,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
             _settled = _Settled()
         # Not on the click branch above: the daemon ended that question
         # itself when it claimed it.
-        _close_answered_question(db, _settled, origin=origin, redacted=redacted)
+        _close_answered_question(db, _settled)
 
     if _settled.reply is not None:
         # Declined. Fixed words, no model: handing a refusal back to it

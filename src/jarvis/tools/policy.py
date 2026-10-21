@@ -52,11 +52,12 @@ OUTCOME_REFUSED = "refusé"
 OUTCOME_ASKED = "demandé"
 OUTCOME_DECLINED = "décliné"
 OUTCOME_EXPIRED = "expiré"
-# He answered and she could not read it. Kept apart from `décliné`, which
-# says he was asked and said no, and from `expiré`, which says nobody
-# answered and nobody can any more. Both would put his name on a decision
-# he did not make — the reasoning the approval judge already applies when
-# it returns UNCLEAR on a timeout rather than DENIED.
+# On the turn that could answer the question, what he said was not a
+# plain yes or no: unclear, conditional, or about something else. Kept
+# apart from `décliné`, which says he was asked and said no and would put
+# his name on a decision he did not make — the reasoning the approval
+# judge already applies when it returns UNCLEAR on a timeout rather than
+# DENIED — and from `expiré`, which says no turn came that could answer.
 OUTCOME_UNREADABLE = "illisible"
 # A tool that could not proceed without something only the user can
 # supply, and asked. Distinct from `échec`, which says something broke,

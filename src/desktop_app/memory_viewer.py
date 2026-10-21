@@ -1865,6 +1865,10 @@ def index() -> str:
         /* Asked and never answered. */
         .activity-expiré   { color: var(--text-muted); border-color: var(--text-muted);
                              border-style: dashed; }
+        /* You spoke when she was waiting for an answer, and it was not a yes
+           or a no. Not your no, and not silence. */
+        .activity-illisible { color: var(--text-secondary); border-color: var(--text-secondary);
+                              border-style: dotted; }
         .activity-demandé  { color: var(--accent-primary); border-color: var(--accent-primary); }
         /* A run that began. Left alone, with nothing after it, it is the
            trace of a run the process took down with it. */
@@ -3128,6 +3132,7 @@ def index() -> str:
                         <br>
                         <code>refusé</code> : la politique a dit non, on ne t'a rien demandé.
                         <code>décliné</code> : on t'a demandé, tu as dit non.
+                        <code>illisible</code> : tu as parlé quand elle attendait ta réponse, sans dire oui ni non.
                         <code>demandé</code> seul : personne n'a répondu.
                     </p>
                     <button class="activity-clear" id="btn-clear-activity">🗑️ Effacer le registre</button>
