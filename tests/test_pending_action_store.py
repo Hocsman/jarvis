@@ -306,18 +306,7 @@ def test_two_threads_racing_to_raise_get_one_question(dm):
     assert len([r for r in raised if r is not None]) == 1
 
 
-# ── Clearing ──────────────────────────────────────────────────────────
-
-
-def test_a_new_conversation_drops_the_question(dm):
-    """A question raised before a gap does not survive it: whatever the
-    user was doing then, they are doing something else now."""
-    dm.begin_turn()
-    dm.raise_pending(_action(dm))
-
-    dm.clear_pending()
-
-    assert dm.peek_pending() is None
+# ── Basics ────────────────────────────────────────────────────────────
 
 
 def test_there_is_no_pending_question_on_a_fresh_memory(dm):

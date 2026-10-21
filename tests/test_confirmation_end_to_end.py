@@ -14,6 +14,8 @@ Turn two must run the pinned call once, and only on a yes.
 
 from __future__ import annotations
 
+import json
+import time
 from unittest.mock import Mock, patch
 
 import pytest
@@ -115,14 +117,14 @@ def scene(tmp_path):
         yield tool, dm, cfg
 
 
-def _turn(cfg, dm, text, *, chat_responses, extract="", origin="voix"):
+def _turn(cfg, dm, text, *, chat_responses, extract="", origin="voix", db=None):
     with patch("src.jarvis.reply.engine.chat_with_messages") as chat, \
          patch("src.jarvis.reply.engine.extract_text_from_response",
                return_value=extract):
         chat.side_effect = chat_responses
         reply = run_reply_engine(
-            db=Mock(), cfg=cfg, tts=None, text=text, dialogue_memory=dm,
-            origin=origin,
+            db=db if db is not None else Mock(), cfg=cfg, tts=None, text=text,
+            dialogue_memory=dm, origin=origin,
         )
         return reply, chat
 
@@ -266,3 +268,107 @@ def test_the_model_cannot_slip_a_second_call_past_the_grant(scene):
 
     assert tool.fired == [{"cible": "/a"}]
     assert dm.peek_pending() is None
+
+
+# ── A gap: the conversation ends before the answer comes ──────────────
+
+
+def _ledger(db, request_id):
+    """The outcomes recorded for one question, oldest first."""
+    return [r["outcome"] for r in reversed(db.recent_actions(200))
+            if r.get("request_id") == request_id]
+
+
+def _after_a_silence(dm):
+    """What was said falls out of the conversation window, as it does when
+    he comes back to her minutes later: the next turn starts a new
+    conversation."""
+    dm.RECENT_WINDOW_SEC = 0.01
+    time.sleep(0.05)
+    assert not dm.has_recent_messages()
+
+
+def _settled_events(capsys):
+    from src.jarvis import daemon
+
+    events = []
+    for line in capsys.readouterr().out.splitlines():
+        if line.startswith(daemon.CHAT_IPC_PREFIX):
+            event = json.loads(line[len(daemon.CHAT_IPC_PREFIX):])
+            if event.get("type") == "confirm_settled":
+                events.append(event["data"])
+    return events
+
+
+def test_a_question_the_conversation_outlived_is_closed_as_expired(scene, tmp_path):
+    """A question raised before the gap does not survive it, and it has
+    to end where the Activity tab can see it end. Dropped without a row,
+    it reads as a question she is still waiting on until the next
+    start-up sweeps it."""
+    from src.jarvis.memory.db import Database
+
+    tool, dm, cfg = scene
+    db = Database(str(tmp_path / "ledger.db"))
+    _turn(cfg, dm, "lance sabotage sur /a", db=db, chat_responses=[
+        _tool_call_response("sabotage", {"cible": "/a"}),
+    ])
+    asked = dm.peek_pending()
+
+    _after_a_silence(dm)
+    _turn(cfg, dm, "quelle heure est-il", db=db, extract="Il est midi.",
+          chat_responses=[{"message": {"content": "Il est midi."}}])
+
+    assert dm.peek_pending() is None
+    assert _ledger(db, asked.request_id) == ["demandé", "expiré"]
+    assert tool.fired == []
+
+
+def test_the_card_of_a_question_the_conversation_outlived_is_withdrawn(scene, capsys):
+    """The card is still on screen and its question no longer exists: a
+    click on it would answer nothing. Both surfaces are told it lapsed,
+    the bus a subprocess desktop reads and the callback a bundled one
+    wires."""
+    from src.jarvis import daemon
+
+    tool, dm, cfg = scene
+    _turn(cfg, dm, "lance sabotage sur /a", chat_responses=[
+        _tool_call_response("sabotage", {"cible": "/a"}),
+    ])
+    asked = dm.peek_pending()
+    settled = []
+    daemon.set_confirmation_callbacks(
+        on_confirm_settled=lambda rid, outcome: settled.append((rid, outcome))
+    )
+    try:
+        capsys.readouterr()
+        _after_a_silence(dm)
+        _turn(cfg, dm, "quelle heure est-il", extract="Il est midi.",
+              chat_responses=[{"message": {"content": "Il est midi."}}])
+    finally:
+        daemon.set_confirmation_callbacks()
+
+    assert settled == [(asked.request_id, "expiré")]
+    assert _settled_events(capsys) == [
+        {"request_id": asked.request_id, "outcome": "expiré"},
+    ]
+
+
+def test_inside_the_conversation_the_next_turn_leaves_the_question_open(scene, tmp_path):
+    """The control: the gap closes it, not any next turn. Something typed
+    while a spoken question waits is not an answer to it, and the card
+    stays live for a click."""
+    from src.jarvis.memory.db import Database
+
+    tool, dm, cfg = scene
+    db = Database(str(tmp_path / "ledger.db"))
+    _turn(cfg, dm, "lance sabotage sur /a", db=db, chat_responses=[
+        _tool_call_response("sabotage", {"cible": "/a"}),
+    ])
+    asked = dm.peek_pending()
+
+    _turn(cfg, dm, "quelle heure est-il", db=db, origin="chat",
+          extract="Il est midi.",
+          chat_responses=[{"message": {"content": "Il est midi."}}])
+
+    assert dm.peek_pending() is asked
+    assert _ledger(db, asked.request_id) == ["demandé"]

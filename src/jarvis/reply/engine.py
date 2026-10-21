@@ -152,6 +152,48 @@ def _publish_confirmation(action, *, origin) -> None:
         debug_log(f"confirmation not announced: {e}", "tools")
 
 
+def _publish_settled(action, outcome: str) -> None:
+    """Take a settled question off every surface that shows it.
+
+    Fire and forget, like raising it: the daemon owns the surfaces.
+    """
+    try:
+        from ..daemon import announce_settled
+
+        announce_settled(action, outcome)
+    except Exception as e:
+        debug_log(f"settlement not announced: {e}", "tools")
+
+
+def _expire_forgotten_question(db, dialogue_memory) -> None:
+    """Close the question a new conversation leaves behind.
+
+    Whatever the user was doing when she asked, they are doing something
+    else now, and an approval given to a forgotten question is not an
+    approval. It ends `expiré`, in the ledger and on the card: dropped
+    without a row, it reads as a question she is still waiting on, and
+    its card stays up for a click that can answer nothing.
+    """
+    take = getattr(dialogue_memory, "take_pending", None)
+    if not callable(take):
+        return
+    held = take()
+    if held is None:
+        return
+
+    from ..tools.policy import OUTCOME_EXPIRED
+    from ..tools.registry import _log_action
+
+    _log_action(
+        db, tool=held.tool, args=held.args, risk=held.risk,
+        verdict="demande", outcome=OUTCOME_EXPIRED,
+        query=held.query_redacted, origin=held.origin,
+        request_id=held.request_id,
+    )
+    _publish_settled(held, OUTCOME_EXPIRED)
+    debug_log(f"    🙋 {held.tool} expired: a new conversation began", "tools")
+
+
 def _float_setting(cfg, name: str, default: float) -> float:
     """A numeric setting, or the default when cfg cannot supply one.
 
@@ -1212,15 +1254,11 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 dialogue_memory.clear_tool_carryover()
             except Exception:
                 pass
-        # A question raised before the gap does not survive it. Whatever
-        # the user was doing when she asked, they are doing something
-        # else now, and an approval given to a forgotten question is not
-        # an approval.
-        if hasattr(dialogue_memory, "clear_pending"):
-            try:
-                dialogue_memory.clear_pending()
-            except Exception:
-                pass
+        # A question raised before the gap does not survive it.
+        try:
+            _expire_forgotten_question(db, dialogue_memory)
+        except Exception as e:
+            debug_log(f"forgotten question not closed: {e}", "tools")
 
     # Refresh MCP tools on new conversation (memory expired)
     if is_new_conversation and getattr(cfg, "mcps", {}):
