@@ -906,13 +906,22 @@ class DialogueMemory:
 
         For a question whose context is gone: a stop asked about a job
         that has since ended would, approved later, stop whatever runs
-        then. Atomic, so a click racing the withdrawal runs nothing twice.
+        then. Atomic, so a click racing the withdrawal either runs the stop
+        or finds it gone, never both.
         """
         with self._lock:
             held = self._pending
             if held is None or held.tool != tool:
                 return None
             self._pending = None
+            return held
+
+    def take_pending(self):
+        """Claim whatever question is waiting, for a shutdown or a rewind
+        that closes it unanswered. Read and cleared in one step, so nothing
+        racing it settles the same question as well."""
+        with self._lock:
+            held, self._pending = self._pending, None
             return held
 
     def clear_pending(self) -> None:

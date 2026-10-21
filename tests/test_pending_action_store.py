@@ -235,6 +235,54 @@ def test_two_threads_racing_on_one_id_get_one_between_them(dm):
     assert len([g for g in got if g is not None]) == 1
 
 
+def test_a_question_about_a_tool_is_claimed_by_its_name(dm):
+    dm.begin_turn()
+    p = dm.raise_pending(_action(dm, tool="stopClaudeCode", args={}, channel=CHANNEL_GESTE))
+
+    assert dm.take_pending_for_tool("stopClaudeCode") == p
+    assert dm.peek_pending() is None
+
+
+def test_a_question_about_another_tool_is_left_waiting(dm):
+    dm.begin_turn()
+    p = dm.raise_pending(_action(dm, channel=CHANNEL_GESTE))
+
+    assert dm.take_pending_for_tool("stopClaudeCode") is None
+    assert dm.peek_pending() == p
+
+
+def test_a_click_racing_a_withdrawal_gets_one_between_them(dm):
+    """Either the stop runs or it is withdrawn, never both: two settling
+    rows for one question would contradict each other."""
+    dm.begin_turn()
+    p = dm.raise_pending(_action(dm, tool="stopClaudeCode", args={}, channel=CHANNEL_GESTE))
+    got = []
+    barrier = threading.Barrier(8)
+
+    def _claim(i):
+        barrier.wait()
+        got.append(dm.take_pending_by_id(p.request_id) if i % 2
+                   else dm.take_pending_for_tool("stopClaudeCode"))
+
+    threads = [threading.Thread(target=_claim, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len([g for g in got if g is not None]) == 1
+
+
+def test_taking_the_question_whatever_it_is_consumes_it(dm):
+    """For a shutdown or a rewind, which close whatever is waiting: read
+    and cleared in one step, so nothing else settles it as well."""
+    dm.begin_turn()
+    p = dm.raise_pending(_action(dm, channel=CHANNEL_GESTE))
+
+    assert dm.take_pending() == p
+    assert dm.take_pending() is None
+
+
 def test_two_threads_racing_to_raise_get_one_question(dm):
     dm.begin_turn()
     raised = []

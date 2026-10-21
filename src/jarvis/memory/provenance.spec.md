@@ -65,11 +65,12 @@ filtered after it.
 
 Running a tool is not the same as having consulted something. `stop`,
 `toolSearchTool` and `stopClaudeCode` steer (a report `stopClaudeCode`
-repeats was brought in by the `claudeCode` job that produced it); `remember`, `forget`, `logMeal`, `setReminder`
-and the goal tools write; `fetchMeals`, `listGoals` and `reviewLearnings`
-read his own records, which are not the world. Only the rest counts, and
-only the rest decides the source label — a window that merely wrote a
-reminder looked nothing up.
+carries came from the `claudeCode` job that produced it); `remember`,
+`forget`, `logMeal`, `setReminder` and the goal tools write;
+`fetchMeals`, `listGoals` and `reviewLearnings` read his own records,
+which are not the world. Only the rest counts, and only the rest decides
+the source label — a window that merely wrote a reminder looked nothing
+up.
 
 Observed 2026-08-17: a turn whose only tool was `toolSearchTool` — which
 returns a list of tool *names* — satisfied the gate as first written.

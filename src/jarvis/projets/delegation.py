@@ -371,9 +371,10 @@ def _kill_tree(proc: subprocess.Popen) -> None:
     """Kill the process and everything it started.
 
     Killing only the top process is not enough: on Windows an npm install
-    runs `cmd.exe`, which leaves the agent itself running. On Windows the
-    job object (`_terminate_job`) goes first; this walks the tree from the
-    top, for a process the job object could not hold.
+    runs `cmd.exe`, which leaves the agent itself running. On Windows this
+    walks the tree from the top, for a job the job object (`_terminate_job`)
+    could not end: none was made, or it would not terminate. Callers go
+    through `Delegations._end_tree`, which owns that order.
     """
     if proc.poll() is not None:
         return
@@ -395,6 +396,33 @@ def _kill_tree(proc: subprocess.Popen) -> None:
         proc.kill()
     except Exception:
         pass
+
+
+_KERNEL32 = None
+
+
+def _kernel32():
+    """kernel32 with the job-object calls typed, bound once.
+
+    Binding takes the process loader lock, and the job object is reached
+    under the keeper's lock: only the system call itself belongs there.
+    A private instance, so no other module's argtypes are touched.
+    """
+    global _KERNEL32
+    if _KERNEL32 is None:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.CreateJobObjectW.argtypes = (ctypes.c_void_p, wintypes.LPCWSTR)
+        kernel32.SetInformationJobObject.argtypes = (
+            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD)
+        kernel32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+        kernel32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        _KERNEL32 = kernel32
+    return _KERNEL32
 
 
 def _tie_to_this_process(proc: subprocess.Popen):
@@ -436,14 +464,7 @@ def _tie_to_this_process(proc: subprocess.Popen):
                 ("PeakJobMemoryUsed", ctypes.c_size_t),
             ]
 
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
-        kernel32.CreateJobObjectW.argtypes = (ctypes.c_void_p, wintypes.LPCWSTR)
-        kernel32.SetInformationJobObject.argtypes = (
-            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD)
-        kernel32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
-        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
-
+        kernel32 = _kernel32()
         job = kernel32.CreateJobObjectW(None, None)
         if not job:
             raise ctypes.WinError(ctypes.get_last_error())
@@ -467,17 +488,14 @@ def _terminate_job(job) -> bool:
     That includes a descendant whose parent has already exited, which a
     walk down from the top (`taskkill /T`) never reaches, and which keeps
     the job running for as long as it holds its output open. One system
-    call, so it is safe under the keeper's lock.
+    call, which queues the kills and returns, so it is safe under the
+    keeper's lock. True when it was made: walking the tree is then
+    redundant.
     """
     if not job:
         return False
     try:
-        import ctypes
-        from ctypes import wintypes
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
-        return bool(kernel32.TerminateJobObject(job, 1))
+        return bool(_kernel32().TerminateJobObject(job, 1))
     except Exception as e:
         debug_log(f"Claude Code job object not terminated: {e}", "tools")
         return False
@@ -488,12 +506,7 @@ def _release(job) -> None:
     if not job:
         return
     try:
-        import ctypes
-        from ctypes import wintypes
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
-        kernel32.CloseHandle(job)
+        _kernel32().CloseHandle(job)
     except Exception as e:
         debug_log(f"Claude Code job object not closed: {e}", "tools")
 
@@ -590,6 +603,7 @@ class Delegations:
         self._running: Optional[Job] = None
         self._proc: Optional[subprocess.Popen] = None
         self._tie = None  # its Windows job object, closed only under the lock
+        self._killer: Optional[threading.Thread] = None  # a stop's walk down the tree
         self._thread: Optional[threading.Thread] = None
         self._active = 0  # jobs whose thread has not finished delivering
         self._stopped: set = set()  # a stop reached it while its process ran or had not started
@@ -600,18 +614,25 @@ class Delegations:
         self._last: Optional[Outcome] = None
         self._sessions: Dict[str, _Session] = {}
         self._deliver: Optional[Callable[[Outcome], None]] = None
+        self._changed: Optional[Callable[[Job], None]] = None
 
-    def open(self, deliver: Optional[Callable[[Outcome], None]]) -> None:
+    def open(self, deliver: Optional[Callable[[Outcome], None]], *,
+             changed: Optional[Callable[[Job], None]] = None) -> None:
+        """Start serving, with the delivery for each job's end and a
+        ``changed`` hook told whenever the running job changes: one starts,
+        or one ends, whether or not its end is delivered."""
         with self._lock:
+            # A job closing gave up waiting for is still dying: its end
+            # belongs to the daemon that closed, not to this one. One still
+            # running with no close before is this daemon's own.
+            straggler = self._running if self._closed else None
             self._closed = False
             self._deliver = deliver
+            self._changed = changed
             self._sessions.clear()
             self._last = None
             self._stopped.clear()
             self._reported.clear()
-            # A job closing gave up waiting for is still dying: its end
-            # belongs to the daemon that closed, not to this one.
-            straggler = self._running
             self._silenced = {straggler.id} if straggler is not None else set()
 
     def close(self, timeout: float = 5.0) -> None:
@@ -622,11 +643,12 @@ class Delegations:
             job, proc, thread = self._running, self._proc, self._thread
             if job is not None:
                 self._silenced.add(job.id)
-            _terminate_job(self._tie)
-        if proc is not None:
-            _kill_tree(proc)
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout)
+        self._end_tree(proc)
+        with self._lock:
+            killer = self._killer
+        for waited in (thread, killer):
+            if waited is not None and waited is not threading.current_thread():
+                waited.join(timeout)
         if job is not None:
             debug_log(f"Claude Code job on {job.projet} stopped with the daemon", "tools")
 
@@ -650,13 +672,14 @@ class Delegations:
             if proc is None or proc.poll() is None:
                 self._stopped.add(job.id)
             self._reported.setdefault(job.id, None)
-            _terminate_job(self._tie)
+            if not self._closed:
+                # A job left from a daemon gone, stopped by this one: this
+                # daemon asked about it, so its end is this daemon's to hear.
+                self._silenced.discard(job.id)
         debug_log(f"    🛑 Claude Code on {job.projet}: stop asked", "tools")
-        if proc is not None:
-            # Off this thread: the turn holds the query lock, and a hung
-            # taskkill must not hold it past the deadline.
-            threading.Thread(target=_kill_tree, args=(proc,),
-                             name="jarvis-claude-code-kill", daemon=True).start()
+        # Off this thread: the turn holds the query lock, and a hung
+        # taskkill must not hold it past the deadline.
+        self._end_tree(proc, off_thread=True)
         with self._finished:
             self._finished.wait_for(lambda: self._reported.get(job.id) is not None,
                                     max(0.0, deadline - time.monotonic()))
@@ -726,6 +749,7 @@ class Delegations:
             "tools",
         )
         _record(db, job, OUTCOME_STARTED)
+        self._tell_changed(job)
         try:
             thread.start()
         except Exception:
@@ -740,6 +764,38 @@ class Delegations:
             _record(db, job, OUTCOME_FAILED, 0)
             raise
         return True, job
+
+    def _end_tree(self, proc: Optional[subprocess.Popen], *,
+                  off_thread: bool = False) -> None:
+        """End the job's whole process tree.
+
+        The Windows job object first, under the lock where its handle is
+        closed, so it is never a closed one; then, only if it could not,
+        the walk down from the top, on a thread of its own when the caller
+        holds a turn.
+        """
+        with self._lock:
+            terminated = _terminate_job(self._tie)
+        if proc is None or terminated:
+            return
+        if not off_thread:
+            _kill_tree(proc)
+            return
+        killer = threading.Thread(target=_kill_tree, args=(proc,),
+                                  name="jarvis-claude-code-kill", daemon=True)
+        with self._lock:
+            self._killer = killer
+        killer.start()
+
+    def _tell_changed(self, job: Job) -> None:
+        """Bookkeeping never breaks the job."""
+        changed = self._changed
+        if changed is None:
+            return
+        try:
+            changed(job)
+        except Exception as e:
+            debug_log(f"Claude Code job change not told: {e}", "tools")
 
     # ── Inside the job's thread ──────────────────────────────────────
 
@@ -820,6 +876,7 @@ class Delegations:
         )
         _record(db, job, OUTCOME_CANCELLED if cancelled else OUTCOME_OK if ok else OUTCOME_FAILED,
                 int(outcome.duration_s * 1000))
+        self._tell_changed(job)
         try:
             if not (silenced or reported) and self._deliver is not None:
                 self._deliver(outcome)
@@ -851,17 +908,13 @@ class Delegations:
                 self._proc = proc
                 self._tie = tie
                 stopped = job.id in self._stopped or job.id in self._silenced
-                if stopped:
-                    _terminate_job(tie)
             if stopped:
-                _kill_tree(proc)
+                self._end_tree(proc)
             try:
                 stdout, stderr = proc.communicate(input=job.tache, timeout=timeout)
                 return stdout, stderr, proc.returncode, False
             except subprocess.TimeoutExpired:
-                with self._lock:
-                    _terminate_job(tie)
-                _kill_tree(proc)
+                self._end_tree(proc)
                 try:
                     stdout, stderr = proc.communicate(timeout=15)
                 except Exception:
