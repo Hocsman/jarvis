@@ -728,7 +728,7 @@ class Delegations:
             if self._running is not None:
                 return False, self._running
             job = Job(
-                id=f"cc_{uuid.uuid4().hex[:12]}", projet=projet, path=Path(path),
+                id=f"cc_{uuid.uuid4().hex[:12]}", projet=projet, path=_full_path(path),
                 tache=tache, modifier=bool(modifier), origin=origin, risk=risk,
                 verdict=verdict, started=time.monotonic(),
             )
@@ -928,11 +928,22 @@ class Delegations:
                 _release(tie)
 
 
-def _key(path: Path) -> str:
+def _full_path(path) -> Path:
+    """The project's full, resolved path: what Claude Code is started in.
+
+    Claude Code refuses to read through a Windows short name (`DUC_MO~1`)
+    and then treats the long form as outside its working directory, so a
+    projects folder written either way, or reached through a link, must
+    reach it as the one path the files actually have.
+    """
     try:
-        return str(Path(path).resolve())
+        return Path(path).resolve()
     except OSError:
-        return str(path)
+        return Path(path)
+
+
+def _key(path: Path) -> str:
+    return str(_full_path(path))
 
 
 # The process-wide keeper. The daemon opens it when it starts and closes it

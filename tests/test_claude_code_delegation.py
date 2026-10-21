@@ -1074,3 +1074,40 @@ def test_a_failed_job_closes_its_bracket_as_a_failure(
     _wait(delegations)
 
     assert [row["outcome"] for row in db.rows] == ["démarré", "échec"]
+
+
+def _short_form(path: Path) -> str:
+    """The 8.3 short form Windows gives a long path, or the path itself."""
+    import ctypes
+    from ctypes import wintypes
+
+    buffer = ctypes.create_unicode_buffer(1024)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetShortPathNameW.argtypes = (wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD)
+    if not kernel32.GetShortPathNameW(str(path), buffer, len(buffer)):
+        return str(path)
+    return buffer.value
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows 8.3 short names")
+def test_claude_code_works_in_the_projects_full_path(
+        tmp_path, fake_claude, delegations):
+    """Claude Code refuses to read through a short `~1` path and then
+    treats the long form as outside the project: it must be started in
+    the project's full, resolved path, however the folder was named."""
+    projects = make_projects(tmp_path, ("un-projet-au-nom-long",))
+    full = (projects / "un-projet-au-nom-long").resolve()
+    short = _short_form(full)
+    if "~" not in short:
+        pytest.skip("this volume does not keep 8.3 short names")
+
+    delegations.start(
+        cfg=make_cfg(tmp_path, projects), db=None, projet="un-projet-au-nom-long",
+        path=Path(short), tache="Lis le README.", modifier=False, origin="voix",
+        risk="lecture",
+    )
+    _wait(delegations)
+
+    (call,) = fake_claude()
+    assert "~" not in call["cwd"]
+    assert Path(call["cwd"]) == full
