@@ -323,6 +323,29 @@ def test_a_question_the_conversation_outlived_is_closed_as_expired(scene, tmp_pa
     assert tool.fired == []
 
 
+def test_a_yes_after_the_gap_runs_nothing(scene, tmp_path):
+    """The reason the question goes. Without the gap this exact yes runs
+    the call: same origin, the very next turn, well inside the deadline.
+    It is the gap alone that makes it an answer to nothing."""
+    from src.jarvis.memory.db import Database
+
+    tool, dm, cfg = scene
+    db = Database(str(tmp_path / "ledger.db"))
+    _turn(cfg, dm, "lance sabotage sur /a", db=db, chat_responses=[
+        _tool_call_response("sabotage", {"cible": "/a"}),
+    ])
+    asked = dm.peek_pending()
+
+    _after_a_silence(dm)
+    with patch("src.jarvis.reply.engine.read_approval", return_value=GRANTED):
+        _turn(cfg, dm, "vas-y", db=db, extract="ok",
+              chat_responses=[{"message": {"content": "ok"}}])
+
+    assert tool.fired == []
+    assert dm.peek_pending() is None
+    assert _ledger(db, asked.request_id) == ["demandé", "expiré"]
+
+
 def test_the_card_of_a_question_the_conversation_outlived_is_withdrawn(scene, capsys):
     """The card is still on screen and its question no longer exists: a
     click on it would answer nothing. Both surfaces are told it lapsed,
@@ -331,16 +354,17 @@ def test_the_card_of_a_question_the_conversation_outlived_is_withdrawn(scene, ca
     from src.jarvis import daemon
 
     tool, dm, cfg = scene
-    _turn(cfg, dm, "lance sabotage sur /a", chat_responses=[
-        _tool_call_response("sabotage", {"cible": "/a"}),
-    ])
-    asked = dm.peek_pending()
     settled = []
+    # Listening from the first turn, which opens a conversation with nothing
+    # waiting: that one must take nothing down.
     daemon.set_confirmation_callbacks(
         on_confirm_settled=lambda rid, outcome: settled.append((rid, outcome))
     )
     try:
-        capsys.readouterr()
+        _turn(cfg, dm, "lance sabotage sur /a", chat_responses=[
+            _tool_call_response("sabotage", {"cible": "/a"}),
+        ])
+        asked = dm.peek_pending()
         _after_a_silence(dm)
         _turn(cfg, dm, "quelle heure est-il", extract="Il est midi.",
               chat_responses=[{"message": {"content": "Il est midi."}}])

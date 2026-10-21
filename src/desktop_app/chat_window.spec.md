@@ -132,7 +132,7 @@ Event shapes (mirrors the diary IPC):
 {"type": "delegation_done", "data": {"projet": "...", "ok": true, "texte": "..."}}  // a Claude Code report
 ```
 
-A `confirm_settled` can arrive while its card is still on screen, long before the card's deadline: a `stopClaudeCode` question is withdrawn as `expiré` when the Claude Code job changes (see `src/jarvis/projets/projets.spec.md`, *Stopping a job*), and the first turn of a new conversation closes as `expiré` whatever question the previous one left waiting (see `src/jarvis/tools/policy.spec.md`, *The ledger*). The card is hidden and reads as expired like any other; for a stop question, the job's report follows on `delegation_done`.
+The card keeps no time of its own: it stays on screen until a `confirm_settled` takes it down, and that can come on either side of its deadline. A `stopClaudeCode` question is withdrawn as `expiré` when the Claude Code job changes, often long before the deadline (see `src/jarvis/projets/projets.spec.md`, *Stopping a job*), and the job's report follows on `delegation_done`. The first turn of a new conversation closes as `expiré` whatever question the previous one left waiting (see `src/jarvis/tools/policy.spec.md`, *The ledger*); with the shipped settings the conversation window outlasts the deadline, so that card has usually lapsed already, and this is what takes it down. Either way the card is hidden and reads as expired like any other.
 
 `delegation_done` carries the report of a Claude Code job, which ends
 minutes after the turn that started it and so has no turn of its own: it
