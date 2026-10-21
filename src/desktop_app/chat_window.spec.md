@@ -132,6 +132,8 @@ Event shapes (mirrors the diary IPC):
 {"type": "delegation_done", "data": {"projet": "...", "ok": true, "texte": "..."}}  // a Claude Code report
 ```
 
+A `confirm_settled` can arrive while its card is still on screen, long before the card's deadline: a `stopClaudeCode` question is withdrawn as `expiré` when the Claude Code job changes (see `src/jarvis/projets/projets.spec.md`, *Stopping a job*). The card is hidden and reads as expired like any other, and the job's report follows on `delegation_done`.
+
 `delegation_done` carries the report of a Claude Code job, which ends
 minutes after the turn that started it and so has no turn of its own: it
 is shown as an assistant message, not through the `complete` that ends a

@@ -33,6 +33,17 @@ if mode == "grandchild":
     time.sleep(120)
 if mode == "sleep":
     time.sleep(120)
+if mode == "orphan":
+    # A child that starts a grandchild and exits at once: the grandchild's
+    # parent is gone, so walking parents from the top never reaches it,
+    # and it holds the job's output open, so the job never ends by itself.
+    subprocess.run([sys.executable, "-c",
+                    "import subprocess, sys; "
+                    "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'], "
+                    "stdin=subprocess.DEVNULL); "
+                    "open(sys.argv[1], 'w').write(str(p.pid))",
+                    os.environ["FAKE_CLAUDE_LOG"] + ".orphan"])
+    time.sleep(120)
 if mode == "garbage":
     sys.stderr.write("boom: not logged in\n")
     sys.exit(1)

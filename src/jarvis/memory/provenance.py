@@ -46,7 +46,7 @@ _WEB_TOOLS = frozenset({"webSearch", "fetchWebPage"})
 # expensive direction to be wrong in.
 _NOT_A_LOOKUP = frozenset({
     # control
-    "stop", "toolSearchTool", "refreshMCPTools",
+    "stop", "toolSearchTool", "refreshMCPTools", "stopClaudeCode",
     # writes
     "remember", "forget", "logMeal", "deleteMeal",
     "setReminder", "setRoutine", "cancelRoutine",

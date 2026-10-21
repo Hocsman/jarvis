@@ -65,7 +65,7 @@ class StopClaudeCodeTool(Tool):
 
     @property
     def name(self) -> str:
-        return "stopClaudeCode"
+        return dl.STOP_TOOL_NAME
 
     @property
     def description(self) -> str:

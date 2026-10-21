@@ -216,9 +216,8 @@ def rewind_chat_to_user(user_index: int, content: str) -> bool:
                 f"chat rewind refused: user message {user_index} is not in memory", "chat"
             )
             return False
-        held = dm.peek_pending()
+        held = dm.take_pending()
         if held is not None:
-            dm.clear_pending()
             _settle(held, "expiré")
             _announce_settled(held, "expiré")
             debug_log(f"    🙋 {held.tool} expired by a chat rewind", "tools")
@@ -893,7 +892,8 @@ def deliver_delegation(outcome) -> None:
 
     Runs on the job's own thread, minutes after the turn that started it,
     so the report has no turn of its own. It waits for the reply in
-    flight, like a reminder: the lock is inspected, never taken. Then it
+    flight, like a reminder: the lock is inspected, never taken, and a
+    stop question that reply raised about this job is withdrawn. Then it
     joins the conversation (a follow-up can refer to it), reaches both
     buses, and is spoken unless the task was typed. See
     projets/projets.spec.md.
@@ -902,6 +902,9 @@ def deliver_delegation(outcome) -> None:
 
     while _chat_query_lock.locked() and not is_stop_requested():
         time.sleep(_DELIVERY_POLL_SEC)
+    # The reply it waited for was offered the stop while the job still ran,
+    # and may have asked about a job that has ended since.
+    withdraw_stop_question()
     if is_stop_requested():
         debug_log("Claude Code report dropped: shutting down", "tools")
         return
@@ -932,6 +935,36 @@ def deliver_delegation(outcome) -> None:
     debug_log(f"    🛠️ Claude Code report delivered for {outcome.job.projet}", "tools")
 
 
+def delegation_changed(job) -> None:
+    """A Claude Code job has started or ended.
+
+    Any stop question still waiting was about another job, or about one
+    that no longer runs: approved later, it would stop the wrong one.
+    """
+    withdraw_stop_question()
+
+
+def withdraw_stop_question() -> None:
+    """Close a waiting stopClaudeCode question.
+
+    Called when the job it could be about is no longer the one running:
+    approved later, it would stop whatever runs then, a job the user was
+    never asked about. Settled as `expiré`, like any question that can no
+    longer be answered.
+    """
+    from .projets.delegation import STOP_TOOL_NAME
+
+    dm = _global_dialogue_memory
+    if dm is None or not hasattr(dm, "take_pending_for_tool"):
+        return
+    action = dm.take_pending_for_tool(STOP_TOOL_NAME)
+    if action is None:
+        return
+    _settle(action, "expiré")
+    _announce_settled(action, "expiré")
+    debug_log(f"    🙋 withdrew {action.tool}: the job it was about has ended", "tools")
+
+
 def revoke_pending_confirmation() -> None:
     """Drop a waiting question on shutdown.
 
@@ -940,12 +973,11 @@ def revoke_pending_confirmation() -> None:
     context that produced it.
     """
     dm = _global_dialogue_memory
-    if dm is None or not hasattr(dm, "peek_pending"):
+    if dm is None or not hasattr(dm, "take_pending"):
         return
-    action = dm.peek_pending()
+    action = dm.take_pending()
     if action is None:
         return
-    dm.clear_pending()
     _settle(action, "expiré")
     _announce_settled(action, "expiré")
     debug_log(f"    🙋 revoked {action.tool} on shutdown", "tools")
@@ -1451,7 +1483,7 @@ def main() -> None:
     # inside its own process.
     from .projets.delegation import DELEGATIONS
 
-    DELEGATIONS.open(deliver_delegation)
+    DELEGATIONS.open(deliver_delegation, changed=delegation_changed)
     if str(getattr(cfg, "claude_code_projects_dir", "") or "").strip():
         print("🛠️ Claude Code projects on", flush=True)
     else:
