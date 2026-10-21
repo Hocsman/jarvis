@@ -334,6 +334,10 @@ def test_a_question_the_conversation_outlived_is_closed_as_expired(scene, tmp_pa
 
     assert dm.peek_pending() is None
     assert _ledger(db, asked.request_id) == ["demandé", "expiré"]
+    expired = next(r for r in db.recent_actions(200)
+                   if r.get("request_id") == asked.request_id
+                   and r["outcome"] == "expiré")
+    assert expired["query"] == asked.query_redacted
     assert tool.fired == []
 
 
@@ -453,9 +457,9 @@ def _answer(cfg, dm, verdict, *, db=None, then=None):
 ])
 def test_a_spoken_answer_ends_its_episode(scene, tmp_path, verdict, ending):
     """The question is claimed before the judge reads the answer, so
-    nothing else can close it in this session. An answer she could not
-    read left open is swept at the next start-up as `expiré`, a word for
-    silence: he did answer."""
+    nothing else can close it in this session. Left open, it would be
+    swept at the next start-up as `expiré`, the word for a question no
+    turn came to answer."""
     from src.jarvis.memory.db import Database
 
     tool, dm, cfg = scene
@@ -472,7 +476,7 @@ def test_a_spoken_answer_ends_its_episode(scene, tmp_path, verdict, ending):
     pytest.param(UNCLEAR, id="unreadable"),
     pytest.param(DENIED, id="no"),
 ])
-def test_the_row_that_ends_it_keeps_the_request_not_the_answer(scene, tmp_path, verdict):
+def test_an_ending_that_runs_nothing_keeps_the_request_not_the_answer(scene, tmp_path, verdict):
     """The Activity tab shows the ending row with its query, to answer
     "did I ask for this?". That is the request she asked about. What he
     said back is often about something else entirely, and keeping it would

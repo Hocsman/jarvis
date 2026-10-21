@@ -120,8 +120,8 @@ class _Settled:
     the claimed request, ended in the ledger and on its card whatever the
     answer said. With no approval and no reply the utterance is an
     ordinary query: either nothing was waiting for it, or ``action`` holds
-    a question it answered with neither a yes nor a no, so a question the
-    user ignored never locks them out.
+    a question in whose answer neither a yes nor a no could be read, so a
+    question the user ignored never locks them out.
     """
 
     __slots__ = ("approval", "action", "reply", "declined")
@@ -167,7 +167,7 @@ def _publish_settled(action, outcome: str) -> None:
 
 
 def _end_question(db, action, outcome: str) -> None:
-    """Close a claimed question's episode, in the ledger and on its card.
+    """End a claimed question's episode, in the ledger and on its card.
 
     The row keeps the request she asked about, not whatever ended it: it
     is what the Activity tab shows to answer "did I ask for this?".
@@ -286,10 +286,11 @@ def _close_answered_question(db, settled) -> None:
     hears all but a grant, which the call settles itself with `ok` or
     `échec` under the same id.
 
-    Words the judge reads as neither a yes nor a no end `illisible`,
-    whether they were unclear or about something else. Left open, the
-    episode waits for the next daemon start, and the sweep there would
-    call it `expiré`, the word for a question no turn came to answer.
+    An answer in which the judge reads neither a yes nor a no ends
+    `illisible`: unclear, about something else, or never read because the
+    judge failed. Left open, the episode waits for the next daemon start,
+    and the sweep there would call it `expiré`, the word for a question no
+    turn came to answer.
     """
     action = settled.action
     if action is None:

@@ -132,6 +132,7 @@ def test_the_page_explains_the_difference(viewer):
     page = index()
 
     assert "refusé" in page and "décliné" in page
+    assert "<code>illisible</code>" in page
 
 
 # ── Still no tool output, ever ────────────────────────────────────────
