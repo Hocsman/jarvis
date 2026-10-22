@@ -110,6 +110,7 @@ def test_they_are_styled_differently(viewer):
     assert ".activity-refusé" in page
     assert ".activity-décliné" in page
     assert ".activity-expiré" in page
+    assert ".activity-illisible" in page
 
 
 def test_a_run_bracket_is_not_shown_as_a_question(viewer):
@@ -131,6 +132,7 @@ def test_the_page_explains_the_difference(viewer):
     page = index()
 
     assert "refusé" in page and "décliné" in page
+    assert "<code>illisible</code>" in page
 
 
 # ── Still no tool output, ever ────────────────────────────────────────

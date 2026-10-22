@@ -300,6 +300,20 @@ def _settled_events(capsys):
     return events
 
 
+@pytest.fixture
+def cards():
+    """What the surfaces showing a card are told is over, through the
+    callback a bundled desktop wires."""
+    from src.jarvis import daemon
+
+    settled = []
+    daemon.set_confirmation_callbacks(
+        on_confirm_settled=lambda rid, outcome: settled.append((rid, outcome))
+    )
+    yield settled
+    daemon.set_confirmation_callbacks()
+
+
 def test_a_question_the_conversation_outlived_is_closed_as_expired(scene, tmp_path):
     """A question raised before the gap does not survive it, and it has
     to end where the Activity tab can see it end. Dropped without a row,
@@ -320,6 +334,10 @@ def test_a_question_the_conversation_outlived_is_closed_as_expired(scene, tmp_pa
 
     assert dm.peek_pending() is None
     assert _ledger(db, asked.request_id) == ["demandé", "expiré"]
+    expired = next(r for r in db.recent_actions(200)
+                   if r.get("request_id") == asked.request_id
+                   and r["outcome"] == "expiré")
+    assert expired["query"] == asked.query_redacted
     assert tool.fired == []
 
 
@@ -346,38 +364,29 @@ def test_a_yes_after_the_gap_runs_nothing(scene, tmp_path):
     assert _ledger(db, asked.request_id) == ["demandé", "expiré"]
 
 
-def test_the_card_of_a_question_the_conversation_outlived_is_withdrawn(scene, capsys):
+def test_the_card_of_a_question_the_conversation_outlived_is_withdrawn(scene, cards, capsys):
     """The card is still on screen and its question no longer exists: a
     click on it would answer nothing. Both surfaces are told it lapsed,
     the bus a subprocess desktop reads and the callback a bundled one
     wires."""
-    from src.jarvis import daemon
-
     tool, dm, cfg = scene
-    settled = []
     # Listening from the first turn, which opens a conversation with nothing
     # waiting: that one must take nothing down.
-    daemon.set_confirmation_callbacks(
-        on_confirm_settled=lambda rid, outcome: settled.append((rid, outcome))
-    )
-    try:
-        _turn(cfg, dm, "lance sabotage sur /a", chat_responses=[
-            _tool_call_response("sabotage", {"cible": "/a"}),
-        ])
-        asked = dm.peek_pending()
-        _after_a_silence(dm)
-        _turn(cfg, dm, "quelle heure est-il", extract="Il est midi.",
-              chat_responses=[{"message": {"content": "Il est midi."}}])
-    finally:
-        daemon.set_confirmation_callbacks()
+    _turn(cfg, dm, "lance sabotage sur /a", chat_responses=[
+        _tool_call_response("sabotage", {"cible": "/a"}),
+    ])
+    asked = dm.peek_pending()
+    _after_a_silence(dm)
+    _turn(cfg, dm, "quelle heure est-il", extract="Il est midi.",
+          chat_responses=[{"message": {"content": "Il est midi."}}])
 
-    assert settled == [(asked.request_id, "expiré")]
+    assert cards == [(asked.request_id, "expiré")]
     assert _settled_events(capsys) == [
         {"request_id": asked.request_id, "outcome": "expiré"},
     ]
 
 
-def test_inside_the_conversation_the_next_turn_leaves_the_question_open(scene, tmp_path):
+def test_inside_the_conversation_the_next_turn_leaves_the_question_open(scene, tmp_path, cards):
     """The control: the gap closes it, not any next turn. Something typed
     while a spoken question waits is not an answer to it, and the card
     stays live for a click."""
@@ -396,6 +405,22 @@ def test_inside_the_conversation_the_next_turn_leaves_the_question_open(scene, t
 
     assert dm.peek_pending() is asked
     assert _ledger(db, asked.request_id) == ["demandé"]
+    assert cards == []
+
+
+def test_a_turn_with_nothing_waiting_ends_nothing(scene, tmp_path, cards):
+    """Every turn that is not a click passes where an answer is read. With
+    no question waiting it writes no ending and takes no card down."""
+    from src.jarvis.memory.db import Database
+
+    tool, dm, cfg = scene
+    db = Database(str(tmp_path / "ledger.db"))
+
+    _turn(cfg, dm, "quelle heure est-il", db=db, extract="Il est midi.",
+          chat_responses=[{"message": {"content": "Il est midi."}}])
+
+    assert db.recent_actions(50) == []
+    assert cards == []
 
 
 # ── A spoken answer: how its question ends ────────────────────────────
@@ -425,20 +450,6 @@ def _answer(cfg, dm, verdict, *, db=None, then=None):
                      chat_responses=responses)
 
 
-@pytest.fixture
-def cards():
-    """What the surfaces showing a card are told is over, through the
-    callback a bundled desktop wires."""
-    from src.jarvis import daemon
-
-    settled = []
-    daemon.set_confirmation_callbacks(
-        on_confirm_settled=lambda rid, outcome: settled.append((rid, outcome))
-    )
-    yield settled
-    daemon.set_confirmation_callbacks()
-
-
 @pytest.mark.parametrize("verdict, ending", [
     pytest.param(UNCLEAR, "illisible", id="unreadable"),
     pytest.param(DENIED, "décliné", id="no"),
@@ -446,9 +457,9 @@ def cards():
 ])
 def test_a_spoken_answer_ends_its_episode(scene, tmp_path, verdict, ending):
     """The question is claimed before the judge reads the answer, so
-    nothing else can close it in this session. An answer she could not
-    read left open is swept at the next start-up as `expiré`, a word for
-    silence: he did answer."""
+    nothing else can close it in this session. Left open, it would be
+    swept at the next start-up as `expiré`, the word for a question no
+    turn came to answer."""
     from src.jarvis.memory.db import Database
 
     tool, dm, cfg = scene
@@ -459,6 +470,30 @@ def test_a_spoken_answer_ends_its_episode(scene, tmp_path, verdict, ending):
 
     assert dm.peek_pending() is None
     assert _ledger(db, asked.request_id) == ["demandé", ending]
+
+
+@pytest.mark.parametrize("verdict", [
+    pytest.param(UNCLEAR, id="unreadable"),
+    pytest.param(DENIED, id="no"),
+])
+def test_an_ending_that_runs_nothing_keeps_the_request_not_the_answer(scene, tmp_path, verdict):
+    """The Activity tab shows the ending row with its query, to answer
+    "did I ask for this?". That is the request she asked about. What he
+    said back is often about something else entirely, and keeping it would
+    file an unrelated sentence under a tool for ninety days."""
+    from src.jarvis.memory.db import Database
+
+    tool, dm, cfg = scene
+    db = Database(str(tmp_path / "ledger.db"))
+    asked = _ask(cfg, dm, db)
+
+    _answer(cfg, dm, verdict, db=db)
+
+    ending = next(r for r in db.recent_actions(200)
+                  if r.get("request_id") == asked.request_id
+                  and r["outcome"] != "demandé")
+    assert ending["query"] == asked.query_redacted
+    assert _SPOKEN[verdict][0] not in ending["query"]
 
 
 def test_after_an_answer_she_could_not_read_the_turn_is_answered(scene):
