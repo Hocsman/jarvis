@@ -14,6 +14,13 @@ it, and asks about that answer plainly. The subjects are invented, so no
 model prior supplies it, and every tool answers "No results found", so the
 network cannot either. A reply carrying the answer read it from the node.
 
+Measured on `gemma4:e2b`, interleaved call by call, 7 runs a case: shown
+the node's first 300 characters, no reply carried the answer (0 of 21);
+shown its lines that name the search, 13 of 21 did. Most of the misses
+quote another part of the right line, so the line reached the prompt and
+the small model trusted its empty web search over it, the failure
+`test_the_graph_answers_before_the_web.py` measures on its own.
+
 Run:
     EVAL_JUDGE_MODEL=gemma4:e2b ./scripts/run_evals.sh the_graph_reads_a_large_node
 """
@@ -81,7 +88,7 @@ CASES = [
         LargeNodeCase(
             text="Jarvis, how much memory does the Kestrel M3 have?",
             answer_line="The Kestrel M3 is a compact desktop workstation with 96 GB of unified memory.",
-            expect=("96",),
+            expect=("96", "ninety-six"),
         ),
         id="A specification deep in a large node",
     ),
