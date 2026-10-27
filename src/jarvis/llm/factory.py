@@ -200,19 +200,20 @@ def get_private_backend(settings: Any, pinned: str, model: str) -> LLMBackend:
     fortnight of diary the learning step mines. Each specifies that
     pinning a model is how he keeps that sentence off the network.
 
-    A name never did that. Called without a model, :func:`get_llm_backend`
-    picks the endpoint from ``llm_provider`` alone, so a pinned local tag
-    was sent to the cloud — verified, the request reached
-    ``https://openrouter.ai/api/v1`` carrying his sentence, and the tag
-    would have been rejected there anyway.
+    A name alone does not do that. Called without a model,
+    :func:`get_llm_backend` picks the endpoint from ``llm_provider``
+    alone, which on a cloud provider sends a pinned local tag, and the
+    sentence with it, to the cloud.
 
     So a pin decides the destination too, whatever its shape: an
     ``hf.co/...`` Ollama tag has a slash and is still his machine. With
     nothing pinned, ``model`` (the one the context resolved and is about
     to send) decides it the way it does for every other call: a bare tag
     on a remote provider names a model that lives on local Ollama, and
-    goes there. Only a namespaced model, which in practice is the chat
-    model at the end of the chain, stays on the provider he chose.
+    goes there. A namespaced model stays on the provider he chose: the
+    chat model at the end of the chain, a router given as
+    ``vendor/model``, and a slashed local tag too, which only a pin keeps
+    here.
 
     ``pinned`` and ``model`` are separate because a context's chain runs
     past its pin: the model it sends may be a fallback's, and the request

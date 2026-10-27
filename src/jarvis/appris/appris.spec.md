@@ -145,9 +145,11 @@ both the pin and the model it resolved. Either pin, `appris_model` or
 `reminder_model`, keeps the fortnight on this machine whatever the tag's
 shape: a reminder already runs that model here, and the same name cannot
 mean the cloud for his diary. Without a pin, a bare local tag reached
-through the chain runs on local Ollama as well, and only the namespaced
-chat model at the end of it sends the notes to the configured provider,
-which wrote them in the first place.
+through the chain runs on local Ollama as well, and a namespaced model
+sends the notes to the configured provider: the chat model at the end of
+the chain, which wrote them in the first place, or a router or judge
+given as `vendor/model`. A slashed local tag such as `hf.co/...` stays
+here only as a pin.
 
 Seven guards run afterwards, in Python, each counted:
 

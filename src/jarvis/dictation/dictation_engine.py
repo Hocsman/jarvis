@@ -463,9 +463,9 @@ def _llm_clean_dictation(text: str, cfg, *, model: str = "gemma4:e2b", thinking:
     )
     try:
         # On the machine, always. The four contexts that read his own
-        # sentences honour a pin and otherwise follow the provider; this
-        # one does not get that choice, because it is not one sentence
-        # he addressed to her. It is everything he dictates, all day,
+        # sentences honour a pin and otherwise follow the model they
+        # resolved; this one does not get that choice, because it is not
+        # one sentence he addressed to her. It is everything he dictates, all day,
         # into applications that have nothing to do with the assistant.
         #
         # Nothing local answering costs the cleanup and nothing else:

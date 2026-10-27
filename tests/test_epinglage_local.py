@@ -1,28 +1,23 @@
-"""Pinning a model for these four contexts means running it here.
+"""A private prompt goes where the model it names lives.
 
 Four prompts carry the user's own sentences about their own life: the
 time they said out loud, the routine they described, the goal they are
 working towards, and the fortnight of diary the learning step reads. All
-four resolve their model through the same chain, and all four specs say
-the same thing — pinning a model is how you keep that sentence off the
-network.
+four resolve their model through a chain whose first link is a pin, and
+all four specs say the same thing: pinning a model is how you keep that
+sentence off the network.
 
-It was not true. `get_llm_backend` picks the endpoint from
-`llm_provider` alone and never looks at the model, so on a cloud
-provider a pinned local tag was sent *to the cloud*: verified, the
-request went to `https://openrouter.ai/api/v1` carrying his sentence,
-and the tag would have 400'd there anyway. The setting changed a name
-and nothing else, while its documentation promised privacy.
+`get_llm_backend` alone picks the endpoint from `llm_provider` and never
+looks at the model, so on a cloud provider it would carry a local tag,
+and the sentence with it, to the cloud, where the tag does not even
+exist. Hence the rule these tests hold, at the wire:
 
-So the pin now decides the destination as well. With nothing pinned
-there is nothing to honour, and the ordinary provider applies — a user
-who never asked for this is not quietly moved.
-
-Then the same leak one link further down. The destination followed the
-context's own pin while the name followed the whole chain, so with
-`appris_model` empty and `reminder_model: qwen2.5:3b` the journal reader
-sent ten diary summaries to OpenRouter under a local tag. The two are
-now one decision: the request goes where the model it names lives.
+- a pin means this machine, whatever the tag looks like;
+- with no pin, the model the chain resolved decides, as on the auxiliary
+  route: a bare tag on a remote provider runs on local Ollama, and a
+  namespaced model stays on the provider the user chose;
+- the name sent and the destination always come from the same model,
+  however far down the chain it was found.
 """
 
 from __future__ import annotations
@@ -127,7 +122,11 @@ _CONTEXTES = {
 
 
 def _requetes(lire, cfg):
-    """Every request the context sends, as (url, model), sent nowhere."""
+    """Every request the context sends, as (url, model), sent nowhere.
+
+    A context that raised before anything reached the wire fails here
+    with what it raised, rather than later with only "sent nothing".
+    """
     parties = []
 
     def _capter(url, **kw):
@@ -141,11 +140,13 @@ def _requetes(lire, cfg):
          patch.object(requests.Session, "post", _session_post):
         try:
             lire(cfg)
-        except Exception:
+        except Exception as erreur:
             # Every one of them reports a timeout its own way: raising
             # `ExtractionFailed`, or answering quietly. Where the request
-            # went is all this file asks.
-            pass
+            # went is all this file asks, unless it never left.
+            if not parties:
+                raise AssertionError(
+                    f"the context sent nothing at all: {erreur!r}") from erreur
     return parties
 
 
@@ -175,7 +176,7 @@ def test_a_pin_keeps_a_namespaced_local_tag_here_too():
     assert "127.0.0.1" in (_destination(b) or ""), _destination(b)
 
 
-def test_without_a_pin_nothing_moves():
+def test_without_a_pin_a_namespaced_model_keeps_the_provider():
     """Somebody who never asked for this keeps the provider they chose."""
     from src.jarvis.llm import get_llm_backend, get_private_backend
 
@@ -254,9 +255,8 @@ def test_nothing_local_anywhere_keeps_the_chosen_provider(lire):
 
 
 def test_the_journal_honours_the_reminder_pin_it_falls_back_to():
-    """The user's configuration on 2026-10-27: `appris_model` empty,
-    `reminder_model` a local tag, OpenRouter as the provider. The diary
-    went to OpenRouter under the local tag."""
+    """`appris_model` empty, `reminder_model` a local tag, OpenRouter as
+    the provider: the fortnight of diary stays here."""
     cfg = _cfg(reminder_model="qwen2.5:3b")
 
     parties = _requetes(_lire_le_journal, cfg)
@@ -271,6 +271,41 @@ def test_the_reminder_pin_keeps_the_journal_here_whatever_its_shape():
     not: the reminder context runs this tag here, so the journal must."""
     tag = "hf.co/bartowski/Qwen2.5-3B-Instruct-GGUF:Q4_K_M"
     cfg = _cfg(reminder_model=tag)
+
+    parties = _requetes(_lire_le_journal, cfg)
+
+    assert parties, "the journal was not read at all"
+    assert all(_ici(url) and model == tag for url, model in parties), parties
+
+
+@pytest.mark.parametrize("lire", _CONTEXTES.values(), ids=_CONTEXTES.keys())
+def test_a_namespaced_router_reached_by_falling_back_keeps_the_provider(lire):
+    """No pin, and the chain lands on a cloud ID: that model lives on the
+    provider, and so does the request. Nothing is moved that was not
+    asked to be."""
+    cfg = _cfg(tool_router_model="openai/gpt-4o-mini")
+
+    parties = _requetes(lire, cfg)
+
+    assert parties, "the context sent nothing at all"
+    assert all(url.startswith("https://openrouter.ai/api/v1")
+               and model == "openai/gpt-4o-mini"
+               for url, model in parties), parties
+
+
+def test_the_journal_s_own_pin_wins_over_the_reminder_pin():
+    cfg = _cfg(appris_model="gemma4:e2b", reminder_model="qwen2.5:3b")
+
+    parties = _requetes(_lire_le_journal, cfg)
+
+    assert parties, "the journal was not read at all"
+    assert all(_ici(url) and model == "gemma4:e2b"
+               for url, model in parties), parties
+
+
+def test_the_journal_s_own_pin_keeps_it_here_whatever_its_shape():
+    tag = "hf.co/bartowski/Qwen2.5-3B-Instruct-GGUF:Q4_K_M"
+    cfg = _cfg(appris_model=tag)
 
     parties = _requetes(_lire_le_journal, cfg)
 
