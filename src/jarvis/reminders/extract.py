@@ -91,15 +91,20 @@ _EXTRACT_SYSTEM = (
 )
 
 
+def _reminder_pin(cfg) -> str:
+    """The pin, alone: what decides that the sentence stays here."""
+    return str(getattr(cfg, "reminder_model", "") or "").strip()
+
+
 def _resolve_reminder_model(cfg) -> str:
     """The model that reads a time.
 
     A pin wins, and unlike most auxiliary models this one is not rescued
     by the cloud-safe filter — the sentence it reads is the user's own
-    life, and a pin is the only way to keep it off the network.
+    life, and a pin keeps it off the network whatever the tag looks like.
     """
     for candidate in (
-        getattr(cfg, "reminder_model", ""),
+        _reminder_pin(cfg),
         getattr(cfg, "tool_router_model", ""),
         getattr(cfg, "intent_judge_model", ""),
         getattr(cfg, "llm_chat_model", ""),
@@ -120,10 +125,9 @@ def reminder_channel_available(cfg) -> bool:
 
 def _ask_model(cfg, system: str, user: str, timeout_sec: float) -> Optional[str]:
 
-    response = get_private_backend(
-        cfg, str(getattr(cfg, "reminder_model", "") or "").strip()
-    ).chat(
-        _resolve_reminder_model(cfg),
+    model = _resolve_reminder_model(cfg)
+    response = get_private_backend(cfg, _reminder_pin(cfg), model).chat(
+        model,
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
         timeout_sec=timeout_sec,
     )
