@@ -34,7 +34,11 @@ from typing import List, Optional
 
 from ..debug import debug_log
 from ..llm import get_private_backend
-from ..reminders.extract import _parse_body, _resolve_reminder_model
+from ..reminders.extract import (
+    _parse_body,
+    _reminder_pin,
+    _resolve_reminder_model,
+)
 from ..utils.redact import contains_redaction_placeholder
 
 # The whole vocabulary. There is deliberately no third value.
@@ -76,10 +80,9 @@ def juge_disponible(cfg) -> bool:
 
 def _ask(cfg, system: str, user: str, timeout_sec: float) -> Optional[str]:
 
-    response = get_private_backend(
-        cfg, str(getattr(cfg, "reminder_model", "") or "").strip()
-    ).chat(
-        _resolve_reminder_model(cfg),
+    model = _resolve_reminder_model(cfg)
+    response = get_private_backend(cfg, _reminder_pin(cfg), model).chat(
+        model,
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
         timeout_sec=timeout_sec,
     )

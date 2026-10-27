@@ -84,6 +84,13 @@ class TestOllamaRuntimeFlags:
         assert needed is True
         assert chat_on_ollama is True
 
+    def test_anthropic_chat_keeps_ollama_for_embeddings_only(self):
+        """Anthropic serves no embeddings, so the server is still needed;
+        the chat model is a Claude ID, never in the Ollama catalogue."""
+        needed, chat_on_ollama = self._flags(llm_provider="anthropic", embedding_provider="")
+        assert needed is True
+        assert chat_on_ollama is False
+
     def test_missing_attrs_default_to_ollama(self):
         """A cfg-like object without provider attrs defaults to the Ollama
         path (fail-safe — never skip Ollama setup by accident)."""

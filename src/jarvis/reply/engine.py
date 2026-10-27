@@ -36,7 +36,7 @@ from ..llm import (
 def chat_with_messages(cfg, messages, *, timeout_sec=30.0, extra_options=None,
                        tools=None, thinking=False, on_token=None):
     """Local indirection: route the engine's chat call through the active
-    backend (Ollama or OpenAI-compatible, per ``cfg.llm_provider``) so the
+    backend (Ollama, OpenAI-compatible or Anthropic, per ``cfg.llm_provider``) so the
     runtime swap is transparent to the rest of the engine.
 
     Kept as a module-level function so tests can patch this single symbol
