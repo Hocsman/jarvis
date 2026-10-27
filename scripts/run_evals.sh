@@ -27,9 +27,10 @@
 #                         it is not the model under test (default: EVAL_JUDGE_MODEL)
 #   EVAL_MEMORY_EXTRACTOR_MODEL - The memory lookup's own model (default: the small chain)
 #   EVAL_MEMORY_EXTRACTOR_ARMS  - Two or more models, comma-separated: the
-#                         memory_extractor_time_window eval reads its sentences
-#                         on each, arms interleaved call by call
-#   EVAL_MEMORY_EXTRACTOR_REPEATS - Rounds of that comparison (default: 3)
+#                         memory_extractor_time_window eval reads its questions
+#                         on each, arms interleaved call by call. Run it with
+#                         --single, or the two-model pass runs it twice
+#   EVAL_MEMORY_EXTRACTOR_ROUNDS - Rounds of that comparison (default: 3)
 #   PYTHON              - Interpreter to run pytest with (default: the first
 #                         of python3 / python found on PATH)
 

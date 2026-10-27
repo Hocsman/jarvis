@@ -45,7 +45,7 @@ jobs:
           EVAL_LLM_PROVIDER: ollama
           EVAL_LLM_BASE_URL: ""
         run: |
-          python -m pytest -q evals/test_evals_keep_the_core_out_of_the_repository.py
+          python -m pytest -q evals/test_evals_keep_the_core_out_of_the_repository.py "evals/test_memory_extractor_time_window.py::TestTheScoreReadsTheDayNotTheTimezone"
       # Imports every eval without running one, so an eval broken at import
       # time (a renamed helper, a moved module) fails here. It says nothing
       # about the evals' behaviour: running them takes a model.
@@ -82,7 +82,7 @@ jobs:
           EVAL_LLM_PROVIDER: ollama
           EVAL_LLM_BASE_URL: ""
         run: |
-          python -m pytest -q evals/test_evals_keep_the_core_out_of_the_repository.py
+          python -m pytest -q evals/test_evals_keep_the_core_out_of_the_repository.py "evals/test_memory_extractor_time_window.py::TestTheScoreReadsTheDayNotTheTimezone"
       - name: Collect the evals (import check, no model)
         env:
           EVAL_LLM_PROVIDER: ollama

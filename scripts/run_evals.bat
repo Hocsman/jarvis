@@ -25,6 +25,14 @@ REM                         model is the canary, see MODEL_SMALL below)
 REM   EVAL_JUDGE_BASE_URL - Ollama base URL (default: http://localhost:11434)
 REM   EVAL_REPEAT_COUNT   - Number of times to run each test (default: 1; use 3
 REM                         when tuning prompts to surface flakiness)
+REM   EVAL_SMALL_MODEL    - The small chain (router, judges, memory lookup), when
+REM                         it is not the model under test (default: EVAL_JUDGE_MODEL)
+REM   EVAL_MEMORY_EXTRACTOR_MODEL - The memory lookup's own model (default: the small chain)
+REM   EVAL_MEMORY_EXTRACTOR_ARMS  - Two or more models, comma-separated: the
+REM                         memory_extractor_time_window eval reads its questions
+REM                         on each, arms interleaved call by call. Run it with
+REM                         --single, or the two-model pass runs it twice
+REM   EVAL_MEMORY_EXTRACTOR_ROUNDS - Rounds of that comparison (default: 3)
 REM   PYTHON              - Interpreter to run pytest with (default: the mamba
 REM                         environment of this checkout)
 REM
