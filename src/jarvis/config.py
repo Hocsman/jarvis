@@ -48,7 +48,7 @@ def get_supported_model_ids() -> set[str]:
     return set(SUPPORTED_CHAT_MODELS.keys())
 
 
-# The values ``llm_provider`` accepts. Anything else reads as the first.
+# The values ``llm_provider`` accepts. Anything else reads as ``ollama``.
 LLM_PROVIDERS = ("ollama", "openai_compatible", "anthropic")
 
 # Where the ``anthropic`` provider sends every request. Fixed rather than
@@ -113,14 +113,16 @@ class Settings:
     # reading them keeps working when the provider is Ollama.
     llm_provider: str  # one of LLM_PROVIDERS
     llm_base_url: str
-    # Resolved API key for the OpenAI-compatible provider. When
+    # Resolved API key for the remote provider. When
     # ``llm_api_key_env`` names an environment variable that is set, the
     # parser populates this from that variable so the secret never has
     # to live in config.json. Otherwise it falls back to the literal
     # ``llm_api_key`` value from the config file.
     llm_api_key: str
     # Name of the environment variable to read the API key from (e.g.
-    # "OPENROUTER_API_KEY"). Empty = use the literal ``llm_api_key``.
+    # "OPENROUTER_API_KEY", or one of the user's own for Anthropic: never
+    # "ANTHROPIC_API_KEY", which Claude Code would bill against). Empty =
+    # use the literal ``llm_api_key``.
     llm_api_key_env: str
     llm_chat_model: str
     # Provider-specific extra request fields merged into every cloud chat
@@ -130,10 +132,10 @@ class Settings:
     llm_extra_body: Dict[str, Any]
     # Scrub secret-shaped tokens (emails, API keys, JWTs, password/
     # token/secret pairs) from prompts before they leave the machine
-    # for a remote OpenAI-compatible provider. Default True (privacy-
-    # first). No effect when the provider is local Ollama.
+    # for a remote provider (OpenAI-compatible or Anthropic). Default True
+    # (privacy-first). No effect when the provider is local Ollama.
     auto_redact_before_cloud: bool
-    embedding_provider: str  # "" (= same as llm_provider) | "ollama" | "openai_compatible"
+    embedding_provider: str  # "" (= same as llm_provider; Ollama under anthropic) | "ollama" | "openai_compatible"
     embedding_base_url: str
     embedding_api_key: str
     embedding_model: str
@@ -657,9 +659,7 @@ def _cloud_safe_model(value: str, field: str, provider: str,
     """
     if not value:
         return value
-    if provider == "ollama" or names_provider_model(provider, value):
-        return value
-    if provider == "openai_compatible" and is_local_endpoint(base_url):
+    if names_provider_model(provider, value) or is_local_endpoint(base_url):
         return value
     if is_ollama_reachable(ollama_base_url):
         mark = (field, value, "kept")
@@ -1079,7 +1079,7 @@ def load_settings() -> Settings:
     # migration) can never shadow it.
     llm_provider = str(merged.get("llm_provider", "ollama") or "ollama").strip().lower()
     if llm_provider not in LLM_PROVIDERS:
-        llm_provider = LLM_PROVIDERS[0]
+        llm_provider = "ollama"
     llm_base_url = str(merged.get("llm_base_url", "") or "").strip() or ollama_base_url
     # The endpoint the chat provider actually talks to, which is what
     # decides whether an auxiliary pin is local or remote.

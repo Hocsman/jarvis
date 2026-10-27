@@ -87,8 +87,13 @@ what is stored in dialogue memory is the whole text, assembled, exactly
 as today. Streaming is a delivery detail; it must not become a difference
 in what was said.
 
-**A tool-calling turn speaks nothing.** Content is empty on those turns;
-only the final prose is spoken, as now.
+**A tool-calling turn speaks nothing.** Only the final prose is spoken.
+A model may write a sentence before a tool call; that text is not the
+answer, and a backend that streams it would have it spoken and would
+shift the tail the listener computes from what was already said. The
+Anthropic backend, whose models often write one, holds text back while a
+tool call can still follow (`src/jarvis/llm/llm.spec.md`, Anthropic,
+"Streaming"). The OpenAI-compatible backend streams content as it comes.
 
 ## Failure
 

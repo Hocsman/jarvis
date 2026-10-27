@@ -176,10 +176,28 @@ class TestGetRequiredModels:
             llm_provider="openai_compatible",
             embedding_provider="ollama",
             ollama_chat_model="some-remote-model",
+            intent_judge_model="vendor/remote-judge",
         )
         with patch("desktop_app.setup_wizard.load_settings", return_value=cfg):
             models = get_required_models()
         assert models == ["nomic-embed-text"]
+
+    @pytest.mark.parametrize("provider", ["openai_compatible", "anthropic"])
+    def test_a_small_role_kept_local_on_a_remote_provider_is_pulled(self, provider):
+        """With Ollama running for the embeddings, a local tag for a small
+        role (the default intent judge) stays local, so it must be there:
+        nothing else pulls it, and the wizard does not open on its own
+        for a remote provider."""
+        cfg = self._cfg(
+            llm_provider=provider,
+            embedding_provider="ollama",
+            intent_judge_model="gemma4:e2b",
+            tool_router_model="qwen2.5:3b",
+            planner_model="",
+        )
+        with patch("desktop_app.setup_wizard.load_settings", return_value=cfg):
+            models = get_required_models()
+        assert models == ["nomic-embed-text", "gemma4:e2b", "qwen2.5:3b"]
 
     def test_anthropic_chat_requires_only_the_embed_model(self):
         """Chat and judge go to Anthropic; embeddings stay on Ollama, which
@@ -464,6 +482,27 @@ class TestProviderChoicePage:
         finally:
             cfg_path.unlink(missing_ok=True)
 
+    def test_validate_for_ollama_forgets_the_remote_key_variable(self):
+        """The variable naming a remote provider's key goes with the rest
+        of the remote setup: left behind, it would hand that key to the
+        next remote provider chosen."""
+        import tempfile, json
+        from pathlib import Path
+        page = ProviderChoicePage.__new__(ProviderChoicePage)
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
+            json.dump({"llm_provider": "anthropic", "llm_api_key_env": "YUBA_ANTHROPIC_KEY",
+                       "llm_chat_model": "claude-haiku-5-5"}, f)
+            cfg_path = Path(f.name)
+        try:
+            with patch("jarvis.config.default_config_path", return_value=cfg_path):
+                page._selected = "ollama"
+                assert page.validatePage() is True
+            saved = json.loads(cfg_path.read_text(encoding="utf-8"))
+            assert "llm_api_key_env" not in saved
+        finally:
+            cfg_path.unlink(missing_ok=True)
+
     def test_nextid_routes_openai_to_config_page(self):
         """OpenAI-compatible selection jumps to the connection-config page."""
         page = ProviderChoicePage.__new__(ProviderChoicePage)
@@ -645,6 +684,28 @@ class TestOpenAICompatiblePage:
             saved = json.loads(cfg_path.read_text(encoding="utf-8"))
             assert "llm_api_key" not in saved
             assert "embedding_model" not in saved
+        finally:
+            cfg_path.unlink(missing_ok=True)
+
+    def test_validate_makes_the_key_typed_here_the_one_used(self):
+        """A key variable left from another provider would win over the key
+        typed on this page, and send that other provider's key here."""
+        import tempfile, json
+        from pathlib import Path
+        page = OpenAICompatiblePage.__new__(OpenAICompatiblePage)
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
+            json.dump({"llm_provider": "anthropic", "llm_api_key_env": "YUBA_ANTHROPIC_KEY"}, f)
+            cfg_path = Path(f.name)
+        try:
+            with patch("jarvis.config.default_config_path", return_value=cfg_path):
+                page._read_inputs = MagicMock(return_value=(
+                    "https://openrouter.ai/api/v1", "sk-or-typed", "google/gemini-2.5-flash", "",
+                ))
+                assert page.validatePage() is True
+            saved = json.loads(cfg_path.read_text(encoding="utf-8"))
+            assert saved["llm_api_key"] == "sk-or-typed"
+            assert "llm_api_key_env" not in saved
         finally:
             cfg_path.unlink(missing_ok=True)
 

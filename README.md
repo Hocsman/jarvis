@@ -299,7 +299,8 @@ Leave `embedding_provider` empty to use the same provider as chat. When no embed
 ```
 
 - `llm_api_key_env`: the name of an environment variable holding your key, so the key never sits in `config.json`. Use a name of your own: if you also hand projects to Claude Code, an `ANTHROPIC_API_KEY` variable would make Claude Code bill the API instead of your subscription.
-- Model names are Claude model IDs (`claude-haiku-5-5`, `claude-sonnet-5-5`, …). Any other name (`qwen2.5:3b`) runs on your local Ollama, so you can keep the small roles local.
+- Model names are Claude model IDs (`claude-haiku-5-5`, `claude-sonnet-5-5`, …). Any other name (`qwen2.5:3b`) runs on your local Ollama, so you can keep the small roles local; startup tells you which `ollama pull` they need.
+- Switching provider leaves the key fields shared: an Anthropic key is never sent to another provider, and another provider's key is never sent to Anthropic. Jarvis says so and sends nothing until the right key is set.
 - Embeddings stay on Ollama: Anthropic has none.
 - Reasoning is off for every role unless you turn on its thinking setting (Chat Thinking Mode, Intent Judge Thinking Mode).
 

@@ -71,12 +71,12 @@ class ToolsNotSupportedError(Exception):
 
 
 class LLMBackend(ABC):
-    """Common interface for local LLM runtimes.
+    """Common interface for the LLM runtimes Jarvis talks to.
 
     Implementations are responsible for translating the calls below
     into their native HTTP shape (Ollama ``/api/chat``, OpenAI
-    ``/chat/completions``) and for normalising responses into the
-    formats described per-method.
+    ``/chat/completions``, Anthropic ``/v1/messages``) and for
+    normalising responses into the formats described per-method.
     """
 
     @abstractmethod

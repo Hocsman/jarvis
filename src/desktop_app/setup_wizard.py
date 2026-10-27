@@ -84,7 +84,7 @@ def check_mlx_whisper_status() -> MLXWhisperStatus:
 
 
 # Import config early (no PyQt6 dependency) - needed for detection functions
-from jarvis.config import load_settings, get_default_config, default_config_path
+from jarvis.config import load_settings, get_default_config, default_config_path, names_provider_model
 
 
 class SetupStatus(Enum):
@@ -192,6 +192,9 @@ def get_required_models() -> List[str]:
       local, and every Anthropic setup, since Anthropic serves no
       embeddings). Skipped when embeddings are on an OpenAI-compatible
       server.
+    - The small roles' local tags (intent judge, tool router, planner) —
+      on a remote chat provider whose embeddings are on Ollama: Ollama then
+      answers, so a local tag is kept and runs there.
 
     A pure OpenAI-compatible setup therefore requires nothing locally.
     """
@@ -219,6 +222,15 @@ def get_required_models() -> List[str]:
             intent_judge_model = getattr(cfg, "intent_judge_model", "gemma4:e2b")
             if intent_judge_model and intent_judge_model not in models:
                 models.append(intent_judge_model)
+        elif embed_provider != "openai_compatible":
+            # A remote chat provider keeps a small role on Ollama when its
+            # model is a local tag and Ollama answers, which it does when it
+            # serves the embeddings. Nothing else pulls that model.
+            for field in ("intent_judge_model", "tool_router_model", "planner_model"):
+                model = getattr(cfg, field, "")
+                if (isinstance(model, str) and model and model not in models
+                        and not names_provider_model(llm_provider, model)):
+                    models.append(model)
 
         return models
     except Exception:
@@ -958,7 +970,7 @@ class ProviderChoicePage(QWizardPage):
                 # OpenAI-compatible connection overrides.
                 config.pop("llm_provider", None)
                 for stale in (
-                    "llm_base_url", "llm_api_key", "llm_chat_model",
+                    "llm_base_url", "llm_api_key", "llm_api_key_env", "llm_chat_model",
                     "embedding_provider", "embedding_base_url",
                     "embedding_api_key", "embedding_model",
                 ):
@@ -1106,6 +1118,9 @@ class OpenAICompatiblePage(QWizardPage):
             config["llm_provider"] = "openai_compatible"
             config["llm_base_url"] = base_url
             config["llm_chat_model"] = chat_model
+            # The key typed here is the key: a variable left from another
+            # provider would win over it and send that provider's key here.
+            config.pop("llm_api_key_env", None)
             if api_key:
                 config["llm_api_key"] = api_key
             else:

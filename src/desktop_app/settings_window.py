@@ -191,7 +191,7 @@ def _build_field_metadata() -> List[FieldMeta]:
     # fields below are nullable: leaving them empty falls back to the Ollama
     # settings on the "LLM & AI Models" page, so a default (Ollama) install
     # never needs to touch this page.
-    f("llm_provider", "Provider", "Which runtime serves the LLM",
+    f("llm_provider", "Provider", "Which runtime serves the LLM (Anthropic is remote)",
       "llm_provider", "choice",
       choices=[("ollama", "Ollama (local)"),
                ("openai_compatible", "OpenAI-compatible server"),
@@ -209,8 +209,9 @@ def _build_field_metadata() -> List[FieldMeta]:
       "Leave empty for none.",
       "llm_provider", "password", nullable=True)
     f("llm_chat_model", "Chat Model",
-      "Model name the provider exposes (e.g. claude-haiku-5-5 on Anthropic). "
-      "Leave empty to use the Ollama chat model.",
+      "Model name the provider serves (e.g. claude-haiku-5-5 on Anthropic). "
+      "Left empty, the Ollama chat model's name is sent, which a remote "
+      "provider does not know.",
       "llm_provider", "str", nullable=True)
     f("embedding_provider", "Embedding Provider",
       "Runtime for embeddings. Leave on 'Same as chat provider' unless your "

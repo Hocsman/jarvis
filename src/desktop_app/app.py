@@ -227,6 +227,8 @@ def _collect_runtime_status_snapshot(
         embedding_provider = str(
             getattr(cfg, "embedding_provider", "") or llm_provider or "unknown"
         )
+        if embedding_provider == "anthropic":
+            embedding_provider = "ollama"  # Anthropic serves no embeddings
         embedding_model = str(getattr(cfg, "embedding_model", "") or "unknown")
         low_power_mode = getattr(cfg, "low_power_mode", False) is True
         mcps = getattr(cfg, "mcps", {}) or {}
@@ -3824,17 +3826,16 @@ def main() -> int:
                 splash.set_status("Models installed!")
                 app.processEvents()
             elif missing_models:
-                # Only embeddings run on Ollama (chat is remote), so the
-                # chat-model wizard does not apply. The embedding model is a
-                # fixed name; surface a clear, non-blocking instruction rather
-                # than silently degrading — memory search falls back to keyword
-                # matching until the model is pulled.
+                # Chat is remote, so the chat-model wizard does not apply.
+                # What runs on Ollama is the embedding model and any small
+                # role kept on a local tag; surface a clear, non-blocking
+                # instruction rather than silently degrading — memory search
+                # falls back to keyword matching and the small roles to their
+                # fallbacks until the models are pulled.
                 pull_cmd = "; ".join(f"ollama pull {m}" for m in missing_models)
-                print(
-                    f"⚠️ Ollama embedding model(s) not installed: {missing_models}. "
-                    f"Memory search will use keyword matching until you run: {pull_cmd}",
-                    flush=True,
-                )
+                print(f"⚠️ Ollama model(s) not installed: {', '.join(missing_models)}", flush=True)
+                print("   🧭 memory search and the small local roles fall back until you run:", flush=True)
+                print(f"   💻 {pull_cmd}", flush=True)
             else:
                 print("✅ All required models are installed", flush=True)
 

@@ -15,6 +15,7 @@ Two factories share one provider catalogue:
 from __future__ import annotations
 import json
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 
 from ..debug import debug_log
 from .anthropic_backend import AnthropicBackend
@@ -34,6 +35,7 @@ _OLLAMA = "ollama"
 _OPENAI_COMPATIBLE = "openai_compatible"
 _ANTHROPIC = "anthropic"
 _DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
+_ANTHROPIC_KEY_PREFIX = "sk-ant-"
 
 # Backends are cached by their resolved connection parameters so that a
 # single instance — and its persistent HTTP session — is reused across
@@ -87,6 +89,35 @@ def _build(
     return backend
 
 
+def _key_for_host(api_key: Optional[str], base_url: str) -> Optional[str]:
+    """``api_key``, unless it is an Anthropic key bound for another host.
+
+    The key fields are shared by the remote providers, so a provider
+    switch can leave the Anthropic key configured for an OpenAI-compatible
+    server or an embedding endpoint. Anthropic keys carry a fixed prefix,
+    so the key itself says where it belongs; Anthropic's own
+    OpenAI-compatible endpoint still receives it.
+    """
+    if not api_key or not api_key.startswith(_ANTHROPIC_KEY_PREFIX):
+        return api_key
+    host = (urlparse(base_url if "//" in base_url else f"//{base_url}").hostname or "").lower()
+    if host == urlparse(ANTHROPIC_BASE_URL).hostname:
+        return api_key
+    print("⚠️ The configured key is an Anthropic key; not sent to this provider", flush=True)
+    print("   🔑 set the key of the provider in use, or switch llm_provider to anthropic", flush=True)
+    return None
+
+
+def _anthropic_key(api_key: Optional[str]) -> Optional[str]:
+    """``api_key`` if it is an Anthropic key; another provider's key left in
+    the shared field is not sent to Anthropic."""
+    if not api_key or api_key.startswith(_ANTHROPIC_KEY_PREFIX):
+        return api_key
+    print("⚠️ The configured key is not an Anthropic key; not sent to Anthropic", flush=True)
+    print("   🔑 set llm_api_key_env to the variable that holds your Anthropic key", flush=True)
+    return None
+
+
 def _build_uncached(
     provider: str,
     base_url: str,
@@ -97,10 +128,10 @@ def _build_uncached(
     if provider == _OLLAMA:
         return OllamaBackend(base_url)
     if provider == _ANTHROPIC:
-        backend: LLMBackend = AnthropicBackend(api_key=api_key)
+        backend: LLMBackend = AnthropicBackend(api_key=_anthropic_key(api_key))
     else:
         backend = OpenAICompatibleBackend(
-            base_url, api_key=api_key, extra_body=extra_body
+            base_url, api_key=_key_for_host(api_key, base_url), extra_body=extra_body
         )
     # Scrub secrets before remote egress. The Ollama path is not wrapped:
     # its prompts never leave the machine and redaction would be wasted work.
@@ -229,12 +260,13 @@ def get_private_backend(settings: Any, pinned: str, model: str) -> LLMBackend:
     So a pin decides the destination too, whatever its shape: an
     ``hf.co/...`` Ollama tag has a slash and is still his machine. With
     nothing pinned, ``model`` (the one the context resolved and is about
-    to send) decides it the way it does for every other call: a bare tag
-    on a remote provider names a model that lives on local Ollama, and
-    goes there. A namespaced model stays on the provider he chose: the
-    chat model at the end of the chain, a router given as
-    ``vendor/model``, and a slashed local tag too, which only a pin keeps
-    here.
+    to send) decides it the way it does for every other call: a local tag
+    on a remote provider (:func:`names_provider_model`) names a model that
+    lives on local Ollama, and goes there. A name the provider serves stays
+    on the provider he chose: the chat model at the end of the chain, a
+    router given as ``vendor/model`` or as a Claude ID, and on an
+    OpenAI-compatible endpoint a slashed local tag too, which only a pin
+    keeps here.
 
     ``pinned`` and ``model`` are separate because a context's chain runs
     past its pin: the model it sends may be a fallback's, and the request

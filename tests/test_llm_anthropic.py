@@ -64,20 +64,40 @@ def _streamed_text(chunks: List[str]) -> bytes:
     return _sse(events)
 
 
-def _streamed_tool_call(name: str, call_id: str, arguments_json: str) -> bytes:
+def _streamed_tool_call(name: str, call_id: str, arguments_json: str,
+                        preamble: Optional[List[str]] = None) -> bytes:
     half = len(arguments_json) // 2
-    return _sse([
+    events: List[Dict[str, Any]] = [
         {"type": "message_start", "message": {**_message([]), "stop_reason": None}},
-        {"type": "content_block_start", "index": 0,
+    ]
+    index = 0
+    if preamble:
+        events.append({"type": "content_block_start", "index": 0,
+                       "content_block": {"type": "text", "text": ""}})
+        events += [{"type": "content_block_delta", "index": 0,
+                    "delta": {"type": "text_delta", "text": chunk}} for chunk in preamble]
+        events.append({"type": "content_block_stop", "index": 0})
+        index = 1
+    events += [
+        {"type": "content_block_start", "index": index,
          "content_block": {"type": "tool_use", "id": call_id, "name": name, "input": {}}},
-        {"type": "content_block_delta", "index": 0,
+        {"type": "content_block_delta", "index": index,
          "delta": {"type": "input_json_delta", "partial_json": arguments_json[:half]}},
-        {"type": "content_block_delta", "index": 0,
+        {"type": "content_block_delta", "index": index,
          "delta": {"type": "input_json_delta", "partial_json": arguments_json[half:]}},
-        {"type": "content_block_stop", "index": 0},
+        {"type": "content_block_stop", "index": index},
         {"type": "message_delta", "delta": {"stop_reason": "tool_use", "stop_sequence": None},
          "usage": {"output_tokens": 9}},
         {"type": "message_stop"},
+    ]
+    return _sse(events)
+
+
+def _streamed_error(kind: str) -> bytes:
+    """An error the API reports inside a stream that had already answered 200."""
+    return _sse([
+        {"type": "message_start", "message": {**_message([]), "stop_reason": None}},
+        {"type": "error", "error": {"type": kind, "message": "Overloaded"}},
     ])
 
 
@@ -173,6 +193,30 @@ class TestDestination:
         assert backend.direct(MODEL, "sys", "hello") is None
         assert backend.chat(MODEL, [{"role": "user", "content": "hi"}]) is None
         assert server.requests == []
+
+    def test_headers_set_for_other_tools_are_not_sent(self, monkeypatch):
+        """``ANTHROPIC_CUSTOM_HEADERS`` serves gateways set up for other
+        tools; its secrets must not ride along, nor replace the key."""
+        monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS",
+                           "Authorization: Bearer someone-else\nx-gateway-key: s3cret")
+        server = _Server(_text("ok"))
+
+        _backend(server, api_key="sk-ant-configured").direct(MODEL, "sys", "hello")
+
+        headers = server.requests[0].headers
+        assert "x-gateway-key" not in headers
+        assert "someone-else" not in headers.get("authorization", "")
+        assert "sk-ant-configured" in headers.get("x-api-key", "") + headers.get("authorization", "")
+
+    def test_no_description_of_the_machine_is_sent(self):
+        server = _Server(_text("ok"))
+
+        _backend(server).direct(MODEL, "sys", "hello")
+
+        sent = {name.lower() for name in server.requests[0].headers}
+        for fingerprint in ("x-stainless-os", "x-stainless-arch", "x-stainless-runtime",
+                            "x-stainless-runtime-version"):
+            assert fingerprint not in sent
 
     def test_the_key_never_reaches_standard_output(self, capsys):
         server = _Server(_error(401, "invalid x-api-key", "authentication_error"))
@@ -292,6 +336,24 @@ class TestRetry:
 
         assert _backend(server).direct(MODEL, "sys", "hello", timeout_sec=5.0) is None
         assert len(server.requests) == 1
+
+    def test_a_long_wait_is_not_spent_even_inside_the_deadline(self):
+        """A caller with a fallback (the judge's is the text wake word) is
+        better served by an answer of None now than by one in seconds."""
+        server = _Server(_error(429, "rate", "rate_limit_error", headers={"retry-after": "4"}), _text("ok"))
+
+        assert _backend(server).direct(MODEL, "sys", "hello", timeout_sec=30.0) is None
+        assert len(server.requests) == 1
+
+    def test_an_overload_reported_inside_the_stream_is_retried(self):
+        server = _Server(_streamed_error("overloaded_error"), _streamed_text(["ok"]))
+        seen: List[str] = []
+
+        resp = _backend(server).chat(MODEL, [{"role": "user", "content": "?"}], timeout_sec=10.0,
+                                     on_token=seen.append)
+
+        assert resp["message"]["content"] == "ok"
+        assert len(server.requests) == 2
 
 
 # ── streaming() ─────────────────────────────────────────────────────────────
@@ -462,6 +524,30 @@ class TestChat:
             {"role": "user", "content": [{"type": "text", "text": "first"}, {"type": "text", "text": "18°C"}]},
         ]
 
+    def test_a_history_opening_on_an_old_tool_round_trip_keeps_its_result_as_text(self):
+        """Tool carry-over outlives the text it followed: past five minutes
+        the history can open on an assistant call. The turn before the
+        first user message goes, so its result has no call left to answer."""
+        server = _Server(_text("ok"))
+
+        _backend(server).chat(MODEL, [
+            {"role": "system", "content": "s"},
+            {"role": "assistant", "content": "", "tool_calls": [{
+                "id": "toolu_old", "type": "function",
+                "function": {"name": "getWeather", "arguments": {"city": "Paris"}}}]},
+            {"role": "tool", "tool_call_id": "toolu_old", "content": "18°C"},
+            {"role": "user", "content": "and tomorrow?"},
+            {"role": "assistant", "content": "Let me see."},
+            {"role": "user", "content": "well?"},
+        ], tools=[WEATHER_TOOL])
+
+        assert server.body()["messages"] == [
+            {"role": "user", "content": [{"type": "text", "text": "18°C"},
+                                         {"type": "text", "text": "and tomorrow?"}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "Let me see."}]},
+            {"role": "user", "content": [{"type": "text", "text": "well?"}]},
+        ]
+
     def test_the_conversation_starts_with_the_user_and_ends_with_the_user(self):
         server = _Server(_text("ok"))
 
@@ -490,10 +576,17 @@ class TestChat:
     def test_a_bad_request_with_tools_hands_the_engine_its_text_fallback(self):
         from jarvis.llm import ToolsNotSupportedError
 
-        server = _Server(_error(400, "tools.0.name: invalid"))
+        server = _Server(_error(400, "tools.0.custom.name: String should match pattern"))
 
         with pytest.raises(ToolsNotSupportedError):
             _backend(server).chat(MODEL, [{"role": "user", "content": "hi"}], tools=[WEATHER_TOOL])
+
+    def test_a_bad_request_about_the_conversation_is_not_blamed_on_the_tools(self):
+        """Falling back to text tools re-sends the same conversation: it
+        cannot fix an error in it."""
+        server = _Server(_error(400, "messages.0.content.0: unexpected `tool_use_id` found in `tool_result` blocks"))
+
+        assert _backend(server).chat(MODEL, [{"role": "user", "content": "hi"}], tools=[WEATHER_TOOL]) is None
 
     def test_an_unreachable_server_raises_a_connection_error_without_the_url(self):
         """The intent judge backs off on ``requests.ConnectionError``."""
@@ -532,6 +625,29 @@ class TestChatStreaming:
             "id": "toolu_7", "type": "function",
             "function": {"name": "getWeather", "arguments": {"city": "Lyon"}},
         }]
+
+    def test_text_written_before_a_tool_call_is_not_streamed(self):
+        """A tool-calling turn speaks nothing: what Claude writes before
+        the call is not the answer, and the voice only says the answer."""
+        server = _Server(_streamed_tool_call("getWeather", "toolu_8", "{\"city\": \"Lyon\"}",
+                                             preamble=["Je ", "regarde."]))
+        seen: List[str] = []
+
+        resp = _backend(server).chat(MODEL, [{"role": "user", "content": "?"}], tools=[WEATHER_TOOL],
+                                     on_token=seen.append)
+
+        assert seen == []
+        assert resp["message"]["content"] == "Je regarde."
+        assert resp["message"]["tool_calls"][0]["function"]["name"] == "getWeather"
+
+    def test_with_tools_offered_the_answer_is_still_streamed(self):
+        server = _Server(_streamed_text(["Il ", "fait ", "beau."]))
+        seen: List[str] = []
+
+        resp = _backend(server).chat(MODEL, [{"role": "user", "content": "?"}], tools=[WEATHER_TOOL],
+                                     on_token=seen.append)
+
+        assert "".join(seen) == resp["message"]["content"] == "Il fait beau."
 
     def test_a_raising_callback_never_costs_the_reply(self):
         server = _Server(_streamed_text(["a", "b"]))
@@ -573,6 +689,17 @@ class TestThinkingAcrossToolTurns:
         # changed under it (the tool list can widen mid-loop).
         assert server.body(1)["thinking"]["block_binding"] == {"prefix_mismatch_behavior": "drop_block"}
         assert "thinking-binding-controls" in server.requests[1].headers["anthropic-beta"]
+
+    def test_a_refusal_carries_no_reasoning_forward(self):
+        """The engine reads reasoning with no answer as a step to continue;
+        after a refusal that would re-send the refused request."""
+        server = _Server(_message([{"type": "thinking", "thinking": "hmm", "signature": "s"}],
+                                  stop_reason="refusal"))
+
+        resp = _backend(server).chat(MODEL, [{"role": "user", "content": "?"}], thinking=True)
+
+        assert resp["message"]["content"] == ""
+        assert "thinking" not in resp["message"]
 
     def test_no_reasoning_is_replayed_into_a_request_that_does_not_think(self):
         server = _Server(self._thinking_tool_call(), _text("ok"))
