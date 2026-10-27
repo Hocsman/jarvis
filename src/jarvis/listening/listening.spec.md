@@ -11,10 +11,15 @@ counts or sample rates trigger bounded retries on the same selected input:
 mono, stereo and the device's advertised maximum channel count, at the configured
 and native rates, without duplicate attempts. Access and device-availability
 errors are not retried as format failures. Both the Windows permission probe and
-continuous capture use this negotiation and input selection. Name matching skips
-output-only devices; a missing named microphone produces an actionable error
-rather than silently selecting another input. Multichannel samples are averaged
-to mono before framing and speech detection.
+continuous capture use this negotiation and input selection.
+
+The input comes from `voice_device` through `resolve_input_device`
+(`jarvis.utils.audio_stream`), the resolver hold-to-dictate also uses: blank,
+`default` or `system` is the system default input, a number is a device index,
+and any other text is the first input-capable device whose name contains it,
+ignoring case, so output-only devices are skipped. A missing named microphone
+produces an actionable error rather than silently selecting another input.
+Multichannel samples are averaged to mono before framing and speech detection.
 
 Frames always span the configured 10, 20 or
 30 ms at the actual capture rate; unsupported frame durations use 20 ms. Partial
