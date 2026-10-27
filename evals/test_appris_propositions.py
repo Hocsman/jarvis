@@ -107,7 +107,11 @@ def _cfg(tmp_path):
     cfg = MockConfig()
     cfg.db_path = str(tmp_path / "jarvis.db")
     cfg.llm_chat_model = JUDGE_MODEL
+    # Neither pin: a pin means local Ollama whatever it names, and the
+    # remote tier's model is a cloud ID. Unpinned, the chain lands on the
+    # tier's own small model and the request goes where that model lives.
     cfg.appris_model = ""
+    cfg.reminder_model = ""
     cfg.appris_jours = 400
     cfg.appris_max_propositions = 6
     cfg.appris_seuil_doublon = 90
@@ -184,9 +188,11 @@ class TestTheTwoReadersPartitionTheSameNote:
         case = CASES[3].values[0]   # the interleaved one, the hard case
         cfg = _cfg(tmp_path)
 
-        mien = {normalise_fact(c.texte)
-                for c in propositions(cfg, _db(case), core=_core(tmp_path),
-                                      deja=[]).gardes}
+        lecture = propositions(cfg, _db(case), core=_core(tmp_path), deja=[])
+        # An unread journal proposes nothing, and nothing is disjoint from
+        # everything.
+        assert lecture.appelee, "the journal was not read at all"
+        mien = {normalise_fact(c.texte) for c in lecture.gardes}
         sien = {normalise_fact(f)
                 for f in (extract_graph_memories(case.summary, cfg, JUDGE_MODEL,
                                                  tools_used=["webSearch"]) or [])}
