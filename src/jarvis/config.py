@@ -620,6 +620,10 @@ def _cloud_safe_model(value: str, field: str, provider: str,
     auxiliary backend dispatcher will route them to Ollama, eliminating cloud
     latency for intent judging and tool routing.
 
+    A pin equal to the chat model is the chat model: the dispatcher sends
+    it wherever it sends the chat model, so there is nothing to keep,
+    replace or announce.
+
     A local OpenAI-compatible server is the opposite case. A bare name is
     the only shape it accepts, and the pin is the whole reason the user
     set a small model for a small task. So the endpoint decides rather
@@ -631,7 +635,7 @@ def _cloud_safe_model(value: str, field: str, provider: str,
         return value
     if provider != "openai_compatible" or "/" in value:
         return value
-    if is_local_endpoint(base_url):
+    if is_local_endpoint(base_url) or value == fallback:
         return value
     if is_ollama_reachable(ollama_base_url):
         mark = (field, value, "kept")
@@ -644,7 +648,7 @@ def _cloud_safe_model(value: str, field: str, provider: str,
                 "config",
             )
         return value
-    if not fallback or fallback == value:
+    if not fallback:
         return value
     mark = (field, value, fallback)
     if mark not in _announced_pins:
@@ -823,7 +827,8 @@ def get_default_config() -> Dict[str, Any]:
         # but says how late she is rather than pretending it is now.
         "reminders_enabled": True,
         # Empty = the warm small chain. Pin a local model to keep the
-        # user's own sentence about their own life off the network.
+        # user's own sentence about their own life on their own machine
+        # or network.
         "reminder_model": "",
         "reminder_timeout_sec": 8.0,
         # Where a bare day lands when no hour was said: "jeudi" means

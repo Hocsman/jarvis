@@ -708,6 +708,81 @@ def get_like_requests():
     return make
 
 
+def _clear_llm_backend_caches():
+    # The two import paths are distinct module instances, each with its
+    # own cache.
+    for name in ("src.jarvis.llm.factory", "jarvis.llm.factory"):
+        module = sys.modules.get(name)
+        if module is not None:
+            module.clear_backend_cache()
+
+
+class _OllamaTags:
+    """Ollama's answer to ``GET /api/tags``."""
+
+    def __init__(self, names):
+        self._names = list(names)
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return {"models": [{"name": name} for name in self._names]}
+
+
+@pytest.fixture
+def wire(monkeypatch):
+    """``wire(call, ollama_has=None)``: every chat request ``call`` makes,
+    as ``(url, model)``, sent nowhere.
+
+    A routing rule is held at the wire: where the request went and the
+    model it named, through any wrapper. ``ollama_has`` is the tag list
+    local Ollama answers with; ``None`` means nothing answers there. A call
+    that raised before anything reached the wire fails here with what it
+    raised, rather than later with only "sent nothing".
+
+    The LLM factory's caches are cleared around the test and before each
+    call, since a backend or a tag list cached by one would answer for the
+    next. The files that route requests share this one double rather than
+    each keeping a copy, since two copies drift."""
+    import requests
+
+    def sent(call, ollama_has=None):
+        _clear_llm_backend_caches()
+        parties = []
+
+        def _post(url, **kw):
+            parties.append((url, (kw.get("json") or {}).get("model")))
+            raise requests.exceptions.Timeout("intercepted")
+
+        def _session_post(self, url, **kw):
+            return _post(url, **kw)
+
+        def _get(url, **kw):
+            if ollama_has is not None and url.endswith("/api/tags"):
+                return _OllamaTags(ollama_has)
+            raise requests.exceptions.ConnectionError("nothing answers here")
+
+        with monkeypatch.context() as m:
+            m.setattr(requests, "post", _post)
+            m.setattr(requests.Session, "post", _session_post)
+            m.setattr(requests, "get", _get)
+            try:
+                call()
+            except Exception as erreur:
+                # Every caller reports a timeout its own way: raising, or
+                # answering quietly. Where the request went is all this
+                # asks, unless it never left.
+                if not parties:
+                    raise AssertionError(
+                        f"nothing was sent at all: {erreur!r}") from erreur
+        return parties
+
+    _clear_llm_backend_caches()
+    yield sent
+    _clear_llm_backend_caches()
+
+
 class ViewerClient:
     """Memory-viewer test client that carries the launch token.
 

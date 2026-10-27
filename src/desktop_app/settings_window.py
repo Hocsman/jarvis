@@ -498,7 +498,7 @@ def _build_field_metadata() -> List[FieldMeta]:
       "reminders", "bool")
     f("reminder_model", "Modèle des rappels",
       "Lit l'heure dans ta phrase. Épingle un modèle local et ta phrase "
-      "ne quitte pas la machine",
+      "reste sur ta machine ou ton réseau",
       "reminders", "str")
     f("reminder_default_hour", "Heure par défaut",
       "Quand tu nommes un jour sans heure. Elle te le dit à voix haute "

@@ -3,7 +3,8 @@
 Receives full context (transcript buffer, TTS history, state) and makes
 informed decisions about whether speech is directed at the assistant and
 what the actual query is. Routes through ``jarvis.llm.get_auxiliary_backend``
-so a bare judge-model tag on a remote provider runs on local Ollama.
+so a bare judge-model tag on a remote provider runs on local Ollama,
+unless it is the provider's own chat model.
 """
 
 import json

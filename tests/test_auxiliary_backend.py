@@ -4,8 +4,9 @@ Auxiliary tasks (intent judge, tool router, planner) can run on a local
 Ollama model even when the main chat provider is a remote OpenAI-compatible
 server (e.g. OpenRouter). A bare model name without a slash indicates a local
 model tag and is routed to Ollama, while a namespaced tag (vendor/model), the
-chat model however it is spelled, or a local OpenAI-compatible endpoint stays
-on the configured LLM backend.
+chat model however it is spelled (unless it is the Ollama chat model an empty
+`llm_chat_model` inherits), or a local OpenAI-compatible endpoint stays on the
+configured LLM backend.
 """
 
 from __future__ import annotations
@@ -183,45 +184,12 @@ def test_weather_place_extractor_routes_its_bare_model_to_local_ollama(direct_ca
 # slash. The no-slash test reads `gpt-4o-mini` as a local tag, and every
 # auxiliary call that lands on the chat model (the planner's default, a
 # judge or router rescued to it) would then go to Ollama, which does not
-# have it. Asserted at the wire: where the request went, and what it named.
+# have it. The one name that is not the provider's is the Ollama chat
+# model an empty `llm_chat_model` inherits. Asserted at the wire, through
+# the shared `wire` fixture: where the request went, and what it named.
 
 
-def _sent(call):
-    """Every request `call` makes, as (url, model), sent nowhere."""
-    from unittest.mock import patch
-
-    import requests
-
-    parties = []
-
-    def _capter(url, **kw):
-        parties.append((url, (kw.get("json") or {}).get("model")))
-        raise requests.exceptions.Timeout("intercepted")
-
-    def _session_post(self, url, **kw):
-        return _capter(url, **kw)
-
-    with patch("requests.post", _capter), \
-         patch.object(requests.Session, "post", _session_post):
-        try:
-            call()
-        except Exception as erreur:
-            if not parties:
-                raise AssertionError(
-                    f"nothing was sent at all: {erreur!r}") from erreur
-    return parties
-
-
-@pytest.fixture
-def _backends_neufs():
-    from src.jarvis.llm import clear_backend_cache
-
-    clear_backend_cache()
-    yield
-    clear_backend_cache()
-
-
-def _settings_from(tmp_path, monkeypatch, values: dict, *, ollama: bool):
+def _settings_from(tmp_path, monkeypatch, values: dict, *, ollama_reachable: bool):
     """Settings built from a real config file, the path production uses."""
     import json
 
@@ -233,7 +201,7 @@ def _settings_from(tmp_path, monkeypatch, values: dict, *, ollama: bool):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     monkeypatch.setattr(config, "_announced_pins", set(), raising=False)
     monkeypatch.setattr(config, "is_ollama_reachable",
-                        lambda *args, **kwargs: ollama)
+                        lambda *args, **kwargs: ollama_reachable)
     return config.load_settings()
 
 
@@ -245,15 +213,15 @@ _OPENAI = {
 
 
 def test_the_default_planner_stays_with_a_bare_cloud_chat_model(
-        tmp_path, monkeypatch, _backends_neufs):
+        tmp_path, monkeypatch, wire):
     """No `planner_model`: the planner tracks the chat model, and so does
     the endpoint it is sent to."""
     from src.jarvis.reply import planner
 
-    cfg = _settings_from(tmp_path, monkeypatch, _OPENAI, ollama=True)
+    cfg = _settings_from(tmp_path, monkeypatch, _OPENAI, ollama_reachable=True)
     model = planner.resolve_planner_model(cfg)
 
-    parties = _sent(lambda: planner.call_llm_direct(
+    parties = wire(lambda: planner.call_llm_direct(
         cfg=cfg, chat_model=model, system_prompt="s", user_content="u"))
 
     assert parties == [("https://api.openai.com/v1/chat/completions",
@@ -261,16 +229,16 @@ def test_the_default_planner_stays_with_a_bare_cloud_chat_model(
 
 
 def test_a_judge_rescued_to_a_bare_cloud_chat_model_reaches_it(
-        tmp_path, monkeypatch, _backends_neufs):
+        tmp_path, monkeypatch, wire):
     """Local Ollama unreachable, so the judge's bare default was replaced
     by the chat model at load. Sending that to Ollama would undo the
     rescue: the one server known not to be there."""
     from src.jarvis.tools.builtin import weather
 
-    cfg = _settings_from(tmp_path, monkeypatch, _OPENAI, ollama=False)
+    cfg = _settings_from(tmp_path, monkeypatch, _OPENAI, ollama_reachable=False)
     assert cfg.intent_judge_model == "gpt-4o-mini"
 
-    parties = _sent(lambda: weather._extract_place_from_user_text(
+    parties = wire(lambda: weather._extract_place_from_user_text(
         "quel temps à Paris", cfg))
 
     assert parties == [("https://api.openai.com/v1/chat/completions",
@@ -278,18 +246,48 @@ def test_a_judge_rescued_to_a_bare_cloud_chat_model_reaches_it(
 
 
 def test_a_bare_local_pin_beside_a_bare_cloud_chat_model_still_runs_here(
-        tmp_path, monkeypatch, _backends_neufs):
+        tmp_path, monkeypatch, wire):
     """Only the chat model's own name is the provider's: a router pinned to
     a local tag still runs on local Ollama."""
     from src.jarvis.tools.builtin import weather
 
     cfg = _settings_from(tmp_path, monkeypatch,
                          {**_OPENAI, "tool_router_model": "qwen2.5:3b"},
-                         ollama=True)
+                         ollama_reachable=True)
 
-    parties = _sent(lambda: weather._extract_place_from_user_text(
+    parties = wire(lambda: weather._extract_place_from_user_text(
         "quel temps à Paris", cfg))
 
     assert len(parties) == 1, parties
     url, model = parties[0]
     assert url.startswith(cfg.ollama_base_url) and model == "qwen2.5:3b", parties
+
+
+def test_the_judge_keeps_the_room_here_when_the_chat_model_is_inherited(
+        tmp_path, monkeypatch, wire):
+    """`llm_chat_model` left empty on a remote provider inherits the Ollama
+    chat model, which is also the judge's default. That name is a local
+    tag: the room it hears stays on local Ollama rather than reaching the
+    provider on the way to a 400."""
+    import time
+
+    from src.jarvis.listening.intent_judge import create_intent_judge
+    from src.jarvis.listening.transcript_buffer import TranscriptSegment
+
+    cfg = _settings_from(tmp_path, monkeypatch, {
+        "llm_provider": "openai_compatible",
+        "llm_base_url": "https://openrouter.ai/api/v1",
+    }, ollama_reachable=True)
+    assert cfg.intent_judge_model == cfg.llm_chat_model == cfg.ollama_chat_model
+
+    now = time.time()
+    juge = create_intent_judge(cfg)
+    parties = wire(lambda: juge.judge(
+        [TranscriptSegment(text="jarvis quelle heure est-il",
+                           start_time=now - 2, end_time=now - 1)],
+        wake_timestamp=now - 2))
+
+    assert len(parties) == 1, parties
+    url, model = parties[0]
+    assert url.startswith(cfg.ollama_base_url), parties
+    assert model == cfg.intent_judge_model, parties
