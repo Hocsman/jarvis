@@ -29,7 +29,7 @@ from rapidfuzz import fuzz, process
 from ..config import get_default_config
 from ..debug import debug_log
 from ..llm import get_auxiliary_backend
-from ..utils.redact import redaction_placeholders
+from ..utils.redact import hidden_values, redaction_placeholders, scrub_secrets
 from .provenance import (
     SOURCE_UNKNOWN,
     fact_line,
@@ -215,17 +215,61 @@ def _numbers_are_grounded(cleaned, inputs) -> bool:
     different fact wearing the same words, and it is the shape a later
     answer quotes with confidence.
 
+    Figures are read from the claim, not from its provenance suffix: a
+    node whose lines carry ` · web · 2026-10-16` would otherwise vouch for
+    an invented 16, 10 or 2026 in any line of the rewrite.
+
     Refusing is safe: the caller falls back to plain append, so a false
     positive costs consolidation, never a fact.
     """
     connus = set()
     for line in inputs:
-        connus.update(_DIGITS.findall(line or ""))
+        connus.update(_DIGITS.findall(fact_text(line or "")))
     for line in cleaned:
-        for n in _DIGITS.findall(line or ""):
+        for n in _DIGITS.findall(fact_text(line or "")):
             if n not in connus:
                 return False
     return True
+
+
+def _restore_hidden_values(written, inputs) -> list:
+    """Put back, in a rewrite's lines, the values a remote model saw only as markers.
+
+    The redacting backend hands a remote model ``scrub_secrets`` of every
+    line, so a faithful rewrite returns an address or a long number as a
+    ``[REDACTED_*]`` marker. A written line carrying a marker is matched
+    against the inputs' scrubbed lines the way ``_claims_kept`` matches a
+    claim (the same key, or ``_REWRITE_MATCH`` and every figure), and is
+    replaced by the one input line it stands for. A marker that matches no
+    input line, or two that hid different values, is left in place for the
+    redaction guard to refuse.
+    """
+    if not (_redaction_markers(written) - _redaction_markers(inputs)):
+        return list(written)
+    sources: dict[str, set] = {}
+    for line in inputs:
+        scrubbed = scrub_secrets(line)
+        if scrubbed != line:
+            sources.setdefault(_match_key(scrubbed), set()).add(line)
+    figures = {key: set(_DIGITS.findall(key)) for key in sources}
+    choices = list(sources)
+    restored = []
+    for line in written:
+        key = _match_key(line)
+        if not redaction_placeholders(line) or not choices:
+            restored.append(line)
+            continue
+        originals = sources.get(key)
+        if originals is None:
+            held = set(_DIGITS.findall(key))
+            originals = set()
+            for choice, _, _ in process.extract(
+                    key, choices, scorer=fuzz.ratio,
+                    score_cutoff=_REWRITE_MATCH, limit=None):
+                if figures[choice] <= held:
+                    originals |= sources[choice]
+        restored.append(next(iter(originals)) if len(originals) == 1 else line)
+    return restored
 
 
 def _match_key(text: str) -> str:
@@ -885,6 +929,11 @@ def merge_node_data(
     if not cleaned:
         return MergeResult(success=False)
 
+    # A remote model saw an address or a long number on the node only as a
+    # marker; where the line it hands back can be traced to one line that
+    # went in, that line is written instead, value and all.
+    cleaned = _restore_hidden_values(cleaned, list(existing_lines) + list(sanitised_new))
+
     # Hallucination guard: bound the output relative to the input.
     # Consolidation rules can shrink or hold but should never grow
     # beyond `existing + new + small slack` — anything larger means
@@ -909,11 +958,11 @@ def merge_node_data(
         )
         return MergeResult(success=False)
 
-    # A remote model sees the node through the redacting backend, so an
-    # address or a long number on it comes back as a marker. Written
-    # over the node, the value it hid would be gone for good. A marker
-    # the inputs already carried (redacted diary text) may stay; one
-    # more than they carried stands for a value.
+    # A marker left after the restoration above stands for a value no
+    # single input line can give back. Written over the node, the value it
+    # hid would be gone for good. A marker the inputs already carried
+    # (redacted diary text) may stay; one more than they carried stands for
+    # a value.
     if _redaction_markers(cleaned) - _redaction_markers(
         list(existing_lines) + list(sanitised_new)
     ):
@@ -1166,8 +1215,13 @@ def _read_split(node: MemoryNode, response: str):
             description = f"Memories about: {name}"
         children.append((name, description.strip(), lines))
 
-    written = [line for _, _, lines in children for line in lines]
     before = _split_data_lines(node.data)
+    # A remote model saw an address or a long number on the node only as a
+    # marker; where a child's line can be traced to one line of the node,
+    # that line is written instead, value and all.
+    children = [(name, description, _restore_hidden_values(lines, before))
+                for name, description, lines in children]
+    written = [line for _, _, lines in children for line in lines]
 
     # Clearing the parent is the one step here that cannot be undone, so
     # what the children leave out is gone for good. A split may drop what
@@ -1183,11 +1237,24 @@ def _read_split(node: MemoryNode, response: str):
         )
         return None
 
+    # An address or a long number is what a remote model sees only as a
+    # marker: it cannot judge the line it sits on, and once the parent is
+    # cleared nothing brings the value back. So every such value must be
+    # carried, however small a share of the node its line is.
+    carried = "\n".join(written)
+    lost = sum(1 for line in before for value in hidden_values(line) if value not in carried)
+    if lost:
+        debug_log(
+            f"auto-split: rejected — the children leave out {lost} value(s) the "
+            f"redacting backend hides",
+            "memory",
+        )
+        return None
+
     # The merge's guards, for the same reasons: a split redistributes and
     # consolidates, so it may shrink a node but not grow it; a figure may
-    # be dropped but not invented; and a remote model sees the node through
-    # the redacting backend, so a marker it hands back stands for a value
-    # the node held.
+    # be dropped but not invented; and a marker left after the restoration
+    # above stands for a value no single line of the node can give back.
     if len(written) > len(before) + _MERGE_GROWTH_SLACK:
         debug_log(
             f"auto-split: rejected — the children hold {len(written)} lines "

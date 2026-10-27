@@ -80,6 +80,23 @@ def redact(text: str, max_len: int = 8000) -> str:
     return scrubbed
 
 
+def hidden_values(text: str | None) -> list[str]:
+    """The values :func:`scrub_secrets` takes out of ``text``, rule by rule.
+
+    What a remote model never sees of a line: a rewrite it returns cannot
+    have written one of these back, so a caller that must not lose them
+    checks that they survived.
+    """
+    if not text:
+        return []
+    found: list[str] = []
+    remaining = text
+    for pattern, repl in _REDACTION_RULES:
+        found.extend(m.group(0) for m in pattern.finditer(remaining))
+        remaining = pattern.sub(repl, remaining)
+    return found
+
+
 def scrub_secrets(text: str) -> str:
     """Apply the structural scrub rules without whitespace collapse or length cap.
 
