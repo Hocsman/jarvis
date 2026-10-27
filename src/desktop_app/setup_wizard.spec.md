@@ -16,7 +16,7 @@ A user on a remote chat provider (OpenAI-compatible or Anthropic) has opted out 
 1. **Minimal friction**: Skip pages whose requirements are already met. Auto-detect as much as possible.
 2. **Guided, not blocking**: The wizard resolves prerequisites; it does not configure every setting. Fine-tuning happens in the Settings Window.
 3. **Platform-aware**: Apple Silicon gets MLX Whisper options. Windows gets hidden-console Ollama serve. macOS opens the Ollama app.
-4. **Safe re-entry**: Running the wizard again never destroys existing config — it only fills in missing values.
+4. **Safe re-entry**: Running the wizard again never destroys existing config — it only fills in missing values. Each page reads its current value from `config.json` as written there (the default when the file names none). A value a page has no option for (a chat model pulled on purpose, a Whisper model given as a path, a hand-edited dictation hotkey) is added as its own option, shown as the raw value, and selected, so leaving the page writes it back exactly as it was read. Choosing a listed option still replaces it.
 
 ## Page Flow
 
@@ -60,11 +60,11 @@ Fields suffixed `?` are written only when non-empty (minimal-config invariant).
 
 **OllamaServerPage** — Start button auto-starts Ollama (macOS: `open -a Ollama`, Windows: hidden `ollama serve`, Linux: terminal `ollama serve`). Verify button re-checks `check_ollama_server()`.
 
-**ModelsPage** — Displays `SUPPORTED_CHAT_MODELS` as selectable cards with VRAM requirements (including always-loaded intent judge overhead). Installs: selected chat model + embedding model (`nomic-embed-text`) + intent judge (`gemma4:e2b`). Progress bar and log output during `ollama pull`. User can skip if models are already present.
+**ModelsPage** — Displays `SUPPORTED_CHAT_MODELS` as selectable cards with VRAM requirements (including always-loaded intent judge overhead). A configured `ollama_chat_model` the list lacks gets one more card, showing the raw model name, and the wizard grows by one card's height to fit it. Installs: selected chat model + embedding model (`nomic-embed-text`) + intent judge (`gemma4:e2b`). Progress bar and log output during `ollama pull`. User can skip if models are already present.
 
-**WhisperSetupPage** — Language mode toggle (multilingual vs English-only), then model size selection from hardcoded options. `large-v3-turbo` is left out when `is_faster_whisper_turbo_supported()` (`jarvis/listening/whisper_turbo.py`, the check the listener uses) says the installed faster-whisper cannot run it; never on Apple Silicon, where MLX can. Apple Silicon: additional FFmpeg and MLX Whisper installation buttons.
+**WhisperSetupPage** — Language mode toggle (multilingual vs English-only), then model size selection on a slider. The sizes come from `SUPPORTED_WHISPER_MODELS` in `jarvis/config.py`, the list the settings window offers too: ids ending in `.en` fill the English-only slider, the others the multilingual one. `large-v3-turbo` is hidden when `is_faster_whisper_turbo_supported()` (`jarvis/listening/whisper_turbo.py`, the check the listener uses) says the installed faster-whisper cannot run it; never on Apple Silicon, where MLX can. A configured `whisper_model` the slider lacks (a local model path, a turbo the engine cannot run) is the last stop of the slider for the language its name belongs to, shown as the raw name with no size; a name too long for the slider is cut in the middle there and in the selected-model line, and shown whole in their tooltips. Switching language keeps the selected size's twin in the other mode (`medium` and `medium.en`); a size with no twin, such as a large model, keeps the slider's place within the new range, so a large model lands on the largest English-only size. Apple Silicon: additional FFmpeg and MLX Whisper installation buttons.
 
-**DictationPage** — Enable/disable dictation, hotkey selection dropdown (the presets of `DICTATION_HOTKEY_PRESETS`, built by `dictation_hotkey_choices()` as in the settings window), filler word removal toggle with delay warning. Reads current config values on open so re-running the wizard preserves user choices.
+**DictationPage** — Enable/disable dictation, hotkey selection dropdown (the presets of `DICTATION_HOTKEY_PRESETS`, built by `dictation_hotkey_choices()` as in the settings window), filler word removal toggle with delay warning. All three start from the values in `config.json`, so re-running the wizard preserves user choices: a hotkey the presets do not list is added to the dropdown as the raw value.
 
 **MCPPage** — Shows wizard-featured entries from `mcp_catalogue.py` as selectable cards (checkbox + name + description). Already-configured servers start checked. On validate, selected servers are added to `config.mcps` and deselected wizard entries are removed. Includes a tip pointing users to Settings → MCP Servers for the full catalogue and custom servers.
 
@@ -98,6 +98,6 @@ The wizard is deliberately limited to prerequisites. These are configured via th
 - TTS settings (engine, voice, rate)
 - VAD / timing parameters
 - Wake word customisation
-- Dictation hotkey
+- Dictation custom dictionary
 - Full MCP catalogue and custom MCP servers (wizard only shows featured entries)
 - All advanced parameters

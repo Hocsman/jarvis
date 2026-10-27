@@ -364,6 +364,7 @@ The settings are under **⚙️ Settings → 🔧 Advanced**:
 | Small | `small.en` | `small` | ~465 MB | ~2 GB | ~4x |
 | **Medium** | `medium.en` | `medium` | ~1.5 GB | ~5 GB | ~2x |
 | Large V3 Turbo | - | `large-v3-turbo` | ~1.5 GB | ~6 GB | ~8x |
+| Large V3 | - | `large-v3` | ~3 GB | ~10 GB | 1x |
 
 Speed is relative to the original large model. [Source](https://github.com/openai/whisper)
 
@@ -685,7 +686,7 @@ Get API key at [composio.dev](https://composio.dev)
 
 **First startup takes a bit** - Jarvis pre-warms the Whisper, chat, and intent-judge models before announcing "Listening!" so the first engagement feels instant. This adds a few seconds on cold start and is bounded at 60 s. If Ollama is slow, Jarvis will start listening anyway and load the models on demand. Enable **Low Power Mode** in Settings to skip LLM startup warmup.
 
-**First startup downloads the speech model** - On the very first launch Jarvis downloads the Whisper model (up to ~1.5 GB depending on the chosen size) and shows progress lines (`⬇️ Downloading … X/Y MB · rate`) in the log. A slow connection keeps printing progress as long as data flows. An interrupted download resumes where it stopped on the next launch.
+**First startup downloads the speech model** - On the very first launch Jarvis downloads the Whisper model (up to ~3 GB depending on the chosen size) and shows progress lines (`⬇️ Downloading … X/Y MB · rate`) in the log. A slow connection keeps printing progress as long as data flows. An interrupted download resumes where it stopped on the next launch.
 
 **Jarvis doesn't hear me** - Check microphone permissions, speak clearly after "Jarvis"
 
