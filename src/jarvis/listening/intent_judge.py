@@ -555,7 +555,7 @@ def create_intent_judge(cfg) -> IntentJudge:
 
     The judge dispatches every chat call through
     ``get_auxiliary_backend(cfg, model)``, so the active provider
-    (Ollama / OpenAI-compatible) handles the wire shape automatically.
+    (Ollama / OpenAI-compatible / Anthropic) handles the wire shape automatically.
     """
     config = IntentJudgeConfig(
         assistant_name=str(getattr(cfg, "wake_word", "jarvis")).capitalize(),

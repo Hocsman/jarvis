@@ -1,7 +1,7 @@
 """Provider-agnostic LLM backend interface.
 
-Every supported LLM runtime (Ollama, and OpenAI-compatible servers like
-LM Studio / oMLX) implements this ABC. Callers obtain an instance via
+Every supported LLM runtime (Ollama, OpenAI-compatible servers like
+LM Studio / oMLX, and Anthropic's Messages API) implements this ABC. Callers obtain an instance via
 ``jarvis.llm.get_llm_backend(settings)`` and never construct backends
 directly so the chosen runtime can swap based on user config.
 
