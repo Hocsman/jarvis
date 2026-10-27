@@ -128,6 +128,23 @@ def _is_default_value(val: Any, default_val: Any) -> bool:
     return val is None and default_val in (None, "")
 
 
+def _select_choice(combo: QComboBox, key: str, value: Any) -> None:
+    """Select ``value`` in a choice combo.
+
+    A value the field does not list (a model served by a remote provider, a
+    hand-edited value) is added as its own option and selected, so a Save
+    writes back what was read instead of the first option.
+    """
+    cur_str = str(value) if value not in (None, "") else ""
+    idx = combo.findData(cur_str)
+    if idx < 0 and cur_str:
+        combo.addItem(cur_str, cur_str)
+        idx = combo.count() - 1
+        debug_log(f"{key} keeps a value its options do not list", "settings")
+    if idx >= 0:
+        combo.setCurrentIndex(idx)
+
+
 def _dictation_hotkey_choices() -> list:
     """Build platform-aware dictation hotkey dropdown choices."""
     from jarvis.dictation.dictation_engine import format_hotkey_display
@@ -753,11 +770,7 @@ class SettingsWindow(QDialog):
             w = QComboBox()
             for val, display in (fm.choices or []):
                 w.addItem(display, val)
-            # Set current value
-            cur_str = str(current) if current is not None else ""
-            idx = w.findData(cur_str)
-            if idx >= 0:
-                w.setCurrentIndex(idx)
+            _select_choice(w, fm.key, current)
             w.setToolTip(fm.description)
             return w
 
@@ -1191,7 +1204,10 @@ class SettingsWindow(QDialog):
             except (TypeError, ValueError):
                 w.setValue(0.0)
 
-        elif fm.field_type in ("choice", "device"):
+        elif fm.field_type == "choice":
+            _select_choice(w, fm.key, value)
+
+        elif fm.field_type == "device":
             cur_str = str(value) if value not in (None, "") else ""
             idx = w.findData(cur_str)
             if idx >= 0:

@@ -10,7 +10,7 @@ The Settings Window provides a graphical interface for editing `config.json` wit
 
 1. **Metadata-driven**: All fields are defined in a `FIELD_METADATA` registry. Adding a new config parameter to the settings UI requires only adding a `FieldMeta` entry — no widget code changes.
 2. **Minimal config files**: Only non-default values are written to `config.json`. Removing a field from the config reverts it to the default.
-3. **Preserves unknown keys**: Keys not managed by the UI (e.g. `mcps`, `_config_version`, future additions) are preserved when saving.
+3. **Preserves unknown keys and values**: Keys not managed by the UI (e.g. `mcps`, `_config_version`, future additions) are preserved when saving, and so is a value a `choice` field has no option for.
 4. **Theme-consistent**: Uses the shared Jarvis theme from `themes.py`.
 
 ## Architecture
@@ -40,7 +40,7 @@ FieldMeta (dataclass)
 | `float` | QDoubleSpinBox | With bounds, step, suffix |
 | `str` | QLineEdit | Placeholder if nullable |
 | `password` | QLineEdit (EchoMode.Password) | Masked input for API keys; same value extraction as `str` |
-| `choice` | QComboBox | Pre-defined options |
+| `choice` | QComboBox | Pre-defined options. A current value the field does not list (a model served by a remote provider, such as an `intent_judge_model` pin, or a hand-edited value) is added as its own option, shown as the raw value, and selected |
 | `device` | QComboBox | Dynamically populated from sounddevice |
 | `list` | QListWidget + Add/Edit/Remove buttons | Stores as JSON array in config |
 | `map` | QListWidget + Add/Edit/Remove buttons | One `key -> value` row per entry; stores as a JSON object in config. A row that names no key or no value is refused when added, and dropped on save if it got in some other way. Only the first arrow separates, so a value may contain one; a key listed twice keeps its last value |
@@ -166,6 +166,7 @@ The Voice Input tab includes a device dropdown populated at window open time via
 ## Save Behaviour
 
 - Only keys that differ from `get_default_config()` are written.
+- A `choice` value the field does not list is written back exactly as it was read: saving another setting never moves it to the first option or to the default. Choosing a listed option, or Reset, still replaces it.
 - Existing keys not managed by the UI are preserved (e.g. `mcps`, `active_profiles`, `wake_aliases`, `allowlist_bundles`, `stop_commands`).
 - After save, a dialog confirms success and reminds the user to restart.
 - If the daemon is running when save completes, the tray app offers to restart it.

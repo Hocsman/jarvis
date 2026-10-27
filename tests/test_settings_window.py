@@ -6,11 +6,14 @@ without touching the GUI. Widget creation is tested via mock Qt objects where ne
 """
 
 import json
+import os
 import tempfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from desktop_app.settings_window import (
     FIELD_METADATA,
@@ -381,6 +384,124 @@ class TestConfigSaveLogic:
             assert saved["tts_enabled"] is False
         finally:
             cfg_path.unlink(missing_ok=True)
+
+
+REMOTE_PINS = ["google/gemini-3.1-flash-lite", "claude-haiku-5-5"]
+
+
+def _a_value_not_in(fm: FieldMeta):
+    """A value the choice field does not list, of the kind it stores."""
+    listed = {value for value, _ in fm.choices}
+    if all(value.isdigit() for value in listed):
+        return max(int(value) for value in listed) + 1
+    return "pinned-by-hand"
+
+
+class TestASaveKeepsWhatTheWindowDoesNotList:
+    """A value the window has no option for, such as a model served by a
+    remote provider, is written back exactly as it was read when any setting
+    is saved. Falling back to the first option would move a pin the user
+    never touched, without a word."""
+
+    @pytest.fixture
+    def settings_file(self, qapp, tmp_path, monkeypatch):
+        from desktop_app import settings_window as sw
+
+        path = tmp_path / "jarvis" / "config.json"
+        path.parent.mkdir(parents=True)
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+        monkeypatch.setattr(sw, "default_config_path", lambda: path)
+        return path
+
+    @staticmethod
+    def _open(path: Path, values: dict):
+        from desktop_app import settings_window as sw
+
+        path.write_text(json.dumps(values), encoding="utf-8")
+        return sw.SettingsWindow()
+
+    @staticmethod
+    def _save(window, path: Path) -> dict:
+        from desktop_app import settings_window as sw
+
+        with patch.object(sw, "QMessageBox"):
+            window._on_save()
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    @pytest.mark.parametrize("pin", REMOTE_PINS)
+    def test_a_remote_judge_pin_survives_saving_another_setting(self, settings_file, pin):
+        window = self._open(settings_file, {"intent_judge_model": pin})
+        window._widgets["low_power_mode"].setChecked(True)
+
+        saved = self._save(window, settings_file)
+
+        assert saved["intent_judge_model"] == pin
+        assert saved["low_power_mode"] is True
+
+    @pytest.mark.parametrize("pin", REMOTE_PINS)
+    def test_the_window_shows_the_pin_it_keeps(self, settings_file, pin):
+        window = self._open(settings_file, {"intent_judge_model": pin})
+
+        assert window._widgets["intent_judge_model"].currentText() == pin
+
+    def test_every_model_key_keeps_a_remote_pin(self, settings_file):
+        pins = {
+            key: REMOTE_PINS[0]
+            for key in get_default_config()
+            if key.endswith("_model")
+        }
+
+        saved = self._save(self._open(settings_file, pins), settings_file)
+
+        assert {key: saved.get(key) for key in pins} == pins
+
+    def test_every_choice_field_keeps_a_value_it_does_not_list(self, settings_file):
+        unlisted = {
+            fm.key: _a_value_not_in(fm)
+            for fm in FIELD_METADATA
+            if fm.field_type == "choice"
+        }
+
+        saved = self._save(self._open(settings_file, unlisted), settings_file)
+
+        assert {key: saved.get(key) for key in unlisted} == unlisted
+
+    def test_a_listed_model_still_replaces_the_pin(self, settings_file):
+        from jarvis.config import SUPPORTED_CHAT_MODELS
+
+        default = get_default_config()["intent_judge_model"]
+        listed = next(model for model in SUPPORTED_CHAT_MODELS if model != default)
+        window = self._open(settings_file, {"intent_judge_model": REMOTE_PINS[0]})
+        combo = window._widgets["intent_judge_model"]
+        combo.setCurrentIndex(combo.findData(listed))
+
+        saved = self._save(window, settings_file)
+
+        assert saved["intent_judge_model"] == listed
+
+    def test_choosing_the_default_drops_the_pin(self, settings_file):
+        default = get_default_config()["intent_judge_model"]
+        window = self._open(settings_file, {"intent_judge_model": REMOTE_PINS[0]})
+        combo = window._widgets["intent_judge_model"]
+        combo.setCurrentIndex(combo.findData(default))
+
+        saved = self._save(window, settings_file)
+
+        assert "intent_judge_model" not in saved
+
+    def test_reset_drops_the_pin(self, settings_file):
+        from desktop_app import settings_window as sw
+
+        window = self._open(settings_file, {"intent_judge_model": REMOTE_PINS[0]})
+        with patch.object(
+            sw.QMessageBox, "question",
+            return_value=sw.QMessageBox.StandardButton.Yes,
+        ):
+            window._on_reset()
+
+        saved = self._save(window, settings_file)
+
+        assert "intent_judge_model" not in saved
 
 
 class TestDefaultValueTypes:
