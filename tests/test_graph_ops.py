@@ -410,6 +410,22 @@ class TestAutoSplitNode:
         result = auto_split_node(store, node.id, "http://localhost", "model")
         assert result is False
 
+    def test_the_prompt_keeps_an_answer_however_well_known(self):
+        """A split rewrites every fact of a node at once, so its pruning
+        rule must be the merge's narrow one: being in the model's
+        training data is no reason to drop a line, and a line with the
+        assistant as its subject is not written. Pinned on what the
+        prompt must say, never on its layout (graph.spec.md, Auto-Split).
+        """
+        from src.jarvis.memory.graph_ops import _SPLIT_SYSTEM_PROMPT as prompt
+
+        assert "not by itself a reason to drop" in prompt
+        assert "stays" in prompt
+        assert "SUBJECT" in prompt
+        assert "do not write it" in prompt.lower()
+        # Never a rule that prunes by what the model already knows.
+        assert "remove anything you already know" not in prompt.lower()
+
 
 # ── append_to_node ─────────────────────────────────────────────────────
 
