@@ -165,6 +165,13 @@ A line the rewrite reworded matches nothing and stays bare, which reads
 as `inconnu` — the truthful answer, since after a rewrite nobody can say
 what that sentence rested on.
 
+The repair is part of `merge_node_data` itself, done before its one write,
+not a step left to whoever calls it. The memory viewer's 🧹 sweep merges
+every World node with no new facts, and a caller that had to remember the
+repair could forget it and turn every line it rewrote into `inconnu`. With
+no new facts, the index is the node's own lines, so each line the sweep
+hands back keeps exactly what it carried.
+
 ## What changes at the far end
 
 A stored fact stops being a bare sentence. What is displayed, and what is

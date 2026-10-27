@@ -259,7 +259,7 @@ The graph explorer appears as the **Knowledge** tab in the memory viewer, positi
 | GET | `/api/graph/top` | Most frequently accessed nodes |
 | GET | `/api/graph/stats` | Node count and total data tokens (`total_tokens = 0` means the graph holds no knowledge) |
 | POST | `/api/graph/import-diary` | Import all diary summaries into graph (streaming NDJSON) |
-| POST | `/api/graph/consolidate-all` | Self-consolidate every populated node (streaming NDJSON) — runs the merge LLM with no new facts on each node so updated conventions and supersession rules apply to historical data |
+| POST | `/api/graph/consolidate-all` | Self-consolidate every populated node of the World branch (streaming NDJSON) — runs the merge LLM with no new facts on each node so updated conventions and supersession rules apply to historical data |
 
 ### Import from Diary
 
@@ -269,7 +269,13 @@ The endpoint streams NDJSON progress events (`start`, `progress`, `complete`, `e
 
 ### Consolidate All (🧹)
 
-The toolbar's 🧹 button walks every populated node and calls `merge_node_data` with an empty `new_facts` list, prompting the chat model to re-apply the latest supersession/dedupe/consolidation rules to data that landed before those rules existed (or before the prompt was tightened). With the chat model on a remote provider, one sweep sends every populated node there, and the modal says so. Most of it is world facts the chat model already saw when it extracted them, but not all: nodes written while the chat model was local, and anything typed into a node by hand in the viewer, leave the machine for the first time. Like Import from Diary, it streams NDJSON progress events. Per-node failures are non-fatal so a single bad node can't abort the sweep. The UI confirms before starting and reports the total line-count delta on completion.
+The toolbar's 🧹 button walks every populated node of the World branch, its root included, and calls `merge_node_data` with an empty `new_facts` list, prompting the chat model to re-apply the latest supersession/dedupe/consolidation rules to data that landed before those rules existed (or before the prompt was tightened). With the chat model on a remote provider, one sweep sends every one of those nodes there, and the modal says so. Most of it is world facts the chat model already saw when it extracted them, but not all: nodes written while the chat model was local, and anything typed into a node by hand in the viewer, leave the machine for the first time. Like Import from Diary, it streams NDJSON progress events. Per-node failures are non-fatal so a single bad node can't abort the sweep. The UI confirms before starting and reports the total line-count delta on completion.
+
+**World only.** The User and Directives subtrees belong to the core (`core.spec.md`), which is written only when the user asks or corrects. A node still holding data there is one whose hand-over has not finished: rewriting it would hand the core a model's wording of the user, attributed `migré`, and would first send the user's profile and rules to whichever provider runs the chat model. `populated_world_nodes()` is the one definition of the walk, so the viewer's up-front node count, which drives the progress bar, is the set the sweep visits.
+
+**Each line keeps its source.** The rewrite hands lines back bare, and the merge puts every suffix back before it writes, the same repair a flush gets (see [provenance.spec.md](provenance.spec.md)). A line the sweep only reordered or kept keeps its `web` or `outil` and its date; a line it reworded matches nothing and reads as `inconnu`, which the modal says.
+
+**The modal describes the prompt.** The button's title and the confirmation modal list what the merge prompt does: merge near-duplicates, replace an outdated value, fold repeated activities into patterns, drop filler nobody asked for and lines narrating the assistant. They do not promise to prune common knowledge, because the prompt keeps an answer to a real question however well known (see **Pruning is narrow on purpose** under Merge).
 
 ## Relationship to Existing Systems
 
