@@ -456,10 +456,12 @@ def _give_the_run_a_config_home() -> None:
 
     The per-test sandbox (``_isolate_user_config_path``) holds only inside a
     test's own fixtures. Collection, class- and module-scoped fixtures, a
-    thread that outlives its test, and the pytest sessions some of those start
-    in a child process all run outside it, and would resolve the user's own
-    ``config.json``: the native guard's end-to-end session reads it through
-    ``debug_log``. The guard takes the files it protects first, from the
+    thread that outlives its test, and the child processes some of those
+    start all run outside it, and would resolve the user's own
+    ``config.json``: a child that logs reads it through ``debug_log``. The
+    pytest sessions a guard's end-to-end test runs apart get a home of their
+    own from ``inner_session.py`` instead, with these variables pointing
+    inside it. The guard takes the files it protects first, from the
     environment the run started in, so it protects the user's file and not
     this one.
     """
