@@ -10,7 +10,7 @@ The Settings Window provides a graphical interface for editing `config.json` wit
 
 1. **Metadata-driven**: All fields are defined in a `FIELD_METADATA` registry. Adding a new config parameter to the settings UI requires only adding a `FieldMeta` entry — no widget code changes.
 2. **Minimal config files**: Only non-default values are written to `config.json`. Removing a field from the config reverts it to the default.
-3. **Preserves unknown keys and values**: Keys not managed by the UI (e.g. `mcps`, `_config_version`, future additions) are preserved when saving, and so is a value a `choice` field has no option for (a `device` field is the exception, see "Hardware Device Selection").
+3. **Preserves unknown keys and values**: Keys not managed by the UI (e.g. `mcps`, `_config_version`, future additions) are preserved when saving, and so is a value a `choice` field has no option for, and a microphone set by name (a `device` field still drops an index it cannot show, see "Hardware Device Selection").
 4. **Theme-consistent**: Uses the shared Jarvis theme from `themes.py`.
 
 ## Architecture
@@ -41,7 +41,7 @@ FieldMeta (dataclass)
 | `str` | QLineEdit | Placeholder if nullable |
 | `password` | QLineEdit (EchoMode.Password) | Masked input for API keys; same value extraction as `str` |
 | `choice` | QComboBox | Pre-defined options. A current value the field does not list (a model served by a remote provider, such as an `intent_judge_model` pin, or a hand-edited value) is added as its own option, shown as the raw value, and selected |
-| `device` | QComboBox | Dynamically populated from sounddevice |
+| `device` | QComboBox | Dynamically populated from sounddevice. A device set by name is added as its own option and selected; an index the list lacks is not (see "Hardware Device Selection") |
 | `list` | QListWidget + Add/Edit/Remove buttons | Stores as JSON array in config |
 | `map` | QListWidget + Add/Edit/Remove buttons | One `key -> value` row per entry; stores as a JSON object in config. A row that names no key or no value is refused when added, and dropped on save if it got in some other way. Only the first arrow separates, so a value may contain one; a key listed twice keeps its last value |
 
@@ -164,14 +164,16 @@ works when the user asks (see "Update System" in `desktop_app.spec.md`).
 
 ## Hardware Device Selection
 
-The Voice Input tab includes a device dropdown populated at window open time via `sounddevice.query_devices()`. It lists all input-capable devices with their index and name. The stored value is the device index as a string, or empty string for system default.
+The Voice Input tab includes a device dropdown populated at window open time via `sounddevice.query_devices()`. It lists all input-capable devices with their index and name. Choosing one stores the device index as a string; choosing System Default stores nothing.
 
-Unlike a `choice` field, a stored device the list does not contain (one unplugged when the window opens, or one named by hand) is not kept: the dropdown falls back to System Default and a Save drops the key. An index can name a different device after a replug, so the window does not keep one it cannot show.
+The config can also name a microphone (`"voice_device": "MSI GV60"`), which the listener matches against the input device names. A stored value that does not read as an index is such a name: it is added as its own option, shown as `🎤 <name> (by name)` whether or not a connected device matches it, and selected, so a Save writes it back as it was read. A name stays true across a replug. Choosing a listed option, or Reset, replaces it.
+
+A stored index the list does not contain (a device unplugged when the window opens, or an output-only one) is not kept: the dropdown falls back to System Default and a Save drops the key. An index can name a different device after a replug, so the window does not keep one it cannot show. A blank value, and `default` or `system` in any letter case, which the config and the listener read as the system default, also show as System Default.
 
 ## Save Behaviour
 
 - Only keys that differ from `get_default_config()` are written.
-- A `choice` value the field does not list is written back exactly as it was read: saving another setting never moves it to the first option or to the default. Choosing a listed option, or Reset, still replaces it.
+- A `choice` value the field does not list, and a microphone set by name, are written back exactly as they were read: saving another setting never moves one to the first option or to the default. Choosing a listed option, or Reset, still replaces it.
 - Existing keys not managed by the UI are preserved (e.g. `mcps`, `active_profiles`, `wake_aliases`, `allowlist_bundles`, `stop_commands`).
 - After save, a dialog confirms success and reminds the user to restart.
 - If the daemon is running when save completes, the tray app offers to restart it.
