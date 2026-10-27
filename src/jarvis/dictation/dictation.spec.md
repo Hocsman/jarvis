@@ -20,10 +20,14 @@ Defaults are aligned with WisprFlow. Modifier-only combos are supported
 key required).
 
 The hotkey is configurable as a dropdown in both the setup wizard and settings
-window, with four preset options: `ctrl+alt`, `ctrl+cmd`, `ctrl+shift+d`,
-`ctrl+shift`. A hotkey written by hand that no preset matches is added to the
-dropdown as its raw value and selected, so opening either window and saving
-keeps it.
+window. The presets are `DICTATION_HOTKEY_PRESETS` in `jarvis/config.py`,
+beside `_default_dictation_hotkey()`, and every platform's default is one of
+them. Both dropdowns are built by `dictation_hotkey_choices()` in
+`dictation_engine.py`: each preset labelled with `format_hotkey_display()`, the
+platform default's label ending in `(default)`. A preset added to the list
+reaches both windows. A hotkey written by hand that no preset matches is added
+to the dropdown as its raw value and selected, so opening either window and
+saving keeps it.
 
 ## Core Flow
 
