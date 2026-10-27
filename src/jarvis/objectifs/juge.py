@@ -22,9 +22,10 @@ In this slice there is nothing else to read, and the rule is stated here
 so that the day an unattended pass exists, its write-up is already
 excluded by contract rather than by whoever remembers.
 
-It rides the reminder chain and its pin, like #16 and #17: one privacy
-decision rather than three things to get wrong, and this prompt carries
-his own sentences about his own life just as those do.
+It rides the reminder chain and its pin wherever the chat runs, like the
+journal reader. Unlike a time or a routine, what it reads is gathered
+across days rather than said in this turn, so no turn has already sent
+it anywhere.
 """
 
 from __future__ import annotations

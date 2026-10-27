@@ -176,9 +176,9 @@ class Lecture:
 def _epingle(cfg) -> str:
     """The pin this reading honours: its own, else the reminder chain's.
 
-    The reminder pin counts as a pin here too. A reminder runs that model
-    on this machine, and the same name cannot mean the cloud when what it
-    carries is a fortnight of his diary.
+    The reminder pin counts as a pin here too. The goal judge runs that
+    model on this machine, and the same name cannot mean the cloud when
+    what it carries is a fortnight of his diary.
     """
     return str(getattr(cfg, "appris_model", "") or "").strip() or _reminder_pin(cfg)
 

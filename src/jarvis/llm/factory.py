@@ -235,6 +235,22 @@ def get_private_backend(settings: Any, pinned: str, model: str) -> LLMBackend:
     return backend
 
 
+def chat_is_remote(settings: Any) -> bool:
+    """Whether the reply leaves this machine and its network.
+
+    Read as :func:`get_llm_backend` reads it for the reply, which passes
+    no model: an OpenAI-compatible provider at an address that is not
+    local. A prompt carrying only what the reply sends there anyway can
+    go there too without anything new leaving.
+    """
+    if _resolve_provider(getattr(settings, "llm_provider", None)) != _OPENAI_COMPATIBLE:
+        return False
+    base_url = _str_attr(settings, "llm_base_url") or _str_attr(
+        settings, "ollama_base_url", _DEFAULT_OLLAMA_URL
+    )
+    return not is_local_endpoint(base_url)
+
+
 def get_auxiliary_backend(settings: Any, model: Optional[str] = None) -> LLMBackend:
     """The backend for auxiliary classification and routing tasks.
 

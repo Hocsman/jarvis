@@ -141,8 +141,12 @@ anything at all, and unlike a one-off reminder this sentence is replayed
 to a model every single morning — which is also why a redaction
 placeholder in it is refused outright rather than passed along.
 
-It rides the reminder model chain, including the pin: one privacy
-decision rather than two things to get wrong.
+It is read where the reminder sentence is read, by the same rule and
+through the same call: `setRoutine` is a tool of the reply loop too, so
+the chat model receives this sentence in this turn whatever the
+extractor does. Chat at home: the reminder chain and its pin. Chat off
+this machine: `llm_chat_model` on the chat's own backend, with no
+fallback to a local model. One rule rather than two things to get wrong.
 
 Failure is `ExtractionFailed`, never a guess. A routine placed at a
 moment nobody meant runs at that moment every day until someone notices.

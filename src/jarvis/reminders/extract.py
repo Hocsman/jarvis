@@ -26,7 +26,7 @@ from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from ..debug import debug_log
-from ..llm import get_private_backend
+from ..llm import chat_is_remote, get_llm_backend, get_private_backend
 from ..utils.redact import contains_redaction_placeholder
 from ..utils.time_context import format_reference_moment
 
@@ -97,11 +97,13 @@ def _reminder_pin(cfg) -> str:
 
 
 def _resolve_reminder_model(cfg) -> str:
-    """The model that reads a time.
+    """The reminder chain: the pin, the warm small chain, the chat model.
 
     A pin wins, and unlike most auxiliary models this one is not rescued
-    by the cloud-safe filter — the sentence it reads is the user's own
+    by the cloud-safe filter: what the chain reads is the user's own
     life, and a pin keeps it off the network whatever the tag looks like.
+    The goal judge and the journal reader ride it wherever the chat runs;
+    a time rides it only when the chat is at home (``_reading_model``).
     """
     for candidate in (
         _reminder_pin(cfg),
@@ -114,19 +116,48 @@ def _resolve_reminder_model(cfg) -> str:
     return ""
 
 
+def _reading_model(cfg) -> str:
+    """The model that reads a time: the one the sentence is already with.
+
+    ``setReminder`` and ``setRoutine`` are tools of the reply loop, and
+    every reply ends on the chat model, so the turn sends this sentence
+    there whatever happens here. With the chat off this machine, reading
+    it anywhere else keeps nothing more private and reads it worse, so
+    the chat model reads it and the pin does not apply. With the chat at
+    home, the reminder chain does, pin first.
+    """
+    if chat_is_remote(cfg):
+        return str(getattr(cfg, "llm_chat_model", "") or "").strip()
+    return _resolve_reminder_model(cfg)
+
+
+def _reading_backend(cfg, model: str):
+    """Where ``_reading_model`` lives.
+
+    With the chat remote, the reply's own backend, redaction included, so
+    the reading reaches no host and no text the reply does not. Neither
+    side falls back to the other: a reading that fails is said out loud.
+    """
+    if chat_is_remote(cfg):
+        debug_log(f"🔓 sentence read by the chat model {model!r}: "
+                  "the turn sends it there anyway", "llm")
+        return get_llm_backend(cfg)
+    return get_private_backend(cfg, _reminder_pin(cfg), model)
+
+
 def reminder_channel_available(cfg) -> bool:
     """Whether a time can be read at all.
 
     Reported rather than assumed: with no model, ``setReminder`` refuses
     out loud instead of inventing a moment.
     """
-    return bool(_resolve_reminder_model(cfg))
+    return bool(_reading_model(cfg))
 
 
 def _ask_model(cfg, system: str, user: str, timeout_sec: float) -> Optional[str]:
 
-    model = _resolve_reminder_model(cfg)
-    response = get_private_backend(cfg, _reminder_pin(cfg), model).chat(
+    model = _reading_model(cfg)
+    response = _reading_backend(cfg, model).chat(
         model,
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
         timeout_sec=timeout_sec,
