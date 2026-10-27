@@ -164,7 +164,7 @@ works when the user asks (see "Update System" in `desktop_app.spec.md`).
 
 ## Hardware Device Selection
 
-The Voice Input tab includes a device dropdown populated at window open time via `sounddevice.query_devices()`. It lists all input-capable devices with their index and name. Choosing one stores the device index as a string; choosing System Default stores nothing.
+The Voice Input tab includes a device dropdown populated at window open time via `sounddevice.query_devices()`. It lists every input-capable device by name. Choosing one stores the device index as a string; choosing System Default stores nothing. A stored index in any form the listener reads as that index (`"1"`, `1`, `"01"`) selects it.
 
 The config can also name a microphone (`"voice_device": "MSI GV60"`), which the listener matches against the input device names. A stored value that does not read as an index is such a name: it is added as its own option, shown as `🎤 <name> (by name)` whether or not a connected device matches it, and selected, so a Save writes it back as it was read. A name stays true across a replug. Choosing a listed option, or Reset, replaces it.
 

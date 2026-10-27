@@ -419,7 +419,15 @@ class TestASaveKeepsWhatTheWindowDoesNotList:
     """A value the window has no option for, such as a model served by a
     remote provider, is written back exactly as it was read when any setting
     is saved. Falling back to the first option would move a pin the user
-    never touched, without a word."""
+    never touched, without a word. A device index the window cannot show is
+    the exception: after a replug it can name another device."""
+
+    @pytest.fixture
+    def microphones(self, monkeypatch):
+        sd = MagicMock()
+        sd.query_devices.return_value = AUDIO_DEVICES
+        monkeypatch.setitem(sys.modules, "sounddevice", sd)
+        return sd
 
     @pytest.fixture
     def settings_file(self, qapp, tmp_path, monkeypatch):
@@ -551,13 +559,6 @@ class TestASaveKeepsWhatTheWindowDoesNotList:
 
         assert "intent_judge_model" not in saved
 
-    @pytest.fixture
-    def microphones(self, monkeypatch):
-        sd = MagicMock()
-        sd.query_devices.return_value = AUDIO_DEVICES
-        monkeypatch.setitem(sys.modules, "sounddevice", sd)
-        return sd
-
     @pytest.mark.parametrize("plugged_in", [True, False])
     def test_a_microphone_set_by_name_survives_saving_another_setting(
         self, settings_file, microphones, plugged_in,
@@ -599,9 +600,10 @@ class TestASaveKeepsWhatTheWindowDoesNotList:
         assert combo.currentData() == ""
         assert "voice_device" not in self._save(window, settings_file)
 
-    @pytest.mark.parametrize("index", ["1", 1])
+    @pytest.mark.parametrize("index", ["1", 1, "01", "+1"])
     def test_a_listed_index_is_selected_and_kept(self, settings_file, microphones, index):
-        shown = dict(get_input_devices())[str(index)]
+        """Any form the listener reads as that index selects it."""
+        shown = dict(get_input_devices())[str(int(index))]
         window = self._open(settings_file, {"voice_device": index})
         combo = window._widgets["voice_device"]
 
@@ -612,7 +614,7 @@ class TestASaveKeepsWhatTheWindowDoesNotList:
     def test_a_word_for_the_system_default_shows_as_system_default(
         self, settings_file, microphones, default,
     ):
-        """The config reads these as the system default, so the window shows
+        """The listener reads these as the system default, so the window shows
         System Default rather than a microphone of that name."""
         window = self._open(settings_file, {"voice_device": default})
         combo = window._widgets["voice_device"]

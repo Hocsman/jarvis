@@ -153,7 +153,7 @@ def _select_device(combo: QComboBox, key: str, value: Any) -> None:
     listener tells them apart) is added as its own option and selected, so a
     Save writes the name back. An index the list lacks is not kept: after a
     replug it can name another device, so the combo falls back to System
-    Default, as it does for the words the config reads as the system default.
+    Default, as it does for the words the listener reads as the system default.
     """
     cur_str = str(value).strip() if value is not None else ""
     if cur_str.lower() in ("default", "system"):
@@ -161,13 +161,15 @@ def _select_device(combo: QComboBox, key: str, value: Any) -> None:
     idx = combo.findData(cur_str)
     if idx < 0 and cur_str:
         try:
-            int(cur_str)
+            index = int(cur_str)
         except ValueError:
             combo.addItem(f"🎤 {cur_str} (by name)", value)
             idx = combo.count() - 1
             debug_log(f"{key} keeps a device set by name", "settings")
         else:
-            debug_log(f"{key} names an index the list lacks, shown as System Default", "settings")
+            idx = combo.findData(str(index))
+            if idx < 0:
+                debug_log(f"{key} names an index the list lacks, shown as System Default", "settings")
     if idx < 0:
         idx = combo.findData("")
     combo.setCurrentIndex(idx)
