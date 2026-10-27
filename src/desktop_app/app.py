@@ -3328,15 +3328,18 @@ def _ollama_runtime_flags(cfg) -> tuple[bool, bool]:
       to start or verify.
     - ``chat_on_ollama`` — the chat model is an Ollama model, so the
       chat-model verification / unsupported-model checks apply. False when
-      chat runs on an OpenAI-compatible server (its model name is not in the
-      Ollama catalogue and would be wrongly flagged as unsupported).
+      chat runs on a remote provider (its model name is not in the Ollama
+      catalogue and would be wrongly flagged as unsupported).
+
+    Anthropic serves no embeddings, so a chat provider of ``anthropic``
+    still needs the server for them.
     """
     llm_provider = getattr(cfg, "llm_provider", "ollama") or "ollama"
     embed_provider = getattr(cfg, "embedding_provider", "") or llm_provider
     ollama_needed = not (
         llm_provider == "openai_compatible" and embed_provider == "openai_compatible"
     )
-    chat_on_ollama = llm_provider != "openai_compatible"
+    chat_on_ollama = llm_provider == "ollama"
     return ollama_needed, chat_on_ollama
 
 

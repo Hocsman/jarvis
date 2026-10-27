@@ -185,22 +185,26 @@ def get_required_models() -> List[str]:
 
     Only models that actually run on Ollama are required:
     - Chat model + intent-judge model — when the chat provider is Ollama
-      (both run through the chat backend). Skipped for an OpenAI-compatible
-      chat provider, where those are remote model names, not Ollama pulls.
+      (both run through the chat backend). Skipped for a remote chat
+      provider, where those are remote model names, not Ollama pulls.
     - Embedding model — when the effective embedding provider is Ollama
       (covers the advanced split where chat is remote but embeddings are
-      local). Skipped when embeddings are remote.
+      local, and every Anthropic setup, since Anthropic serves no
+      embeddings). Skipped when embeddings are on an OpenAI-compatible
+      server.
 
     A pure OpenAI-compatible setup therefore requires nothing locally.
     """
     try:
         cfg = load_settings()
-        llm_provider = getattr(cfg, "llm_provider", "ollama") or "ollama"
+        llm_provider = getattr(cfg, "llm_provider", "ollama")
+        if not isinstance(llm_provider, str) or not llm_provider:
+            llm_provider = "ollama"
         embed_provider = getattr(cfg, "embedding_provider", "") or llm_provider
         models = []
 
         # Chat model runs on the chat provider's backend.
-        if llm_provider != "openai_compatible":
+        if llm_provider == "ollama":
             if cfg.ollama_chat_model:
                 models.append(cfg.ollama_chat_model)
 
@@ -211,7 +215,7 @@ def get_required_models() -> List[str]:
 
         # Intent judge is always needed for voice intent classification, but
         # only as an Ollama pull when the chat provider is Ollama.
-        if llm_provider != "openai_compatible":
+        if llm_provider == "ollama":
             intent_judge_model = getattr(cfg, "intent_judge_model", "gemma4:e2b")
             if intent_judge_model and intent_judge_model not in models:
                 models.append(intent_judge_model)
@@ -332,12 +336,15 @@ def should_show_setup_wizard() -> bool:
     Does NOT return True just because server isn't running,
     since the app can auto-start the server if CLI is installed.
     """
-    # An OpenAI-compatible user has opted out of the local Ollama stack,
-    # so the Ollama-centric prerequisites don't apply — never auto-show.
-    # (The wizard can still be opened manually from the tray to switch back.)
+    # A remote chat provider means the user opted out of the local Ollama
+    # stack, so the Ollama-centric prerequisites don't apply — never
+    # auto-show. The provider page offers no Anthropic choice and would
+    # reset that setup to Ollama on its own. (The wizard can still be
+    # opened manually from the tray to switch.)
     try:
         cfg = load_settings()
-        if getattr(cfg, "llm_provider", "ollama") == "openai_compatible":
+        provider = getattr(cfg, "llm_provider", "ollama")
+        if isinstance(provider, str) and provider not in ("", "ollama"):
             return False
     except Exception:
         pass

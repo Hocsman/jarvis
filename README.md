@@ -257,7 +257,7 @@ The task and whatever files Claude Code reads go to Anthropic, under your Claude
 </details>
 
 <details>
-<summary><strong>LLM Provider (Ollama or OpenAI-compatible)</strong></summary>
+<summary><strong>LLM Provider (Ollama, OpenAI-compatible or Anthropic)</strong></summary>
 
 By default Jarvis runs everything locally through [Ollama](https://ollama.com): no API keys, nothing leaves your machine. If you already run an OpenAI-compatible server (**LM Studio**, **oMLX**, **llama.cpp**'s `llama-server`, **vLLM**, **LocalAI**, …) you can point Jarvis at it instead. Your data still only travels to the servers you control.
 
@@ -286,6 +286,22 @@ Pick the provider in the Setup Wizard's first step, or under **⚙️ Settings �
 ```
 
 Leave `embedding_provider` empty to use the same provider as chat. When no embedding model is available, memory search degrades gracefully to keyword search.
+
+**Anthropic (Claude API, remote).** `llm_provider: "anthropic"` talks to Anthropic's own API directly with your key, one intermediary fewer than a router like OpenRouter. Unlike everything above, **your conversations then leave your machine** for Anthropic's servers. Set it under **⚙️ Settings → 🔌 LLM Provider** (the Setup Wizard does not offer it):
+
+```json
+{
+  "llm_provider": "anthropic",
+  "llm_api_key_env": "YUBA_ANTHROPIC_KEY",
+  "llm_chat_model": "claude-haiku-5-5",
+  "intent_judge_model": "claude-haiku-5-5"
+}
+```
+
+- `llm_api_key_env`: the name of an environment variable holding your key, so the key never sits in `config.json`. Use a name of your own: if you also hand projects to Claude Code, an `ANTHROPIC_API_KEY` variable would make Claude Code bill the API instead of your subscription.
+- Model names are Claude model IDs (`claude-haiku-5-5`, `claude-sonnet-5-5`, …). Any other name (`qwen2.5:3b`) runs on your local Ollama, so you can keep the small roles local.
+- Embeddings stay on Ollama: Anthropic has none.
+- Reasoning is off for every role unless you turn on its thinking setting (Chat Thinking Mode, Intent Judge Thinking Mode).
 
 </details>
 
@@ -765,7 +781,8 @@ provider can't run out the voice-assistant latency budget.
 - **Local storage** - Everything in `~/.local/share/jarvis`
 - **No record of what it read** - The action log has no column for tool output, structurally. A log that kept results would accumulate the contents of every page fetched and every file opened, somewhere you read casually
 - **No record of what you said in the timing log** - The latency journal has no free-text column either: durations, counts and model names only
-- **One exception, off by default** - Handing a project to Claude Code sends the task and the code it reads to Anthropic. Nothing reaches it until you name a projects folder (`claude_code_projects_dir`)
+- **A cloud model only if you pick one** - With the default Ollama nothing leaves your machine. Choosing a hosted provider (an OpenAI-compatible endpoint such as OpenRouter, or Anthropic) sends your conversations there, after auto-redaction; small roles you pin to a local model stay local
+- **Claude Code, off by default** - Handing a project to Claude Code sends the task and the code it reads to Anthropic. Nothing reaches it until you name a projects folder (`claude_code_projects_dir`)
 - **Permissions are yours to set** - `~/.local/share/jarvis/yuba/outils.md` lists your own tools by name, in three sections you move lines between. Written once, never rewritten. A tool that appears later falls back to the risk it declares, so a read runs and anything else asks
 
 ## License

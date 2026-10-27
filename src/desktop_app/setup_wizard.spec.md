@@ -9,7 +9,7 @@ The setup wizard is shown only when **user action is required** — it is not sh
 1. Ollama CLI is not installed.
 2. Ollama server is running but required models are missing.
 
-An OpenAI-compatible user has opted out of the local Ollama stack, so `should_show_setup_wizard()` returns `False` for them regardless of Ollama state. They can still open the wizard manually from the tray to switch providers.
+A user on a remote chat provider (OpenAI-compatible or Anthropic) has opted out of the local Ollama stack, so `should_show_setup_wizard()` returns `False` for them regardless of Ollama state. They can still open the wizard manually from the tray to switch providers. The wizard offers no Anthropic page: that provider is set in the settings window, and choosing Ollama on the Provider Choice page switches an Anthropic setup back to Ollama like any other.
 
 ## Design Principles
 

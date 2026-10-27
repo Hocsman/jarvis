@@ -181,6 +181,18 @@ class TestGetRequiredModels:
             models = get_required_models()
         assert models == ["nomic-embed-text"]
 
+    def test_anthropic_chat_requires_only_the_embed_model(self):
+        """Chat and judge go to Anthropic; embeddings stay on Ollama, which
+        is the one model to pull."""
+        cfg = self._cfg(
+            llm_provider="anthropic",
+            ollama_chat_model="gemma4:e2b",
+            intent_judge_model="claude-haiku-5-5",
+        )
+        with patch("desktop_app.setup_wizard.load_settings", return_value=cfg):
+            models = get_required_models()
+        assert models == ["nomic-embed-text"]
+
     def test_ollama_chat_with_openai_embeddings_skips_embed_model(self):
         """Chat/judge on Ollama, embeddings remote: pull chat + judge, not
         the Ollama embed model."""
@@ -383,6 +395,20 @@ class TestShouldShowSetupWizard:
             missing_models=["llama2:7b"],
         )
         cfg = SimpleNamespace(llm_provider="openai_compatible")
+        with patch("desktop_app.setup_wizard.load_settings", return_value=cfg), \
+             patch("desktop_app.setup_wizard.check_ollama_status", return_value=missing_cli):
+            assert should_show_setup_wizard() is False
+
+    def test_returns_false_for_anthropic_provider(self):
+        """The wizard offers no Anthropic page, and its provider page would
+        reset an Anthropic setup to Ollama: it must not open on its own."""
+        from types import SimpleNamespace
+        missing_cli = OllamaStatus(
+            is_cli_installed=False,
+            is_server_running=False,
+            missing_models=["llama2:7b"],
+        )
+        cfg = SimpleNamespace(llm_provider="anthropic")
         with patch("desktop_app.setup_wizard.load_settings", return_value=cfg), \
              patch("desktop_app.setup_wizard.check_ollama_status", return_value=missing_cli):
             assert should_show_setup_wizard() is False

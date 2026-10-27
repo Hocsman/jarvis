@@ -148,11 +148,21 @@ class TestLLMProviderFields:
 
     def test_llm_provider_choices_match_config(self):
         """The provider dropdown offers exactly the values the config loader
-        accepts ('ollama', 'openai_compatible')."""
+        accepts."""
+        from jarvis.config import LLM_PROVIDERS
+
         fm = self._field("llm_provider")
         assert fm is not None and fm.field_type == "choice"
         values = {v for v, _ in (fm.choices or [])}
-        assert values == {"ollama", "openai_compatible"}
+        assert values == set(LLM_PROVIDERS)
+
+    def test_the_key_can_live_in_an_environment_variable(self):
+        """Naming the variable keeps the secret out of config.json; the
+        field holds a name, not a secret, so it is plain text."""
+        fm = self._field("llm_api_key_env")
+        assert fm is not None
+        assert fm.category == "llm_provider"
+        assert fm.field_type == "str"
 
     def test_embedding_provider_offers_inherit_option(self):
         """embedding_provider includes the empty 'same as chat provider'
