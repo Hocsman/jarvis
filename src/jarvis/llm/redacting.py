@@ -1,7 +1,8 @@
 """Redaction decorator for cloud-bound LLM backends.
 
 When chat runs against a remote provider (OpenAI-compatible endpoints
-like OpenRouter, Mistral, OpenAI), the prompt leaves the machine. The
+like OpenRouter, Mistral, OpenAI, or Anthropic), the prompt leaves the
+machine. The
 project's privacy contract — the same automatic scrub that protects
 on-disk diary writes — should apply before any byte crosses the wire.
 

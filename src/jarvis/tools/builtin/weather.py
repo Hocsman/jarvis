@@ -4,6 +4,7 @@ import requests
 from typing import Dict, Any, Optional
 from ...debug import debug_log
 from ...llm import get_auxiliary_backend
+from ...memory.graph import fold_for_search
 from ...utils.location import get_location_info
 from ..base import Tool, ToolContext
 from ..types import ToolExecutionResult
@@ -17,6 +18,28 @@ _NO_PLACE_SENTINELS = frozenset({
 })
 
 
+def _fold_name(name: str) -> str:
+    """Case and accents dropped, whitespace runs reduced to one space, so two
+    spellings of a name compare equal."""
+    return " ".join(fold_for_search(name).split())
+
+
+def _assistant_names(cfg) -> frozenset:
+    """The names the assistant answers to, folded for comparison.
+
+    That is the wake word, which is also the name the persona goes by, and
+    its aliases, the spellings the speech recogniser produces for it.
+    Values that are not strings are skipped, so a config object without a
+    wake word simply yields no names.
+    """
+    raw = [getattr(cfg, "wake_word", None)]
+    aliases = getattr(cfg, "wake_aliases", None)
+    if isinstance(aliases, (list, tuple, set, frozenset)):
+        raw.extend(aliases)
+    names = (_fold_name(n) for n in raw if isinstance(n, str))
+    return frozenset(n for n in names if n)
+
+
 def _extract_place_from_user_text(text: str, cfg) -> Optional[str]:
     """Ask a small LLM to pull a place name out of the user's utterance.
 
@@ -28,7 +51,10 @@ def _extract_place_from_user_text(text: str, cfg) -> Optional[str]:
     doesn't have to keep repeating themselves.
 
     Returns ``None`` when no place is named, the call fails, or the
-    extractor gives back something that doesn't look like a place.
+    extractor gives back something that doesn't look like a place. A reply
+    equal to the assistant's own name (wake word or alias) counts as no
+    place: "Yuba, what's the weather" is the user addressing the assistant,
+    and geocoding "Yuba" would answer for Yuba City.
     """
     if not isinstance(text, str) or not text.strip():
         return None
@@ -68,6 +94,13 @@ def _extract_place_from_user_text(text: str, cfg) -> Optional[str]:
     if not place:
         return None
     if place.lower() in _NO_PLACE_SENTINELS:
+        return None
+    if _fold_name(place) in _assistant_names(cfg):
+        debug_log(
+            f"    ⚠️ place extractor answered with the assistant's own name "
+            f"('{place}'); treating it as no place",
+            "tools",
+        )
         return None
     # Reject multi-sentence or overly long replies — those are almost always
     # the model explaining ("the user did not name a place") instead of
