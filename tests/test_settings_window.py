@@ -400,6 +400,29 @@ class TestConfigSaveLogic:
 REMOTE_PINS = ["google/gemini-3.1-flash-lite", "claude-haiku-5-5"]
 
 
+class TestAWindowThatPinsNoPathUsesTheTestsOwnFile:
+    """The window binds ``default_config_path`` at import, so the sandbox has
+    to reach it without a patch: a test that opens the window and pins no
+    path reads and saves the file the config loader reads, never the
+    user's own."""
+
+    def test_a_save_lands_where_the_loader_reads(self, qapp):
+        from desktop_app import settings_window as sw
+        from jarvis.config import _save_json, default_config_path, load_config
+
+        flipped = not get_default_config()["low_power_mode"]
+        assert _save_json(default_config_path(), {"intent_judge_model": REMOTE_PINS[0]})
+        window = sw.SettingsWindow()
+        window._widgets["low_power_mode"].setChecked(flipped)
+
+        with patch.object(sw, "QMessageBox"):
+            window._on_save()
+
+        config = load_config()
+        assert config["low_power_mode"] is flipped
+        assert config["intent_judge_model"] == REMOTE_PINS[0]
+
+
 def _a_value_not_in(fm: FieldMeta):
     """A value the choice field does not list, of the type its default has."""
     if isinstance(get_default_config()[fm.key], int):
@@ -414,16 +437,11 @@ class TestASaveKeepsWhatTheWindowDoesNotList:
     never touched, without a word."""
 
     @pytest.fixture
-    def settings_file(self, qapp, tmp_path, monkeypatch):
-        from desktop_app import settings_window as sw
+    def settings_file(self, qapp):
+        from jarvis.config import default_config_path
 
-        path = tmp_path / "jarvis" / "config.json"
-        path.parent.mkdir(parents=True)
-        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
-        # The window resolves the path through its own import of
-        # default_config_path, which TestInputDevices' module reload can
-        # leave bound to another test's sandbox, so patch it there too.
-        monkeypatch.setattr(sw, "default_config_path", lambda: path)
+        path = default_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
         return path
 
     @staticmethod

@@ -17,6 +17,10 @@ from thread_guard import _no_thread_outlives_its_test  # noqa: F401
 # lives in its own module for the same reason.
 from native_guard import _no_native_inference  # noqa: F401
 
+# The autouse guard that refuses a test the user's own config file. It lives in
+# its own module for the same reason.
+from config_guard import _no_real_user_config, _real_user_config  # noqa: F401
+
 # Robustly locate repository root (directory containing src/jarvis)
 _this_file = Path(__file__).resolve()
 ROOT = None
@@ -139,18 +143,30 @@ def _bac_a_sable(tmp_path_factory):
 
 @pytest.fixture(autouse=True)
 def _isolate_user_config_path(_bac_a_sable, request, monkeypatch):
-    """Redirect ``default_config_path`` to a per-session tempfile so a test
-    that calls ``load_settings`` (or any other code path that resolves the
-    user's config) cannot read or overwrite ``~/.config/jarvis/config.json``.
+    """Give every test a config file of its own, so a test that calls
+    ``load_settings`` (or any other code path that resolves the user's
+    config) cannot read or overwrite ``~/.config/jarvis/config.json``.
+
+    ``default_config_path()`` reads ``XDG_CONFIG_HOME`` on every call, so the
+    variable points at a directory of the test's own. That reaches every
+    caller, including the modules that did ``from jarvis.config import
+    default_config_path`` at import (the settings window, the setup wizard,
+    the app) and so hold the function rather than the name, which a patch on
+    ``jarvis.config`` would miss. ``JARVIS_CONFIG_PATH`` names the file that
+    function answers, so the loader and every other caller read and write
+    one file.
 
     Tests that need to exercise the loader against specific JSON should
     monkey-patch ``_load_json`` (and ``_save_json`` if the migration would
-    trigger a write) directly. This fixture is a belt-and-braces guard so
-    a half-mocked test cannot reach the real config file.
+    trigger a write) directly, or write that file. The guard in
+    ``config_guard.py`` fails a test that reaches the real config file all
+    the same.
     """
-    sandbox = _bac_a_sable / f"config-{abs(hash(request.node.nodeid)):x}.json"
-    monkeypatch.setattr("jarvis.config.default_config_path", lambda: sandbox)
-    monkeypatch.setenv("JARVIS_CONFIG_PATH", str(sandbox))
+    from jarvis.config import default_config_path
+
+    config_home = _bac_a_sable / f"config-{abs(hash(request.node.nodeid)):x}"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    monkeypatch.setenv("JARVIS_CONFIG_PATH", str(default_config_path()))
 
 
 @pytest.fixture(autouse=True)
