@@ -154,6 +154,103 @@ def test_it_is_framed_as_the_world_and_not_as_him(tmp_path):
     assert "describes the world, not the user" in prompt
 
 
+# ── What of a large node reaches the prompt ───────────────────────────
+#
+# A node is shown within a fixed budget of characters. A node that never
+# splits (on the small tier the split guards refuse every split) grows far
+# past it, and the search matches its whole text, so the budget is spent
+# on the lines that name what was asked rather than on whichever lines
+# happen to come first.
+
+
+def _large_node(answer_at=30):
+    lines = [
+        f"The {w} gallery on Wharf Road number {i} opens at {8 + i % 4}am on weekdays."
+        for i, w in enumerate(("amber", "basil", "cedar", "dahlia", "ember", "fennel",
+                               "garnet", "hazel", "indigo", "juniper") * 4)
+    ]
+    lines.insert(answer_at, "The Kestrel M3 workstation ships with 96 GB of unified memory.")
+    return _Node("World", "\n".join(lines))
+
+
+def test_a_large_node_shows_the_line_that_matched(tmp_path):
+    node = _large_node()
+    assert len(node.data) > 1000 and node.data.index("Kestrel") > 1000
+
+    _, prompt = _turn(tmp_path, {"keywords": ["kestrel m3", "memory"]}, noeuds=[node])
+
+    assert "96 GB of unified memory" in prompt
+    assert "amber gallery" not in prompt
+
+
+def test_the_lines_that_match_more_of_the_search_come_first(tmp_path):
+    lines = [f"The Kestrel M{i} drone folds to the size of a paperback and weighs {300 + i} g."
+             for i in range(1, 30)]
+    lines.insert(20, "The Kestrel M3 workstation ships with 96 GB of unified memory.")
+    node = _Node("World", "\n".join(lines))
+
+    _, prompt = _turn(tmp_path, {"keywords": ["kestrel", "m3", "memory"]}, noeuds=[node])
+
+    assert "96 GB of unified memory" in prompt
+
+
+def test_a_search_word_matches_whatever_the_accents(tmp_path):
+    lines = _large_node().data.split("\n")
+    lines.insert(25, "Café Rouvière in Lyon is known for its Yirgacheffe filter.")
+    node = _Node("World", "\n".join(lines))
+
+    _, prompt = _turn(tmp_path, {"keywords": ["cafe rouviere", "filter"]}, noeuds=[node])
+
+    assert "Yirgacheffe" in prompt
+
+
+def test_a_small_node_reaches_the_prompt_whole(tmp_path):
+    node = _Node("World", "DGX Spark is compact with 128 GB unified memory.\n"
+                          "It ships with DGX OS, a build of Ubuntu.")
+
+    _, prompt = _turn(tmp_path, {"keywords": ["dgx spark", "memory"]}, noeuds=[node])
+
+    assert "128 GB unified memory" in prompt and "a build of Ubuntu" in prompt
+
+
+def test_a_large_node_no_line_of_which_matches_shows_its_first_lines(tmp_path):
+    # The search matched the node by its name or description, not by a line.
+    node = _large_node()
+
+    _, prompt = _turn(tmp_path, {"keywords": ["world", "galleries"]}, noeuds=[node])
+
+    assert "amber gallery" in prompt
+
+
+def test_the_lines_shown_stay_within_the_budget(tmp_path):
+    from src.jarvis.reply.engine import _GRAPH_PREVIEW_CHARS
+
+    lines = [f"The Kestrel M{i} drone folds to the size of a paperback and weighs {300 + i} g."
+             for i in range(1, 60)]
+    node = _Node("World", "\n".join(lines))
+
+    _, prompt = _turn(tmp_path, {"keywords": ["kestrel", "drone"]}, noeuds=[node])
+
+    shown = [line for line in lines if line in prompt]
+    assert shown and len("\n".join(shown)) <= _GRAPH_PREVIEW_CHARS
+
+
+def test_a_matching_line_longer_than_the_budget_is_cut_not_passed_over(tmp_path):
+    from src.jarvis.reply.engine import _GRAPH_PREVIEW_CHARS
+
+    long_line = ("The Kestrel M3 workstation ships with 96 GB of unified memory, "
+                 + "and a long list of ports, " * 20).strip()
+    assert len(long_line) > _GRAPH_PREVIEW_CHARS
+    lines = _large_node().data.split("\n")
+    lines.insert(30, long_line)
+    node = _Node("World", "\n".join(lines))
+
+    _, prompt = _turn(tmp_path, {"keywords": ["kestrel m3", "memory"]}, noeuds=[node])
+
+    assert "96 GB of unified memory" in prompt
+    assert "amber gallery" not in prompt
+
+
 def test_the_log_says_why_a_node_surfaced(tmp_path, capsys):
     """These lines are read by the user, not by a machine. `· World` with
     nothing after it says a node was pulled in and refuses to say what

@@ -816,6 +816,11 @@ _STOP_WORDS = frozenset({
 # stop-word set. Cheap language-agnostic backstop against generic 1–2 char noise.
 _MIN_CONTENT_WORD_LEN = 3
 
+# Characters of each matched graph node that reach the prompt. A node
+# larger than this is shown by its lines that name the search
+# (`node_preview`), so the budget stays the same however large it grows.
+_GRAPH_PREVIEW_CHARS = 300
+
 
 def _is_content_word(word: str) -> bool:
     """True if `word` looks like a meaningful content token (not stop word, not too short)."""
@@ -1855,7 +1860,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         else:
             graph_store = None
             try:
-                from ..memory.graph import GraphMemoryStore
+                from ..memory.graph import GraphMemoryStore, node_preview
                 graph_store = GraphMemoryStore(cfg.db_path)
 
                 graph_parts: list[str] = []
@@ -1883,7 +1888,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                     for node in graph_nodes:
                         ancestors = graph_store.get_ancestors(node.id)
                         path = " > ".join(a.name for a in ancestors)
-                        data_preview = node.data[:300] if node.data else ""
+                        data_preview = node_preview(node.data, search_words, _GRAPH_PREVIEW_CHARS)
                         if data_preview:
                             graph_parts.append(f"[{path}] {data_preview}")
                             # Whichever list drove the search explains the hit.

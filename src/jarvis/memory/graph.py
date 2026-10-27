@@ -111,6 +111,47 @@ def fold_for_search(text: str) -> str:
     return "".join(c for c in decomposed if not unicodedata.combining(c)).casefold()
 
 
+def node_preview(data: str, words, budget: int) -> str:
+    """What of a node's data to show for a search, within ``budget`` characters.
+
+    A node that fits is shown whole. One that does not is shown by its
+    lines that name the most of ``words``, most first, as many as fit:
+    `search_nodes` matches a node's whole text, so in a node that has grown
+    long the line that answers the search can sit anywhere, and its first
+    lines are no more likely than any others to be it. Lines are matched
+    the way the search matches them (``fold_for_search``, a word anywhere in
+    the line), so the line that made the node a hit is the line shown.
+    When no line holds a word (the node was found by its name or its
+    description), its first lines are shown.
+    """
+    if not data:
+        return ""
+    if len(data) <= budget:
+        return data
+    folded_words = {fold_for_search(w) for w in words if w and w.strip()}
+    lines = [line for line in data.split("\n") if line.strip()]
+    ranked = sorted(
+        ((sum(w in fold_for_search(line) for w in folded_words), i, line)
+         for i, line in enumerate(lines)),
+        key=lambda t: (-t[0], t[1]),
+    )
+    shown: list[str] = []
+    used = 0
+    for score, _, line in ranked:
+        if score == 0:
+            break
+        cost = len(line) + (1 if shown else 0)
+        if used + cost > budget:
+            continue
+        shown.append(line)
+        used += cost
+    if not shown:
+        best_score, _, best = ranked[0] if ranked else (0, 0, "")
+        # A matching line longer than the budget is cut, not passed over.
+        return best[:budget] if best_score else data[:budget]
+    return "\n".join(shown)
+
+
 # ── Configuration defaults ──────────────────────────────────────────────────
 
 SPLIT_THRESHOLD = 1500       # tokens — when to split a node into children
