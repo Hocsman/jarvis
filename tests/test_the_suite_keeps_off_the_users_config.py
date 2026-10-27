@@ -10,8 +10,8 @@ import default_config_path`` at import (the settings window, the setup
 wizard, the app), which hold the function rather than the name, and the code
 that runs outside a test's own fixtures: collection, wider fixtures, and the
 child processes those start. A pytest session a guard's end-to-end test runs
-apart gets a home directory of its own from ``inner_session.py`` on top of
-that, and none of the variables that name a config file. The guard in
+apart gets a home directory of its own from ``inner_session.py`` instead,
+with the variables that name a config file pointing inside it. The guard in
 ``config_guard.py`` refuses the user's file to ``_load_json`` and
 ``_save_json`` and fails the test that asked. These tests hold both to that,
 and never put the user's real file at stake: a test checks its path is not

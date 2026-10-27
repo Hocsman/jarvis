@@ -460,9 +460,10 @@ def _give_the_run_a_config_home() -> None:
     start all run outside it, and would resolve the user's own
     ``config.json``: a child that logs reads it through ``debug_log``. The
     pytest sessions a guard's end-to-end test runs apart get a home of their
-    own from ``inner_session.py`` besides. The guard takes the files it
-    protects first, from the environment the run started in, so it protects
-    the user's file and not this one.
+    own from ``inner_session.py`` instead, with these variables pointing
+    inside it. The guard takes the files it protects first, from the
+    environment the run started in, so it protects the user's file and not
+    this one.
     """
     global _run_config_home
     config_guard.arm()
