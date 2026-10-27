@@ -5056,7 +5056,7 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
                 <div class="modal">
                     <h3>🧹 Consolidate All Nodes</h3>
                     <p style="color: var(--text-secondary); margin-bottom: 16px; line-height: 1.5;">
-                        Re-run the merge prompt over every populated node. Dedupes near-duplicate lines, drops contradictions, folds repeated activities into patterns, and prunes common knowledge. Useful after a prompt change to back-fill the new rules across historical data. Cannot be undone.
+                        Re-run the merge prompt over every populated node. Dedupes near-duplicate lines, drops contradictions, folds repeated activities into patterns, and prunes common knowledge. Useful after a prompt change to back-fill the new rules across historical data. Every node goes to your chat model, so to its provider when that model runs remotely. Cannot be undone.
                     </p>
                     <div id="consolidate-progress" style="display: none;">
                         <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">

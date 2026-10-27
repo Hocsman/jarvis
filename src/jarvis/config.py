@@ -613,8 +613,8 @@ def _cloud_safe_model(value: str, field: str, provider: str,
                       ollama_base_url: str = "http://127.0.0.1:11434") -> str:
     """Keep auxiliary model names valid for the endpoint actually in use.
 
-    Jarvis runs several small LLM tasks (intent judge, tool router,
-    planner, memory extractor) on their own configured model. A remote
+    Jarvis runs several auxiliary LLM tasks (intent judge, tool router,
+    planner, memory extractor) on a model of their own. A remote
     cloud endpoint namespaces its model IDs as ``vendor/model`` and
     answers HTTP 400 ("X is not a valid model ID") to a bare local tag
     like ``gemma4:e2b``, so the auxiliary task dies for no gain: those get
@@ -626,7 +626,7 @@ def _cloud_safe_model(value: str, field: str, provider: str,
 
     A local OpenAI-compatible server is the opposite case. A bare name is
     the only shape it accepts, and the pin is the whole reason the user
-    set a small model for a small task. So the endpoint decides rather
+    set a model of its own for that task. So the endpoint decides rather
     than the provider name, and a discarded pin is announced: nothing
     downstream ever shows the effective value, and two of these four
     fields have no field in the settings window at all.

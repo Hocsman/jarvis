@@ -1,8 +1,8 @@
 """Which model reads a question for the memory lookup (context 3).
 
-`memory_extractor_model` names it. Empty, nothing changes: the lookup rides
-the tool router's chain (`tool_router_model → intent_judge_model →
-llm_chat_model`), already warm for the router. Named, it wins over that
+`memory_extractor_model` names it. Empty, the lookup rides the tool
+router's chain (`tool_router_model → intent_judge_model → llm_chat_model`),
+already warm for the router. Named, it wins over that
 chain, and the name is dispatched like every auxiliary model: one with a
 vendor slash goes to the configured provider, a bare tag to local Ollama.
 
@@ -235,5 +235,5 @@ def test_resolve_tool_router_model_is_public():
 
     assert hasattr(engine, "resolve_tool_router_model")
     assert not hasattr(engine, "_resolve_tool_router_model"), (
-        "the private alias was removed — callers should use the public name"
+        "callers use the public name"
     )

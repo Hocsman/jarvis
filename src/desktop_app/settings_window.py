@@ -389,8 +389,9 @@ def _build_field_metadata() -> List[FieldMeta]:
       "memory", "choice", choices=[("diary", "Diary only"), ("graph", "Graph only"), ("all", "All (diary + graph)")])
     f("memory_extractor_model", "Memory Lookup Model",
       "Model that reads each question for the keywords and dates memory is "
-      "searched with. Empty = the tool router's model. A bare local tag "
-      "(qwen2.5:3b) stays on this machine; a vendor/model name goes to your provider",
+      "searched with. Empty = the tool router's model. A vendor/model name "
+      "runs on your OpenAI-compatible provider; a bare tag (qwen2.5:3b) runs "
+      "on local Ollama when it is reachable, otherwise the chat model is used",
       "memory", "str")
     f("tool_carryover_max_turns", "Tool Carryover Turns",
       "How many prior replies' tool results to keep visible for follow-up questions",

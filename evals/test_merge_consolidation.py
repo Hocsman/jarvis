@@ -169,7 +169,7 @@ INDEPENDENCE_CASES = [
         IndependenceCase(
             description="Vegetarian + unrelated meal mention",
             # Note: "user is vegetarian" + "user ate a Big Mac" is a
-            # genuine contradiction the picker may legitimately
+            # genuine contradiction the model may legitimately
             # surface or pick a side on. Use clearly-orthogonal facts
             # instead so the eval is unambiguous.
             existing_data=(
@@ -477,7 +477,7 @@ class TestPatternBoundary:
         for kw in case.must_keep_distinct:
             assert kw.lower() in merged_lower, (
                 f"[{case.description}] distinct event '{kw}' was folded away — "
-                f"the picker invented a pattern from one-offs.\n{merged}"
+                f"the merge invented a pattern from one-offs.\n{merged}"
             )
 
 
@@ -645,7 +645,7 @@ class TestBatchedMerge:
         # landed means the orchestrator under-reports flushes — the
         # exact regression `_match_key`'s tolerant punctuation strip
         # was added to prevent. Allow strict equality OR coverage of
-        # all input indices, since the picker may legitimately
+        # all input indices, since the model may legitimately
         # consolidate two new facts into one line.
         assert len(result.incorporated_indices) >= 1, (
             f"[{case.description}] incorporated_indices is empty despite facts landing — "

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Iterator, NamedTuple, Optional, Sequence
 
@@ -23,6 +24,7 @@ from rapidfuzz import fuzz
 
 from ..debug import debug_log
 from ..llm import get_auxiliary_backend
+from ..utils.redact import redaction_placeholders
 from .provenance import (
     SOURCE_UNKNOWN,
     fact_line,
@@ -74,6 +76,16 @@ _REWRITE_MATCH = 85
 
 
 _DIGITS = re.compile(r"\d+")
+
+
+def _redaction_markers(lines) -> Counter:
+    """How many of each redaction marker ``lines`` carry.
+
+    Counted rather than merely detected: a node that already held one
+    marker must not cover a second one the rewrite put where a real value
+    stood.
+    """
+    return Counter(m for line in lines for m in redaction_placeholders(line))
 
 
 def _numbers_are_grounded(cleaned, inputs) -> bool:
@@ -391,6 +403,13 @@ def _llm_pick_best_child(
     )
 
     if not response:
+        # Not the same answer as NONE, though it ends the same way: the
+        # fact stays at this level. A chat model too slow for the budget
+        # shows up here, on every fact.
+        debug_log(
+            f"graph picker: no answer from {chat_model} within {timeout_sec:.0f}s",
+            "memory",
+        )
         return None
 
     response = response.strip().upper()
@@ -652,6 +671,10 @@ def merge_node_data(
     )
 
     if not response:
+        debug_log(
+            f"merge: no answer from {chat_model} within {timeout_sec:.0f}s",
+            "memory",
+        )
         return MergeResult(success=False)
 
     parsed = _extract_facts_object(response)
@@ -692,6 +715,21 @@ def merge_node_data(
         debug_log(
             "merge: rejected rewrite — it carries a figure that was in "
             "neither the node nor the new facts",
+            "memory",
+        )
+        return MergeResult(success=False)
+
+    # A remote model sees the node through the redacting backend, so an
+    # address or a long number on it comes back as a marker. Written
+    # over the node, the value it hid would be gone for good. A marker
+    # the inputs already carried (redacted diary text) may stay; one
+    # more than they carried stands for a value.
+    if _redaction_markers(cleaned) - _redaction_markers(
+        list(existing_lines) + list(sanitised_new)
+    ):
+        debug_log(
+            "merge: rejected rewrite — it carries a redaction marker where "
+            "the node held a real value",
             "memory",
         )
         return MergeResult(success=False)

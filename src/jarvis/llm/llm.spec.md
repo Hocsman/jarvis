@@ -80,7 +80,7 @@ The `ollama_base_url` / `ollama_chat_model` / `ollama_embed_model` keys hold the
 
 ### Splitting roles across models
 
-`intent_judge_model` / `tool_router_model` / `planner_model` exist so the classification-shaped calls can run on a different model from the reply. On a cloud provider this is not a micro-optimisation — it dominates latency.
+`intent_judge_model` / `tool_router_model` / `memory_extractor_model` / `planner_model` exist so the classification-shaped calls can run on a different model from the reply. On a cloud provider this is not a micro-optimisation — it dominates latency.
 
 Measured on the memory extractor (same prompt, same query, OpenRouter):
 

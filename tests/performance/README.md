@@ -34,7 +34,7 @@ benchmarking a change, use `JARVIS_PERF_RUNS=10` or higher.
 
 Shape invariants (not absolute numbers):
 - Tool router p50 ≤ main chat turn p50 × 1.5.
-- Enrichment extractor shares the router model chain.
+- Enrichment extractor shares the router model chain (`memory_extractor_model` left empty).
 
 Unmapped callers print as `other:<qualname>` — that's a signal to update the
 `_CALLER_TO_CONTEXT` map in `timing_recorder.py` alongside `docs/llm_contexts.md`.
