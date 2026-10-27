@@ -138,6 +138,17 @@ reading that did not happen**, or a single failure would skip those days
 for ever, and the tool says so out loud rather than reporting that
 nothing was new.
 
+**The request goes where the model lives.** The model is `appris_model`,
+else the reminder chain (`reminder_model → tool_router_model →
+intent_judge_model → llm_chat_model`), and `get_private_backend` is given
+both the pin and the model it resolved. Either pin, `appris_model` or
+`reminder_model`, keeps the fortnight on this machine whatever the tag's
+shape: a reminder already runs that model here, and the same name cannot
+mean the cloud for his diary. Without a pin, a bare local tag reached
+through the chain runs on local Ollama as well, and only the namespaced
+chat model at the end of it sends the notes to the configured provider,
+which wrote them in the first place.
+
 Seven guards run afterwards, in Python, each counted:
 
 | Guard | What it defends |

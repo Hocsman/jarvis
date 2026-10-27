@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, Optional
 
+from ..debug import debug_log
 from .backend import LLMBackend
 from .ollama import OllamaBackend
 from .openai_compatible import OpenAICompatibleBackend
@@ -191,7 +192,7 @@ class _SurLaMachine:
         return getattr(object.__getattribute__(self, "_vrai"), nom)
 
 
-def get_private_backend(settings: Any, pinned: str) -> LLMBackend:
+def get_private_backend(settings: Any, pinned: str, model: str) -> LLMBackend:
     """The backend for a prompt carrying the user's own life.
 
     Four contexts read his own sentences: the time he said out loud, the
@@ -203,18 +204,34 @@ def get_private_backend(settings: Any, pinned: str) -> LLMBackend:
     picks the endpoint from ``llm_provider`` alone, so a pinned local tag
     was sent to the cloud — verified, the request reached
     ``https://openrouter.ai/api/v1`` carrying his sentence, and the tag
-    would have been rejected there anyway. The model-aware form exists for
-    auxiliary passes (a bare tag handed over as ``model`` on a remote
-    provider routes to local Ollama), but a privacy pin must not depend on
-    the caller remembering to pass it.
+    would have been rejected there anyway.
 
-    So a pin decides the destination too. With nothing pinned there is
-    nothing to honour and the ordinary provider applies: a user who never
-    asked for this is not quietly moved off the one he chose.
+    So a pin decides the destination too, whatever its shape: an
+    ``hf.co/...`` Ollama tag has a slash and is still his machine. With
+    nothing pinned, ``model`` (the one the context resolved and is about
+    to send) decides it the way it does for every other call: a bare tag
+    on a remote provider names a model that lives on local Ollama, and
+    goes there. Only a namespaced model, which in practice is the chat
+    model at the end of the chain, stays on the provider he chose.
+
+    ``pinned`` and ``model`` are separate because a context's chain runs
+    past its pin: the model it sends may be a fallback's, and the request
+    has to go where that model lives.
     """
-    if not (pinned or "").strip():
-        return get_llm_backend(settings)
-    return get_llm_backend(_SurLaMachine(settings))
+    is_pinned = bool((pinned or "").strip())
+    if is_pinned:
+        backend = get_llm_backend(_SurLaMachine(settings))
+    else:
+        backend = get_llm_backend(settings, model=model)
+    # The class rather than the URL: a configured URL can carry an
+    # account-bearing query string, and `OllamaBackend` already reads as
+    # "this machine".
+    debug_log(
+        f"🔒 private prompt for {model!r} → {type(backend).__name__}"
+        f"{' (pinned)' if is_pinned else ''}",
+        "llm",
+    )
+    return backend
 
 
 def get_auxiliary_backend(settings: Any, model: Optional[str] = None) -> LLMBackend:
