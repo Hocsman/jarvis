@@ -30,23 +30,27 @@ def resolve_input_device(
     """The PortAudio input index ``voice_device`` selects, or None for the system default.
 
     Blank, ``default`` and ``system`` (any case) mean the system default input.
-    Anything ``int()`` reads is an index. Any other text is a name: the first
-    input-capable device whose name contains it, ignoring case. ``list_devices``
-    is only called for a name. A name no input matches raises
+    Anything ``int()`` reads is an index, which must name an input-capable
+    device. Any other text is a name: the first input-capable device whose name
+    contains it, ignoring case. ``list_devices`` is not called for the system
+    default. An index or a name that selects no input raises
     ``InputDeviceNotFound`` rather than falling back to another microphone; its
-    message leaves the name out, since a device name can carry a person's.
+    message leaves the value out, since a device name can carry a person's.
     """
     wanted = (voice_device or '').strip().lower()
     if wanted in ('', 'default', 'system'):
         return None
+    devices = list_devices()
     try:
-        return int(wanted)
+        index = int(wanted)
     except ValueError:
-        pass
-    for idx, dev in enumerate(list_devices()):
-        if dev.get('max_input_channels', 0) > 0 and wanted in dev.get('name', '').lower():
-            return idx
-    raise InputDeviceNotFound("voice_device matches no input device")
+        for idx, dev in enumerate(devices):
+            if dev.get('max_input_channels', 0) > 0 and wanted in dev.get('name', '').lower():
+                return idx
+    else:
+        if 0 <= index < len(devices) and devices[index].get('max_input_channels', 0) > 0:
+            return index
+    raise InputDeviceNotFound("voice_device selects no input device")
 
 
 def is_input_format_error(exc: Exception) -> bool:

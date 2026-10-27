@@ -343,6 +343,28 @@ class TestInputDevices:
         assert "Built-in Mic" in devices[1][1]
         assert "External Mic" in devices[2][1]
 
+    def test_a_microphone_listed_once_per_audio_system_shows_once(self, monkeypatch):
+        """Windows lists one microphone under each of its audio systems, and
+        every entry would save the same name."""
+        mock_sd = MagicMock()
+        mock_sd.query_devices.return_value = [
+            {"name": "Microphone (MSI GV60 Streaming ", "max_input_channels": 2},
+            {"name": "Microphone (USB2.0 Device)", "max_input_channels": 2},
+            {"name": "Microphone (MSI GV60 Streaming Mic)", "max_input_channels": 2},
+            {"name": "Microphone (MSI GV60 Streaming Mic)", "max_input_channels": 2},
+            {"name": "Microphone (USB2.0 Device)", "max_input_channels": 1},
+        ]
+        monkeypatch.setitem(sys.modules, "sounddevice", mock_sd)
+
+        values = [value for value, _ in get_input_devices()]
+
+        assert values == [
+            "",
+            "Microphone (MSI GV60 Streaming",
+            "Microphone (USB2.0 Device)",
+            "Microphone (MSI GV60 Streaming Mic)",
+        ]
+
     def test_handles_sounddevice_import_error(self):
         """Gracefully handles missing sounddevice."""
         devices = get_input_devices()
@@ -626,14 +648,50 @@ class TestASaveKeepsWhatTheWindowDoesNotList:
         assert "voice_device" not in self._save(window, settings_file)
 
     @pytest.mark.parametrize("index", ["1", 1, "01", "+1"])
-    def test_a_listed_index_is_selected_and_kept(self, settings_file, microphones, index):
-        """Any form the listener reads as that index selects it."""
-        shown = dict(get_input_devices())[str(int(index))]
+    def test_a_saved_index_shows_its_microphone_and_saves_its_name(
+        self, settings_file, microphones, index,
+    ):
+        """Any form the listener reads as that index selects the microphone
+        it names, and a Save writes that microphone's name, which a replug
+        cannot move onto another device."""
+        name = AUDIO_DEVICES[int(index)]["name"]
         window = self._open(settings_file, {"voice_device": index})
         combo = window._widgets["voice_device"]
 
-        assert combo.currentText() == shown
-        assert int(self._save(window, settings_file)["voice_device"]) == int(index)
+        assert combo.currentText() == dict(get_input_devices())[name]
+        assert self._save(window, settings_file)["voice_device"] == name
+
+    def test_choosing_a_microphone_saves_its_name(self, settings_file, microphones):
+        name = AUDIO_DEVICES[2]["name"]
+        window = self._open(settings_file, {})
+        combo = window._widgets["voice_device"]
+        combo.setCurrentIndex(combo.findText(f"🎤 {name}"))
+
+        assert self._save(window, settings_file)["voice_device"] == name
+
+    def test_a_saved_name_selects_its_listed_microphone(self, settings_file, microphones):
+        name = AUDIO_DEVICES[1]["name"]
+        window = self._open(settings_file, {"voice_device": name})
+        combo = window._widgets["voice_device"]
+
+        assert combo.currentText() == f"🎤 {name}"
+        assert combo.count() == len(get_input_devices()), "no extra (by name) row"
+        assert self._save(window, settings_file)["voice_device"] == name
+
+    def test_a_truncated_name_survives_a_save_and_a_reopen(self, settings_file, microphones):
+        """Windows' MME lists a long name cut at 31 characters, trailing
+        space included."""
+        microphones.query_devices.return_value = AUDIO_DEVICES + [
+            {"name": "Microphone (MSI GV60 Streaming ", "max_input_channels": 2},
+        ]
+        window = self._open(settings_file, {})
+        combo = window._widgets["voice_device"]
+        combo.setCurrentIndex(combo.count() - 1)
+        saved = self._save(window, settings_file)
+
+        reopened = self._open(settings_file, saved)._widgets["voice_device"]
+        assert reopened.currentIndex() == reopened.count() - 1
+        assert reopened.count() == len(get_input_devices())
 
     @pytest.mark.parametrize("default", ["default", "System", "  "])
     def test_a_word_for_the_system_default_shows_as_system_default(
@@ -648,7 +706,7 @@ class TestASaveKeepsWhatTheWindowDoesNotList:
         assert combo.count() == len(get_input_devices())
         assert "voice_device" not in self._save(window, settings_file)
 
-    @pytest.mark.parametrize("choice", ["2", ""])
+    @pytest.mark.parametrize("choice", [AUDIO_DEVICES[2]["name"], ""])
     def test_choosing_a_listed_option_replaces_the_name(
         self, settings_file, microphones, choice,
     ):

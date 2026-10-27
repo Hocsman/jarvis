@@ -528,6 +528,13 @@ class TestInputDevice:
         opened, _ = self._press(_make_engine(voice_device="4"))
         assert [kw["device"] for kw in opened] == [4]
 
+    @pytest.mark.parametrize("index", ["2", "9"])
+    def test_an_index_that_names_no_microphone_records_nothing(self, capsys, index):
+        # Device 2 is output-only and 9 names no device at all.
+        opened, beep = self._press(_make_engine(voice_device=index))
+        assert opened == [] and not beep.called
+        assert "microphone not found" in capsys.readouterr().out.lower()
+
     def test_no_device_records_from_the_system_input(self):
         opened, _ = self._press(_make_engine(voice_device=None))
         assert len(opened) == 1

@@ -147,13 +147,15 @@ def _select_choice(combo: QComboBox, key: str, value: Any) -> None:
 
 
 def _select_device(combo: QComboBox, key: str, value: Any) -> None:
-    """Select ``value`` in a device combo.
+    """Select ``value`` in a device combo, whose options carry device names.
 
-    A device set by name (any value that does not read as an index, as the
-    listener tells them apart) is added as its own option and selected, so a
-    Save writes the name back. An index the list lacks is not kept: after a
-    replug it can name another device, so the combo falls back to System
-    Default, as it does for the words the listener reads as the system default.
+    A stored index (any form the listener reads as one) selects the
+    microphone it names, so a Save writes that microphone's name instead. An
+    index that names no listed microphone is not kept: after a replug it can
+    name another device, so the combo falls back to System Default, as it does
+    for the words the listener reads as the system default. Any other value is
+    a name: the listed microphone of exactly that name, or else its own option,
+    so a Save writes the name back.
     """
     cur_str = str(value).strip() if value is not None else ""
     if cur_str.lower() in ("default", "system"):
@@ -161,13 +163,14 @@ def _select_device(combo: QComboBox, key: str, value: Any) -> None:
     idx = combo.findData(cur_str)
     if idx < 0 and cur_str:
         try:
-            index = int(cur_str)
+            int(cur_str)
         except ValueError:
             combo.addItem(f"🎤 {cur_str} (by name)", value)
             idx = combo.count() - 1
             debug_log(f"{key} keeps a device set by name", "settings")
         else:
-            idx = combo.findData(str(index))
+            name = _input_device_name(cur_str)
+            idx = combo.findData(name) if name is not None else -1
             if idx < 0:
                 debug_log(f"{key} names an index the list lacks, shown as System Default", "settings")
     if idx < 0:
@@ -614,7 +617,11 @@ FIELD_METADATA = _build_field_metadata()
 def get_input_devices() -> List[tuple[str, str]]:
     """Return list of (value, display_name) for available audio input devices.
 
-    Returns [("", "System Default")] if sounddevice is not available.
+    The value is the device name, which a replug cannot move onto another
+    device the way it moves an index. Windows lists one microphone under each
+    of its audio systems; each name is listed once, since every entry would
+    save the same value. Returns [("", "System Default")] if sounddevice is
+    not available.
     """
     devices: List[tuple[str, str]] = [("", "🔧 System Default")]
     try:
@@ -625,11 +632,23 @@ def get_input_devices() -> List[tuple[str, str]]:
             except Exception:
                 max_in = 0
             if max_in > 0:
-                name = dev.get("name", f"Device {idx}")
-                devices.append((str(idx), f"🎤 {name}"))
+                name = str(dev.get("name") or f"Device {idx}").strip()
+                if all(value != name for value, _ in devices):
+                    devices.append((name, f"🎤 {name}"))
     except Exception as e:
         debug_log(f"could not enumerate audio devices: {e}", "settings")
     return devices
+
+
+def _input_device_name(index: str) -> Optional[str]:
+    """The name of the microphone a stored index selects, or None."""
+    try:
+        import sounddevice as sd
+        from jarvis.utils.audio_stream import resolve_input_device
+        devices = sd.query_devices()
+        return str(devices[resolve_input_device(index, lambda: devices)]["name"]).strip()
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
