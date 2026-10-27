@@ -982,6 +982,34 @@ class TestMergeNodeData:
     """merge_node_data rewrites a node's data via an LLM consolidation pass."""
 
     @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_a_node_past_the_split_threshold_is_not_rewritten_whole(self, mock_llm, store):
+        # Past the threshold the node is the split's to reorganise. A whole
+        # rewrite of it either does not fit a small window or, given room,
+        # comes back short of facts with nothing to refuse it.
+        node = store.create_node(name="World", description="d", data=_stored(_LOOKED_UP), parent_id="root")
+        assert node.data_token_count > SPLIT_THRESHOLD
+        mock_llm.return_value = json.dumps({"facts": _LOOKED_UP[:10]})
+
+        result = merge_node_data(store=store, node_id=node.id,
+                                 new_facts=["Netil Market hosts a flea market on Sundays."],
+                                 cfg=None, chat_model="model")
+
+        assert result.success is False
+        assert not mock_llm.called
+        assert store.get_node(node.id).data == node.data
+
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_a_sweep_leaves_a_node_past_the_split_threshold_as_it_is(self, mock_llm, store):
+        node = store.create_node(name="World", description="d", data=_stored(_LOOKED_UP), parent_id="root")
+        mock_llm.return_value = json.dumps({"facts": _LOOKED_UP[:10]})
+
+        results = list(consolidate_all_populated_nodes(store=store, cfg=None, chat_model="model"))
+
+        lines = len(node.data.split("\n"))
+        assert ("World", lines, lines) in results
+        assert store.get_node(node.id).data == node.data
+
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
     def test_rewrites_node_with_consolidated_facts(self, mock_llm, store):
         node = store.create_node(
             name="Test",

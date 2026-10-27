@@ -58,6 +58,20 @@ def _oversized(store, node_id=BRANCH_WORLD):
     return store.get_node(node_id)
 
 
+def _just_under(store, node_id):
+    """A node a few characters short of the threshold, so the flush merges
+    it and the line it appends takes it over."""
+    lines = _lines(1)
+    while len("\n".join(lines + _lines(1))) // 4 <= SPLIT_THRESHOLD:
+        lines = _lines(len(lines) + 1)
+    data = "\n".join(lines)
+    data += "\n" + "Notes " + "x" * (SPLIT_THRESHOLD * 4 - len(data) - 8)
+    store.update_node(node_id, data=data)
+    node = store.get_node(node_id)
+    assert node.data_token_count == SPLIT_THRESHOLD
+    return node
+
+
 class _Model:
     """Extracts one new fact per flush, declines every merge (so the facts
     are appended) and answers every split with a lossy split, or with
@@ -158,13 +172,24 @@ class TestSplitBackoff:
 
         assert model.asked.count("split") == 2
 
+    def test_a_node_past_the_threshold_takes_its_new_facts_without_a_merge(self, store):
+        _oversized(store)
+        model = _Model()
+
+        result = _flush(store, model)
+
+        assert "merge" not in model.asked
+        assert [fact for fact, _ in result.stored] == ["The Rio Cinema screens a silent film on night 1."]
+        assert "silent film on night 1" in store.get_node(BRANCH_WORLD).data
+
     def test_splits_come_after_every_merge_of_the_flush(self, store):
-        # Two children under World: the big one, which needs a split, and a
-        # small one. The flush brings one fact to each.
+        # Two children under World: the big one, which the flush's fact takes
+        # past the threshold, and a small one. The flush brings one fact to
+        # each, and both merges come back with nothing.
         big = store.create_node(name="Markets", description="Markets", data="", parent_id=BRANCH_WORLD)
         small = store.create_node(name="Cinemas", description="Cinemas",
                                   data="The Rio Cinema is in Dalston.", parent_id=BRANCH_WORLD)
-        _oversized(store, big.id)
+        _just_under(store, big.id)
         asked = []
 
         def model(*, system_prompt, user_content, **kw):

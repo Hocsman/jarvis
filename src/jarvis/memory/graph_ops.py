@@ -789,6 +789,9 @@ def merge_node_data(
     Consolidation should only ever shrink or hold; runaway growth
     means the model invented content.
 
+    A node past ``SPLIT_THRESHOLD`` is not asked about at all: the
+    split reorganises it, and its new facts are appended.
+
     Fail-open on any error (LLM failure, parse failure, empty
     rewrite, oversized rewrite). Caller's append path then writes the
     fact directly. We never let a flaky LLM erase data — a
@@ -805,6 +808,21 @@ def merge_node_data(
     if node is None:
         node = store.get_node(node_id)
     if node is None:
+        return MergeResult(success=False)
+
+    # Past the threshold the node is the split's to reorganise, not the
+    # merge's to rewrite whole. On a small local window the rewrite of such
+    # a node does not fit: measured on gemma4:e2b at 4096 tokens, none of 40
+    # came back whole (101 and 152 lines; past the window the instruction to
+    # answer in JSON is cut away with the start of the prompt). Given room
+    # (8192), 7 of 20 were accepted and kept as little as 62 % of the node,
+    # with no guard here that counts lost lines.
+    if node.data_token_count > SPLIT_THRESHOLD:
+        debug_log(
+            f"merge: '{node.name}' holds {node.data_token_count} tokens, past the "
+            f"split threshold; its new facts are appended, not merged",
+            "memory",
+        )
         return MergeResult(success=False)
 
     existing_lines = _split_data_lines(node.data)
