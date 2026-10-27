@@ -19,16 +19,18 @@ _NO_PLACE_SENTINELS = frozenset({
 
 
 def _fold_name(name: str) -> str:
-    """Case, accents and spacing dropped, so two spellings of a name compare equal."""
+    """Case and accents dropped, whitespace runs reduced to one space, so two
+    spellings of a name compare equal."""
     return " ".join(fold_for_search(name).split())
 
 
 def _assistant_names(cfg) -> frozenset:
     """The names the assistant answers to, folded for comparison.
 
-    That is the wake word and its aliases, which is also the name the
-    persona goes by. Values that are not strings are skipped, so a config
-    object without a wake word simply yields no names.
+    That is the wake word, which is also the name the persona goes by, and
+    its aliases, the spellings the speech recogniser produces for it.
+    Values that are not strings are skipped, so a config object without a
+    wake word simply yields no names.
     """
     raw = [getattr(cfg, "wake_word", None)]
     aliases = getattr(cfg, "wake_aliases", None)

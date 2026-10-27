@@ -513,6 +513,8 @@ class TestExtractPlaceFromUserText:
             ("Yuba", "yuba"),
             ("yüba", "Yuba"),
             ("yuba", "Yübà"),
+            ("jar is", "Jar  is"),
+            ("jar is", " jar\tis "),
         ]
         for configured, reply in cases:
             cfg = self._cfg_named(configured)
@@ -544,7 +546,8 @@ class TestExtractPlaceFromUserText:
         """Config objects that carry no usable wake word (absent, empty, not
         a string) must not change extraction."""
         for wake_word, aliases in ((None, None), ("", []), (42, 7), ("  ", [""])):
-            cfg = self._cfg_named(wake_word, aliases=[])
+            cfg = self._cfg()
+            cfg.wake_word = wake_word
             cfg.wake_aliases = aliases
             with self._patched_backend("London"):
                 got = _extract_place_from_user_text("weather in London", cfg)

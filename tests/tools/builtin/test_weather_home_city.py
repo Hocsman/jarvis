@@ -101,9 +101,10 @@ class TestHomeCityFallback:
     def test_assistant_name_from_extractor_falls_through_to_configured_city(
         self, mock_get, _loc,
     ):
-        """"Yuba, la météo s'il te plaît": the extractor answers "Yuba", which
-        Open-Meteo would happily geocode to Yuba City. The assistant's own
-        name is not a place, so the configured home city must win."""
+        """When the user says "Yuba, la météo s'il te plaît" the extractor
+        answers "Yuba", which Open-Meteo would happily geocode to Yuba City.
+        The assistant's own name is not a place, so the configured home city
+        must win."""
         geo = Mock()
         geo.json.return_value = {"results": [{
             "latitude": 48.79, "longitude": 2.31, "name": "Bagneux",
