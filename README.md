@@ -364,6 +364,7 @@ The settings are under **⚙️ Settings → 🔧 Advanced**:
 | Small | `small.en` | `small` | ~465 MB | ~2 GB | ~4x |
 | **Medium** | `medium.en` | `medium` | ~1.5 GB | ~5 GB | ~2x |
 | Large V3 Turbo | - | `large-v3-turbo` | ~1.5 GB | ~6 GB | ~8x |
+| Large V3 | - | `large-v3` | ~3 GB | ~10 GB | 1x |
 
 Speed is relative to the original large model. [Source](https://github.com/openai/whisper)
 

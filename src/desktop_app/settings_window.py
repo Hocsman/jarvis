@@ -25,7 +25,7 @@ from PyQt6.QtGui import QFont
 from jarvis.config import (
     get_default_config, load_config,
     default_config_path, _save_json, _load_json,
-    SUPPORTED_CHAT_MODELS,
+    SUPPORTED_CHAT_MODELS, SUPPORTED_WHISPER_MODELS,
 )
 from jarvis.debug import debug_log
 from desktop_app.themes import apply_theme
@@ -321,11 +321,13 @@ def _build_field_metadata() -> List[FieldMeta]:
       "How loosely to match the wake word (0.0–1.0)",
       "wake", "float", min_val=0.5, max_val=1.0, step=0.01)
     # --- Whisper ---
+    whisper_choices = [
+        (mid, f"{info['name']} (English only)" if mid.endswith(".en") else info["name"])
+        for mid, info in SUPPORTED_WHISPER_MODELS.items()
+    ]
     f("whisper_model", "Model Size",
       "Whisper model size (tiny/base/small/medium/large)",
-      "whisper", "choice",
-      choices=[("tiny", "Tiny"), ("base", "Base"), ("small", "Small"),
-               ("medium", "Medium"), ("large-v3", "Large v3")])
+      "whisper", "choice", choices=whisper_choices)
     f("whisper_backend", "Backend",
       "Speech recognition backend",
       "whisper", "choice",

@@ -48,6 +48,34 @@ def get_supported_model_ids() -> set[str]:
     return set(SUPPORTED_CHAT_MODELS.keys())
 
 
+# Whisper models offered by the setup wizard and the settings window, smallest
+# first. An id ending in ``.en`` is English-only; the others cover ~99
+# languages. File sizes from HuggingFace (Systran/faster-whisper-*), VRAM from
+# OpenAI.
+SUPPORTED_WHISPER_MODELS: Dict[str, Dict[str, str]] = {
+    "tiny": {"name": "Tiny", "size": "~75MB", "vram": "~1GB VRAM",
+             "description": "Fastest, lower accuracy"},
+    "tiny.en": {"name": "Tiny", "size": "~75MB", "vram": "~1GB VRAM",
+                "description": "Fastest, English optimised"},
+    "base": {"name": "Base", "size": "~140MB", "vram": "~1GB VRAM",
+             "description": "Fast, decent accuracy"},
+    "base.en": {"name": "Base", "size": "~140MB", "vram": "~1GB VRAM",
+                "description": "Fast, English optimised"},
+    "small": {"name": "Small", "size": "~465MB", "vram": "~2GB VRAM",
+              "description": "Good balance of speed and accuracy"},
+    "small.en": {"name": "Small", "size": "~465MB", "vram": "~2GB VRAM",
+                 "description": "Good balance of speed and accuracy"},
+    "medium": {"name": "Medium", "size": "~1.5GB", "vram": "~5GB VRAM",
+               "description": "Best balance (Recommended)"},
+    "medium.en": {"name": "Medium", "size": "~1.5GB", "vram": "~5GB VRAM",
+                  "description": "Best balance (Recommended)"},
+    "large-v3-turbo": {"name": "Large V3 Turbo", "size": "~1.5GB", "vram": "~6GB VRAM",
+                       "description": "Near Large V3 accuracy, much faster"},
+    "large-v3": {"name": "Large V3", "size": "~3GB", "vram": "~10GB VRAM",
+                 "description": "Best accuracy, slowest, needs the most VRAM"},
+}
+
+
 # The values ``llm_provider`` accepts. Anything else reads as ``ollama``.
 LLM_PROVIDERS = ("ollama", "openai_compatible", "anthropic")
 

@@ -106,6 +106,31 @@ class TestFieldMetadata:
         assert field.field_type == "bool"
 
 
+class TestWhisperModelField:
+    """The settings window offers every Whisper model the setup wizard can
+    write, so a size picked in one is listed by the other."""
+
+    @staticmethod
+    def _field():
+        return next(fm for fm in FIELD_METADATA if fm.key == "whisper_model")
+
+    def test_every_wizard_option_is_offered(self):
+        from desktop_app.setup_wizard import WhisperSetupPage
+
+        offered = {value for value, _ in self._field().choices}
+        wizard = {
+            option[0]
+            for option in WhisperSetupPage.WHISPER_MODEL_OPTIONS
+            + WhisperSetupPage.WHISPER_MODEL_OPTIONS_EN
+        }
+        assert wizard <= offered, f"not offered by settings: {sorted(wizard - offered)}"
+
+    def test_labels_tell_every_model_apart(self):
+        """``tiny`` and ``tiny.en`` must not read the same in the dropdown."""
+        labels = [label for _, label in self._field().choices]
+        assert len(labels) == len(set(labels))
+
+
 class TestLLMProviderFields:
     """The settings UI must expose the provider-aware LLM config so a user
     can select an OpenAI-compatible backend without editing config.json by

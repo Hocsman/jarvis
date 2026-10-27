@@ -1021,6 +1021,7 @@ class TestWhisperModelOptions:
         page._is_apple_silicon = False
         page.WHISPER_MODEL_OPTIONS = WhisperSetupPage.WHISPER_MODEL_OPTIONS
         page.WHISPER_MODEL_OPTIONS_EN = WhisperSetupPage.WHISPER_MODEL_OPTIONS_EN
+        page._unlisted_whisper_model = None
 
         with patch("desktop_app.setup_wizard._is_faster_whisper_turbo_supported", return_value=False):
             options = WhisperSetupPage._get_current_model_options(page)
@@ -1037,6 +1038,7 @@ class TestWhisperModelOptions:
         page._is_apple_silicon = False
         page.WHISPER_MODEL_OPTIONS = WhisperSetupPage.WHISPER_MODEL_OPTIONS
         page.WHISPER_MODEL_OPTIONS_EN = WhisperSetupPage.WHISPER_MODEL_OPTIONS_EN
+        page._unlisted_whisper_model = None
 
         with patch("desktop_app.setup_wizard._is_faster_whisper_turbo_supported", return_value=True):
             options = WhisperSetupPage._get_current_model_options(page)
@@ -1052,6 +1054,7 @@ class TestWhisperModelOptions:
         page._is_apple_silicon = True
         page.WHISPER_MODEL_OPTIONS = WhisperSetupPage.WHISPER_MODEL_OPTIONS
         page.WHISPER_MODEL_OPTIONS_EN = WhisperSetupPage.WHISPER_MODEL_OPTIONS_EN
+        page._unlisted_whisper_model = None
 
         with patch("desktop_app.setup_wizard._is_faster_whisper_turbo_supported", return_value=False):
             options = WhisperSetupPage._get_current_model_options(page)
@@ -1374,4 +1377,229 @@ class TestSearchProvidersPage:
             assert saved["mcps"] == {"x": {}}
         finally:
             cfg_path.unlink(missing_ok=True)
+
+
+# --- Re-running the wizard keeps a value its pages do not list ------------
+
+
+@pytest.fixture
+def wizard_config(tmp_path, monkeypatch):
+    """Point every config read and write the wizard pages make at one file.
+
+    ``setup_wizard`` binds ``default_config_path`` by name at import, so the
+    suite-wide sandbox on ``jarvis.config`` does not reach the pages that
+    write through that name.
+    """
+    import json
+
+    path = tmp_path / "config.json"
+    monkeypatch.setattr("jarvis.config.default_config_path", lambda: path)
+    monkeypatch.setattr("desktop_app.setup_wizard.default_config_path", lambda: path)
+    monkeypatch.setenv("JARVIS_CONFIG_PATH", str(path))
+
+    class _Config:
+        def write(self, values):
+            path.write_text(json.dumps(values), encoding="utf-8")
+
+        def read(self):
+            return json.loads(path.read_text(encoding="utf-8"))
+
+    return _Config()
+
+
+class TestModelsPageKeepsAnUnlistedChatModel:
+    """A chat model the cards do not list (one pulled on purpose) survives a
+    re-run of the wizard untouched."""
+
+    UNLISTED = "my-own-model:7b"
+
+    @staticmethod
+    def _cards(page):
+        from PyQt6.QtWidgets import QPushButton
+
+        return [b for b in page.findChildren(QPushButton) if b.isCheckable()]
+
+    def test_unlisted_model_is_written_back_unchanged(self, qapp, wizard_config):
+        from desktop_app.setup_wizard import ModelsPage
+        from jarvis.config import SUPPORTED_CHAT_MODELS
+
+        assert self.UNLISTED not in SUPPORTED_CHAT_MODELS
+        wizard_config.write({"ollama_chat_model": self.UNLISTED})
+
+        page = ModelsPage()
+        page.initializePage()
+        page.validatePage()
+
+        assert wizard_config.read()["ollama_chat_model"] == self.UNLISTED
+
+    def test_unlisted_model_gets_its_own_selected_card(self, qapp, wizard_config):
+        from desktop_app.setup_wizard import ModelsPage
+
+        wizard_config.write({"ollama_chat_model": self.UNLISTED})
+
+        page = ModelsPage()
+        page.initializePage()
+
+        checked = [b for b in self._cards(page) if b.isChecked()]
+        assert [b.text() for b in checked] == [self.UNLISTED]
+
+    def test_reentering_the_page_adds_the_card_once(self, qapp, wizard_config):
+        from desktop_app.setup_wizard import ModelsPage
+        from jarvis.config import SUPPORTED_CHAT_MODELS
+
+        wizard_config.write({"ollama_chat_model": self.UNLISTED})
+
+        page = ModelsPage()
+        for _ in range(3):
+            page.initializePage()
+
+        assert len(self._cards(page)) == len(SUPPORTED_CHAT_MODELS) + 1
+
+    def test_choosing_a_listed_model_replaces_it(self, qapp, wizard_config):
+        from desktop_app.setup_wizard import ModelsPage
+        from jarvis.config import SUPPORTED_CHAT_MODELS
+
+        wizard_config.write({"ollama_chat_model": self.UNLISTED})
+        listed_id, listed = next(iter(SUPPORTED_CHAT_MODELS.items()))
+
+        page = ModelsPage()
+        page.initializePage()
+        card = next(b for b in self._cards(page) if b.text().startswith(listed["name"]))
+        card.click()
+        page.validatePage()
+
+        assert wizard_config.read()["ollama_chat_model"] == listed_id
+
+
+class TestWhisperSetupPageKeepsAnUnlistedModel:
+    """A Whisper model the slider does not list (a local model path, a turbo
+    the installed engine cannot run) survives a re-run of the wizard
+    untouched."""
+
+    @staticmethod
+    def _slider_names(page):
+        names = []
+        for i in range(page._labels_layout.count()):
+            w = page._labels_layout.itemAt(i).widget()
+            if w is not None:
+                names.append(w.text())
+        return names
+
+    @pytest.mark.parametrize("value", [
+        "distil-large-v3",
+        "distil-small.en",
+        "~/models/whisper-ct2",
+    ])
+    def test_unlisted_model_is_written_back_unchanged(self, qapp, wizard_config, value):
+        from desktop_app.setup_wizard import WhisperSetupPage
+
+        wizard_config.write({"whisper_model": value})
+
+        page = WhisperSetupPage()
+        page.initializePage()
+        page.validatePage()
+
+        assert wizard_config.read()["whisper_model"] == value
+
+    def test_every_model_the_settings_window_offers_is_written_back(self, qapp, wizard_config):
+        """A size picked in Settings must not come back as another size."""
+        from desktop_app.settings_window import FIELD_METADATA
+        from desktop_app.setup_wizard import WhisperSetupPage
+
+        fm = next(f for f in FIELD_METADATA if f.key == "whisper_model")
+        for value, _label in fm.choices:
+            wizard_config.write({"whisper_model": value})
+
+            page = WhisperSetupPage()
+            page.initializePage()
+            page.validatePage()
+
+            assert wizard_config.read()["whisper_model"] == value
+
+    def test_turbo_is_kept_when_the_engine_cannot_run_it(self, qapp, wizard_config):
+        from desktop_app.setup_wizard import WhisperSetupPage
+
+        wizard_config.write({"whisper_model": "large-v3-turbo"})
+
+        with patch("desktop_app.setup_wizard.is_apple_silicon", return_value=False), \
+                patch("desktop_app.setup_wizard._is_faster_whisper_turbo_supported", return_value=False):
+            page = WhisperSetupPage()
+            page.initializePage()
+            page.validatePage()
+
+        assert wizard_config.read()["whisper_model"] == "large-v3-turbo"
+
+    def test_unlisted_model_is_shown_raw_on_the_slider(self, qapp, wizard_config):
+        from desktop_app.setup_wizard import WhisperSetupPage
+
+        wizard_config.write({"whisper_model": "distil-large-v3"})
+
+        page = WhisperSetupPage()
+        page.initializePage()
+
+        assert "distil-large-v3" in self._slider_names(page)
+        assert "distil-large-v3" in page._model_info_label.text()
+
+    def test_reentering_the_page_adds_the_option_once(self, qapp, wizard_config):
+        from desktop_app.setup_wizard import WhisperSetupPage
+
+        wizard_config.write({"whisper_model": "distil-large-v3"})
+
+        page = WhisperSetupPage()
+        for _ in range(3):
+            page.initializePage()
+
+        assert self._slider_names(page).count("distil-large-v3") == 1
+
+    def test_choosing_a_listed_model_replaces_it(self, qapp, wizard_config):
+        from desktop_app.setup_wizard import WhisperSetupPage
+
+        wizard_config.write({"whisper_model": "distil-large-v3"})
+
+        page = WhisperSetupPage()
+        page.initializePage()
+        page._model_slider.setValue(0)
+        page.validatePage()
+
+        assert wizard_config.read()["whisper_model"] == WhisperSetupPage.WHISPER_MODEL_OPTIONS[0][0]
+
+
+class TestDictationPageKeepsAnUnlistedHotkey:
+    """A hand-edited dictation hotkey the presets do not list survives a
+    re-run of the wizard untouched."""
+
+    UNLISTED = "ctrl+alt+space"
+
+    def test_unlisted_hotkey_is_written_back_unchanged(self, qapp, wizard_config):
+        from desktop_app.setup_wizard import DictationPage
+
+        assert self.UNLISTED not in [v for v, _ in DictationPage._hotkey_options()]
+        wizard_config.write({"dictation_hotkey": self.UNLISTED})
+
+        page = DictationPage()
+        page.validatePage()
+
+        assert wizard_config.read()["dictation_hotkey"] == self.UNLISTED
+
+    def test_unlisted_hotkey_is_shown_raw_and_selected(self, qapp, wizard_config):
+        from desktop_app.setup_wizard import DictationPage
+
+        wizard_config.write({"dictation_hotkey": self.UNLISTED})
+
+        page = DictationPage()
+
+        assert page._hotkey_combo.currentText() == self.UNLISTED
+        assert page._hotkey_combo.currentData() == self.UNLISTED
+
+    def test_choosing_a_preset_replaces_it(self, qapp, wizard_config):
+        from desktop_app.setup_wizard import DictationPage
+
+        wizard_config.write({"dictation_hotkey": self.UNLISTED})
+        preset = DictationPage._hotkey_options()[0][0]
+
+        page = DictationPage()
+        page._hotkey_combo.setCurrentIndex(page._hotkey_combo.findData(preset))
+        page.validatePage()
+
+        assert wizard_config.read()["dictation_hotkey"] == preset
 

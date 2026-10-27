@@ -137,6 +137,13 @@ values are harmless because the backend resolves per-provider: the Ollama path
 uses `ollama_base_url` / `ollama_chat_model` and `OllamaBackend` ignores any
 API key. To drop a leftover value, clear that field and save.
 
+### Speech Recognition (Whisper)
+
+The `whisper_model` dropdown lists every model in `SUPPORTED_WHISPER_MODELS`
+(`jarvis/config.py`), the list the setup wizard's Whisper page draws its
+slider from, so a size picked in either one is listed by the other. An
+English-only id (`.en`) reads as its size name followed by "(English only)".
+
 ### Features
 
 The Features category exposes user-facing runtime toggles that do not need a
