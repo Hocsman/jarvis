@@ -85,6 +85,7 @@ def check_mlx_whisper_status() -> MLXWhisperStatus:
 
 # Import config early (no PyQt6 dependency) - needed for detection functions
 from jarvis.config import load_settings, get_default_config, default_config_path, names_provider_model
+from jarvis.listening.whisper_turbo import is_faster_whisper_turbo_supported
 
 
 class SetupStatus(Enum):
@@ -1873,16 +1874,6 @@ class ModelsPage(QWizardPage):
         return super().nextId()
 
 
-def _is_faster_whisper_turbo_supported() -> bool:
-    """Check if the installed faster-whisper supports the large-v3-turbo model."""
-    try:
-        import faster_whisper
-        from packaging.version import Version
-        return Version(faster_whisper.__version__) >= Version("1.1.0")
-    except Exception:
-        return False
-
-
 class WhisperSetupPage(QWizardPage):
     """Page for setting up Whisper speech recognition (all platforms)."""
 
@@ -2182,7 +2173,7 @@ class WhisperSetupPage(QWizardPage):
         if self._is_apple_silicon:
             return options
         # For faster-whisper backend, only show turbo if the library supports it
-        if not _is_faster_whisper_turbo_supported():
+        if not is_faster_whisper_turbo_supported():
             options = [opt for opt in options if opt[0] != "large-v3-turbo"]
         return options
 
@@ -2822,23 +2813,6 @@ class LocationPage(QWizardPage):
 class DictationPage(QWizardPage):
     """Page for configuring dictation (hold-to-dictate) settings."""
 
-    @staticmethod
-    def _hotkey_options():
-        from jarvis.dictation.dictation_engine import format_hotkey_display
-        from jarvis.config import _default_dictation_hotkey
-        default = _default_dictation_hotkey()
-        options = [
-            ("ctrl+alt", format_hotkey_display("ctrl+alt")),
-            ("ctrl+cmd", format_hotkey_display("ctrl+cmd")),
-            ("ctrl+shift+d", format_hotkey_display("ctrl+shift+d")),
-            ("ctrl+shift", format_hotkey_display("ctrl+shift")),
-        ]
-        # Tag the platform default
-        return [
-            (val, f"{label} (default)" if val == default else label)
-            for val, label in options
-        ]
-
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setTitle("")
@@ -2906,7 +2880,8 @@ class DictationPage(QWizardPage):
         hotkey_layout.addWidget(hotkey_desc)
 
         self._hotkey_combo = QComboBox()
-        for value, label in self._hotkey_options():
+        from jarvis.dictation.dictation_engine import dictation_hotkey_choices
+        for value, label in dictation_hotkey_choices():
             self._hotkey_combo.addItem(label, value)
         self._hotkey_combo.setStyleSheet(
             "QComboBox { padding: 8px; font-size: 14px; background: #27272a; "

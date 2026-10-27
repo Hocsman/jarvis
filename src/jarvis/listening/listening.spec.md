@@ -510,6 +510,9 @@ When components are unavailable, the system degrades gracefully:
 | Intent Judge | Simple text-based wake word + query extraction; hot window override still applies |
 | 16 kHz sample rate | Stream at device native rate, resample to 16 kHz for Whisper |
 | Transcript Buffer | Process each utterance independently |
+| `large-v3-turbo` on faster-whisper older than 1.1.0 | Load `large-v3` instead and say so (`⚠️ large-v3-turbo is not supported…`). MLX always runs it |
+
+Whether the installed faster-whisper runs `large-v3-turbo` is `is_faster_whisper_turbo_supported()` in `jarvis/listening/whisper_turbo.py`, the one check the listener and the setup wizard share. It reads the version from the package's installed metadata (`importlib.metadata.version("faster-whisper")`) and never imports the package, so the wizard can ask on its UI thread without loading ctranslate2. A missing install or an unreadable version reads as unsupported. The distribution name stays a literal in that call: PyInstaller's analysis ships the metadata of the names it sees passed to `version()`, which is how the frozen build can answer at all.
 
 ## Download Recovery
 

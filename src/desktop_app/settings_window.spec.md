@@ -153,6 +153,11 @@ dedicated page:
 - `dictation_filler_removal`
 - `dictation_custom_dictionary`
 
+`dictation_hotkey` is a dropdown of `DICTATION_HOTKEY_PRESETS` (`jarvis/config.py`)
+built by `dictation_hotkey_choices()`, the same builder the setup wizard's
+Dictation page uses, so both windows offer the same presets with the platform
+default marked `(default)`.
+
 `low_power_mode` is a boolean toggle. When enabled, the voice listener skips
 LLM startup warmup and the Ollama keep-alive windows used by warmup and the
 intent judge are short. The setting is saved only when it differs from the

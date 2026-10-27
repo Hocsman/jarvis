@@ -524,6 +524,19 @@ def format_hotkey_display(combo: str) -> str:
     return " + ".join(display_parts)
 
 
+def dictation_hotkey_choices() -> list[tuple[str, str]]:
+    """The dictation hotkey presets as ``(value, label)`` pairs for a
+    dropdown, the platform default's label ending in ``(default)``."""
+    from .. import config
+
+    default = config._default_dictation_hotkey()
+    choices = []
+    for combo in config.DICTATION_HOTKEY_PRESETS:
+        label = format_hotkey_display(combo)
+        choices.append((combo, f"{label} (default)" if combo == default else label))
+    return choices
+
+
 def parse_hotkey(combo: str):
     """Parse a hotkey string like ``'ctrl+shift+d'`` into pynput key objects.
 

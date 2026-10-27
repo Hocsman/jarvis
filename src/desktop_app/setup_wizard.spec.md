@@ -62,9 +62,9 @@ Fields suffixed `?` are written only when non-empty (minimal-config invariant).
 
 **ModelsPage** — Displays `SUPPORTED_CHAT_MODELS` as selectable cards with VRAM requirements (including always-loaded intent judge overhead). Installs: selected chat model + embedding model (`nomic-embed-text`) + intent judge (`gemma4:e2b`). Progress bar and log output during `ollama pull`. User can skip if models are already present.
 
-**WhisperSetupPage** — Language mode toggle (multilingual vs English-only), then model size selection from hardcoded options. Apple Silicon: additional FFmpeg and MLX Whisper installation buttons.
+**WhisperSetupPage** — Language mode toggle (multilingual vs English-only), then model size selection from hardcoded options. `large-v3-turbo` is left out when `is_faster_whisper_turbo_supported()` (`jarvis/listening/whisper_turbo.py`, the check the listener uses) says the installed faster-whisper cannot run it; never on Apple Silicon, where MLX can. Apple Silicon: additional FFmpeg and MLX Whisper installation buttons.
 
-**DictationPage** — Enable/disable dictation, hotkey selection dropdown (4 presets), filler word removal toggle with delay warning. Reads current config values on open so re-running the wizard preserves user choices.
+**DictationPage** — Enable/disable dictation, hotkey selection dropdown (the presets of `DICTATION_HOTKEY_PRESETS`, built by `dictation_hotkey_choices()` as in the settings window), filler word removal toggle with delay warning. Reads current config values on open so re-running the wizard preserves user choices.
 
 **MCPPage** — Shows wizard-featured entries from `mcp_catalogue.py` as selectable cards (checkbox + name + description). Already-configured servers start checked. On validate, selected servers are added to `config.mcps` and deselected wizard entries are removed. Includes a tip pointing users to Settings → MCP Servers for the full catalogue and custom servers.
 

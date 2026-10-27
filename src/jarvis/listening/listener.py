@@ -24,6 +24,7 @@ from .state_manager import StateManager, ListeningState
 from ..utils.audio_lock import portaudio_lock
 from .wake_detection import is_wake_word_detected, extract_query_after_wake, is_stop_command
 from .transcript_buffer import TranscriptBuffer
+from .whisper_turbo import is_faster_whisper_turbo_supported
 from .intent_judge import (
     IntentJudge,
     _is_low_power_mode_enabled,
@@ -372,16 +373,6 @@ def _query_is_an_unfinished_fragment(heard: str, query: str) -> bool:
         return False
     plat = re.sub(r"\s+", " ", heard.rstrip("… .").lower())
     return re.sub(r"\s+", " ", query.lower()) in plat
-
-
-def _is_faster_whisper_turbo_supported() -> bool:
-    """Check if the installed faster-whisper supports the large-v3-turbo model."""
-    try:
-        import faster_whisper
-        from packaging.version import Version
-        return Version(faster_whisper.__version__) >= Version("1.1.0")
-    except Exception:
-        return False
 
 
 def _get_mlx_model_repo(model_name: str) -> str:
@@ -2400,7 +2391,7 @@ class VoiceListener(threading.Thread):
 
         # Validate large-v3-turbo support for faster-whisper backend
         if model_name == "large-v3-turbo" and self._whisper_backend != "mlx":
-            if not _is_faster_whisper_turbo_supported():
+            if not is_faster_whisper_turbo_supported():
                 debug_log(
                     "faster-whisper does not support large-v3-turbo, "
                     "falling back to large-v3", "voice",

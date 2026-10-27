@@ -75,6 +75,11 @@ def _default_dictation_hotkey() -> str:
         return "ctrl+alt"
 
 
+# The dictation hotkeys the setup wizard and the settings window offer, in
+# dropdown order. Every platform's default above is one of them.
+DICTATION_HOTKEY_PRESETS = ("ctrl+alt", "ctrl+cmd", "ctrl+shift+d", "ctrl+shift")
+
+
 def _default_db_path() -> str:
     """Where the database lives when the user pins no path.
 
