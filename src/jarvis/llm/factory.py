@@ -100,6 +100,20 @@ def _build_uncached(
     return OllamaBackend(base_url)
 
 
+def _openai_compatible_url(settings: Any) -> str:
+    return _str_attr(settings, "llm_base_url") or _str_attr(
+        settings, "ollama_base_url", _DEFAULT_OLLAMA_URL
+    )
+
+
+def _on_a_remote_provider(settings: Any) -> bool:
+    """Whether the configured chat endpoint is off this machine and network."""
+    provider = _resolve_provider(getattr(settings, "llm_provider", None))
+    return provider == _OPENAI_COMPATIBLE and not is_local_endpoint(
+        _openai_compatible_url(settings)
+    )
+
+
 def get_llm_backend(settings: Any, model: Optional[str] = None) -> LLMBackend:
     """Return the configured chat backend.
 
@@ -112,14 +126,23 @@ def get_llm_backend(settings: Any, model: Optional[str] = None) -> LLMBackend:
     on a remote OpenAI-compatible provider, the model cannot run on the
     remote endpoint. It routes to local Ollama instead, eliminating cloud
     network latency for auxiliary classification and routing passes.
+
+    The chat model is the exception: it lives on the provider whatever its
+    spelling. Some providers (api.openai.com, DeepSeek, Groq) name their
+    models without a slash, and the chat model is the one name known to
+    exist there, so a call that lands on it, by default or because
+    ``_cloud_safe_model`` substituted it, stays on the provider.
     """
     model_str = (model or "").strip()
     provider = _resolve_provider(getattr(settings, "llm_provider", None))
     if provider == _OPENAI_COMPATIBLE:
-        base_url = _str_attr(settings, "llm_base_url") or _str_attr(
-            settings, "ollama_base_url", _DEFAULT_OLLAMA_URL
-        )
-        if model_str and not is_local_endpoint(base_url) and "/" not in model_str:
+        base_url = _openai_compatible_url(settings)
+        if (
+            model_str
+            and "/" not in model_str
+            and model_str != _str_attr(settings, "llm_chat_model")
+            and not is_local_endpoint(base_url)
+        ):
             return get_llm_backend(_SurLaMachine(settings))
     else:
         base_url = _str_attr(settings, "ollama_base_url", _DEFAULT_OLLAMA_URL)
@@ -205,13 +228,17 @@ def get_private_backend(settings: Any, pinned: str, model: str) -> LLMBackend:
     alone, which on a cloud provider sends a pinned local tag, and the
     sentence with it, to the cloud.
 
-    So a pin decides the destination too, whatever its shape: an
-    ``hf.co/...`` Ollama tag has a slash and is still his machine. With
-    nothing pinned, ``model`` (the one the context resolved and is about
-    to send) decides it the way it does for every other call: a bare tag
-    on a remote provider names a model that lives on local Ollama, and
-    goes there. A namespaced model stays on the provider he chose: the
-    chat model at the end of the chain, a router given as
+    So on a remote provider a pin decides the destination too, whatever
+    its shape: an ``hf.co/...`` Ollama tag has a slash and is still his
+    machine. On a server on his own machine or network (LM Studio,
+    ``llama-server``), the pin is one of that server's model IDs and runs
+    there: the sentence is already home, and Ollama does not have it.
+
+    With nothing pinned, ``model`` (the one the context resolved and is
+    about to send) decides it the way it does for every other call: a bare
+    tag on a remote provider names a model that lives on local Ollama, and
+    goes there. The chat model, whatever its spelling, and a namespaced
+    model stay on the provider he chose: a router given as
     ``vendor/model``, and a slashed local tag too, which only a pin keeps
     here.
 
@@ -220,7 +247,7 @@ def get_private_backend(settings: Any, pinned: str, model: str) -> LLMBackend:
     has to go where that model lives.
     """
     is_pinned = bool((pinned or "").strip())
-    if is_pinned:
+    if is_pinned and _on_a_remote_provider(settings):
         backend = get_llm_backend(_SurLaMachine(settings))
     else:
         backend = get_llm_backend(settings, model=model)

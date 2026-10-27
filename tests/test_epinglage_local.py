@@ -12,10 +12,13 @@ looks at the model, so on a cloud provider it would carry a local tag,
 and the sentence with it, to the cloud, where the tag does not even
 exist. Hence the rule these tests hold, at the wire:
 
-- a pin means this machine, whatever the tag looks like;
+- behind a remote provider a pin means local Ollama, whatever the tag
+  looks like; behind a server on his own machine or network (LM Studio,
+  `llama-server`) it runs on that server, where its ID lives;
 - with no pin, the model the chain resolved decides, as on the auxiliary
-  route: a bare tag on a remote provider runs on local Ollama, and a
-  namespaced model stays on the provider the user chose;
+  route: a bare tag on a remote provider runs on local Ollama, and the
+  chat model, however it is spelled, or a namespaced model stays on the
+  provider the user chose;
 - the name sent and the destination always come from the same model,
   however far down the chain it was found.
 """
@@ -311,6 +314,83 @@ def test_the_journal_s_own_pin_keeps_it_here_whatever_its_shape():
 
     assert parties, "the journal was not read at all"
     assert all(_ici(url) and model == tag for url, model in parties), parties
+
+
+# ── A server on his own machine, and a cloud with bare IDs ────────────
+
+
+_LM_STUDIO = "http://localhost:1234/v1"
+
+
+@pytest.mark.parametrize("lire", _CONTEXTES.values(), ids=_CONTEXTES.keys())
+def test_a_pin_on_a_server_on_his_own_machine_runs_there(lire):
+    """LM Studio on localhost is already this machine, and the pin is one
+    of its model IDs: Ollama does not have it, and moving the request
+    there would buy no privacy for a reading that fails."""
+    cfg = _cfg(llm_base_url=_LM_STUDIO, llm_chat_model="qwen3-32b-instruct",
+               reminder_model="qwen3-1.7b-instruct",
+               appris_model="qwen3-1.7b-instruct")
+
+    parties = _requetes(lire, cfg)
+
+    assert parties, "the context sent nothing at all"
+    assert all(url.startswith(_LM_STUDIO) and model == "qwen3-1.7b-instruct"
+               for url, model in parties), parties
+
+
+def test_the_journal_follows_the_reminder_pin_to_his_own_server():
+    """`appris_model` empty, `reminder_model` pinned on LM Studio: the
+    journal runs where the reminder runs, which is that server."""
+    cfg = _cfg(llm_base_url=_LM_STUDIO, llm_chat_model="qwen3-32b-instruct",
+               reminder_model="qwen3-1.7b-instruct")
+
+    parties = _requetes(_lire_le_journal, cfg)
+
+    assert parties, "the journal was not read at all"
+    assert all(url.startswith(_LM_STUDIO) and model == "qwen3-1.7b-instruct"
+               for url, model in parties), parties
+
+
+def test_a_box_on_his_network_counts_as_his_own_server():
+    """The host decides, as it does for the auxiliary pins."""
+    lan = "http://192.168.1.42:8000/v1"
+    cfg = _cfg(llm_base_url=lan, llm_chat_model="qwen3-32b-instruct",
+               reminder_model="qwen3-1.7b-instruct")
+
+    parties = _requetes(_lire_un_rappel, cfg)
+
+    assert parties, "the context sent nothing at all"
+    assert all(url.startswith(lan) and model == "qwen3-1.7b-instruct"
+               for url, model in parties), parties
+
+
+@pytest.mark.parametrize("lire", _CONTEXTES.values(), ids=_CONTEXTES.keys())
+def test_a_chain_ending_on_a_bare_cloud_chat_id_keeps_the_provider(lire):
+    """api.openai.com names its models without a vendor slash. The chat
+    model lives on the provider whatever its spelling: Ollama does not
+    have `gpt-4o-mini`, and the chat already sends everything there."""
+    cfg = _cfg(llm_base_url="https://api.openai.com/v1",
+               llm_chat_model="gpt-4o-mini")
+
+    parties = _requetes(lire, cfg)
+
+    assert parties, "the context sent nothing at all"
+    assert all(url.startswith("https://api.openai.com/v1")
+               and model == "gpt-4o-mini" for url, model in parties), parties
+
+
+@pytest.mark.parametrize("lire", _CONTEXTES.values(), ids=_CONTEXTES.keys())
+def test_a_bare_local_tag_still_stays_here_beside_a_bare_cloud_chat_id(lire):
+    """Only the chat model's own name is read as the provider's: a router
+    pinned to a local tag still runs here."""
+    cfg = _cfg(llm_base_url="https://api.openai.com/v1",
+               llm_chat_model="gpt-4o-mini", tool_router_model="qwen2.5:3b")
+
+    parties = _requetes(lire, cfg)
+
+    assert parties, "the context sent nothing at all"
+    assert all(_ici(url) and model == "qwen2.5:3b"
+               for url, model in parties), parties
 
 
 def test_the_promise_is_the_same_for_all_four():
