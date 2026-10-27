@@ -30,6 +30,7 @@ from src.jarvis.memory.graph_ops import (
     merge_node_data,
     consolidate_all_populated_nodes,
     MergeResult,
+    _MERGE_GROWTH_SLACK,
     _SPLIT_MIN_RETENTION,
 )
 
@@ -507,12 +508,12 @@ class TestAutoSplitNode:
     @patch("src.jarvis.memory.graph_ops.call_llm_direct")
     def test_good_split_that_drops_filler_and_narration_and_folds_a_duplicate_is_accepted(
             self, mock_llm, store):
-        # The node holds one answer twice, worded apart, plus filler and
-        # narration. The split folds the pair into one line, leaves out
-        # the filler and the narration, hands every line back without its
-        # provenance suffix, and drops a full stop and a capital here and
-        # there, as models do.
-        duplicate = "The main pool at Clissold Leisure Centre is 25 metres long, and its learner pool is kept a little warmer."
+        # The node holds one answer twice, in two close wordings, plus
+        # filler and narration. The split folds the pair into one line,
+        # leaves out the filler and the narration, hands every line back
+        # without its provenance suffix, and drops a full stop and a
+        # capital here and there, as models do.
+        duplicate = "Clissold Leisure Centre's main pool is 25 metres long, and the learner pool beside it is kept a little warmer."
         node = self._make_world_node(store, _LOOKED_UP + [duplicate] + _FILLER + _NARRATION)
         kept = [line.rstrip(".") if i % 3 == 0 else line for i, line in enumerate(_LOOKED_UP)]
         kept[5] = kept[5].lower()
@@ -535,6 +536,104 @@ class TestAutoSplitNode:
 
         mock_llm.return_value = _split_answer(_LOOKED_UP[:10], _LOOKED_UP[10:floor])
         assert auto_split_node(store, node.id, None, "model") is True
+
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_a_close_rewording_counts_as_carried_and_a_loose_one_does_not(self, mock_llm, store):
+        # One line short of the floor kept word for word; whether the split
+        # passes depends on how the last answer comes back.
+        floor = math.ceil(_SPLIT_MIN_RETENTION * len(_LOOKED_UP))
+        bao = next(line for line in _LOOKED_UP if line.startswith("Bao Borough"))
+        verbatim = [line for line in _LOOKED_UP if line != bao][: floor - 1]
+        close = "Bao Borough serves a fried chicken bao on its weekend menu, alongside a side dish of sweet potato fries."
+        loose = "At weekends Bao Borough has a fried chicken bao and sweet potato fries."
+
+        node = self._make_world_node(store, _LOOKED_UP)
+        mock_llm.return_value = _split_answer(verbatim[:10], verbatim[10:] + [loose])
+        assert auto_split_node(store, node.id, None, "model") is False
+        self._assert_untouched(store, node)
+
+        mock_llm.return_value = _split_answer(verbatim[:10], verbatim[10:] + [close])
+        assert auto_split_node(store, node.id, None, "model") is True
+
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_lines_that_differ_in_their_figures_are_not_carried_by_one_of_them(self, mock_llm, store):
+        # One line per performance, worded alike, each with its own date,
+        # time and price. Keeping one of them keeps none of the others.
+        performances = [
+            f"The Hackney Empire's pantomime on 2026-12-{day:02d} starts at {2 + day % 6}pm "
+            f"and tickets cost £{14 + day}."
+            for day in range(1, 25)
+        ]
+        kept = _LOOKED_UP + performances[:1]
+        assert len(kept) < _SPLIT_MIN_RETENTION * len(_LOOKED_UP + performances)
+        node = self._make_world_node(store, _LOOKED_UP + performances)
+        mock_llm.return_value = _split_answer(kept[:24], kept[24:])
+
+        assert auto_split_node(store, node.id, None, "model") is False
+        self._assert_untouched(store, node)
+
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_split_that_adds_lines_the_node_did_not_hold_is_rejected(self, mock_llm, store):
+        node = self._make_world_node(store, _LOOKED_UP)
+        invented = [
+            "The Earth revolves around the Sun.",
+            "London is the capital of England.",
+            "Bread is made from flour and water.",
+            "Rivers flow towards the sea.",
+        ][: _MERGE_GROWTH_SLACK + 1]
+        kept = _LOOKED_UP + invented
+        mock_llm.return_value = _split_answer(kept[:24], kept[24:])
+
+        assert auto_split_node(store, node.id, None, "model") is False
+        self._assert_untouched(store, node)
+
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_facts_packed_into_one_item_are_measured_and_written_one_per_line(self, mock_llm, store):
+        node = self._make_world_node(store, _LOOKED_UP)
+        mock_llm.return_value = _split_answer(["\n".join(_LOOKED_UP[:24])], _LOOKED_UP[24:])
+
+        assert auto_split_node(store, node.id, None, "model") is True
+        written = [line for c in store.get_children(node.id) for line in c.data.split("\n")]
+        assert sorted(written) == sorted(_LOOKED_UP)
+
+    @pytest.mark.parametrize("answer", [
+        pytest.param(lambda: {"categories": {"Venues": {"name": "Venues", "facts": _LOOKED_UP}}},
+                     id="categories-not-a-list"),
+        pytest.param(lambda: {"categories": ["Venues", {"name": "Things", "facts": _LOOKED_UP}]},
+                     id="category-not-an-object"),
+        pytest.param(lambda: {"categories": [{"name": "  ", "facts": _LOOKED_UP[:24]},
+                                             {"name": "Things", "facts": _LOOKED_UP[24:]}]},
+                     id="blank-name"),
+        pytest.param(lambda: {"categories": [{"name": ["Venues"], "facts": _LOOKED_UP[:24]},
+                                             {"name": "Things", "facts": _LOOKED_UP[24:]}]},
+                     id="name-not-a-string"),
+        pytest.param(lambda: {"categories": [{"name": "Venues", "facts": ["", "  "]},
+                                             {"name": "Things", "facts": _LOOKED_UP}]},
+                     id="only-blank-facts"),
+    ])
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_malformed_category_is_rejected(self, mock_llm, store, answer):
+        node = self._make_world_node(store, _LOOKED_UP)
+        mock_llm.return_value = json.dumps({**answer(), "summary": "Places he looked up"})
+
+        assert auto_split_node(store, node.id, None, "model") is False
+        self._assert_untouched(store, node)
+
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_a_summary_or_description_that_is_not_text_is_not_written(self, mock_llm, store):
+        node = self._make_world_node(store, _LOOKED_UP)
+        mock_llm.return_value = json.dumps({
+            "categories": [
+                {"name": "Venues", "description": None, "facts": _LOOKED_UP[:24]},
+                {"name": "Things", "description": ["shops"], "facts": _LOOKED_UP[24:]},
+            ],
+            "summary": None,
+        })
+
+        assert auto_split_node(store, node.id, None, "model") is True
+        assert store.get_node(node.id).description == node.description
+        for child in store.get_children(node.id):
+            assert child.description and child.name in child.description
 
     @patch("src.jarvis.memory.graph_ops.call_llm_direct")
     def test_split_with_facts_as_one_string_is_rejected(self, mock_llm, store):

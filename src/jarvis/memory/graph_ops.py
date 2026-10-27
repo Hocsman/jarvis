@@ -239,16 +239,17 @@ def _match_key(text: str) -> str:
 
 
 # The share of a node's claims a split must carry into its children. A
-# split may leave out filler nobody asked for and lines whose subject is
-# the assistant, and it folds duplicates and repeated activities into one
-# line, so it cannot be held to every claim. Calibrated on recorded split
-# answers for two World nodes of 90 and 101 lines, 8 and 13 of them filler
-# or narration. `google/gemini-2.5-flash` carried at least 84 % of the
-# claims in each of 75 splits under pruning as narrow as the merge's, and
-# 68 % to 100 % in 75 more under a prompt that also dropped what it
-# already knew. Every `gemma4:e2b` answer that parsed (79 of 200) carried
-# at most 69 %, having lost about half the node's niche lookups. The floor
-# sits in that gap and leaves a quarter of the node for what may go.
+# split may leave out what its prompt tells it to prune, and it folds
+# duplicates and repeated activities into one line, so it cannot be held
+# to every claim. Calibrated on recorded split answers for two World nodes
+# of 90 and 101 lines, 8 and 13 of them filler or narration.
+# `google/gemini-2.5-flash` carried at least 84 % of the claims in each of
+# 75 splits under pruning as narrow as the merge's, and 68 % to 100 % in
+# 75 more under the split prompt's wider pruning, which also drops what
+# the model already knows (62 of those pass). Every `gemma4:e2b` answer
+# that parsed (79 of 200) carried at most 69 %, having lost about half the
+# node's niche lookups. The floor sits in that gap and leaves a quarter of
+# the node for everything a split may drop.
 _SPLIT_MIN_RETENTION = 0.75
 
 
@@ -257,18 +258,30 @@ def _claims_kept(before, after) -> tuple[int, int]:
 
     Returns ``(kept, total)``. A claim is carried when a line of ``after``
     makes it: the same key, or a rewording that scores ``_REWRITE_MATCH``,
-    the bar a reworded merge line has to clear to get its source back.
-    Duplicates in ``before`` count once and one line of ``after`` may
-    carry several claims, so folding two wordings of one answer into a
-    single line loses nothing.
+    the bar a reworded merge line has to clear to get its source back, and
+    holds every figure the claim held. Without the figures, lines worded
+    alike that differ only in a date, a time or a price (one per
+    performance, one per day) would all be carried by whichever of them
+    survived. A claim the node holds twice in the same words counts once,
+    and one line of ``after`` may carry several claims, so a duplicate
+    folded into a line that scores ``_REWRITE_MATCH`` against both
+    wordings costs nothing. Two lines that differ only by a name still
+    score above the bar against each other, so dropping one of them goes
+    unseen.
     """
     claims = {_match_key(line) for line in before} - {""}
-    written = {_match_key(line) for line in after} - {""}
-    choices = list(written)
+    figures = {line: set(_DIGITS.findall(line))
+               for line in {_match_key(line) for line in after} - {""}}
+    choices = list(figures)
     kept = 0
     for claim in claims:
-        if claim in written or (choices and process.extractOne(
-                claim, choices, scorer=fuzz.ratio, score_cutoff=_REWRITE_MATCH)):
+        if claim in figures:
+            kept += 1
+            continue
+        held = set(_DIGITS.findall(claim))
+        if any(held <= figures[line] for line, _, _ in process.extract(
+                claim, choices, scorer=fuzz.ratio,
+                score_cutoff=_REWRITE_MATCH, limit=None)):
             kept += 1
     return kept, len(claims)
 
@@ -1002,10 +1015,13 @@ def auto_split_node(
         return False
 
     categories = result.get("categories", [])
-    summary = result.get("summary", node.description)
+    summary = result.get("summary")
 
-    # Validate: need at least 2 categories
-    if not isinstance(categories, list) or len(categories) < 2:
+    # Validate: need a list of at least 2 categories
+    if not isinstance(categories, list):
+        debug_log("auto-split: categories are not a list, aborting", "memory")
+        return False
+    if len(categories) < 2:
         debug_log("auto-split: fewer than 2 categories proposed, aborting", "memory")
         return False
 
@@ -1013,32 +1029,40 @@ def auto_split_node(
     # facts must be a list of strings. A `facts` given as one string would
     # be written one character per line, and an item that is not a string
     # has no sentence to write.
-    children: list[tuple[dict, list[str]]] = []
+    children: list[tuple[str, str, list[str]]] = []
     for cat in categories:
-        if not isinstance(cat, dict) or not cat.get("name"):
+        name = cat.get("name") if isinstance(cat, dict) else None
+        if not isinstance(name, str) or not name.strip():
             debug_log("auto-split: a category has no name, aborting", "memory")
             return False
+        name = name.strip()
         facts = cat.get("facts")
         if not isinstance(facts, list) or not all(isinstance(f, str) for f in facts):
             debug_log(
-                f"auto-split: category '{cat['name']}' does not give its facts "
+                f"auto-split: category '{name}' does not give its facts "
                 "as a list of strings, aborting",
                 "memory",
             )
             return False
-        lines = [f.strip() for f in facts if f.strip()]
+        # One fact per line, as a node holds them: an item that packs
+        # several lines is measured and written as those lines.
+        lines = [part.strip() for f in facts for part in f.split("\n") if part.strip()]
         if not lines:
-            debug_log(f"auto-split: category '{cat['name']}' has no facts, aborting", "memory")
+            debug_log(f"auto-split: category '{name}' has no facts, aborting", "memory")
             return False
-        children.append((cat, lines))
+        description = cat.get("description")
+        if not isinstance(description, str) or not description.strip():
+            description = f"Memories about: {name}"
+        children.append((name, description.strip(), lines))
 
-    written = [line for _, lines in children for line in lines]
+    written = [line for _, _, lines in children for line in lines]
     before = _split_data_lines(node.data)
 
-    # Clearing the parent is the one step here that cannot be retried, so
-    # what the children leave out is gone for good. A split may drop
-    # filler and narration and fold duplicates, but one that leaves out
-    # more than the floor allows lost answers he asked for.
+    # Clearing the parent is the one step here that cannot be undone, so
+    # what the children leave out is gone for good. A split may drop what
+    # its prompt prunes and fold duplicates and repeated activities, but
+    # one that leaves out more than the floor allows lost answers he asked
+    # for.
     kept, total = _claims_kept(before, written)
     if kept < _SPLIT_MIN_RETENTION * total:
         debug_log(
@@ -1048,9 +1072,18 @@ def auto_split_node(
         )
         return False
 
-    # The merge's guards, for the same reasons: a figure may be dropped but
-    # not invented, and a remote model sees the node through the redacting
-    # backend, so a marker it hands back stands for a value the node held.
+    # The merge's guards, for the same reasons: a split redistributes and
+    # consolidates, so it may shrink a node but not grow it; a figure may
+    # be dropped but not invented; and a remote model sees the node through
+    # the redacting backend, so a marker it hands back stands for a value
+    # the node held.
+    if len(written) > len(before) + _MERGE_GROWTH_SLACK:
+        debug_log(
+            f"auto-split: rejected — the children hold {len(written)} lines "
+            f"against the node's {len(before)}",
+            "memory",
+        )
+        return False
     if not _numbers_are_grounded(written, before):
         debug_log(
             "auto-split: rejected — the children carry a figure the node did not hold",
@@ -1066,17 +1099,21 @@ def auto_split_node(
         return False
 
     # Create child nodes
-    for cat, lines in children:
+    for name, description, lines in children:
         store.create_node(
-            name=str(cat["name"]),
-            description=str(cat.get("description", f"Memories about: {cat['name']}")),
+            name=name,
+            description=description,
             data="\n".join(lines),
             parent_id=node_id,
         )
-        debug_log(f"  auto-split: created child '{cat['name']}' with {len(lines)} facts", "memory")
+        debug_log(f"  auto-split: created child '{name}' with {len(lines)} facts", "memory")
 
-    # Clear parent data and update description to summary
-    store.update_node(node_id, data="", description=str(summary))
+    # Clear parent data and update description to summary; a summary that
+    # is not text leaves the description as it was.
+    if isinstance(summary, str) and summary.strip():
+        store.update_node(node_id, data="", description=summary.strip())
+    else:
+        store.update_node(node_id, data="")
 
     debug_log(
         f"auto-split: node '{node.name}' split into {len(children)} children, "
