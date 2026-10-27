@@ -1,7 +1,8 @@
 """What the tool router actually reads.
 
-The router is given one line per tool: the name, and the first 120
-characters of the description. Everything past that is invisible to it —
+The router is given one line per tool: the name, and the whole
+sentences of the description that fit in 200 characters
+(`_router_summary`). Everything past that is invisible to it —
 so a description whose opening sentence invites and whose restriction
 comes second is, to the router, an unrestricted invitation.
 
@@ -13,8 +14,8 @@ user said "can't you write to me in the conversation?", the router
 matched on the one word the two had in common, and the model filed her
 own previous answer as a permanent fact about him.
 
-The lesson generalises past that one tool: the first 120 characters have
-to carry the discrimination, because they are all the router gets.
+The lesson generalises past that one tool: the sentences within the cut
+have to carry the discrimination, because they are all the router gets.
 """
 
 from __future__ import annotations

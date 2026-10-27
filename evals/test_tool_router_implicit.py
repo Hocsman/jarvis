@@ -248,12 +248,14 @@ class TestRouterNeverCollapses:
 # Task Tools — the request is a job only one tool can do
 # =============================================================================
 
-# What the reply engine hands the router on every turn: the live time and
-# location line (`_build_enrichment_context_hint`). Measured in this shape,
-# not bare, because the bare shape is not the one the user's sentences meet:
-# with no KNOWN FACTS block, qwen2.5:3b answers 'none' to "trouve la facture
-# PDF sur mon ordinateur" whatever localFiles says, and does so because of
-# the router prompt's 'none' rule (removed, it picks a tool).
+# A time and location line in the place of the one the reply engine hands
+# the router on every turn (`_build_enrichment_context_hint`, which words
+# the date differently); the router reads both as KNOWN FACTS. Measured in
+# this shape, not bare, because the bare shape is not the one the user's
+# sentences meet: with no KNOWN FACTS block, qwen2.5:3b answers 'none' to
+# "trouve la facture PDF sur mon ordinateur" whatever localFiles says, and
+# does so because of the router prompt's 'none' rule (removed, it picks a
+# tool).
 _LIVE_FACTS = (
     "Current local time: Tuesday, 2026-10-27 17:42 (Europe/Paris). "
     "Location: Paris, Île-de-France, France."

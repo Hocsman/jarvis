@@ -40,7 +40,8 @@ class FetchWebPageTool(Tool):
     def description(self) -> str:
         # "Article" is what the user asks for. A "fetch" verb in the opening
         # draws requests meant for other tools ("every Monday, give me the
-        # weather") onto this one. Measurements: selection.spec.md.
+        # weather") onto this one. Measurements: selection.spec.md, What the
+        # router reads.
         return (
             "Open a web page or article from its URL and read its full "
             "text, such as a result webSearch found."
