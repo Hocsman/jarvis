@@ -145,16 +145,16 @@ All ordering by access frequency uses a **time-decayed score** computed at query
 
 ## Auto-Split (Natural Reduction)
 
-Triggered automatically when `data_token_count > SPLIT_THRESHOLD` (1500 tokens) after a write. Auto-split is the system's primary consolidation and pruning mechanism — it's where temporal events get distilled into patterns, common knowledge gets dropped, and the tree structure deepens organically.
+Triggered automatically when `data_token_count > SPLIT_THRESHOLD` (1500 tokens) after a write. Auto-split is the system's primary consolidation mechanism — it's where temporal events get distilled into patterns, filler nobody asked for gets dropped, and the tree structure deepens organically.
 
 1. LLM analyses the node's data and proposes 2-5 child categories
-2. Each fact is assigned to exactly one child
+2. Each fact it keeps is assigned to exactly one child
 3. **Consolidation**: duplicate facts are merged, and repeated similar activities across different dates are consolidated into patterns (e.g. "ate sushi on Mon, ate sushi on Thu" → "regularly eats sushi"). Date context is preserved only for significant events.
-4. **Pruning**: facts that the LLM already knows from its training data are dropped. This keeps the graph as a delta from the model's baseline knowledge. When migrating to a newer model with broader training data, subsequent splits will naturally prune more — reducing the graph's memory footprint over time.
+4. **Pruning is as narrow as the merge's** (Merge, "Pruning is narrow on purpose"). Generic filler nobody asked for goes: stock advice, encyclopaedic padding, how-to steps for everyday tasks, advice telling anyone what is good for them. So does a line with the assistant as its subject, checked as each fact is written, in the merge's register. Being in the model's training data is not a reason to drop a line: a fact is on a node because the user asked about it, so a name, a date, a place or a figure about one particular thing stays however well known. A split rewrites every fact of an oversized node at once, so a wider rule here would take back, on the largest rewrite a node ever gets, the answers the merge keeps. Measured on `google/gemini-2.5-flash`, interleaved call by call, 25 splits an arm of one 90-line World node (`evals/test_split_pruning.py`). Against a rule that dropped whatever the model already knew, the narrow rule kept 248 of 250 well-known answers against 200 (p = 5e-14; the wide rule lost a nutrition figure and a boiling point in nearly every run). It wrote none of the 50 narration lines, against 37, and none of the 150 filler lines, against 3. Niche lines were lost at the same low rate under both (16 and 10 of 1800). A wording that named filler only as "stock advice" kept 22 of 150 filler lines, all of them health advice, which is why the rule gives an example of advice addressed to anyone and of a figure that stays. On `gemma4:e2b` the rule changes nothing measurable (20 an arm), because the split itself does not hold on that tier: 6 and 7 answers in 20 fail to parse as JSON, and the ones that parse lose about half the node's niche lines and keep about half its filler, under either prompt.
 5. Child nodes are created under the split node
 6. Parent data is cleared; parent description updated to a summary
 
-This means the tree depth itself encodes a raw→refined spectrum: surface-level nodes hold recently ingested knowledge, deeper nodes hold distilled novel knowledge that survived multiple split cycles. Model upgrades naturally shrink the graph as previously-novel facts become common knowledge.
+This means the tree depth itself encodes a raw→refined spectrum: surface-level nodes hold recently ingested knowledge, deeper nodes hold knowledge that survived several split cycles, its repetitions folded into patterns. A model that knows more does not shrink the graph: what a model already knows is not what the user asked.
 
 Split quality safeguards:
 - Minimum 2 categories required (abort if LLM proposes fewer)
