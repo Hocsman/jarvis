@@ -10,7 +10,7 @@ The Settings Window provides a graphical interface for editing `config.json` wit
 
 1. **Metadata-driven**: All fields are defined in a `FIELD_METADATA` registry. Adding a new config parameter to the settings UI requires only adding a `FieldMeta` entry — no widget code changes.
 2. **Minimal config files**: Only non-default values are written to `config.json`. Removing a field from the config reverts it to the default.
-3. **Preserves unknown keys and values**: Keys not managed by the UI (e.g. `mcps`, `_config_version`, future additions) are preserved when saving, and so is a value a `choice` field has no option for.
+3. **Preserves unknown keys and values**: Keys not managed by the UI (e.g. `mcps`, `_config_version`, future additions) are preserved when saving, and so is a value a `choice` field has no option for (a `device` field is the exception, see "Hardware Device Selection").
 4. **Theme-consistent**: Uses the shared Jarvis theme from `themes.py`.
 
 ## Architecture
@@ -162,6 +162,8 @@ works when the user asks (see "Update System" in `desktop_app.spec.md`).
 ## Hardware Device Selection
 
 The Voice Input tab includes a device dropdown populated at window open time via `sounddevice.query_devices()`. It lists all input-capable devices with their index and name. The stored value is the device index as a string, or empty string for system default.
+
+Unlike a `choice` field, a stored device the list does not contain (one unplugged when the window opens, or one named by hand) is not kept: the dropdown falls back to System Default and a Save drops the key. An index can name a different device after a replug, so the window does not keep one it cannot show.
 
 ## Save Behaviour
 

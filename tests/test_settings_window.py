@@ -1,8 +1,9 @@
 """
 Tests for settings window metadata and config I/O logic.
 
-Tests verify the metadata registry, value extraction, and save/load behaviour
-without touching the GUI. Widget creation is tested via mock Qt objects where needed.
+Tests verify the metadata registry, value extraction, and save/load behaviour.
+Most run without the GUI, using mock Qt objects where needed; the save round
+trips open a real window on the offscreen Qt platform.
 """
 
 import json
@@ -390,10 +391,9 @@ REMOTE_PINS = ["google/gemini-3.1-flash-lite", "claude-haiku-5-5"]
 
 
 def _a_value_not_in(fm: FieldMeta):
-    """A value the choice field does not list, of the kind it stores."""
-    listed = {value for value, _ in fm.choices}
-    if all(value.isdigit() for value in listed):
-        return max(int(value) for value in listed) + 1
+    """A value the choice field does not list, of the type its default has."""
+    if isinstance(get_default_config()[fm.key], int):
+        return max(int(value) for value, _ in fm.choices) + 1
     return "pinned-by-hand"
 
 
@@ -410,6 +410,9 @@ class TestASaveKeepsWhatTheWindowDoesNotList:
         path = tmp_path / "jarvis" / "config.json"
         path.parent.mkdir(parents=True)
         monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+        # The window resolves the path through its own import of
+        # default_config_path, which TestInputDevices' module reload can
+        # leave bound to another test's sandbox, so patch it there too.
         monkeypatch.setattr(sw, "default_config_path", lambda: path)
         return path
 
@@ -465,6 +468,33 @@ class TestASaveKeepsWhatTheWindowDoesNotList:
         saved = self._save(self._open(settings_file, unlisted), settings_file)
 
         assert {key: saved.get(key) for key in unlisted} == unlisted
+
+    def test_an_unlisted_value_of_another_type_keeps_its_value(self, settings_file):
+        """A number in a text field stays that number, and a sample rate
+        written as a float is saved as the rate it names."""
+        odd = {}
+        for fm in FIELD_METADATA:
+            if fm.field_type != "choice":
+                continue
+            unlisted = _a_value_not_in(fm)
+            odd[fm.key] = float(unlisted) if isinstance(unlisted, int) else 3
+
+        saved = self._save(self._open(settings_file, odd), settings_file)
+
+        assert {key: saved.get(key) for key in odd} == odd
+
+    @pytest.mark.parametrize("empty", ["", None])
+    def test_an_empty_pin_is_never_kept_as_a_blank_option(self, settings_file, empty):
+        fm = next(fm for fm in FIELD_METADATA if fm.key == "intent_judge_model")
+        listed = [value for value, _ in fm.choices]
+        default = get_default_config()["intent_judge_model"]
+        window = self._open(settings_file, {"intent_judge_model": empty})
+        combo = window._widgets["intent_judge_model"]
+
+        saved = self._save(window, settings_file)
+
+        assert [combo.itemData(i) for i in range(combo.count())] == listed
+        assert saved.get("intent_judge_model", default) in listed
 
     def test_a_listed_model_still_replaces_the_pin(self, settings_file):
         from jarvis.config import SUPPORTED_CHAT_MODELS
