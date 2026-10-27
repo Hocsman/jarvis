@@ -23,6 +23,13 @@
 #                         model is the canary, see MODEL_SMALL below)
 #   EVAL_JUDGE_BASE_URL - Ollama base URL (default: http://localhost:11434)
 #   EVAL_REPEAT_COUNT   - Number of times to run each test (default: 1; use 3 when tuning prompts to surface flakiness)
+#   EVAL_SMALL_MODEL    - The small chain (router, judges, memory lookup), when
+#                         it is not the model under test (default: EVAL_JUDGE_MODEL)
+#   EVAL_MEMORY_EXTRACTOR_MODEL - The memory lookup's own model (default: the small chain)
+#   EVAL_MEMORY_EXTRACTOR_ARMS  - Two or more models, comma-separated: the
+#                         memory_extractor_time_window eval reads its sentences
+#                         on each, arms interleaved call by call
+#   EVAL_MEMORY_EXTRACTOR_REPEATS - Rounds of that comparison (default: 3)
 #   PYTHON              - Interpreter to run pytest with (default: the first
 #                         of python3 / python found on PATH)
 
