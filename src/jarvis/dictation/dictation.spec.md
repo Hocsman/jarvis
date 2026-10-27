@@ -21,7 +21,9 @@ key required).
 
 The hotkey is configurable as a dropdown in both the setup wizard and settings
 window, with four preset options: `ctrl+alt`, `ctrl+cmd`, `ctrl+shift+d`,
-`ctrl+shift`.
+`ctrl+shift`. A hotkey written by hand that no preset matches is added to the
+dropdown as its raw value and selected, so opening either window and saving
+keeps it.
 
 ## Core Flow
 
@@ -142,11 +144,15 @@ Two short beeps generated the same way as the existing `TunePlayer` sonar ping:
 
 ## Setup Wizard
 
-The setup wizard includes a dedicated Dictation page (between Whisper and
-Location steps) that allows users to:
+The setup wizard includes a dedicated Dictation page (between the Whisper and
+MCP Servers steps) that allows users to:
 - Enable/disable dictation
+- Turn filler word removal on or off
 - Choose the hotkey from a dropdown of presets
 - View tips about hold-to-dictate and double-tap hands-free mode
+
+Each control starts from the value in `config.json`, so re-running the wizard
+keeps what was set in Settings.
 
 ## Dependencies
 

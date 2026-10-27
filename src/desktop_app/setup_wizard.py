@@ -85,7 +85,7 @@ def check_mlx_whisper_status() -> MLXWhisperStatus:
 
 
 # Import config early (no PyQt6 dependency) - needed for detection functions
-from jarvis.config import load_settings, get_default_config, default_config_path, names_provider_model
+from jarvis.config import load_settings, get_default_config, names_provider_model
 
 
 def _configured_value(key: str) -> Any:
@@ -93,9 +93,11 @@ def _configured_value(key: str) -> Any:
     the default when the file names none.
 
     Read from the file the pages write to, so a value a page does not list
-    goes back as it was read rather than as the loader normalised it.
+    goes back as it was read rather than as the loader normalised it. The
+    path is resolved through ``jarvis.config`` on each call, as every page's
+    write does, so the two always name the same file.
     """
-    from jarvis.config import _load_json
+    from jarvis.config import default_config_path, _load_json
     value = _load_json(default_config_path()).get(key)
     if value in (None, ""):
         return get_default_config().get(key)
@@ -1763,7 +1765,7 @@ class ModelsPage(QWizardPage):
     def _save_model_to_config(self):
         """Save the selected chat model to config file."""
         try:
-            from jarvis.config import _load_json, _save_json
+            from jarvis.config import default_config_path, _load_json, _save_json
             config_path = default_config_path()
             config_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1926,6 +1928,12 @@ class WhisperSetupPage(QWizardPage):
         (mid, m["name"], m["size"], m["vram"], m["description"])
         for mid, m in SUPPORTED_WHISPER_MODELS.items() if mid.endswith(".en")
     ]
+
+    # Longest a configured model the list lacks is shown, in characters: on
+    # the slider beside the listed names, and in the selected-model line.
+    # Both keep the page within the wizard's width.
+    _UNLISTED_NAME_CHARS = 28
+    _UNLISTED_INFO_CHARS = 64
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2194,23 +2202,38 @@ class WhisperSetupPage(QWizardPage):
         self._is_complete = True  # Always complete - model selection can always proceed
         self._worker: Optional[CommandWorker] = None
 
-    def _get_current_model_options(self) -> list:
-        """Get the model options list based on current language mode.
+    def _listed_model_options(self) -> list:
+        """The listed sizes for the current language mode.
 
         Filters out large-v3-turbo on non-Apple-Silicon platforms when the
-        installed faster-whisper version does not support it. A configured
-        model the list lacks comes last, in the language mode its name
-        belongs to, shown as its raw name with no size.
+        installed faster-whisper version does not support it.
         """
         options = self.WHISPER_MODEL_OPTIONS_EN if self._is_english_only else self.WHISPER_MODEL_OPTIONS
-        # Apple Silicon uses MLX Whisper which always supports turbo; for the
-        # faster-whisper backend, only show turbo if the library supports it
-        if not self._is_apple_silicon and not _is_faster_whisper_turbo_supported():
+        # Apple Silicon uses MLX Whisper which always supports turbo
+        if self._is_apple_silicon:
+            return options
+        # For faster-whisper backend, only show turbo if the library supports it
+        if not _is_faster_whisper_turbo_supported():
             options = [opt for opt in options if opt[0] != "large-v3-turbo"]
+        return options
+
+    def _get_current_model_options(self) -> list:
+        """The slider's options: the listed sizes, then the configured model
+        the list lacks when its name belongs to the current language mode.
+        That last option carries only its raw name."""
+        options = self._listed_model_options()
         unlisted = self._unlisted_whisper_model
         if unlisted and unlisted.endswith(".en") == self._is_english_only:
             options = options + [(unlisted, unlisted, "", "", "")]
         return options
+
+    @staticmethod
+    def _shortened(text: str, limit: int) -> str:
+        """``text`` cut in the middle to at most ``limit`` characters."""
+        if len(text) <= limit:
+            return text
+        head = (limit - 1) // 2
+        return f"{text[:head]}…{text[-(limit - 1 - head):]}"
 
     def _on_language_changed(self, is_english: bool):
         """Handle language mode change."""
@@ -2268,6 +2291,7 @@ class WhisperSetupPage(QWizardPage):
         # We achieve this by: label[0], stretch, label[1], stretch, ..., label[n-1]
         # First label left-aligned, last label right-aligned, middle labels centered
         for i, (model_id, name, file_size, vram, desc) in enumerate(options):
+            unlisted = model_id == self._unlisted_whisper_model
             # Model name label
             label = QLabel(name)
             if i == 0:
@@ -2278,10 +2302,15 @@ class WhisperSetupPage(QWizardPage):
                 label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             label.setStyleSheet("font-size: 11px; color: #e4e4e7; background: transparent;")
             label.setFixedHeight(18)
+            if unlisted:
+                # A local model path can be any length: shorten it on the
+                # slider so the row keeps the wizard's width, whole in the tooltip
+                label.setText(self._shortened(name, self._UNLISTED_NAME_CHARS))
+                label.setToolTip(name)
             self._labels_layout.addWidget(label)
 
             # Size/VRAM label - single line to save space
-            size_label = QLabel(f"{file_size} / {vram}" if file_size else "")
+            size_label = QLabel("" if unlisted else f"{file_size} / {vram}")
             if i == 0:
                 size_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             elif i == n - 1:
@@ -2297,28 +2326,22 @@ class WhisperSetupPage(QWizardPage):
                 self._labels_layout.addStretch(1)
                 self._size_layout.addStretch(1)
 
-        # Find best matching position for current selection or default to
-        # "tiny". Done before the range changes: shrinking it moves the
-        # slider, which rewrites the selection.
+        # Keep the selection, else its twin in the other language mode, else
+        # the slider's place within the new range (a large model has no
+        # English-only twin, so it lands on the largest English size). Worked
+        # out before the range changes: shrinking it moves the slider, which
+        # rewrites the selection.
         model_ids = [m[0] for m in options]
-        current_base = self._selected_whisper_model.replace(".en", "")
+        selected = self._selected_whisper_model
+        base = selected.removesuffix(".en")
+        twin = f"{base}.en" if self._is_english_only else base
 
-        # Try to find matching model
-        if self._is_english_only:
-            target = f"{current_base}.en" if not current_base.endswith(".en") else current_base
+        if selected in model_ids:
+            slider_pos = model_ids.index(selected)
+        elif twin in model_ids:
+            slider_pos = model_ids.index(twin)
         else:
-            target = current_base.replace(".en", "")
-
-        if self._selected_whisper_model in model_ids:
-            slider_pos = model_ids.index(self._selected_whisper_model)
-        elif target in model_ids:
-            slider_pos = model_ids.index(target)
-        elif "tiny.en" in model_ids:
-            slider_pos = model_ids.index("tiny.en")
-        elif "tiny" in model_ids:
-            slider_pos = model_ids.index("tiny")
-        else:
-            slider_pos = 0  # Default to first (smallest) model
+            slider_pos = min(self._model_slider.value(), n - 1)
 
         # Update slider range
         self._model_slider.setMinimum(0)
@@ -2341,12 +2364,15 @@ class WhisperSetupPage(QWizardPage):
         options = self._get_current_model_options()
         for model_id, name, file_size, ram, desc in options:
             if model_id == self._selected_whisper_model:
-                if not file_size:
+                if model_id == self._unlisted_whisper_model:
                     # The configured model the list lacks: only its name is known
-                    self._model_info_label.setText(f"Selected: {name}")
+                    shown = self._shortened(name, self._UNLISTED_INFO_CHARS)
+                    self._model_info_label.setText(f"Selected: {shown}")
+                    self._model_info_label.setToolTip(name)
                     break
                 lang_note = "English only" if self._is_english_only else "99 languages"
                 self._model_info_label.setText(f"Selected: {name} ({file_size}, {ram}) — {desc} [{lang_note}]")
+                self._model_info_label.setToolTip("")
                 break
 
     def _create_status_row(self, label_text: str, status_text: str) -> QWidget:
@@ -2383,7 +2409,7 @@ class WhisperSetupPage(QWizardPage):
     def _save_whisper_model_to_config(self):
         """Save the selected whisper model to config file."""
         try:
-            from jarvis.config import _load_json, _save_json
+            from jarvis.config import default_config_path, _load_json, _save_json
             config_path = default_config_path()
             config_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -2408,10 +2434,9 @@ class WhisperSetupPage(QWizardPage):
         # A model the list lacks (a local path, a turbo this engine cannot
         # run) is offered as its own option, so leaving the page writes it
         # back as it was read.
-        self._unlisted_whisper_model = None
-        listed = [m[0] for m in self._get_current_model_options()]
-        if current_whisper_model not in listed:
-            self._unlisted_whisper_model = current_whisper_model
+        listed = [m[0] for m in self._listed_model_options()]
+        self._unlisted_whisper_model = None if current_whisper_model in listed else current_whisper_model
+        if self._unlisted_whisper_model:
             debug_log("setup wizard keeps a whisper_model its options do not list", "desktop")
 
         # Set the selected model and rebuild slider
@@ -2825,7 +2850,7 @@ class LocationPage(QWizardPage):
             return
 
         try:
-            from jarvis.config import _load_json, _save_json
+            from jarvis.config import default_config_path, _load_json, _save_json
 
             config_path = default_config_path()
             config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2901,7 +2926,7 @@ class DictationPage(QWizardPage):
 
         # Enabled checkbox
         self._enabled_check = QCheckBox("  Enable dictation mode")
-        self._enabled_check.setChecked(True)
+        self._enabled_check.setChecked(bool(_configured_value("dictation_enabled")))
         self._enabled_check.setStyleSheet("font-size: 14px; color: #fafafa;")
         layout.addWidget(self._enabled_check)
 
@@ -2909,7 +2934,7 @@ class DictationPage(QWizardPage):
 
         # Filler removal checkbox
         self._filler_check = QCheckBox("  Remove filler words (um, uh, like) using local LLM")
-        self._filler_check.setChecked(self._load_current_filler_removal())
+        self._filler_check.setChecked(bool(_configured_value("dictation_filler_removal")))
         self._filler_check.setStyleSheet("font-size: 14px; color: #fafafa;")
         layout.addWidget(self._filler_check)
 
@@ -2989,17 +3014,6 @@ class DictationPage(QWizardPage):
         layout.addWidget(tips_card)
         layout.addStretch()
         self.setLayout(layout)
-
-    def _load_current_filler_removal(self) -> bool:
-        """Load the current filler removal setting from config, defaulting to False."""
-        try:
-            from jarvis.config import default_config_path, _load_json
-            config = _load_json(default_config_path())
-            if config and "dictation_filler_removal" in config:
-                return bool(config["dictation_filler_removal"])
-            return False
-        except Exception:
-            return False
 
     def validatePage(self) -> bool:
         """Save dictation settings to config before leaving page."""
