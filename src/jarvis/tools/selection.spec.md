@@ -97,24 +97,27 @@ A description says what the tool does in the words the user asks for it with, be
 - `fetchWebPage` opens "a web page or article". Described as fetching "a web page URL", a request for an article that gives no address got `webSearch` alone.
 - `setRoutine` shows what a repeat sounds like ("every morning, every Monday"). Without that, a recurring request is routed on what will be fetched each time ("the weather"), never on the fact that it recurs.
 
-The descriptions are read together, so changing one moves requests meant for another. With `fetchWebPage` opening "Fetch and extract text content…", "tous les lundis matin, fais-moi un point sur la météo" went to `getWeather, fetchWebPage, webSearch` and missed `setRoutine` even with `setRoutine`'s current description; the French city-time questions ("quelle heure est-il à Tokyo ?"), where qwen2.5:3b already puts `getWeather` first and `getTime` second, lose `getTime` more often after any change to the catalogue. A description change is therefore measured on the whole router bench, both arms interleaved call by call, never only on its own tool's cases.
+The descriptions are read together, so changing one moves requests meant for another. With `fetchWebPage` opening "Fetch and extract text content…", "tous les lundis matin, fais-moi un point sur la météo" went to `getWeather, fetchWebPage, webSearch` and missed `setRoutine` even with an example-bearing `setRoutine` description (14 of 25, against 30 of 30 with `fetchWebPage` opening "Read…"); the French city-time questions ("quelle heure est-il à Tokyo ?"), where qwen2.5:3b already puts `getWeather` first and `getTime` second, lose `getTime` more often after any change to the catalogue. A description change is therefore measured on the whole router bench, both arms interleaved call by call, never only on its own tool's cases.
 
 The shape of the call counts too. The reply engine always sends the live time and location as KNOWN FACTS; `toolSearchTool` and the bare evals send none. With no KNOWN FACTS block, qwen2.5:3b answers `none` to "trouve la facture PDF sur mon ordinateur" whatever `localFiles` says, and it is the prompt's `none` rule that decides it (the same prompt without that sentence picks a tool). With the block, the request reaches `localFiles`.
 
-Measured on qwen2.5:3b, these three descriptions against their earlier wording, 40 calls an arm, arms interleaved:
+Measured against their earlier wording, arms interleaved call by call, on the router bench's 62 cases (27 English from the evals, 35 French), 15 requests for these three tools in French and English (bare, and with the engine's time/location line), and nine requests where they do not belong:
 
-| Cases | Earlier wording | This wording |
+| Cases | qwen2.5:3b, 30 calls an arm | gemma4:e2b, 15 calls an arm |
 |---|---|---|
-| The 62 cases of the router bench (27 English from the evals, 35 French) | 84.0% | 85.6% (p = 0.0008) |
-| 12 requests for these three tools, French and English, bare | 40.0% | 64.0% |
-| The same 12 with the engine's time/location line | 54.2% | 74.2% |
-| "tous les lundis matin, fais-moi un point sur la météo" → `setRoutine`, bare / with the line | 5/40, 2/40 | 37/40, 14/40 |
-| "trouve la facture PDF sur mon ordinateur" → `localFiles`, bare / with the line | 0/40, 0/40 | 1/40, 40/40 |
-| "trouve-moi un article détaillé sur le programme Apollo" → `webSearch` + `fetchWebPage`, bare / with the line | 10/40, 35/40 | 28/40, 39/40 |
-| "quelle heure est-il à Tokyo ?" → `getTime`, bare | 40/40 | 30/40 |
-| Nine requests where these tools do not belong (one-off reminders, screenshots, plain searches) | 360/360 | 360/360 |
+| Router bench | 84.1% → 85.1% (p = 0.11) | 80.0% → 79.6% (p = 0.57) |
+| The 15 requests, bare | 38.4% → 63.6% | 83.6% → 84.9% |
+| The 15 requests, with the time/location line | 49.8% → 68.7% | 88.9% → 84.0% (p = 0.18) |
+| "tous les lundis matin, fais-moi un point sur la météo" → `setRoutine`, bare / with the line | 8 → 27, 2 → 19 of 30 | 0 → 0, 0 → 14 of 15 |
+| "every evening at 9, tell me what I ate that day" → `setRoutine`, bare / with the line | 14 → 30, 7 → 22 of 30 | 8 → 0, 12 → 2 of 15 |
+| "Jarvis, mets en place une routine quotidienne qui cherche sur le web et me résume l'actualité." → `setRoutine`, with the line | 2 → 4 of 30 | 15 → 1 of 15 |
+| "set up a daily routine that searches the web and sums up the news for me" → `setRoutine`, with the line | 21 → 3 of 30 | 15 → 15 of 15 |
+| "trouve la facture PDF sur mon ordinateur" → `localFiles`, bare / with the line | 0 → 0, 0 → 30 of 30 | 15 → 15, 15 → 15 of 15 |
+| "trouve-moi un article détaillé sur le programme Apollo" → `webSearch` + `fetchWebPage`, bare / with the line | 7 → 23, 28 → 30 of 30 | 15 → 15, 15 → 15 of 15 |
+| "quelle heure est-il à Tokyo ?" → `getTime`, bare | 24 → 7 of 30 | 15 → 15 of 15 |
+| Requests where these tools do not belong | 270 → 270 of 270 | 135 → 119 of 135 |
 
-On gemma4:e2b (20 calls an arm) the bench does not move (80.4% against 80.0%, p = 0.44) and the 12 bare requests go from 83.3% to 91.2%. On qwen2.5:3b a daily request phrased around its content ("chaque soir à 21 heures, dis-moi ce que j'ai mangé dans la journée") stays at 0 or 1 in 30 whatever `setRoutine` says: it goes to the content tools (`getWeather`, `fetchMeals`) or to `setReminder`. Variants that add "every day or every week" to the examples did not gain it there and lost it on gemma4:e2b (14/20 to 0/20).
+The gains are where qwen2.5:3b was missing these tools; gemma4:e2b already offered the files and the articles. The losses are requests whose routing moves with any change to the catalogue: on gemma4:e2b a repeated request that names the web or the evening goes to `webSearch` or `setReminder`, "cherche sur internet des tutos Python" now also gets `fetchWebPage` (15 of 15, an extra tool within the cap), and one one-off reminder in 15 also got `setRoutine`, which still asks before it creates anything. Variants of `setRoutine` that add "every day or every week" to the examples lost more on gemma4:e2b without gaining on qwen2.5:3b; dropping "routine" from the opening lost the explicit and the evening requests on qwen2.5:3b (1 and 10 of 30, against 11 and 22).
 
 ### Interface
 
