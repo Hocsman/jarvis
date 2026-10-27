@@ -129,6 +129,7 @@
   "dialogue_memory_timeout": 300.0,
   "memory_enrichment_max_results": 3,
   "memory_enrichment_source": "all",
+  "memory_extractor_model": "",
   "tool_carryover_max_turns": 2,
   "tool_carryover_per_entry_chars": 1200,
   "memory_digest_enabled": null,

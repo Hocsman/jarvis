@@ -61,10 +61,11 @@ def extract_search_params_for_memory(query: str, cfg, chat_model: str,
     """
     Extract search keywords and time parameters for memory recall.
 
-    The model is never asked to think. ``chat_model`` is the router's
-    model, and ``llm_thinking_enabled`` belongs to the reply's: a small
-    local model with no thinking mode refuses a request that asks for one,
-    which would leave every turn that needs memory without it.
+    The model is never asked to think. ``chat_model`` is the extractor's
+    own model (``memory_extractor_model``, else the router's chain), and
+    ``llm_thinking_enabled`` belongs to the reply's: a small local model
+    with no thinking mode refuses a request that asks for one, which would
+    leave every turn that needs memory without it.
 
     ``context_hint`` is an optional compact summary of what is already in the
     assistant's live context (current time, location, short-term dialogue

@@ -1717,7 +1717,6 @@ def update_diary_from_dialogue_memory(
     force: bool = False,
     on_token: Optional[Callable[[str], None]] = None,
     thinking: bool = False,
-    graph_picker_model: Optional[str] = None,
 ) -> Optional[int]:
     """
     Update the diary with pending interactions from dialogue memory.
@@ -1815,7 +1814,6 @@ def update_diary_from_dialogue_memory(
                         timeout_sec=graph_timeout,
                         thinking=thinking,
                         date_utc=today,
-                        picker_model=graph_picker_model,
                     )
                     stored = result.stored
                     skipped = result.skipped

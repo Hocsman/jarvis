@@ -6,7 +6,13 @@ and such a model refuses a request that asks for one (Ollama answers HTTP
 400 "does not support thinking"). Passed through, the setting would leave
 every turn that needs memory without it.
 
-See src/jarvis/reply/reply.spec.md, step 4.
+The graph's picker and merge run on the chat model and never think either:
+both answer inside a short fixed budget, once per level and once per node,
+and a budget spent thinking files every fact at the branch root and drops
+every merge to plain append.
+
+See src/jarvis/reply/reply.spec.md, step 4, and
+src/jarvis/memory/graph.spec.md, "Traverse".
 """
 
 from __future__ import annotations
@@ -59,25 +65,28 @@ def test_a_memory_turn_finds_its_keywords_when_the_chat_model_thinks(
     assert "keywords could not be read" not in capsys.readouterr().out
 
 
-# ── The graph's picker and merge ride the same small model ────────────
+# ── The graph's picker and merge never think either ──────────────────
 
 
-SMALL = "qwen2.5:3b"
+CHAT = "gpt-oss:20b"
 NEW_FACT = "Possessor was directed by Brandon Cronenberg."
 KNOWN = "Alien was directed by Ridley Scott."
 
 
 def _graph_models(*, chat_model, system_prompt, thinking=False, **kwargs):
-    """The chat model extracts one fact; the small model has no thinking
-    mode, then picks the Cinema node and rewrites it without the
+    """Only the chat model answers. Its extraction may think; a picker or
+    merge that asked it to would spend its whole budget thinking and get
+    nothing back. It picks the Cinema node and rewrites it without the
     duplicate it carried."""
-    if chat_model == SMALL and thinking:
+    from jarvis.memory import graph_ops
+
+    if chat_model != CHAT:
         return None
-    if chat_model != SMALL:
-        return json.dumps([NEW_FACT])
     if "Respond with ONLY the number" in system_prompt:
-        return "1"
-    return json.dumps({"facts": [KNOWN, NEW_FACT]})
+        return None if thinking else "1"
+    if system_prompt == graph_ops._MERGE_SYSTEM_PROMPT:
+        return None if thinking else json.dumps({"facts": [KNOWN, NEW_FACT]})
+    return json.dumps([NEW_FACT])
 
 
 def test_a_fact_is_filed_and_merged_when_the_chat_model_thinks(tmp_path):
@@ -93,8 +102,8 @@ def test_a_fact_is_filed_and_merged_when_the_chat_model_thinks(tmp_path):
         with patch.object(graph_ops, "call_llm_direct", side_effect=_graph_models):
             graph_ops.update_graph_from_dialogue(
                 store=store, summary="We talked about Possessor.", cfg=None,
-                chat_model="gpt-oss:20b", tools_used=["webSearch"],
-                thinking=True, picker_model=SMALL,
+                chat_model=CHAT, tools_used=["webSearch"],
+                thinking=True,
             )
 
         lines = store.get_node(cinema.id).data.splitlines()

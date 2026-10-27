@@ -13,7 +13,7 @@ case covered in `test_recency_superseding.py`:
      hallucinated contradiction would erase real data.)
 
 Plus a check that the batched signature works end-to-end with a real
-picker model (the round-1 batching has unit tests but no eval).
+model (the round-1 batching has unit tests but no eval).
 
 Run:
     EVAL_JUDGE_MODEL=gemma4:e2b ./scripts/run_evals.sh merge_consolidation
@@ -591,7 +591,7 @@ class TestMetaNarrativePruning:
 @pytest.mark.eval
 class TestBatchedMerge:
     """Multiple new facts in one merge call must all land. Pins the
-    round-1 batched signature against a real picker model."""
+    round-1 batched signature against a real model."""
 
     @requires_judge_llm
     @pytest.mark.parametrize("case", BATCHED_CASES)
