@@ -36,6 +36,11 @@ window, with four preset options: `ctrl+alt`, `ctrl+cmd`, `ctrl+shift+d`,
    post-processing pipeline, paste result into focused app via clipboard,
    publish `IDLE`, resume main voice listener.
 
+Only a fresh press of the hotkey starts a recording. The OS repeats a held
+key's press, and a repeat never starts one, so a press that was refused (no
+microphone, Whisper not loaded) is tried again only once the hotkey is
+released and pressed again.
+
 The published state therefore moves through three distinct values across a
 dictation cycle: `DICTATING` while recording, `DICTATION_PROCESSING` while the
 captured audio is being transcribed / post-processed / pasted, and back to
@@ -100,19 +105,28 @@ After transcription, text passes through these stages in order:
 
 - The engine accepts an optional `voice_device` parameter, passed through from
   the daemon's configured device, and resolves it on every press with the
-  listener's resolver (`resolve_input_device` in `jarvis.utils.audio_stream`),
-  so dictation and the wake-word listener record from the same microphone:
+  shared resolver the wake-word listener also uses (`resolve_input_device` in
+  `jarvis.utils.audio_stream`), so both record from the same microphone:
   blank, `default` or `system` is the system default input, a number is a
   device index, and any other text is the first input-capable device whose
   name contains it, ignoring case.
-- The device is resolved before anything announces a recording. A name that
-  matches no input (the microphone is unplugged) records nothing: no other
-  input is opened, no start beep plays, the console says the selected
-  microphone was not found, and the next press resolves again. A failed
-  device lookup is handled the same way, without the console line.
+- PortAudio reads the device list once, when the app starts, and every press
+  resolves against that list. A microphone connected later is found once the
+  app is quit and reopened.
+- The device is resolved first, before the Whisper check and before anything
+  announces a recording. A name that matches no input (the microphone was not
+  connected when the app started, so the listener refused it too) records
+  nothing: no other input is opened, no start beep plays, and the console says
+  the selected microphone was not found. A failed device lookup is handled the
+  same way, without the console line.
+- A microphone unplugged while the app runs is still in that list, so its name
+  still matches: the start beep plays, its stream fails to open, the console
+  says the microphone could not be opened, and the recording ends with nothing
+  captured.
 - The stream opens at the selected input's native sample rate (requesting
-  16 kHz fails on many devices, e.g. PortAudio error -50 on macOS), with the
-  listener's format negotiation, and stores the rate in `_stream_sample_rate`.
+  16 kHz fails on many devices, e.g. PortAudio error -50 on macOS), with
+  `open_input_stream`'s format negotiation, and stores the rate in
+  `_stream_sample_rate`.
 - If the stream rate differs from the Whisper target rate, audio is resampled
   via linear interpolation before transcription.
 
@@ -128,7 +142,9 @@ After transcription, text passes through these stages in order:
 | macOS 26+ (Tahoe)         | `pynput` disabled — TSM main-thread assertion crash |
 | Linux / Wayland           | `pynput` requires X11 (limited Wayland support)    |
 | Audio rate mismatch       | Resample via linear interpolation to Whisper rate  |
-| Named microphone unplugged | Records nothing, opens no other input, no start beep; console line; next press retries |
+| Named microphone missing at startup | Records nothing, opens no other input, no start beep; console line |
+| Named microphone unplugged while running | Start beep, stream fails to open, console line, nothing recorded |
+| Hotkey held after a refused press | Key repeat does not retry it; the next fresh press does |
 | LLM filler removal fails  | Falls back to raw transcription (5 s timeout)     |
 | Custom dictionary empty   | No-op, text passes through unchanged               |
 

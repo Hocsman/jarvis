@@ -482,8 +482,8 @@ class TestInputDevice:
         except ImportError:
             pytest.skip("required dependencies not installed")
 
-    def _press(self, engine, devices=_DESK, release=True):
-        """Press (and release) the hotkey; return the streams opened and the beep mock."""
+    def _patched(self, devices=_DESK, open_error=None):
+        """Patch the audio backend; return (context, streams opened)."""
         opened = []
 
         def query_devices(device=None, kind=None):
@@ -496,12 +496,20 @@ class TestInputDevice:
             return devices
 
         def input_stream(**kwargs):
+            if open_error is not None:
+                raise open_error
             opened.append(kwargs)
             return MagicMock()
 
+        sd_patch = patch("src.jarvis.dictation.dictation_engine.sd")
+        beep_patch = patch("src.jarvis.dictation.dictation_engine._play_beep")
+        return sd_patch, beep_patch, query_devices, input_stream, opened
+
+    def _press(self, engine, devices=_DESK, release=True, open_error=None):
+        """Press (and release) the hotkey; return the streams opened and the beep mock."""
+        sd_patch, beep_patch, query_devices, input_stream, opened = self._patched(devices, open_error)
         before = thread_guard.snapshot()
-        with patch("src.jarvis.dictation.dictation_engine.sd") as mock_sd, \
-             patch("src.jarvis.dictation.dictation_engine._play_beep") as beep:
+        with sd_patch as mock_sd, beep_patch as beep:
             mock_sd.query_devices.side_effect = query_devices
             mock_sd.InputStream.side_effect = input_stream
             engine._start_recording()
@@ -525,7 +533,7 @@ class TestInputDevice:
         assert len(opened) == 1
         assert "device" not in opened[0]
 
-    def test_an_unplugged_named_microphone_records_nothing(self, capsys):
+    def test_a_name_no_input_matches_records_nothing(self, capsys):
         started = threading.Event()
         engine = _make_engine(
             voice_device="Disconnected Headset",
@@ -538,22 +546,72 @@ class TestInputDevice:
         assert not started.is_set()
         assert "microphone not found" in capsys.readouterr().out.lower()
 
-    def test_the_microphone_is_found_again_once_plugged_back_in(self):
-        engine = _make_engine(voice_device="MSI GV60")
-        unplugged = [d for d in _DESK if "GV60" not in d["name"]]
+    def test_a_missing_named_microphone_is_reported_before_whisper_has_loaded(self, capsys):
+        # The listener refuses the same microphone at start-up, before it
+        # loads Whisper, so this is the state dictation meets in the app.
+        engine = _make_engine(
+            voice_device="Disconnected Headset",
+            whisper_model_ref=lambda: None,
+        )
+        opened, beep = self._press(engine)
+        assert opened == [] and not beep.called
+        assert "microphone not found" in capsys.readouterr().out.lower()
+
+    def test_a_refused_press_does_not_block_the_next_one(self, capsys):
+        engine = _make_engine(voice_device="Disconnected Headset")
         # No release in between: the refused press must not leave a
         # recording behind that swallows the next one.
-        assert self._press(engine, unplugged, release=False)[0] == []
+        self._press(engine, release=False)
+        self._press(engine, release=False)
+        assert capsys.readouterr().out.lower().count("microphone not found") == 2
+
+    def test_a_failed_device_lookup_records_nothing_and_frees_the_next_press(self, capsys):
+        started = threading.Event()
+        engine = _make_engine(voice_device="MSI GV60", on_dictation_start=started.set)
+        failure = OSError("Error querying device -1")
+        opened, beep = self._press(engine, failure, release=False)
+        assert opened == [] and not beep.called and not started.is_set()
+        assert "microphone not found" not in capsys.readouterr().out.lower()
         opened, _ = self._press(engine)
         assert [kw["device"] for kw in opened] == [1]
 
-    def test_a_failed_device_lookup_records_nothing_and_frees_the_next_press(self):
-        engine = _make_engine(voice_device="MSI GV60")
-        failure = OSError("Error querying device -1")
-        opened, beep = self._press(engine, failure, release=False)
-        assert opened == [] and not beep.called
+    def test_a_named_microphone_that_fails_to_open_is_reported(self, capsys):
+        # PortAudio keeps the device list it read at start-up, so a
+        # microphone unplugged since then still matches its name and fails
+        # when its stream is opened.
+        ended = threading.Event()
+        engine = _make_engine(voice_device="MSI GV60", on_dictation_end=ended.set)
+        unavailable = OSError("Error opening InputStream: Device unavailable [PaErrorCode -9985]")
+        opened, _ = self._press(engine, open_error=unavailable, release=False)
+        assert opened == []
+        assert ended.is_set(), "the face and the listener are released"
+        assert "could not be opened" in capsys.readouterr().out.lower()
         opened, _ = self._press(engine)
         assert [kw["device"] for kw in opened] == [1]
+
+    def test_holding_the_hotkey_after_a_refusal_reports_it_once(self, capsys):
+        from pynput import keyboard
+
+        engine = _make_engine(hotkey="ctrl+shift+d", voice_device="Disconnected Headset")
+        ctrl, shift, d = keyboard.Key.ctrl_l, keyboard.Key.shift, keyboard.KeyCode.from_char("d")
+        sd_patch, beep_patch, query_devices, input_stream, opened = self._patched()
+        before = thread_guard.snapshot()
+        with sd_patch as mock_sd, beep_patch:
+            mock_sd.query_devices.side_effect = query_devices
+            mock_sd.InputStream.side_effect = input_stream
+            engine._on_key_press(ctrl)
+            engine._on_key_press(shift)
+            for _ in range(5):  # the press, then the OS repeating the held keys
+                engine._on_key_press(d)
+                engine._on_key_press(shift)
+                thread_guard.wait_for_workers(before)
+            assert capsys.readouterr().out.lower().count("microphone not found") == 1
+
+            engine._on_key_release(d)
+            engine._on_key_press(d)
+            thread_guard.wait_for_workers(before)
+            assert capsys.readouterr().out.lower().count("microphone not found") == 1
+        assert opened == []
 
 
 # ---------------------------------------------------------------------------

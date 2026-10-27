@@ -673,6 +673,7 @@ class DictationEngine:
         self._stream: Optional[Any] = None
         self._listener: Optional[Any] = None
         self._pressed_modifiers: set = set()
+        self._trigger_held = False
         self._record_start_time: float = 0.0
         self._lock = threading.Lock()
         self._started = False
@@ -802,9 +803,18 @@ class DictationEngine:
                 self._stop_recording()
                 return
 
-        # Track modifiers currently held
+        # Track the hotkey's keys currently held. The OS repeats a held
+        # key's press; only a fresh press may start a recording, so a press
+        # that was refused (no microphone, Whisper not loaded) is not retried
+        # until its keys are released.
+        fresh_press = True
         if any(self._key_matches(key, nkey, m) for m in self._modifiers):
-            self._pressed_modifiers.add(nkey if nkey in self._modifiers else key)
+            held = nkey if nkey in self._modifiers else key
+            fresh_press = held not in self._pressed_modifiers
+            self._pressed_modifiers.add(held)
+        elif self._key_matches(key, nkey, self._trigger):
+            fresh_press = not self._trigger_held
+            self._trigger_held = True
 
         # In hands-free mode, hotkey press stops recording
         if self._hands_free and self._recording:
@@ -820,7 +830,7 @@ class DictationEngine:
                 return
 
         # Check activation condition
-        if not self._recording and not self._paste_in_progress:
+        if fresh_press and not self._recording and not self._paste_in_progress:
             mods_held = self._all_modifiers_held()
 
             if self._trigger is not None:
@@ -843,6 +853,8 @@ class DictationEngine:
         for m in list(self._pressed_modifiers):
             if getattr(m, "name", None) == getattr(key, "name", None):
                 self._pressed_modifiers.discard(m)
+        if self._key_matches(key, nkey, self._trigger):
+            self._trigger_held = False
 
         # In hands-free mode, key release does NOT stop recording
         if self._hands_free:
@@ -908,6 +920,22 @@ class DictationEngine:
 
     def _begin_recording(self, token: int) -> None:
         """Worker: open the audio stream and start capturing."""
+        # Resolve the microphone before anything announces a recording: a
+        # named one that matches no input gets no beep and no other input.
+        # This comes before the Whisper check because the listener refuses
+        # the same microphone at startup, before it loads Whisper.
+        try:
+            device = resolve_input_device(self._voice_device, sd.query_devices)
+        except InputDeviceNotFound:
+            debug_log("dictation input device did not match an available microphone", "dictation")
+            print("  ❌ Dictation: selected microphone not found. Choose an available input in Settings.", flush=True)
+            self._abandon_session(token)
+            return
+        except Exception as exc:
+            debug_log(f"dictation input device lookup failed: {exc}", "dictation")
+            self._abandon_session(token)
+            return
+
         # Check Whisper readiness
         model = self._whisper_model_ref()
         backend = self._whisper_backend_ref()
@@ -921,20 +949,6 @@ class DictationEngine:
         with self._lock:
             if self._session != token or not self._recording:
                 return
-
-        # Resolve the microphone before anything announces a recording: a
-        # named one that is unplugged gets no beep and no other input.
-        try:
-            device = resolve_input_device(self._voice_device, sd.query_devices)
-        except InputDeviceNotFound:
-            debug_log("dictation input device did not match an available microphone", "dictation")
-            print("  ❌ Dictation: selected microphone not found. Choose an available input in Settings.", flush=True)
-            self._abandon_session(token)
-            return
-        except Exception as exc:
-            debug_log(f"dictation input device lookup failed: {exc}", "dictation")
-            self._abandon_session(token)
-            return
 
         input_label = "system default" if device is None else device
         debug_log(f"dictation recording started (input: {input_label})", "dictation")
@@ -989,6 +1003,7 @@ class DictationEngine:
                 debug_log(f"dictation stream at native {self._stream_sample_rate} Hz (will resample to {self._target_sample_rate})", "dictation")
         except Exception as exc:
             debug_log(f"failed to open dictation audio stream: {exc}", "dictation")
+            print("  ❌ Dictation: the microphone could not be opened. Check it is connected.", flush=True)
             if self._abandon_session(token) and self._on_dictation_end:
                 try:
                     self._on_dictation_end()

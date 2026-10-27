@@ -55,3 +55,11 @@ def test_a_name_skips_output_only_devices():
 def test_a_name_that_matches_no_input_is_refused(value):
     with pytest.raises(InputDeviceNotFound):
         resolve_input_device(value, lambda: DESK)
+
+
+def test_the_refusal_does_not_repeat_the_name():
+    # A device name can carry a person's, and an exception's text ends up in
+    # logs and tracebacks.
+    with pytest.raises(InputDeviceNotFound) as refused:
+        resolve_input_device("Alice's AirPods", lambda: DESK)
+    assert 'alice' not in str(refused.value).lower()

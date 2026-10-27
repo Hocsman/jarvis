@@ -33,7 +33,8 @@ def resolve_input_device(
     Anything ``int()`` reads is an index. Any other text is a name: the first
     input-capable device whose name contains it, ignoring case. ``list_devices``
     is only called for a name. A name no input matches raises
-    ``InputDeviceNotFound`` rather than falling back to another microphone.
+    ``InputDeviceNotFound`` rather than falling back to another microphone; its
+    message leaves the name out, since a device name can carry a person's.
     """
     wanted = (voice_device or '').strip().lower()
     if wanted in ('', 'default', 'system'):
@@ -45,7 +46,7 @@ def resolve_input_device(
     for idx, dev in enumerate(list_devices()):
         if dev.get('max_input_channels', 0) > 0 and wanted in dev.get('name', '').lower():
             return idx
-    raise InputDeviceNotFound(voice_device)
+    raise InputDeviceNotFound("voice_device matches no input device")
 
 
 def is_input_format_error(exc: Exception) -> bool:
