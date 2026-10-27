@@ -101,7 +101,8 @@ After transcription, text passes through these stages in order:
   module must always import cleanly even when they are broken or missing
   (e.g. `import sounddevice` raises **OSError**, not ImportError, when the
   PortAudio shared library is absent; `pynput` can raise display errors on
-  headless Linux). Importers such as the setup wizard rely on this: a
+  headless Linux). The daemon's dictation start-up relies on this, and in
+  the bundled app the daemon runs inside the desktop app's process: a
   missing audio backend must never crash the app.
 
 ### Audio Device Handling

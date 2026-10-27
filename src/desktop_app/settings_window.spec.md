@@ -200,7 +200,7 @@ A stored index the list does not contain (a device unplugged when the window ope
 
 - Accessed via "⚙️ Settings" in the system tray menu.
 - Opens as a modal QDialog.
-- Lazy-imported to avoid loading sounddevice at startup. Importing the module loads none of sounddevice, numpy or pynput: the hotkey labels come from `jarvis/dictation/hotkeys.py`, not the dictation engine. The Voice Input tab queries sounddevice only when the window opens.
+- Imported from `show_settings` when the window is first opened. Importing the module loads none of sounddevice, numpy or pynput: the hotkey labels come from `jarvis/dictation/hotkeys.py`. sounddevice is imported when the window is built, to list the input devices for the Voice Input tab.
 
 ## MCP Servers Section
 

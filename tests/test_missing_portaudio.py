@@ -4,9 +4,9 @@ Test import resilience when optional audio/input dependencies fail to load.
 When the PortAudio shared library is missing (common on Linux),
 ``import sounddevice`` raises **OSError**, not ImportError. Similarly,
 ``pynput`` can raise non-ImportError exceptions on headless Linux (no X
-display). Modules that treat audio as optional must survive both,
-otherwise the setup wizard's dictation page import chain kills the whole
-app at first launch.
+display). Modules that treat audio as optional must survive both: the
+daemon imports them, and in the bundled app the daemon runs inside the
+desktop app's process.
 
 These tests import the modules in a subprocess where the dependency
 raises at import time, and assert the modules still load with the
@@ -38,13 +38,12 @@ sys.meta_path.insert(0, _Raiser())
 import {module} as m
 assert getattr(m, "{attr}") is None, "{attr} should be None when {dep} is broken"
 
-{extra}
 print("OK")
 """
 
 
-def _run(module: str, dep: str, error: str, attr: str, extra: str = "") -> subprocess.CompletedProcess:
-    code = SCENARIO.format(src=str(ROOT / "src"), module=module, dep=dep, error=error, attr=attr, extra=extra)
+def _run(module: str, dep: str, error: str, attr: str) -> subprocess.CompletedProcess:
+    code = SCENARIO.format(src=str(ROOT / "src"), module=module, dep=dep, error=error, attr=attr)
     env = dict(os.environ, PYTHONIOENCODING="utf-8")
     return subprocess.run(
         [sys.executable, "-c", code], capture_output=True, text=True, timeout=60, env=env, encoding="utf-8"
@@ -58,16 +57,11 @@ def _assert_ok(result: subprocess.CompletedProcess) -> None:
 
 def test_dictation_engine_imports_without_portaudio():
     """Dictation engine must load (audio disabled) when PortAudio is absent."""
-    extra = (
-        "from jarvis.dictation.hotkeys import format_hotkey_display\n"
-        "assert format_hotkey_display('ctrl+alt')"
-    )
     result = _run(
         "jarvis.dictation.dictation_engine",
         dep="sounddevice",
         error='OSError("PortAudio library not found")',
         attr="sd",
-        extra=extra,
     )
     _assert_ok(result)
 

@@ -11,8 +11,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 SRC = Path(__file__).resolve().parents[1] / "src"
 HEAVY = ("sounddevice", "numpy", "pynput")
 
@@ -41,6 +39,15 @@ def test_labelling_the_presets_loads_nothing_heavy():
     assert _loaded_after(code) == set()
 
 
-@pytest.mark.parametrize("heavy", HEAVY)
-def test_opening_the_settings_module_does_not_load(heavy):
-    assert heavy not in _loaded_after("import desktop_app.settings_window")
+def test_opening_the_settings_module_loads_nothing_heavy():
+    assert _loaded_after("import desktop_app.settings_window") == set()
+
+
+def test_building_the_wizards_dictation_page_loads_nothing_heavy():
+    code = (
+        "from PyQt6.QtWidgets import QApplication\n"
+        "app = QApplication([])\n"
+        "from desktop_app.setup_wizard import DictationPage\n"
+        "DictationPage()"
+    )
+    assert _loaded_after(code) == set()
