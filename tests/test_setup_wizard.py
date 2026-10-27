@@ -986,6 +986,18 @@ class TestWhisperModelOptions:
         assert "tiny" in model_ids
         assert "large-v3-turbo" in model_ids
 
+    def test_options_are_the_shared_list_split_by_language(self):
+        """The slider offers every model of the list the settings window
+        offers: ``.en`` ids on the English-only slider, the rest on the
+        multilingual one."""
+        from desktop_app.setup_wizard import WhisperSetupPage
+        from jarvis.config import SUPPORTED_WHISPER_MODELS
+
+        multilingual = [m[0] for m in WhisperSetupPage.WHISPER_MODEL_OPTIONS]
+        english = [m[0] for m in WhisperSetupPage.WHISPER_MODEL_OPTIONS_EN]
+        assert multilingual == [m for m in SUPPORTED_WHISPER_MODELS if not m.endswith(".en")]
+        assert english == [m for m in SUPPORTED_WHISPER_MODELS if m.endswith(".en")]
+
     def test_whisper_english_model_options_available(self):
         """English-only whisper model options include recommended and lightweight options."""
         from desktop_app.setup_wizard import WhisperSetupPage
@@ -1012,7 +1024,7 @@ class TestWhisperModelOptions:
             # Multilingual models should NOT have .en suffix
             assert not model_id.endswith(".en"), f"Multilingual model should not end with .en: {model_id}"
 
-    def test_turbo_hidden_when_faster_whisper_unsupported(self):
+    def test_turbo_hidden_when_faster_whisper_unsupported(self, installed_faster_whisper):
         """large-v3-turbo is filtered from options when faster-whisper is too old."""
         from desktop_app.setup_wizard import WhisperSetupPage
 
@@ -1022,13 +1034,13 @@ class TestWhisperModelOptions:
         page.WHISPER_MODEL_OPTIONS = WhisperSetupPage.WHISPER_MODEL_OPTIONS
         page.WHISPER_MODEL_OPTIONS_EN = WhisperSetupPage.WHISPER_MODEL_OPTIONS_EN
 
-        with patch("desktop_app.setup_wizard._is_faster_whisper_turbo_supported", return_value=False):
-            options = WhisperSetupPage._get_current_model_options(page)
+        installed_faster_whisper("1.0.3")
+        options = WhisperSetupPage._listed_model_options(page)
         model_ids = [m[0] for m in options]
         assert "large-v3-turbo" not in model_ids
         assert "small" in model_ids
 
-    def test_turbo_shown_when_faster_whisper_supported(self):
+    def test_turbo_shown_when_faster_whisper_supported(self, installed_faster_whisper):
         """large-v3-turbo is available when faster-whisper supports it."""
         from desktop_app.setup_wizard import WhisperSetupPage
 
@@ -1038,12 +1050,12 @@ class TestWhisperModelOptions:
         page.WHISPER_MODEL_OPTIONS = WhisperSetupPage.WHISPER_MODEL_OPTIONS
         page.WHISPER_MODEL_OPTIONS_EN = WhisperSetupPage.WHISPER_MODEL_OPTIONS_EN
 
-        with patch("desktop_app.setup_wizard._is_faster_whisper_turbo_supported", return_value=True):
-            options = WhisperSetupPage._get_current_model_options(page)
+        installed_faster_whisper("1.1.1")
+        options = WhisperSetupPage._listed_model_options(page)
         model_ids = [m[0] for m in options]
         assert "large-v3-turbo" in model_ids
 
-    def test_turbo_always_shown_on_apple_silicon(self):
+    def test_turbo_always_shown_on_apple_silicon(self, installed_faster_whisper):
         """large-v3-turbo is always available on Apple Silicon (MLX backend)."""
         from desktop_app.setup_wizard import WhisperSetupPage
 
@@ -1053,8 +1065,8 @@ class TestWhisperModelOptions:
         page.WHISPER_MODEL_OPTIONS = WhisperSetupPage.WHISPER_MODEL_OPTIONS
         page.WHISPER_MODEL_OPTIONS_EN = WhisperSetupPage.WHISPER_MODEL_OPTIONS_EN
 
-        with patch("desktop_app.setup_wizard._is_faster_whisper_turbo_supported", return_value=False):
-            options = WhisperSetupPage._get_current_model_options(page)
+        installed_faster_whisper("1.0.3")
+        options = WhisperSetupPage._listed_model_options(page)
         model_ids = [m[0] for m in options]
         assert "large-v3-turbo" in model_ids
 
@@ -1374,4 +1386,425 @@ class TestSearchProvidersPage:
             assert saved["mcps"] == {"x": {}}
         finally:
             cfg_path.unlink(missing_ok=True)
+
+
+# --- Re-running the wizard keeps a value its pages do not list ------------
+
+
+@pytest.fixture
+def wizard_config(tmp_path, monkeypatch):
+    """Point the config file at a fresh one, the way the suite-wide sandbox
+    does: through ``jarvis.config`` only. A page that read or wrote through
+    a path of its own would miss this file, and the tests below would see it.
+    """
+    import json
+
+    path = tmp_path / "config.json"
+    monkeypatch.setattr("jarvis.config.default_config_path", lambda: path)
+    monkeypatch.setenv("JARVIS_CONFIG_PATH", str(path))
+
+    class _Config:
+        def write(self, values):
+            path.write_text(json.dumps(values), encoding="utf-8")
+
+        def read(self):
+            return json.loads(path.read_text(encoding="utf-8"))
+
+    return _Config()
+
+
+class TestPagesWithNoConfiguredValue:
+    """A fresh install (no file, or a key that names nothing) gets each page's
+    default selected and no extra option."""
+
+    _NO_FILE, _NO_KEY = object(), object()
+    CASES = [
+        pytest.param(_NO_FILE, id="no-file"),
+        pytest.param(_NO_KEY, id="no-key"),
+        pytest.param("", id="empty"),
+        pytest.param(None, id="null"),
+    ]
+
+    @classmethod
+    def _prepare(cls, wizard_config, case, key):
+        if case is cls._NO_FILE:
+            return
+        wizard_config.write({} if case is cls._NO_KEY else {key: case})
+
+    @pytest.mark.parametrize("case", CASES)
+    def test_models_page_selects_the_default_chat_model(self, qapp, wizard_config, case):
+        from PyQt6.QtWidgets import QPushButton
+        from desktop_app.setup_wizard import ModelsPage
+        from jarvis.config import SUPPORTED_CHAT_MODELS
+
+        self._prepare(wizard_config, case, "ollama_chat_model")
+        page = ModelsPage()
+        page.initializePage()
+
+        cards = [b for b in page.findChildren(QPushButton) if b.isCheckable()]
+        checked = [b for b in cards if b.isChecked()]
+        assert len(cards) == len(SUPPORTED_CHAT_MODELS)
+        assert len(checked) == 1
+        assert checked[0].text().startswith(SUPPORTED_CHAT_MODELS[DEFAULT_CHAT_MODEL]["name"])
+
+    @pytest.mark.parametrize("case", CASES)
+    def test_whisper_page_selects_the_default_model(self, qapp, wizard_config, case):
+        from desktop_app.setup_wizard import WhisperSetupPage
+        from jarvis.config import get_default_config
+
+        self._prepare(wizard_config, case, "whisper_model")
+        page = WhisperSetupPage()
+        page.initializePage()
+        page.validatePage()
+
+        listed = WhisperSetupPage.WHISPER_MODEL_OPTIONS + WhisperSetupPage.WHISPER_MODEL_OPTIONS_EN
+        names = TestWhisperSetupPageKeepsAnUnlistedModel._slider_names(page)
+        assert set(names) <= {option[1] for option in listed}
+        assert wizard_config.read()["whisper_model"] == get_default_config()["whisper_model"]
+
+    @pytest.mark.parametrize("case", CASES)
+    def test_dictation_page_selects_the_default_hotkey(self, qapp, wizard_config, case):
+        from desktop_app.setup_wizard import DictationPage
+        from jarvis.config import DICTATION_HOTKEY_PRESETS, get_default_config
+
+        self._prepare(wizard_config, case, "dictation_hotkey")
+        page = DictationPage()
+
+        assert page._hotkey_combo.count() == len(DICTATION_HOTKEY_PRESETS)
+        assert page._hotkey_combo.currentData() == get_default_config()["dictation_hotkey"]
+
+
+class TestModelsPageKeepsAnUnlistedChatModel:
+    """A chat model the cards do not list (one pulled on purpose) survives a
+    re-run of the wizard untouched."""
+
+    UNLISTED = "my-own-model:7b"
+
+    @staticmethod
+    def _cards(page):
+        from PyQt6.QtWidgets import QPushButton
+
+        return [b for b in page.findChildren(QPushButton) if b.isCheckable()]
+
+    def test_unlisted_model_is_written_back_unchanged(self, qapp, wizard_config):
+        from desktop_app.setup_wizard import ModelsPage
+        from jarvis.config import SUPPORTED_CHAT_MODELS
+
+        assert self.UNLISTED not in SUPPORTED_CHAT_MODELS
+        wizard_config.write({"ollama_chat_model": self.UNLISTED})
+
+        page = ModelsPage()
+        page.initializePage()
+        page.validatePage()
+
+        assert wizard_config.read()["ollama_chat_model"] == self.UNLISTED
+
+    def test_unlisted_model_gets_its_own_selected_card(self, qapp, wizard_config):
+        from desktop_app.setup_wizard import ModelsPage
+
+        wizard_config.write({"ollama_chat_model": self.UNLISTED})
+
+        page = ModelsPage()
+        page.initializePage()
+
+        checked = [b for b in self._cards(page) if b.isChecked()]
+        assert [b.text() for b in checked] == [self.UNLISTED]
+
+    def test_reentering_the_page_adds_the_card_once(self, qapp, wizard_config):
+        from desktop_app.setup_wizard import ModelsPage
+        from jarvis.config import SUPPORTED_CHAT_MODELS
+
+        wizard_config.write({"ollama_chat_model": self.UNLISTED})
+
+        page = ModelsPage()
+        for _ in range(3):
+            page.initializePage()
+
+        assert len(self._cards(page)) == len(SUPPORTED_CHAT_MODELS) + 1
+
+    def test_choosing_a_listed_model_replaces_it(self, qapp, wizard_config):
+        from desktop_app.setup_wizard import ModelsPage
+        from jarvis.config import SUPPORTED_CHAT_MODELS
+
+        wizard_config.write({"ollama_chat_model": self.UNLISTED})
+        listed_id, listed = next(iter(SUPPORTED_CHAT_MODELS.items()))
+
+        page = ModelsPage()
+        page.initializePage()
+        card = next(b for b in self._cards(page) if b.text().startswith(listed["name"]))
+        card.click()
+        page.validatePage()
+
+        assert wizard_config.read()["ollama_chat_model"] == listed_id
+
+    def test_the_wizard_grows_by_the_added_card(self, qapp, wizard_config):
+        from PyQt6.QtWidgets import QWizard
+        from desktop_app.setup_wizard import ModelsPage
+
+        heights = {}
+        for model in (DEFAULT_CHAT_MODEL, self.UNLISTED):
+            wizard_config.write({"ollama_chat_model": model})
+            wizard = QWizard()
+            page = ModelsPage()
+            wizard.addPage(page)
+            page.initializePage()
+            heights[model] = wizard.minimumHeight()
+
+        added = next(b for b in self._cards(page) if b.text() == self.UNLISTED)
+        step = added.maximumHeight() + added.parentWidget().layout().spacing()
+        assert heights[self.UNLISTED] - heights[DEFAULT_CHAT_MODEL] == step
+
+    def test_unlisted_model_is_installed_like_a_listed_one(self, qapp, wizard_config):
+        from desktop_app.setup_wizard import SetupWizard
+        from jarvis.config import load_settings
+
+        wizard_config.write({"ollama_chat_model": self.UNLISTED})
+        cfg = load_settings()
+        others = [cfg.ollama_embed_model, cfg.intent_judge_model]
+
+        wizard = SetupWizard()
+        page = wizard.page(wizard.models_page_id)
+        wizard.ollama_status = OllamaStatus(
+            is_cli_installed=True, cli_path="ollama", is_server_running=True,
+            server_version="0", installed_models=list(others), missing_models=[],
+        )
+        page.initializePage()
+        assert not page.isComplete()
+        assert self.UNLISTED in page.models_label.text()
+
+        wizard.ollama_status.installed_models.append(f"{self.UNLISTED}:latest")
+        page.initializePage()
+        assert page.isComplete()
+
+
+class TestWhisperSetupPageKeepsAnUnlistedModel:
+    """A Whisper model the slider does not list (a local model path, a turbo
+    the installed engine cannot run) survives a re-run of the wizard
+    untouched."""
+
+    UNLISTED = "distil-large-v3"
+    LONG_PATH = "C:/Users/someone/AppData/Local/models/" + "faster-whisper-large-v3-ct2-int8" * 3
+
+    @staticmethod
+    def _slider_labels(page):
+        labels = []
+        for i in range(page._labels_layout.count()):
+            w = page._labels_layout.itemAt(i).widget()
+            if w is not None:
+                labels.append(w)
+        return labels
+
+    @classmethod
+    def _slider_names(cls, page):
+        return [label.text() for label in cls._slider_labels(page)]
+
+    @pytest.mark.parametrize("value", [
+        UNLISTED,
+        "distil-small.en",
+        "~/models/whisper-ct2",
+        LONG_PATH,
+    ])
+    def test_unlisted_model_is_written_back_unchanged(self, qapp, wizard_config, value):
+        from desktop_app.setup_wizard import WhisperSetupPage
+        from jarvis.config import SUPPORTED_WHISPER_MODELS
+
+        assert value not in SUPPORTED_WHISPER_MODELS
+        wizard_config.write({"whisper_model": value})
+
+        page = WhisperSetupPage()
+        page.initializePage()
+        page.validatePage()
+
+        assert wizard_config.read()["whisper_model"] == value
+
+    def test_every_model_the_settings_window_offers_is_listed(self, qapp, wizard_config, installed_faster_whisper):
+        """A size picked in Settings comes back as that size, shown with its
+        size details as a listed option rather than kept raw."""
+        from desktop_app.settings_window import FIELD_METADATA
+        from desktop_app.setup_wizard import WhisperSetupPage
+        from jarvis.config import SUPPORTED_WHISPER_MODELS
+
+        fm = next(f for f in FIELD_METADATA if f.key == "whisper_model")
+        installed_faster_whisper("1.1.1")
+        for value, _label in fm.choices:
+            wizard_config.write({"whisper_model": value})
+
+            page = WhisperSetupPage()
+            page.initializePage()
+            page.validatePage()
+
+            assert wizard_config.read()["whisper_model"] == value
+            assert SUPPORTED_WHISPER_MODELS[value]["size"] in page._model_info_label.text()
+
+    def test_switching_a_large_model_to_english_keeps_the_largest_english_size(self, qapp, wizard_config, installed_faster_whisper):
+        """Large models have no English-only variant: switching lands on the
+        largest English size, not the smallest."""
+        from desktop_app.setup_wizard import WhisperSetupPage
+
+        largest_english = WhisperSetupPage.WHISPER_MODEL_OPTIONS_EN[-1][0]
+        large = [m[0] for m in WhisperSetupPage.WHISPER_MODEL_OPTIONS
+                 if f"{m[0]}.en" not in {e[0] for e in WhisperSetupPage.WHISPER_MODEL_OPTIONS_EN}]
+        assert large
+        installed_faster_whisper("1.1.1")
+        for model in large:
+            wizard_config.write({"whisper_model": model})
+            page = WhisperSetupPage()
+            page.initializePage()
+            page._english_btn.click()
+            page.validatePage()
+
+            assert wizard_config.read()["whisper_model"] == largest_english
+
+    def test_reentering_the_page_reselects_the_configured_size(self, qapp, wizard_config):
+        """Back then Next re-reads the config: a size dragged to but never
+        saved does not stick, whatever the slider held."""
+        from desktop_app.setup_wizard import WhisperSetupPage
+
+        configured = WhisperSetupPage.WHISPER_MODEL_OPTIONS_EN[1][0]
+        wizard_config.write({"whisper_model": configured})
+
+        page = WhisperSetupPage()
+        page.initializePage()
+        page._multilingual_btn.click()
+        page._model_slider.setValue(page._model_slider.maximum())
+        page.initializePage()
+        page.validatePage()
+
+        assert wizard_config.read()["whisper_model"] == configured
+
+    def test_a_long_path_is_shortened_on_screen_and_kept_whole(self, qapp, wizard_config):
+        """However long a local model path is, the slider row does not grow
+        with it; the whole path stays readable in the tooltip."""
+        from desktop_app.setup_wizard import WhisperSetupPage
+
+        widths = []
+        for path in (self.LONG_PATH, self.LONG_PATH * 3):
+            wizard_config.write({"whisper_model": path})
+            page = WhisperSetupPage()
+            page.initializePage()
+            label = self._slider_labels(page)[-1]
+            assert label.toolTip() == path
+            assert label.text() != path
+            widths.append((
+                page._labels_container.minimumSizeHint().width(),
+                page._model_info_label.minimumSizeHint().width(),
+            ))
+
+        assert widths[0] == widths[1]
+
+    def test_turbo_is_kept_when_the_engine_cannot_run_it(self, qapp, wizard_config, installed_faster_whisper):
+        from desktop_app.setup_wizard import WhisperSetupPage
+
+        wizard_config.write({"whisper_model": "large-v3-turbo"})
+        installed_faster_whisper("1.0.3")
+
+        with patch("desktop_app.setup_wizard.is_apple_silicon", return_value=False):
+            page = WhisperSetupPage()
+            page.initializePage()
+            page.validatePage()
+
+        assert wizard_config.read()["whisper_model"] == "large-v3-turbo"
+
+    def test_unlisted_model_is_shown_raw_on_the_slider(self, qapp, wizard_config):
+        from desktop_app.setup_wizard import WhisperSetupPage
+
+        wizard_config.write({"whisper_model": self.UNLISTED})
+
+        page = WhisperSetupPage()
+        page.initializePage()
+
+        assert self.UNLISTED in self._slider_names(page)
+        assert self.UNLISTED in page._model_info_label.text()
+
+    def test_reentering_the_page_adds_the_option_once(self, qapp, wizard_config):
+        from desktop_app.setup_wizard import WhisperSetupPage
+
+        wizard_config.write({"whisper_model": self.UNLISTED})
+
+        page = WhisperSetupPage()
+        for _ in range(3):
+            page.initializePage()
+
+        assert self._slider_names(page).count(self.UNLISTED) == 1
+
+    def test_unlisted_model_stays_in_its_own_language(self, qapp, wizard_config):
+        from desktop_app.setup_wizard import WhisperSetupPage
+
+        wizard_config.write({"whisper_model": self.UNLISTED})
+
+        page = WhisperSetupPage()
+        page.initializePage()
+        page._english_btn.click()
+        assert self.UNLISTED not in self._slider_names(page)
+        page._multilingual_btn.click()
+        assert self._slider_names(page).count(self.UNLISTED) == 1
+
+    def test_choosing_a_listed_model_replaces_it(self, qapp, wizard_config):
+        from desktop_app.setup_wizard import WhisperSetupPage
+
+        wizard_config.write({"whisper_model": self.UNLISTED})
+
+        page = WhisperSetupPage()
+        page.initializePage()
+        page._model_slider.setValue(0)
+        page.validatePage()
+
+        assert wizard_config.read()["whisper_model"] == WhisperSetupPage.WHISPER_MODEL_OPTIONS[0][0]
+
+
+class TestDictationPageKeepsAnUnlistedHotkey:
+    """A hand-edited dictation hotkey the presets do not list survives a
+    re-run of the wizard untouched."""
+
+    UNLISTED = "ctrl+alt+space"
+
+    def test_unlisted_hotkey_is_written_back_unchanged(self, qapp, wizard_config):
+        from desktop_app.setup_wizard import DictationPage
+        from jarvis.config import DICTATION_HOTKEY_PRESETS
+
+        assert self.UNLISTED not in DICTATION_HOTKEY_PRESETS
+        wizard_config.write({"dictation_hotkey": self.UNLISTED})
+
+        page = DictationPage()
+        page.validatePage()
+
+        assert wizard_config.read()["dictation_hotkey"] == self.UNLISTED
+
+    def test_unlisted_hotkey_is_shown_raw_and_selected(self, qapp, wizard_config):
+        from desktop_app.setup_wizard import DictationPage
+
+        wizard_config.write({"dictation_hotkey": self.UNLISTED})
+
+        page = DictationPage()
+
+        assert page._hotkey_combo.currentText() == self.UNLISTED
+        assert page._hotkey_combo.currentData() == self.UNLISTED
+
+    def test_choosing_a_preset_replaces_it(self, qapp, wizard_config):
+        from desktop_app.setup_wizard import DictationPage
+        from jarvis.config import DICTATION_HOTKEY_PRESETS
+
+        wizard_config.write({"dictation_hotkey": self.UNLISTED})
+        preset = DICTATION_HOTKEY_PRESETS[0]
+
+        page = DictationPage()
+        page._hotkey_combo.setCurrentIndex(page._hotkey_combo.findData(preset))
+        page.validatePage()
+
+        assert wizard_config.read()["dictation_hotkey"] == preset
+
+    @pytest.mark.parametrize("key", ["dictation_enabled", "dictation_filler_removal"])
+    def test_its_toggles_are_written_back_as_set(self, qapp, wizard_config, key):
+        """Dictation switched off in Settings stays off after a re-run; so
+        does any toggle the user flipped away from its default."""
+        from desktop_app.setup_wizard import DictationPage
+        from jarvis.config import get_default_config
+
+        flipped = not get_default_config()[key]
+        wizard_config.write({key: flipped})
+
+        page = DictationPage()
+        page.validatePage()
+
+        assert wizard_config.read()[key] is flipped
 

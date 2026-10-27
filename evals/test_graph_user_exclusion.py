@@ -140,7 +140,6 @@ def _run_extraction(case: ExclusionCase, config: MockConfig) -> list[str]:
         # empty-window rule has its own suite in
         # ``tests/test_un_fait_du_monde_a_une_source.py``.
         tools_used=["webSearch"],
-        timeout_sec=config.llm_chat_timeout_sec,
         thinking=False,
         date_utc=case.date_utc,
     )

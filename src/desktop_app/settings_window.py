@@ -25,7 +25,7 @@ from PyQt6.QtGui import QFont
 from jarvis.config import (
     get_default_config, load_config,
     default_config_path, _save_json, _load_json,
-    SUPPORTED_CHAT_MODELS,
+    SUPPORTED_CHAT_MODELS, SUPPORTED_WHISPER_MODELS,
 )
 from jarvis.debug import debug_log
 from desktop_app.themes import apply_theme
@@ -146,25 +146,39 @@ def _select_choice(combo: QComboBox, key: str, value: Any) -> None:
         combo.setCurrentIndex(idx)
 
 
-def _dictation_hotkey_choices() -> list:
-    """Build platform-aware dictation hotkey dropdown choices."""
-    from jarvis.dictation.dictation_engine import format_hotkey_display
-    from jarvis.config import _default_dictation_hotkey
-    default = _default_dictation_hotkey()
-    options = [
-        ("ctrl+alt", format_hotkey_display("ctrl+alt")),
-        ("ctrl+cmd", format_hotkey_display("ctrl+cmd")),
-        ("ctrl+shift+d", format_hotkey_display("ctrl+shift+d")),
-        ("ctrl+shift", format_hotkey_display("ctrl+shift")),
-    ]
-    return [
-        (val, f"{label} (default)" if val == default else label)
-        for val, label in options
-    ]
+def _select_device(combo: QComboBox, key: str, value: Any) -> None:
+    """Select ``value`` in a device combo.
+
+    A device set by name (any value that does not read as an index, as the
+    listener tells them apart) is added as its own option and selected, so a
+    Save writes the name back. An index the list lacks is not kept: after a
+    replug it can name another device, so the combo falls back to System
+    Default, as it does for the words the listener reads as the system default.
+    """
+    cur_str = str(value).strip() if value is not None else ""
+    if cur_str.lower() in ("default", "system"):
+        cur_str = ""
+    idx = combo.findData(cur_str)
+    if idx < 0 and cur_str:
+        try:
+            index = int(cur_str)
+        except ValueError:
+            combo.addItem(f"🎤 {cur_str} (by name)", value)
+            idx = combo.count() - 1
+            debug_log(f"{key} keeps a device set by name", "settings")
+        else:
+            idx = combo.findData(str(index))
+            if idx < 0:
+                debug_log(f"{key} names an index the list lacks, shown as System Default", "settings")
+    if idx < 0:
+        idx = combo.findData("")
+    combo.setCurrentIndex(idx)
 
 
 def _build_field_metadata() -> List[FieldMeta]:
     """Build the metadata registry for all user-facing config fields."""
+    from jarvis.dictation.hotkeys import dictation_hotkey_choices
+
     fields = []
 
     def f(key, label, desc, cat, ftype, **kw):
@@ -339,11 +353,13 @@ def _build_field_metadata() -> List[FieldMeta]:
       "How loosely to match the wake word (0.0–1.0)",
       "wake", "float", min_val=0.5, max_val=1.0, step=0.01)
     # --- Whisper ---
+    whisper_choices = [
+        (mid, f"{info['name']} (English only)" if mid.endswith(".en") else info["name"])
+        for mid, info in SUPPORTED_WHISPER_MODELS.items()
+    ]
     f("whisper_model", "Model Size",
       "Whisper model size (tiny/base/small/medium/large)",
-      "whisper", "choice",
-      choices=[("tiny", "Tiny"), ("base", "Base"), ("small", "Small"),
-               ("medium", "Medium"), ("large-v3", "Large v3")])
+      "whisper", "choice", choices=whisper_choices)
     f("whisper_backend", "Backend",
       "Speech recognition backend",
       "whisper", "choice",
@@ -476,7 +492,7 @@ def _build_field_metadata() -> List[FieldMeta]:
       "features", "bool")
     f("dictation_hotkey", "Dictation Hotkey",
       "Key combination to hold for dictation. Double-tap for hands-free mode.",
-      "features", "choice", choices=_dictation_hotkey_choices())
+      "features", "choice", choices=dictation_hotkey_choices())
     f("dictation_filler_removal", "Filler Word Removal",
       "Use the local LLM to remove filler words (um, uh, like) from dictation output",
       "features", "bool")
@@ -796,12 +812,7 @@ class SettingsWindow(QDialog):
             devices = get_input_devices()
             for val, display in devices:
                 w.addItem(display, val)
-            # Not _select_choice: an index the list lacks can name another
-            # device after a replug, so an unlisted one is not kept.
-            cur_str = str(current) if current not in (None, "") else ""
-            idx = w.findData(cur_str)
-            if idx >= 0:
-                w.setCurrentIndex(idx)
+            _select_device(w, fm.key, current)
             w.setToolTip(fm.description)
             return w
 
@@ -1228,10 +1239,7 @@ class SettingsWindow(QDialog):
             _select_choice(w, fm.key, value)
 
         elif fm.field_type == "device":
-            cur_str = str(value) if value not in (None, "") else ""
-            idx = w.findData(cur_str)
-            if idx >= 0:
-                w.setCurrentIndex(idx)
+            _select_device(w, fm.key, value)
 
         elif fm.field_type in ("list", "map"):
             list_w = w._list_widget

@@ -1199,7 +1199,8 @@ def graph_import_diary() -> Response:
                         # says so, and the facts land sourced `inconnu`
                         # rather than claiming a lookup nobody witnessed.
                         tools_used=None,
-                        timeout_sec=settings.llm_chat_timeout_sec,
+                        # No deadline passed: each summary's pass gets one
+                        # chat-model timeout of its own.
                         thinking=getattr(settings, 'llm_thinking_enabled', False),
                         date_utc=date_utc,
                     )
@@ -1287,7 +1288,6 @@ def graph_consolidate_all() -> Response:
                 store=store,
                 cfg=settings,
                 chat_model=settings.llm_chat_model,
-                timeout_sec=20.0,
             ):
                 node_count += 1
                 total_before += before

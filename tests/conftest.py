@@ -658,6 +658,29 @@ def qapp():
             pass
     app.processEvents()
 
+
+@pytest.fixture
+def installed_faster_whisper(monkeypatch):
+    """``installed_faster_whisper(version)``: the installed faster-whisper
+    reads as *version*, or as absent when *version* is None. Every other
+    distribution keeps its real metadata."""
+    import importlib.metadata
+
+    real_version = importlib.metadata.version
+
+    def install(version):
+        def fake_version(name):
+            if name.replace("_", "-").lower() != "faster-whisper":
+                return real_version(name)
+            if version is None:
+                raise importlib.metadata.PackageNotFoundError(name)
+            return version
+
+        monkeypatch.setattr(importlib.metadata, "version", fake_version)
+
+    return install
+
+
 @pytest.fixture
 def tools_unrestricted(monkeypatch):
     """Run tool calls with the policy gate standing aside.
