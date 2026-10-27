@@ -14,7 +14,8 @@ Two factories share one provider catalogue:
 
 from __future__ import annotations
 import json
-from typing import Any, Dict, Optional
+import time
+from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlparse
 
 from ..debug import debug_log
@@ -45,9 +46,16 @@ _ANTHROPIC_KEY_PREFIX = "sk-ant-"
 # cloud endpoint that dominated the latency of a multi-call reply.
 _BACKEND_CACHE: dict = {}
 
+# What local Ollama answered to ``/api/tags``, by its URL, with when.
+# Only a private pin behind a local endpoint asks; a model pulled
+# meanwhile, or Ollama started, is picked up within the TTL.
+_OLLAMA_TAGS_CACHE: Dict[str, tuple] = {}
+_OLLAMA_TAGS_TTL_SEC = 30.0
+_OLLAMA_TAGS_TIMEOUT_SEC = 1.0
+
 
 def clear_backend_cache() -> None:
-    """Drop all cached backends.
+    """Drop all cached backends, and Ollama's cached tag list.
 
     Call after a configuration reload so the next ``get_llm_backend``
     rebuilds against the new settings instead of returning a backend
@@ -55,6 +63,7 @@ def clear_backend_cache() -> None:
     isolated.
     """
     _BACKEND_CACHE.clear()
+    _OLLAMA_TAGS_CACHE.clear()
 
 
 def _resolve_provider(value: Any) -> str:
@@ -140,6 +149,56 @@ def _build_uncached(
     return backend
 
 
+def _chat_endpoint(settings: Any) -> Tuple[str, str]:
+    """The configured provider, and the URL its chat requests go to."""
+    provider = _resolve_provider(getattr(settings, "llm_provider", None))
+    if provider == _OLLAMA:
+        return provider, _str_attr(settings, "ollama_base_url", _DEFAULT_OLLAMA_URL)
+    if provider == _ANTHROPIC:
+        return provider, ANTHROPIC_BASE_URL
+    return provider, _str_attr(settings, "llm_base_url") or _str_attr(
+        settings, "ollama_base_url", _DEFAULT_OLLAMA_URL
+    )
+
+
+def _on_a_remote_provider(settings: Any) -> bool:
+    """Whether the provider is not Ollama and its endpoint is off this
+    machine and its network, as ``is_local_endpoint`` reads the URL."""
+    provider, base_url = _chat_endpoint(settings)
+    return provider != _OLLAMA and not is_local_endpoint(base_url)
+
+
+def _names_the_providers_chat_model(settings: Any, model: str) -> bool:
+    """Whether ``model`` is the chat model, named for the provider.
+
+    The chat model is the one name known to exist on the provider,
+    whatever :func:`names_provider_model` makes of its spelling:
+    api.openai.com, DeepSeek and Groq spell theirs without a slash. Except
+    the Ollama chat model, which an empty ``llm_chat_model`` inherits:
+    that name is a local tag whatever field carries it.
+    """
+    return model == _str_attr(settings, "llm_chat_model") and model != _str_attr(
+        settings, "ollama_chat_model"
+    )
+
+
+def _lives_on_ollama(settings: Any, model: str) -> bool:
+    """Whether ``model``, named on a provider other than Ollama, lives on
+    local Ollama instead.
+
+    Behind a remote endpoint that is a local tag, a name the provider does
+    not serve (:func:`names_provider_model`). Behind a local one it is a
+    tag local Ollama lists: the configured server may be LM Studio beside
+    Ollama, or a gateway that forwards elsewhere. The provider's own chat
+    model never is.
+    """
+    if _names_the_providers_chat_model(settings, model):
+        return False
+    if _on_a_remote_provider(settings):
+        return not names_provider_model(_chat_endpoint(settings)[0], model)
+    return _ollama_has(settings, model)
+
+
 def get_llm_backend(settings: Any, model: Optional[str] = None) -> LLMBackend:
     """Return the configured chat backend.
 
@@ -148,25 +207,21 @@ def get_llm_backend(settings: Any, model: Optional[str] = None) -> LLMBackend:
     Keeping each provider on its own URL means toggling ``llm_provider``
     can never leave the backend pointed at a stale OpenAI-compatible URL.
 
-    When ``model`` is a local tag rather than a name the remote provider
-    serves (:func:`names_provider_model`), the model cannot run on the
-    remote endpoint. It routes to local Ollama instead, eliminating cloud
-    network latency for auxiliary classification and routing passes.
+    When ``model`` lives on local Ollama rather than on the configured
+    server (:func:`_lives_on_ollama`), the request goes there: a local tag
+    behind a remote endpoint, which the remote endpoint does not have, and
+    behind a local endpoint a tag Ollama lists. Auxiliary classification
+    and routing passes are what name such models.
+
+    The provider's own chat model is the exception: it stays on the
+    provider however it is spelled, so a call that lands on it, by default
+    or because ``_cloud_safe_model`` substituted it, reaches the one
+    server known to have it.
     """
     model_str = (model or "").strip()
-    provider = _resolve_provider(getattr(settings, "llm_provider", None))
-    if provider == _OLLAMA:
-        base_url = _str_attr(settings, "ollama_base_url", _DEFAULT_OLLAMA_URL)
-    else:
-        if provider == _ANTHROPIC:
-            base_url = ANTHROPIC_BASE_URL
-        else:
-            base_url = _str_attr(settings, "llm_base_url") or _str_attr(
-                settings, "ollama_base_url", _DEFAULT_OLLAMA_URL
-            )
-        if (model_str and not is_local_endpoint(base_url)
-                and not names_provider_model(provider, model_str)):
-            return get_llm_backend(_SurLaMachine(settings))
+    provider, base_url = _chat_endpoint(settings)
+    if model_str and provider != _OLLAMA and _lives_on_ollama(settings, model_str):
+        return get_llm_backend(_SurLaMachine(settings))
     api_key = _str_attr(settings, "llm_api_key") or None
     # Fallback False (not True) only matters for partial cfg objects
     # that lack the field — i.e. test mocks. The real ``Settings`` always
@@ -244,6 +299,41 @@ class _SurLaMachine:
         return getattr(object.__getattribute__(self, "_vrai"), nom)
 
 
+def _ollama_has(settings: Any, tag: str) -> bool:
+    """Whether local Ollama answers and lists ``tag``.
+
+    Ollama runs an untagged name as ``name:latest``, so that counts too.
+    Nothing answering is False, as is anything else going wrong.
+    """
+    url = _str_attr(settings, "ollama_base_url", _DEFAULT_OLLAMA_URL)
+    now = time.monotonic()
+    cached = _OLLAMA_TAGS_CACHE.get(url)
+    if cached is not None and now - cached[0] < _OLLAMA_TAGS_TTL_SEC:
+        names = cached[1]
+    else:
+        names = frozenset(
+            get_llm_backend(_SurLaMachine(settings)).list_models(
+                timeout_sec=_OLLAMA_TAGS_TIMEOUT_SEC
+            )
+        )
+        _OLLAMA_TAGS_CACHE[url] = (now, names)
+        debug_log(f"🦙 local Ollama lists {len(names)} model(s)", "llm")
+    return tag in names or (":" not in tag and f"{tag}:latest" in names)
+
+
+def _pin_runs_on_ollama(settings: Any, pin: str) -> bool:
+    """Whether a private pin runs on local Ollama rather than the
+    configured server. On the Ollama provider the two are the same.
+
+    Stricter than :func:`_lives_on_ollama`: a pin Ollama lists runs there
+    even when it is also the chat model's name, so a gateway at a local
+    address never receives it.
+    """
+    if _chat_endpoint(settings)[0] == _OLLAMA:
+        return True
+    return _on_a_remote_provider(settings) or _ollama_has(settings, pin)
+
+
 def get_private_backend(settings: Any, pinned: str, model: str) -> LLMBackend:
     """The backend for a prompt carrying the user's own life.
 
@@ -257,32 +347,41 @@ def get_private_backend(settings: Any, pinned: str, model: str) -> LLMBackend:
     alone, which on a cloud provider sends a pinned local tag, and the
     sentence with it, to the cloud.
 
-    So a pin decides the destination too, whatever its shape: an
-    ``hf.co/...`` Ollama tag has a slash and is still his machine. With
-    nothing pinned, ``model`` (the one the context resolved and is about
-    to send) decides it the way it does for every other call: a local tag
-    on a remote provider (:func:`names_provider_model`) names a model that
-    lives on local Ollama, and goes there. A name the provider serves stays
-    on the provider he chose: the chat model at the end of the chain, a
-    router given as ``vendor/model`` or as a Claude ID, and on an
-    OpenAI-compatible endpoint a slashed local tag too, which only a pin
-    keeps here.
+    So a pin decides the destination too. Behind a remote provider it runs
+    on local Ollama whatever its shape: an ``hf.co/...`` Ollama tag has a
+    slash and is still his machine. Behind an endpoint on his own machine
+    or network it runs on local Ollama when Ollama lists that tag, and on
+    the configured server otherwise (LM Studio, ``llama-server``), where
+    its ID lives. A local address is not proof of a local model: a gateway
+    or a tunnel there forwards wherever it is set to, so a tag Ollama has
+    never goes to it.
+
+    With nothing pinned, ``model`` (the one the context resolved and is
+    about to send) decides it the way it does for every other call
+    (:func:`_lives_on_ollama`): a local tag on a remote provider names a
+    model that lives on local Ollama, and goes there, as does a tag
+    Ollama lists behind a local endpoint. A name the provider serves
+    stays on the provider he chose: its own chat model whatever its
+    spelling, a router given as ``vendor/model`` or as a Claude ID, and on
+    a remote OpenAI-compatible endpoint a slashed local tag too, which
+    only a pin keeps here.
 
     ``pinned`` and ``model`` are separate because a context's chain runs
     past its pin: the model it sends may be a fallback's, and the request
     has to go where that model lives.
     """
-    is_pinned = bool((pinned or "").strip())
-    if is_pinned:
+    pin = (pinned or "").strip()
+    if pin and _pin_runs_on_ollama(settings, pin):
         backend = get_llm_backend(_SurLaMachine(settings))
     else:
         backend = get_llm_backend(settings, model=model)
-    # The class rather than the URL: a configured URL can carry an
-    # account-bearing query string, and `OllamaBackend` already reads as
-    # "this machine".
+    # The class and a word rather than the URL: a configured URL can carry
+    # an account-bearing query string. `OllamaBackend` is this machine;
+    # any other backend is local or remote as its endpoint is.
+    ici = isinstance(backend, OllamaBackend) or not _on_a_remote_provider(settings)
     debug_log(
-        f"🔒 private prompt for {model!r} → {type(backend).__name__}"
-        f"{' (pinned)' if is_pinned else ''}",
+        f"🔒 private prompt for {model!r} → {type(backend).__name__}, "
+        f"{'local' if ici else 'remote'}{' (pinned)' if pin else ''}",
         "llm",
     )
     return backend
@@ -292,10 +391,10 @@ def get_auxiliary_backend(settings: Any, model: Optional[str] = None) -> LLMBack
     """The backend for auxiliary classification and routing tasks.
 
     Delegates to :func:`get_llm_backend` with the requested model name so
-    local tags are routed to local Ollama while names the provider serves
-    (and everything on a local endpoint) stay on the configured chat
+    a model that lives on local Ollama runs there (a local tag behind a
+    remote endpoint, a tag Ollama lists behind a local one) while names
+    the provider serves, its own chat model however it is spelled, and
+    anything else behind a local endpoint stay on the configured chat
     provider.
     """
     return get_llm_backend(settings, model=model)
-
-
