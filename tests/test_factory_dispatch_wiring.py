@@ -10,7 +10,7 @@ unit test still passes because they never reach the dispatch shim.
 These tests close that hole by patching the *backend constructors* and
 asserting each wrapper picks the right concrete class for the active
 ``cfg.llm_provider``. One test per migrated wrapper, parametrised across
-the two providers we ship today.
+the providers the factory builds.
 """
 
 from __future__ import annotations
@@ -52,6 +52,34 @@ def _openai_cfg() -> _Cfg:
     )
 
 
+def _anthropic_cfg() -> _Cfg:
+    return _Cfg(
+        llm_provider="anthropic",
+        llm_api_key="sk-ant-test",
+        llm_chat_model="claude-haiku-5-5",
+    )
+
+
+def _patched(method: str, result):
+    """Patch ``method`` on every concrete backend; return the mocks by provider."""
+    from contextlib import ExitStack
+    from src.jarvis.llm.anthropic_backend import AnthropicBackend
+    from src.jarvis.llm.ollama import OllamaBackend
+    from src.jarvis.llm.openai_compatible import OpenAICompatibleBackend
+
+    classes = {"ollama": OllamaBackend, "openai_compatible": OpenAICompatibleBackend,
+               "anthropic": AnthropicBackend}
+    stack = ExitStack()
+    mocks = {name: stack.enter_context(patch.object(cls, method, return_value=result))
+             for name, cls in classes.items()}
+    return stack, mocks
+
+
+def _only_called(mocks, expected: str) -> None:
+    called = sorted(name for name, mock in mocks.items() if mock.called)
+    assert called == [expected], f"expected only {expected} to be invoked, got {called}"
+
+
 # ── direct() wrappers ───────────────────────────────────────────────────────
 
 @pytest.mark.parametrize(
@@ -60,14 +88,18 @@ def _openai_cfg() -> _Cfg:
         # Reply path
         ("src.jarvis.reply.planner", "call_llm_direct", _ollama_cfg, "ollama"),
         ("src.jarvis.reply.planner", "call_llm_direct", _openai_cfg, "openai_compatible"),
+        ("src.jarvis.reply.planner", "call_llm_direct", _anthropic_cfg, "anthropic"),
         ("src.jarvis.reply.enrichment", "call_llm_direct", _ollama_cfg, "ollama"),
         ("src.jarvis.reply.enrichment", "call_llm_direct", _openai_cfg, "openai_compatible"),
+        ("src.jarvis.reply.enrichment", "call_llm_direct", _anthropic_cfg, "anthropic"),
         # Memory path
         ("src.jarvis.memory.graph_ops", "call_llm_direct", _ollama_cfg, "ollama"),
         ("src.jarvis.memory.graph_ops", "call_llm_direct", _openai_cfg, "openai_compatible"),
+        ("src.jarvis.memory.graph_ops", "call_llm_direct", _anthropic_cfg, "anthropic"),
         # Builtin tools
         ("src.jarvis.tools.builtin.nutrition.log_meal", "call_llm_direct", _ollama_cfg, "ollama"),
         ("src.jarvis.tools.builtin.nutrition.log_meal", "call_llm_direct", _openai_cfg, "openai_compatible"),
+        ("src.jarvis.tools.builtin.nutrition.log_meal", "call_llm_direct", _anthropic_cfg, "anthropic"),
     ],
 )
 def test_call_llm_direct_wrapper_dispatches_via_factory(
@@ -83,11 +115,8 @@ def test_call_llm_direct_wrapper_dispatches_via_factory(
     # Patch the concrete backend classes' .direct so we can see which one
     # the wrapper actually called. Patching at the class level catches the
     # backend regardless of how the factory constructs it.
-    from src.jarvis.llm.ollama import OllamaBackend
-    from src.jarvis.llm.openai_compatible import OpenAICompatibleBackend
-
-    with patch.object(OllamaBackend, "direct", return_value="ollama-result") as ollama_direct, \
-         patch.object(OpenAICompatibleBackend, "direct", return_value="openai-result") as openai_direct:
+    stack, mocks = _patched("direct", "result")
+    with stack:
         result = wrapper(
             cfg=cfg,
             chat_model=cfg.llm_chat_model,
@@ -96,14 +125,8 @@ def test_call_llm_direct_wrapper_dispatches_via_factory(
             timeout_sec=1.0,
         )
 
-    if expected_backend_module == "ollama":
-        assert ollama_direct.called, "expected OllamaBackend.direct to be invoked"
-        assert not openai_direct.called, "OpenAICompatibleBackend.direct must not be called for llm_provider=ollama"
-        assert result == "ollama-result"
-    else:
-        assert openai_direct.called, "expected OpenAICompatibleBackend.direct to be invoked"
-        assert not ollama_direct.called, "OllamaBackend.direct must not be called for llm_provider=openai_compatible"
-        assert result == "openai-result"
+    _only_called(mocks, expected_backend_module)
+    assert result == "result"
 
 
 # ── chat() wrapper (engine) ────────────────────────────────────────────────
@@ -113,6 +136,7 @@ def test_call_llm_direct_wrapper_dispatches_via_factory(
     [
         (_ollama_cfg, "ollama"),
         (_openai_cfg, "openai_compatible"),
+        (_anthropic_cfg, "anthropic"),
     ],
 )
 def test_engine_chat_with_messages_dispatches_via_factory(cfg_factory, expected_backend_module: str):
@@ -120,21 +144,14 @@ def test_engine_chat_with_messages_dispatches_via_factory(cfg_factory, expected_
     through the factory too — the chat shape is the largest LLM call in the
     app and silently falling back to Ollama would defeat the entire migration."""
     from src.jarvis.reply import engine as engine_mod
-    from src.jarvis.llm.ollama import OllamaBackend
-    from src.jarvis.llm.openai_compatible import OpenAICompatibleBackend
 
     cfg = cfg_factory()
 
-    with patch.object(OllamaBackend, "chat", return_value={"message": {"content": "ollama"}}) as ollama_chat, \
-         patch.object(OpenAICompatibleBackend, "chat", return_value={"message": {"content": "openai"}}) as openai_chat:
+    stack, mocks = _patched("chat", {"message": {"content": "hi"}})
+    with stack:
         engine_mod.chat_with_messages(cfg, [{"role": "user", "content": "hi"}], timeout_sec=1.0)
 
-    if expected_backend_module == "ollama":
-        assert ollama_chat.called
-        assert not openai_chat.called
-    else:
-        assert openai_chat.called
-        assert not ollama_chat.called
+    _only_called(mocks, expected_backend_module)
 
 
 # ── weather extractor (uses get_llm_backend directly, no local wrapper) ────
@@ -144,22 +161,16 @@ def test_engine_chat_with_messages_dispatches_via_factory(cfg_factory, expected_
     [
         (_ollama_cfg, "ollama"),
         (_openai_cfg, "openai_compatible"),
+        (_anthropic_cfg, "anthropic"),
     ],
 )
 def test_weather_place_extractor_dispatches_via_factory(cfg_factory, expected_backend_module: str):
     from src.jarvis.tools.builtin import weather as weather_mod
-    from src.jarvis.llm.ollama import OllamaBackend
-    from src.jarvis.llm.openai_compatible import OpenAICompatibleBackend
 
     cfg = cfg_factory()
 
-    with patch.object(OllamaBackend, "direct", return_value="London") as ollama_direct, \
-         patch.object(OpenAICompatibleBackend, "direct", return_value="London") as openai_direct:
+    stack, mocks = _patched("direct", "London")
+    with stack:
         weather_mod._extract_place_from_user_text("weather in london please", cfg)
 
-    if expected_backend_module == "ollama":
-        assert ollama_direct.called
-        assert not openai_direct.called
-    else:
-        assert openai_direct.called
-        assert not ollama_direct.called
+    _only_called(mocks, expected_backend_module)
