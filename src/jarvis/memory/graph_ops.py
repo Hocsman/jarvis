@@ -16,6 +16,7 @@ tests patch. Every call is made through ``_ask``, inside the pass's
 from __future__ import annotations
 
 import json
+import math
 import re
 import threading
 import time
@@ -932,6 +933,34 @@ def merge_node_data(
 # ── Auto-split ─────────────────────────────────────────────────────────
 
 
+# How much a node must grow, as a share of its size when its split was
+# refused, before the chat model that refused it is asked again. A refused
+# split leaves the node whole, and on the small tier every split is
+# refused, so without it each flush that touches the node would pay for a
+# full rewrite of the node that is thrown away. Geometric, so a node is
+# asked a handful of times over its life rather than once per flush. A
+# different chat model is asked at once.
+_SPLIT_RETRY_GROWTH = 0.25
+
+# The last refused split of each node, keyed by the graph's database and
+# the node: the chat model that gave the answer and the node's size then.
+# Held for the life of the process, so a restart asks once more.
+_SPLIT_REFUSALS: dict[tuple[str, str], tuple[str, int]] = {}
+
+
+def _split_worth_asking(store: GraphMemoryStore, node: MemoryNode, chat_model: str) -> bool:
+    """Whether to ask ``chat_model`` to split ``node`` now.
+
+    Only an answer that came back and was refused counts against the node:
+    one the deadline turned away, or that timed out, says nothing about the
+    next attempt.
+    """
+    refused = _SPLIT_REFUSALS.get((store.db_path, node.id))
+    if refused is None or refused[0] != chat_model:
+        return True
+    return node.data_token_count >= refused[1] * (1 + _SPLIT_RETRY_GROWTH)
+
+
 def auto_split_node(
     store: GraphMemoryStore,
     node_id: str,
@@ -1002,28 +1031,71 @@ def auto_split_node(
     if not response:
         return False
 
+    plan = _read_split(node, response)
+    if plan is None:
+        # An answer came back and was refused: remembered, so the same
+        # model is not asked again until the node has grown.
+        _SPLIT_REFUSALS[(store.db_path, node_id)] = (chat_model, node.data_token_count)
+        return False
+    children, summary, kept, total = plan
+    _SPLIT_REFUSALS.pop((store.db_path, node_id), None)
+
+    # Create child nodes
+    for name, description, lines in children:
+        store.create_node(
+            name=name,
+            description=description,
+            data="\n".join(lines),
+            parent_id=node_id,
+        )
+        debug_log(f"  auto-split: created child '{name}' with {len(lines)} facts", "memory")
+
+    # Clear parent data and update description to summary; a summary that
+    # is not text leaves the description as it was.
+    if summary:
+        store.update_node(node_id, data="", description=summary)
+    else:
+        store.update_node(node_id, data="")
+
+    debug_log(
+        f"auto-split: node '{node.name}' split into {len(children)} children, "
+        f"carrying {kept} of its {total} claims",
+        "memory",
+    )
+    return True
+
+
+def _read_split(node: MemoryNode, response: str):
+    """The children a split answer proposes, or ``None`` when it is refused.
+
+    Returns ``(children, summary, kept, total)``: each child as
+    ``(name, description, lines)``, the summary when it is text (``None``
+    otherwise), and the claims the children carry out of the node's. Every
+    refusal is logged with its reason.
+    """
     # Parse JSON from response
     json_match = re.search(r'\{.*\}', response, re.DOTALL)
     if not json_match:
         debug_log("auto-split: no JSON found in response", "memory")
-        return False
+        return None
 
     try:
         result = json.loads(json_match.group())
     except (json.JSONDecodeError, ValueError) as e:
         debug_log(f"auto-split: JSON parse failed — {e}", "memory")
-        return False
+        return None
 
     categories = result.get("categories", [])
     summary = result.get("summary")
+    summary = summary.strip() if isinstance(summary, str) and summary.strip() else None
 
     # Validate: need a list of at least 2 categories
     if not isinstance(categories, list):
         debug_log("auto-split: categories are not a list, aborting", "memory")
-        return False
+        return None
     if len(categories) < 2:
         debug_log("auto-split: fewer than 2 categories proposed, aborting", "memory")
-        return False
+        return None
 
     # Validate: each category needs a name and at least one fact, and its
     # facts must be a list of strings. A `facts` given as one string would
@@ -1034,7 +1106,7 @@ def auto_split_node(
         name = cat.get("name") if isinstance(cat, dict) else None
         if not isinstance(name, str) or not name.strip():
             debug_log("auto-split: a category has no name, aborting", "memory")
-            return False
+            return None
         name = name.strip()
         facts = cat.get("facts")
         if not isinstance(facts, list) or not all(isinstance(f, str) for f in facts):
@@ -1043,13 +1115,13 @@ def auto_split_node(
                 "as a list of strings, aborting",
                 "memory",
             )
-            return False
+            return None
         # One fact per line, as a node holds them: an item that packs
         # several lines is measured and written as those lines.
         lines = [part.strip() for f in facts for part in f.split("\n") if part.strip()]
         if not lines:
             debug_log(f"auto-split: category '{name}' has no facts, aborting", "memory")
-            return False
+            return None
         description = cat.get("description")
         if not isinstance(description, str) or not description.strip():
             description = f"Memories about: {name}"
@@ -1070,7 +1142,7 @@ def auto_split_node(
             f"{total} claims, under the {_SPLIT_MIN_RETENTION:.0%} floor",
             "memory",
         )
-        return False
+        return None
 
     # The merge's guards, for the same reasons: a split redistributes and
     # consolidates, so it may shrink a node but not grow it; a figure may
@@ -1083,44 +1155,22 @@ def auto_split_node(
             f"against the node's {len(before)}",
             "memory",
         )
-        return False
+        return None
     if not _numbers_are_grounded(written, before):
         debug_log(
             "auto-split: rejected — the children carry a figure the node did not hold",
             "memory",
         )
-        return False
+        return None
     if _redaction_markers(written) - _redaction_markers(before):
         debug_log(
             "auto-split: rejected — the children carry a redaction marker where "
             "the node held a real value",
             "memory",
         )
-        return False
+        return None
 
-    # Create child nodes
-    for name, description, lines in children:
-        store.create_node(
-            name=name,
-            description=description,
-            data="\n".join(lines),
-            parent_id=node_id,
-        )
-        debug_log(f"  auto-split: created child '{name}' with {len(lines)} facts", "memory")
-
-    # Clear parent data and update description to summary; a summary that
-    # is not text leaves the description as it was.
-    if isinstance(summary, str) and summary.strip():
-        store.update_node(node_id, data="", description=summary.strip())
-    else:
-        store.update_node(node_id, data="")
-
-    debug_log(
-        f"auto-split: node '{node.name}' split into {len(children)} children, "
-        f"carrying {kept} of its {total} claims",
-        "memory",
-    )
-    return True
+    return children, summary, kept, total
 
 
 # ── Orchestrator ───────────────────────────────────────────────────────
@@ -1280,6 +1330,7 @@ def update_graph_from_dialogue(
         by_node.setdefault(node_id, []).append(fact)
 
     stored: "list[tuple[str, str]]" = []
+    merged: "list[tuple[str, str]]" = []  # (node_id, node_name)
     for node_id, node_facts in by_node.items():
         node = store.get_node(node_id)
         node_name = node.name if node else node_id[:8]
@@ -1366,25 +1417,39 @@ def update_graph_from_dialogue(
                 )
 
         store.touch_node(node_id)
+        merged.append((node_id, node_name))
 
-        # Step 5: Auto-split if the node has grown too large.
+    # Step 5: Auto-split the nodes that have grown too large, once every
+    # merge of the flush is done. A split can wait for the next flush; a
+    # merge the deadline turns away drops its facts to plain append.
+    for node_id, node_name in merged:
         refreshed = store.get_node(node_id)
-        if refreshed is not None and refreshed.data_token_count > SPLIT_THRESHOLD:
+        if refreshed is None or refreshed.data_token_count <= SPLIT_THRESHOLD:
+            continue
+        if not _split_worth_asking(store, refreshed, chat_model):
+            _, refused_at = _SPLIT_REFUSALS[(store.db_path, node_id)]
             debug_log(
-                f"graph update: node '{node_name}' exceeded threshold, splitting",
+                f"graph update: node '{node_name}' is over the threshold, but "
+                f"{chat_model} refused its split at {refused_at} tokens; asked "
+                f"again from {math.ceil(refused_at * (1 + _SPLIT_RETRY_GROWTH))}",
                 "memory",
             )
-            try:
-                auto_split_node(
-                    store=store,
-                    node_id=node_id,
-                    cfg=cfg,
-                    chat_model=chat_model,
-                    deadline=deadline,
-                    thinking=thinking,
-                )
-            except Exception as e:
-                debug_log(f"graph update: auto-split failed for '{node_name}' — {e}", "memory")
+            continue
+        debug_log(
+            f"graph update: node '{node_name}' exceeded threshold, splitting",
+            "memory",
+        )
+        try:
+            auto_split_node(
+                store=store,
+                node_id=node_id,
+                cfg=cfg,
+                chat_model=chat_model,
+                deadline=deadline,
+                thinking=thinking,
+            )
+        except Exception as e:
+            debug_log(f"graph update: auto-split failed for '{node_name}' — {e}", "memory")
 
     debug_log(
         f"graph update: stored {len(stored)}/{len(facts)} facts "
