@@ -161,7 +161,7 @@ dedicated page:
 - `dictation_custom_dictionary`
 
 `dictation_hotkey` is a dropdown of `DICTATION_HOTKEY_PRESETS` (`jarvis/config.py`)
-built by `dictation_hotkey_choices()`, the same builder the setup wizard's
+built by `dictation_hotkey_choices()` (`jarvis/dictation/hotkeys.py`), the same builder the setup wizard's
 Dictation page uses, so both windows offer the same presets with the platform
 default marked `(default)`.
 
@@ -200,7 +200,7 @@ A stored index the list does not contain (a device unplugged when the window ope
 
 - Accessed via "⚙️ Settings" in the system tray menu.
 - Opens as a modal QDialog.
-- Lazy-imported to avoid loading sounddevice at startup.
+- Imported from `show_settings` when the window is first opened. Importing the module loads none of sounddevice, numpy or pynput: the hotkey labels come from `jarvis/dictation/hotkeys.py`. sounddevice is imported when the window is built, to list the input devices for the Voice Input tab.
 
 ## MCP Servers Section
 

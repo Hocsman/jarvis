@@ -2942,7 +2942,7 @@ class DictationPage(QWizardPage):
         hotkey_layout.addWidget(hotkey_desc)
 
         self._hotkey_combo = QComboBox()
-        from jarvis.dictation.dictation_engine import dictation_hotkey_choices
+        from jarvis.dictation.hotkeys import dictation_hotkey_choices
         for value, label in dictation_hotkey_choices():
             self._hotkey_combo.addItem(label, value)
         self._hotkey_combo.setStyleSheet(
