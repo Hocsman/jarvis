@@ -191,23 +191,32 @@ def _build_field_metadata() -> List[FieldMeta]:
     # fields below are nullable: leaving them empty falls back to the Ollama
     # settings on the "LLM & AI Models" page, so a default (Ollama) install
     # never needs to touch this page.
-    f("llm_provider", "Provider", "Which local runtime serves the LLM",
+    f("llm_provider", "Provider", "Which runtime serves the LLM (Anthropic is remote)",
       "llm_provider", "choice",
       choices=[("ollama", "Ollama (local)"),
-               ("openai_compatible", "OpenAI-compatible server")])
+               ("openai_compatible", "OpenAI-compatible server"),
+               ("anthropic", "Anthropic (Claude API, remote)")])
     f("llm_base_url", "Base URL",
-      "Provider API base URL (e.g. http://localhost:1234/v1 for LM Studio). "
-      "Leave empty to use the Ollama URL.",
+      "OpenAI-compatible server URL (e.g. http://localhost:1234/v1 for LM Studio). "
+      "Leave empty to use the Ollama URL. Not used by Anthropic.",
+      "llm_provider", "str", nullable=True)
+    f("llm_api_key_env", "API Key Variable",
+      "Name of the environment variable holding the provider's key, so the "
+      "key never sits in config.json. Wins over the API Key field when set.",
       "llm_provider", "str", nullable=True)
     f("llm_api_key", "API Key",
-      "Bearer token for the provider, if it requires one. Leave empty for none.",
+      "The provider's key, if it requires one and no variable is named above. "
+      "Leave empty for none.",
       "llm_provider", "password", nullable=True)
     f("llm_chat_model", "Chat Model",
-      "Model name the provider exposes. Leave empty to use the Ollama chat model.",
+      "Model name the provider serves (e.g. claude-haiku-5-5 on Anthropic). "
+      "Left empty, the Ollama chat model's name is sent, which a remote "
+      "provider does not know.",
       "llm_provider", "str", nullable=True)
     f("embedding_provider", "Embedding Provider",
       "Runtime for embeddings. Leave on 'Same as chat provider' unless your "
-      "chat runtime has no embeddings endpoint (then route them to Ollama).",
+      "chat runtime has no embeddings endpoint (then route them to Ollama). "
+      "Anthropic has none, so with it 'Same as chat provider' means Ollama.",
       "llm_provider", "choice",
       choices=[("", "Same as chat provider"),
                ("ollama", "Ollama (local)"),

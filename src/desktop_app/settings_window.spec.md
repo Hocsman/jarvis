@@ -113,12 +113,15 @@ written to `config.json`.
 
 ### LLM Provider
 
-Selects the local runtime that serves the LLM and holds the provider-aware
-connection fields: `llm_provider` (Ollama / OpenAI-compatible), `llm_base_url`,
+Selects the runtime that serves the LLM and holds the provider-aware
+connection fields: `llm_provider` (Ollama / OpenAI-compatible / Anthropic, the
+values of `LLM_PROVIDERS`), `llm_base_url`, `llm_api_key_env` (the name of the
+environment variable holding the key, plain text since it is not a secret),
 `llm_api_key` (password), `llm_chat_model`, and the four `embedding_*` fields
 (`embedding_provider`, `embedding_base_url`, `embedding_api_key`,
-`embedding_model`). The model fields are free-text `str` — an OpenAI-compatible
-server's model name is not in the Ollama `SUPPORTED_CHAT_MODELS` catalogue.
+`embedding_model`). The model fields are free-text `str` — a remote provider's
+model name is not in the Ollama `SUPPORTED_CHAT_MODELS` catalogue. The
+Anthropic provider is set here only: the setup wizard does not offer it.
 
 Every connection/credential/model field is nullable: leaving it empty falls
 back to the Ollama settings on the "LLM & AI Models" page. A default Ollama

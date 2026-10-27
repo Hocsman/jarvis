@@ -480,3 +480,75 @@ class TestExtractPlaceFromUserText:
         with self._patched_backend("x" * 200):
             got = _extract_place_from_user_text("weather", self._cfg())
         assert got is None
+
+    def _cfg_named(self, wake_word, aliases=()):
+        cfg = self._cfg()
+        cfg.wake_word = wake_word
+        cfg.wake_aliases = list(aliases)
+        return cfg
+
+    def test_assistant_name_is_not_a_place(self):
+        """Small extractors read the vocative ("Yuba, what's the weather")
+        as the place. The assistant's own name means no place was named."""
+        cfg = self._cfg_named("yuba")
+        with self._patched_backend("Yuba"):
+            got = _extract_place_from_user_text("Yuba, la météo s'il te plaît", cfg)
+        assert got is None
+
+    def test_wake_alias_is_not_a_place(self):
+        """A mishearing the user has registered as an alias is the assistant
+        being addressed, just like the wake word itself."""
+        cfg = self._cfg_named("jarvis", aliases=["joris", "jar is"])
+        for reply in ("Joris", "jar is"):
+            with self._patched_backend(reply):
+                assert _extract_place_from_user_text(
+                    "joris what's the weather", cfg
+                ) is None, reply
+
+    def test_assistant_name_comparison_ignores_case_and_accents(self):
+        """Both sides are folded, so neither the config nor the extractor
+        has to spell the name the same way."""
+        cases = [
+            ("yuba", "YUBA"),
+            ("Yuba", "yuba"),
+            ("yüba", "Yuba"),
+            ("yuba", "Yübà"),
+            ("jar is", "Jar  is"),
+            ("jar is", " jar\tis "),
+        ]
+        for configured, reply in cases:
+            cfg = self._cfg_named(configured)
+            with self._patched_backend(reply):
+                assert _extract_place_from_user_text(
+                    "weather please", cfg
+                ) is None, (configured, reply)
+
+    def test_assistant_name_rejected_after_quote_stripping(self):
+        cfg = self._cfg_named("yuba")
+        with self._patched_backend("'Yuba'."):
+            assert _extract_place_from_user_text("weather please", cfg) is None
+
+    def test_real_place_survives_when_assistant_name_is_configured(self):
+        cfg = self._cfg_named("yuba", aliases=["yooba"])
+        with self._patched_backend("Bagneux"):
+            got = _extract_place_from_user_text("météo à Bagneux", cfg)
+        assert got == "Bagneux"
+
+    def test_only_a_whole_reply_equal_to_the_name_is_rejected(self):
+        """A place that merely contains the assistant's name is still a place
+        (Yuba City is real), so the comparison is on the whole reply."""
+        cfg = self._cfg_named("yuba")
+        with self._patched_backend("Yuba City"):
+            got = _extract_place_from_user_text("weather in Yuba City", cfg)
+        assert got == "Yuba City"
+
+    def test_unusable_wake_config_is_ignored(self):
+        """Config objects that carry no usable wake word (absent, empty, not
+        a string) must not change extraction."""
+        for wake_word, aliases in ((None, None), ("", []), (42, 7), ("  ", [""])):
+            cfg = self._cfg()
+            cfg.wake_word = wake_word
+            cfg.wake_aliases = aliases
+            with self._patched_backend("London"):
+                got = _extract_place_from_user_text("weather in London", cfg)
+            assert got == "London", (wake_word, aliases)
