@@ -92,7 +92,7 @@ _EXTRACT_SYSTEM = (
 
 
 def _reminder_pin(cfg) -> str:
-    """The pin, alone: what decides that the sentence stays here."""
+    """The pin, alone: what keeps the reminder chain on this machine."""
     return str(getattr(cfg, "reminder_model", "") or "").strip()
 
 
@@ -103,7 +103,8 @@ def _resolve_reminder_model(cfg) -> str:
     by the cloud-safe filter: what the chain reads is the user's own
     life, and a pin keeps it off the network whatever the tag looks like.
     The goal judge and the journal reader ride it wherever the chat runs;
-    a time rides it only when the chat is at home (``_reading_model``).
+    a time or a routine rides it only when the chat is at home
+    (``_reading_model``).
     """
     for candidate in (
         _reminder_pin(cfg),
@@ -117,7 +118,8 @@ def _resolve_reminder_model(cfg) -> str:
 
 
 def _reading_model(cfg) -> str:
-    """The model that reads a time: the one the sentence is already with.
+    """The model that reads a time or a routine: the one the sentence is
+    already with.
 
     ``setReminder`` and ``setRoutine`` are tools of the reply loop, and
     every reply ends on the chat model, so the turn sends this sentence
@@ -131,18 +133,19 @@ def _reading_model(cfg) -> str:
     return _resolve_reminder_model(cfg)
 
 
-def _reading_backend(cfg, model: str):
-    """Where ``_reading_model`` lives.
+def _reading(cfg):
+    """The model of ``_reading_model`` and where it lives, decided once.
 
     With the chat remote, the reply's own backend, redaction included, so
     the reading reaches no host and no text the reply does not. Neither
     side falls back to the other: a reading that fails is said out loud.
     """
+    model = _reading_model(cfg)
     if chat_is_remote(cfg):
         debug_log(f"🔓 sentence read by the chat model {model!r}: "
                   "the turn sends it there anyway", "llm")
-        return get_llm_backend(cfg)
-    return get_private_backend(cfg, _reminder_pin(cfg), model)
+        return model, get_llm_backend(cfg)
+    return model, get_private_backend(cfg, _reminder_pin(cfg), model)
 
 
 def reminder_channel_available(cfg) -> bool:
@@ -155,9 +158,9 @@ def reminder_channel_available(cfg) -> bool:
 
 
 def _ask_model(cfg, system: str, user: str, timeout_sec: float) -> Optional[str]:
-
-    model = _reading_model(cfg)
-    response = _reading_backend(cfg, model).chat(
+    """The one call that reads a time or a routine, for both extractors."""
+    model, backend = _reading(cfg)
+    response = backend.chat(
         model,
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
         timeout_sec=timeout_sec,

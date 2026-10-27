@@ -195,10 +195,12 @@ class _SurLaMachine:
 def get_private_backend(settings: Any, pinned: str, model: str) -> LLMBackend:
     """The backend for a prompt carrying the user's own life.
 
-    Four contexts read his own sentences: the time he said out loud, the
-    routine he described, the goal he is working towards, and the
-    fortnight of diary the learning step mines. Each specifies that
-    pinning a model is how he keeps that sentence off the network.
+    Four contexts read his own sentences: the goal he is working towards
+    and the fortnight of diary the learning step mines, wherever the chat
+    runs, and the time he said out loud and the routine he described when
+    the chat is at home (with the chat remote, those two are read on the
+    chat's own backend; see :func:`chat_is_remote`). Each specifies that
+    pinning a model is how he keeps that sentence off the network here.
 
     A name alone does not do that. Called without a model,
     :func:`get_llm_backend` picks the endpoint from ``llm_provider``
@@ -236,12 +238,14 @@ def get_private_backend(settings: Any, pinned: str, model: str) -> LLMBackend:
 
 
 def chat_is_remote(settings: Any) -> bool:
-    """Whether the reply leaves this machine and its network.
+    """Whether the reply goes to an OpenAI-compatible provider off home.
 
     Read as :func:`get_llm_backend` reads it for the reply, which passes
-    no model: an OpenAI-compatible provider at an address that is not
-    local. A prompt carrying only what the reply sends there anyway can
-    go there too without anything new leaving.
+    no model: ``openai_compatible`` at an address ``is_local_endpoint``
+    does not recognise. The Ollama provider counts as home whatever its
+    URL, as it does for :func:`get_private_backend`. A prompt carrying
+    only what the reply sends there anyway can go there too without
+    anything new leaving.
     """
     if _resolve_provider(getattr(settings, "llm_provider", None)) != _OPENAI_COMPATIBLE:
         return False

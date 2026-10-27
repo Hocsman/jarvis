@@ -143,8 +143,9 @@ placeholder in it is refused outright rather than passed along.
 
 It is read where the reminder sentence is read, by the same rule and
 through the same call: `setRoutine` is a tool of the reply loop too, so
-the chat model receives this sentence in this turn whatever the
-extractor does. Chat at home: the reminder chain and its pin. Chat off
+the chat model receives this sentence whatever the extractor does, in
+this turn or through the dialogue memory that follows it to the same
+backend. Chat at home: the reminder chain and its pin. Chat off
 this machine: `llm_chat_model` on the chat's own backend, with no
 fallback to a local model. One rule rather than two things to get wrong.
 

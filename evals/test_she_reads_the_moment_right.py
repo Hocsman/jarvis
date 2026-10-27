@@ -82,8 +82,10 @@ RAPPELS = [
      _dans(hours=1, minutes=15)),
     ("rappelle-moi jeudi prochain à 9h de payer le loyer",
      _a(29, 10, 9) + _a(5, 11, 9)),
+    # Next week starts on Monday 2/11, or on Sunday 1/11 for a week that
+    # starts on Sunday. Saturday 31/10 is this week either way.
     ("rappelle-moi la semaine prochaine de prendre rendez-vous chez le médecin",
-     _le(*[(d, 11) for d in range(1, 9)], (31, 10))),
+     _le(*[(d, 11) for d in range(1, 9)])),
     ("rappelle-moi à 21h de sortir les poubelles", _a(27, 10, 21)),
     ("remind me in twenty minutes to call mum", _dans(minutes=20)),
     ("remind me tomorrow at 9 to call the garage", _a(28, 10, 9)),

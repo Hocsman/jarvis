@@ -822,8 +822,9 @@ def get_default_config() -> Dict[str, Any]:
         # from "she was never going to say it": past it she still speaks,
         # but says how late she is rather than pretending it is now.
         "reminders_enabled": True,
-        # Empty = the warm small chain. Pin a local model to keep the
-        # user's own sentence about their own life off the network.
+        # Empty = the warm small chain. Pinned, it keeps the goal judge
+        # and the journal reader on this machine wherever the chat runs,
+        # and reads the time there when the chat is at home too.
         "reminder_model": "",
         "reminder_timeout_sec": 8.0,
         # Where a bare day lands when no hour was said: "jeudi" means
@@ -1180,10 +1181,10 @@ def load_settings() -> Settings:
     reminders_enabled = bool(merged.get("reminders_enabled", True))
     # Deliberately NOT passed through `_cloud_safe_model`, unlike the
     # tool router and the intent judge. That filter rewrites a pinned
-    # local tag to the cloud chat model, and this prompt carries the
-    # user's own sentence about their own life — pinning a local model is
-    # the only way to keep it off the network, so rescuing it would
-    # silently undo the one thing the setting is for.
+    # local tag to the cloud chat model, and this pin is what keeps the
+    # goal judge and the journal reader, and the time when the chat is at
+    # home, on this machine. Rescuing it would silently undo the one
+    # thing the setting is for.
     reminder_model = str(merged.get("reminder_model", ""))
     reminder_timeout_sec = min(max(float(merged.get("reminder_timeout_sec", 8.0)), 2.0), 30.0)
     reminder_default_hour = min(max(int(merged.get("reminder_default_hour", 9)), 0), 23)
