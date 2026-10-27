@@ -5,14 +5,18 @@ nothing new to add, so the latest rules reach data written before them.
 It borrows the per-flush merge, and it is held to the same promises:
 
 - a line the node already carried keeps its source. The rewrite hands
-  every line back bare, and a sweep that did not put the suffixes back
-  turned every line it touched into `inconnu`;
+  lines back bare or with a suffix it may have moved, so the merge
+  re-derives each line's suffix from its claim; without that, every line
+  a sweep touched would read `inconnu` or borrow another line's source;
 - it walks the World branch and nothing else. The User and Directives
   subtrees belong to the core (core.spec.md): a node still holding data
   there is waiting on its hand-over, and rewriting it would put a model's
   wording into the user's profile as `migré`, after sending that profile
-  to whichever provider runs the chat model. The viewer counts the same
-  walk up front, so its progress bar ends where the sweep does;
+  to whichever provider runs the chat model. That holds even if a core
+  branch ends up filed under World. The viewer counts the same walk up
+  front, so its progress bar ends where the sweep does;
+- a node is read when the sweep reaches it, not when it starts: a fact
+  the daemon files while the sweep is busy elsewhere is not overwritten;
 - the modal and the toolbar describe the rules the prompt applies, which
   do not drop a line for being common knowledge.
 
@@ -33,8 +37,12 @@ from conftest import MockConfig, ViewerClient, viewer_page_with_scripts
 
 KNOWN = "Alien was directed by Ridley Scott."
 TWIN = "Alien's director is Ridley Scott."
+POSSESSOR = "Possessor was directed by Brandon Cronenberg."
+BOOK = "Dune was written by Frank Herbert."
+LATE = "Possessor premiered at Sundance."
 PROFILE = "Lives in Lyon and works nights."
 RULE = "Always answer in French."
+CLAIMS = {KNOWN, TWIN, POSSESSOR, BOOK, LATE, PROFILE, RULE}
 
 try:
     import flask as _flask  # noqa: F401
@@ -43,15 +51,19 @@ except ImportError:
     _HAS_FLASK = False
 
 
-def _a_merge_that_drops_the_twin(sent):
-    """Rewrites a node the way the merge does: every line back bare, the
-    near-duplicate gone. Records what each call sent out."""
+def _a_merge_that_drops_the_twin(sent, on_call=None):
+    """Rewrites a node the way the merge does: every claim it was sent
+    back bare, the near-duplicate gone. Records what each call sent out;
+    ``on_call`` runs first, standing in for whatever else writes the
+    graph while the sweep waits on the model."""
     from jarvis.memory.provenance import fact_text
 
     def answer(*, user_content, **kwargs):
         sent.append(user_content)
-        current = user_content.split(":\n", 1)[1].split("\n")
-        kept = [fact_text(line) for line in current if fact_text(line) != TWIN]
+        if on_call:
+            on_call(user_content)
+        claims = [fact_text(line) for line in user_content.splitlines()]
+        kept = [c for c in claims if c in CLAIMS and c != TWIN]
         return json.dumps({"facts": list(dict.fromkeys(kept))})
 
     return answer
@@ -66,11 +78,11 @@ def store(tmp_path):
     s.close()
 
 
-def _sweep(store, sent):
+def _sweep(store, sent, on_call=None):
     from jarvis.memory import graph_ops
 
     with patch.object(graph_ops, "call_llm_direct",
-                      side_effect=_a_merge_that_drops_the_twin(sent)):
+                      side_effect=_a_merge_that_drops_the_twin(sent, on_call)):
         return list(graph_ops.consolidate_world_nodes(
             store=store, cfg=None, chat_model="model"))
 
@@ -80,8 +92,7 @@ def test_a_line_the_sweep_hands_back_keeps_its_source(store):
     from jarvis.memory.graph import BRANCH_WORLD
     from jarvis.memory.provenance import SOURCE_TOOL, SOURCE_WEB, fact_line
 
-    web = fact_line("Possessor was directed by Brandon Cronenberg.",
-                    SOURCE_WEB, "2026-08-16")
+    web = fact_line(POSSESSOR, SOURCE_WEB, "2026-08-16")
     tool = fact_line(KNOWN, SOURCE_TOOL, "2026-01-02")
     cinema = store.create_node(
         name="Cinema", description="Films and directors",
@@ -98,7 +109,7 @@ def test_the_sweep_leaves_the_core_s_branches_alone(store):
     from jarvis.memory.graph import BRANCH_DIRECTIVES, BRANCH_USER, BRANCH_WORLD
 
     home = store.create_node(
-        name="Home", description="Where he lives",
+        name="Home", description="Where the user lives",
         data=f"{PROFILE}\n{PROFILE}", parent_id=BRANCH_USER,
     )
     store.update_node(BRANCH_DIRECTIVES, data=f"{RULE}\n{RULE}")
@@ -130,6 +141,49 @@ def test_the_sweep_reaches_every_depth_of_the_world_branch(store):
     assert [name for name, _, _ in swept] == ["Horror"]
 
 
+@pytest.mark.unit
+def test_a_core_branch_filed_under_world_is_still_not_swept(store):
+    """Nothing in the store stops a fixed branch being re-parented. The
+    walk does: it never crosses into another fixed branch."""
+    from jarvis.memory.graph import BRANCH_USER, BRANCH_WORLD
+
+    store.create_node(name="Home", description="Where the user lives",
+                      data=PROFILE, parent_id=BRANCH_USER)
+    store.update_node(BRANCH_USER, data=PROFILE, parent_id=BRANCH_WORLD)
+    sent: list = []
+
+    _sweep(store, sent)
+
+    assert not any(PROFILE in s for s in sent), sent
+
+
+@pytest.mark.unit
+def test_a_fact_filed_while_the_sweep_runs_is_not_lost(store):
+    """The daemon flushes into the same file from another process, and a
+    sweep can run for minutes. A node rewritten from what it held when
+    the sweep started would drop what arrived since."""
+    from jarvis.memory.graph import BRANCH_WORLD
+
+    cinema = store.create_node(name="Cinema", description="Films",
+                               data=f"{KNOWN}\n{TWIN}", parent_id=BRANCH_WORLD)
+    books = store.create_node(name="Books", description="Books",
+                              data=BOOK, parent_id=BRANCH_WORLD)
+    filed: list = []
+
+    def the_daemon_files_a_fact(user_content):
+        if filed:
+            return
+        # Whichever node the sweep reached first, the fact lands on the
+        # other one while the model is still answering.
+        other = books if KNOWN in user_content else cinema
+        store.append_to_node(other.id, LATE)
+        filed.append(other.id)
+
+    _sweep(store, [], on_call=the_daemon_files_a_fact)
+
+    assert LATE in store.get_node(filed[0]).data.split("\n")
+
+
 # ── The viewer: what it counts, and what it says ───────────────────────
 
 
@@ -152,7 +206,7 @@ def viewer(store):
 def test_the_progress_bar_counts_the_nodes_the_sweep_walks(store, viewer):
     from jarvis.memory.graph import BRANCH_DIRECTIVES, BRANCH_USER, BRANCH_WORLD
 
-    store.create_node(name="Home", description="Where he lives",
+    store.create_node(name="Home", description="Where the user lives",
                       data=PROFILE, parent_id=BRANCH_USER)
     store.update_node(BRANCH_DIRECTIVES, data=RULE)
     store.update_node(BRANCH_WORLD, data=KNOWN)
@@ -183,7 +237,8 @@ def test_the_sweep_does_not_promise_to_prune_common_knowledge(viewer):
     """Rule 5 of the merge prompt keeps an answer the user asked for
     however obvious it is. The page must not say the opposite."""
     for text in _the_sweep_s_own_words(viewer_page_with_scripts(viewer)):
-        assert not re.search(r"prun\w*[^.]*common knowledge", text, re.I), text
+        assert not re.search(r"(prun|drop|remov|delet)\w*[^.;]*common knowledge",
+                             text, re.I), text
 
 
 @pytest.mark.unit

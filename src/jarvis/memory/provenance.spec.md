@@ -147,9 +147,12 @@ so keying `incorporated_indices` on whole lines would report every
 genuinely merged fact as consolidated out: stored but never announced,
 which is the failure this work exists to remove.
 
-**The merge is handed bare facts, and the suffixes are put back after
-it.** Asking an LLM to reproduce an exact format is asking for the class
-of failure this file is about, and it does not: measured in the field,
+**The suffixes are put back after the merge, never taken from it.** New
+facts reach the merge bare; the node's lines reach it with their
+suffixes, since their dates are what its supersession rule reads to tell
+an old value from its update. Asking an LLM to reproduce an exact format
+is asking for the class of failure this file is about, and it does not:
+measured in the field,
 the first fact written into a populated node came back with no marker at
 all. Since a populated node always takes the merge path, that is the
 normal case and not the edge — left alone, a suffix would almost never
@@ -157,9 +160,17 @@ survive.
 
 So the repair is deterministic. Before the rewrite, every claim in play
 is indexed by its text: the lines the node already carried keep whatever
-they had, and this flush's facts take the window's source. Any line the
-rewrite hands back matching one of those keys gets its suffix again.
-Wording is never touched.
+they had, a dated `inconnu` included, and this flush's facts take the
+window's source. When two lines carry the same claim, a known source
+wins over `inconnu`. Any line the rewrite hands back matching one of
+those keys gets its suffix again. Wording is never touched.
+
+Whatever suffix the rewrite hands back is dropped before that match.
+The model sees the suffixes, so it can move one onto a line it does not
+belong to, or leave one at the end of a sentence it folded two claims
+into, and neither may stick: a line's source comes from the index,
+never from the model's own text. A line can therefore never come back
+with two suffixes either.
 
 A line the rewrite reworded matches nothing and stays bare, which reads
 as `inconnu` — the truthful answer, since after a rewrite nobody can say
@@ -170,7 +181,7 @@ not a step left to whoever calls it. The memory viewer's 🧹 sweep merges
 every World node with no new facts, and a caller that had to remember the
 repair could forget it and turn every line it rewrote into `inconnu`. With
 no new facts, the index is the node's own lines, so each line the sweep
-hands back keeps exactly what it carried.
+hands back unchanged or retypeset keeps the suffix it carried.
 
 ## What changes at the far end
 

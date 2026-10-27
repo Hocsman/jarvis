@@ -1265,11 +1265,12 @@ def graph_consolidate_all() -> Response:
             store = get_graph_store()
 
             # Count the nodes upfront so the UI can render a real
-            # progress bar. Reuses the walk from `graph_ops` so the
-            # count can never drift from the set the generator
-            # actually visits. The double walk is acceptable here: a
-            # few SQLite reads, and the bar's accuracy is worth more
-            # than the saved walk on the rarely-pressed maintenance op.
+            # progress bar. Reuses the walk from `graph_ops`, so the
+            # count is defined as the set the generator visits; only a
+            # node filled in the moment between the two walks can make
+            # them differ, and the bar clamps at 100%. The double walk
+            # costs a few SQLite reads per node, nothing next to one
+            # merge call, on a rarely-pressed maintenance op.
             total_nodes = len(populated_world_nodes(store))
             yield json.dumps({"type": "start", "total": total_nodes}) + "\n"
 

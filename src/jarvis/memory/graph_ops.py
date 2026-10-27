@@ -44,6 +44,7 @@ from .graph import (
     BRANCH_USER,
     BRANCH_WORLD,
     FIXED_BRANCHES,
+    FIXED_BRANCH_IDS,
     GraphMemoryStore,
     MAX_TRAVERSAL_DEPTH,
     MemoryNode,
@@ -117,20 +118,40 @@ def _numbers_are_grounded(cleaned, inputs) -> bool:
     return True
 
 
+def _claim(line: str) -> str:
+    """The line's claim with every trailing provenance suffix removed.
+
+    `fact_text` strips one; a line that somehow carries two would keep
+    the first as part of its claim.
+    """
+    claim, previous = fact_text(line), line
+    while claim != previous:
+        claim, previous = fact_text(claim), claim
+    return claim
+
+
 def _source_index(lines) -> dict:
     """Map each line's claim to the provenance suffix it carried.
 
     Built from what a node held before a merge plus what this flush is
-    adding, so the repair afterwards can recognise either.
+    adding, so the repair afterwards can recognise either. A dated
+    `inconnu` suffix is kept too, for its date; when two lines carry the
+    same claim, a known source wins over `inconnu`, and otherwise the
+    later line wins. A bare line has nothing to give back. Only the last
+    suffix is kept, the one `fact_source` reads, so a line that carries
+    two comes back from the repair with one.
     """
     index: dict = {}
     for line in lines:
         if not line or not line.strip():
             continue
-        source = fact_source(line)
-        if source == SOURCE_UNKNOWN:
+        suffix = line[len(fact_text(line)):]
+        if not suffix.strip():
             continue
-        index[normalise_fact(fact_text(line))] = line[len(fact_text(line)):]
+        key = normalise_fact(_claim(line))
+        if fact_source(line) == SOURCE_UNKNOWN and key in index:
+            continue
+        index[key] = suffix
     return index
 
 
@@ -147,13 +168,20 @@ def _reattach_sources(lines, index: dict) -> list:
     Wording is never touched. A line the rewrite reworded matches nothing
     and stays bare, which reads as `inconnu` — the truthful answer, since
     after a rewrite nobody can say what that sentence rested on.
+
+    Whatever suffix the rewrite handed back is dropped first. The model
+    is shown the node's lines with their suffixes, so it can move one onto
+    a line it does not belong to, or leave one on a sentence it folded
+    two claims into: a line's source comes from the index, never from the
+    model's own text.
     """
     repare = []
     for line in lines:
-        if not line or not line.strip() or fact_source(line) != SOURCE_UNKNOWN:
+        if not line or not line.strip():
             repare.append(line)
             continue
-        cle = normalise_fact(fact_text(line))
+        line = _claim(line)
+        cle = normalise_fact(line)
         suffixe = index.get(cle)
         if suffixe is None and index:
             # The rewrite retypesets and rewords, so an exact key matches
@@ -513,6 +541,36 @@ def _split_data_lines(data: Optional[str]) -> list[str]:
     return [l for l in (data or "").split("\n") if l.strip()]
 
 
+def _populated_nodes_under(
+    store: GraphMemoryStore, branch_root_id: str,
+) -> Iterator[MemoryNode]:
+    """Yield every node holding data in a subtree, its root included.
+
+    The walk never crosses into another fixed branch. Nothing in the
+    store stops one being re-parented, and a User branch filed under
+    World would otherwise be swept, or a World branch filed under User
+    handed over to the core.
+    """
+    if store.get_node(branch_root_id) is None:
+        return
+
+    queue: list[str] = [branch_root_id]
+    visited: set[str] = set()
+    while queue:
+        node_id = queue.pop(0)
+        if node_id in visited:
+            continue
+        visited.add(node_id)
+        node = store.get_node(node_id)
+        if node is None:
+            continue
+        if _split_data_lines(node.data):
+            yield node
+        for child in store.get_children(node_id):
+            if child.id not in FIXED_BRANCH_IDS:
+                queue.append(child.id)
+
+
 def populated_world_nodes(store: GraphMemoryStore) -> list[MemoryNode]:
     """The nodes a 🧹 sweep visits: every World node holding data, the
     branch root included.
@@ -549,7 +607,7 @@ class MergeResult:
     True if the cleaned output contains that fact under
     `normalise_fact` folding (so it's safe to consider it landed in
     the node). A fact whose index is missing was either consolidated
-    out, dropped as common knowledge, or silently lost — caller
+    out, dropped as filler or assistant narration, or silently lost — caller
     decides whether to append it as a fallback or skip.
     """
 
@@ -632,11 +690,13 @@ def merge_node_data(
     Pass ``node`` if the caller has already fetched it; saves a
     redundant SQLite read on the orchestrator's hot path.
 
-    The model is handed bare facts and hands lines back bare, so the
-    provenance suffixes are put back before the write: a line the node
-    already carried keeps its own, and ``new_facts`` take ``source`` and
-    ``date_utc``, as the plain-append path would have stamped them. A line
-    the rewrite reworded matches nothing and stays `inconnu`.
+    The node's lines go to the model with their suffixes (their dates are
+    what the supersession rule reads) and ``new_facts`` go bare. Whatever
+    suffix comes back is ignored: each line's is put back from its claim
+    before the write, so a line the node already carried keeps its own,
+    and ``new_facts`` take ``source`` and ``date_utc``, as the plain-append
+    path would have stamped them. A line the rewrite reworded matches
+    nothing and stays `inconnu`.
 
     Like the picker, the rewrite runs on the chat model and never asks it
     to think: the whole node has to come back inside a fixed budget, and
@@ -779,10 +839,8 @@ def merge_node_data(
     # and the 🧹 sweep both rewrite through this function, and a caller
     # left to do it itself can skip it: every line it touched would then
     # read `inconnu`.
-    sources = _source_index(existing_lines)
-    if source:
-        sources.update(_source_index(
-            fact_line(f, source, date_utc) for f in sanitised_new))
+    new_lines = [fact_line(f, source, date_utc) for f in sanitised_new] if source else []
+    sources = _source_index([*existing_lines, *new_lines])
     new_data = "\n".join(_reattach_sources(cleaned, sources))
     store.update_node(node_id, data=new_data)
     return MergeResult(success=True, incorporated_indices=incorporated_indices)
@@ -964,7 +1022,7 @@ def update_graph_from_dialogue(
     # front, applying the cheap exact-match dedupe fast-path along the
     # way. Then group surviving facts by node so the merge step below
     # rewrites each node at most once per flush instead of once per
-    # fact. Without batching, a 5-fact flush against a populated User
+    # fact. Without batching, a 5-fact flush against a populated World
     # node fires 5 rewrites of the same `data`; with
     # batching, it's one rewrite that incorporates all five.
     pending: list[tuple[str, str]] = []  # (fact, node_id)
@@ -1029,8 +1087,8 @@ def update_graph_from_dialogue(
     # that merely wrote a reminder looked nothing up.
     source = source_for_tools(lookup_tools(tools_used) if tools_used else tools_used)
 
-    # Grouped bare, so the merge is never handed a format to preserve.
-    # The suffix is written by the plain-append path, and put back by the
+    # Grouped bare: the new facts reach the merge without a suffix. The
+    # suffix is written by the plain-append path, and put back by the
     # merge itself after a rewrite.
     by_node: dict[str, list[str]] = {}
     for fact, node_id in pending:
@@ -1159,11 +1217,15 @@ def consolidate_world_nodes(
     and reported with ``lines_after == lines_before``.
     """
     # Snapshot the walk up front so a rewrite mid-walk doesn't
-    # cause us to revisit or skip nodes.
+    # cause us to revisit or skip nodes. Each node's data is read again
+    # when the sweep reaches it: a sweep runs for minutes, and the daemon
+    # flushes into the same file meanwhile, so a rewrite from the
+    # snapshot would overwrite whatever it filed since.
     nodes = populated_world_nodes(store)
     debug_log(f"consolidate-all: {len(nodes)} World node(s) to sweep", "memory")
     for node in nodes:
-        before = len(_split_data_lines(node.data))
+        current = store.get_node(node.id)
+        before = len(_split_data_lines(current.data)) if current else 0
         try:
             result = merge_node_data(
                 store=store,
@@ -1172,8 +1234,8 @@ def consolidate_world_nodes(
                 cfg=cfg,
                 chat_model=chat_model,
                 timeout_sec=timeout_sec,
-                node=node,
-            )
+                node=current,
+            ) if current else MergeResult(success=False)
         except Exception as e:
             debug_log(f"consolidate-all: failed for '{node.name}' — {e}", "memory")
             result = MergeResult(success=False)
@@ -1241,26 +1303,3 @@ def migrate_graph_branches_into_core(store: GraphMemoryStore, core: MemoryCore) 
     if written:
         debug_log(f"core migration: {written} entries moved from the graph", "memory")
     return written
-
-
-def _populated_nodes_under(
-    store: GraphMemoryStore, branch_root_id: str,
-) -> Iterator[MemoryNode]:
-    """Yield every node holding data in a subtree, its root included."""
-    if store.get_node(branch_root_id) is None:
-        return
-
-    queue: list[str] = [branch_root_id]
-    visited: set[str] = set()
-    while queue:
-        node_id = queue.pop(0)
-        if node_id in visited:
-            continue
-        visited.add(node_id)
-        node = store.get_node(node_id)
-        if node is None:
-            continue
-        if _split_data_lines(node.data):
-            yield node
-        for child in store.get_children(node_id):
-            queue.append(child.id)
