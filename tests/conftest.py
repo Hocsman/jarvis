@@ -1,7 +1,9 @@
 import ipaddress
 import os
+import shutil
 import socket
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -19,6 +21,7 @@ from native_guard import _no_native_inference  # noqa: F401
 
 # The autouse guard that refuses a test the user's own config file. It lives in
 # its own module for the same reason.
+import config_guard
 from config_guard import _no_real_user_config, _real_user_config  # noqa: F401
 
 # Robustly locate repository root (directory containing src/jarvis)
@@ -145,7 +148,9 @@ def _bac_a_sable(tmp_path_factory):
 def _isolate_user_config_path(_bac_a_sable, request, monkeypatch):
     """Give every test a config file of its own, so a test that calls
     ``load_settings`` (or any other code path that resolves the user's
-    config) cannot read or overwrite ``~/.config/jarvis/config.json``.
+    config) cannot read or overwrite ``~/.config/jarvis/config.json``, nor
+    what another test saved. Outside a test's own fixtures, the run's config
+    home set in ``pytest_configure`` holds instead.
 
     ``default_config_path()`` reads ``XDG_CONFIG_HOME`` on every call, so the
     variable points at a directory of the test's own. That reaches every
@@ -439,6 +444,38 @@ def pytest_configure(config):
         # collection, so a module that probes a server at import is covered.
         sys.addaudithook(_refuse_the_network)
         _network_guard_installed = True
+    _give_the_run_a_config_home()
+
+
+# The directory ``_give_the_run_a_config_home`` made, removed when the run ends.
+_run_config_home: Optional[str] = None
+
+
+def _give_the_run_a_config_home() -> None:
+    """Point the config path at a directory of the run's own, before collection.
+
+    The per-test sandbox (``_isolate_user_config_path``) holds only inside a
+    test's own fixtures. Collection, class- and module-scoped fixtures, a
+    thread that outlives its test, and the pytest sessions some of those start
+    in a child process all run outside it, and would resolve the user's own
+    ``config.json``: the native guard's end-to-end session reads it through
+    ``debug_log``. The guard takes the files it protects first, from the
+    environment the run started in, so it protects the user's file and not
+    this one.
+    """
+    global _run_config_home
+    config_guard.arm()
+    if _run_config_home is None:
+        _run_config_home = tempfile.mkdtemp(prefix="jarvis-config-")
+    from jarvis.config import default_config_path
+
+    os.environ["XDG_CONFIG_HOME"] = _run_config_home
+    os.environ["JARVIS_CONFIG_PATH"] = str(default_config_path())
+
+
+def pytest_unconfigure(config):
+    if _run_config_home is not None:
+        shutil.rmtree(_run_config_home, ignore_errors=True)
 
 
 @pytest.fixture

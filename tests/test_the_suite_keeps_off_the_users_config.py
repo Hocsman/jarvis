@@ -4,18 +4,23 @@
 keys. A test that reads it puts their settings into whatever the test prints;
 a test that saves over it changes the assistant they run every day.
 
-The sandbox in ``conftest.py`` gives every test a config file of its own, and
-it has to reach the modules that did ``from jarvis.config import
-default_config_path`` at import (the settings window, the setup wizard, the
-app), which hold the function rather than the name. The guard in
+The sandboxes in ``conftest.py`` give the run, and then every test, a config
+file of its own. They have to reach the modules that did ``from jarvis.config
+import default_config_path`` at import (the settings window, the setup
+wizard, the app), which hold the function rather than the name, and the code
+that runs outside a test's own fixtures: collection, wider fixtures, and the
+pytest sessions those start in a child process. The guard in
 ``config_guard.py`` refuses the user's file to ``_load_json`` and
 ``_save_json`` and fails the test that asked. These tests hold both to that,
-and never put the user's real file at stake: the guard's end-to-end tests run
-in a session whose home directory is a temporary one.
+and never put the user's real file at stake: a test checks its path is not
+one of the user's before it saves there, the guard's own tests use a stand-in
+file, and its end-to-end tests run in a session whose home directory is a
+temporary one.
 """
 
 from __future__ import annotations
 
+import importlib
 import os
 import subprocess
 import sys
@@ -54,20 +59,65 @@ class TestTheSandbox:
     def test_what_is_saved_through_a_binding_made_at_import_is_what_the_loader_reads(self):
         from jarvis.config import load_config
 
+        path = default_config_path_bound_at_import()
+        assert not config_guard.is_protected(path), path
         named = "a-model-only-this-test-names"
-        assert save_json_bound_at_import(
-            default_config_path_bound_at_import(), {"llm_chat_model": named}
-        )
+        assert save_json_bound_at_import(path, {"llm_chat_model": named})
 
         assert load_config()["llm_chat_model"] == named
 
-    def test_two_tests_do_not_share_a_file(self, _bac_a_sable):
-        # The file is the test's own: it starts empty, whatever the test
-        # before it saved.
+    def test_a_tests_file_lies_in_the_sandbox_and_starts_absent(self, _bac_a_sable):
         path = default_config_path_bound_at_import()
 
         assert _bac_a_sable in path.parents
         assert not path.exists()
+
+
+# What a child process started outside a test resolves, as the native guard's
+# end-to-end session would: the path, then the file JARVIS_CONFIG_PATH names.
+CHILD_RESOLVES = """
+import os
+from jarvis.config import default_config_path
+print(default_config_path())
+print(os.environ.get("JARVIS_CONFIG_PATH", ""))
+"""
+
+
+class TestOutsideATestsOwnFixtures:
+    """A class-scoped fixture is set up before the test's own sandbox, so
+    what it resolves, and what a child process it starts resolves, is the
+    run's config home."""
+
+    @pytest.fixture(scope="class")
+    def resolved_by_a_class_fixture(self):
+        import jarvis.config
+
+        return jarvis.config.default_config_path()
+
+    @pytest.fixture(scope="class")
+    def resolved_by_its_child(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC_DIR), "PYTHONDONTWRITEBYTECODE": "1"}
+        child = subprocess.run(
+            [sys.executable, "-c", CHILD_RESOLVES],
+            env=env, capture_output=True, text=True, timeout=120,
+        )
+        assert child.returncode == 0, child.stderr[-2000:]
+        path, named = child.stdout.splitlines()
+        return path, named
+
+    def test_a_class_fixture_resolves_outside_the_users_files(
+        self, resolved_by_a_class_fixture, _real_user_config
+    ):
+        assert config_guard.key(resolved_by_a_class_fixture) not in _real_user_config
+
+    def test_a_child_it_starts_resolves_outside_them_too(
+        self, resolved_by_its_child, _real_user_config
+    ):
+        path, named = resolved_by_its_child
+
+        assert config_guard.key(path) not in _real_user_config
+        assert named, "the child would fall back to default_config_path()"
+        assert config_guard.key(named) not in _real_user_config
 
 
 class TestTheGuard:
@@ -79,7 +129,9 @@ class TestTheGuard:
         path = tmp_path / "home" / ".config" / "jarvis" / "config.json"
         path.parent.mkdir(parents=True)
         path.write_text('{"llm_api_key": "a key the test must not see"}', encoding="utf-8")
-        monkeypatch.setattr(config_guard, "_protected", frozenset({config_guard.key(path)}))
+        monkeypatch.setattr(
+            config_guard, "_protected", config_guard._protected | {config_guard.key(path)}
+        )
         return path
 
     def test_a_read_through_a_binding_made_at_import_is_refused(self, protected):
@@ -97,6 +149,26 @@ class TestTheGuard:
         assert config_guard.take_requests() == [f"_save_json({protected})"]
         assert protected.read_bytes() == before
 
+    def test_the_loader_is_refused_through_the_config_modules_own_names(
+        self, protected, monkeypatch
+    ):
+        from jarvis.config import load_config
+
+        monkeypatch.setenv("JARVIS_CONFIG_PATH", str(protected))
+
+        with pytest.raises(config_guard.RealUserConfigRefused):
+            load_config()
+
+        assert config_guard.take_requests() == [f"_load_json({protected})"]
+
+    def test_the_config_module_imported_under_its_other_name_is_guarded_too(self, protected):
+        twin = importlib.import_module("src.jarvis.config")
+
+        with pytest.raises(config_guard.RealUserConfigRefused):
+            twin._load_json(protected)
+
+        assert config_guard.take_requests() == [f"_load_json({protected})"]
+
     def test_the_same_file_spelt_another_way_is_refused(self, protected):
         detour = protected.parent / ".." / "jarvis" / protected.name
 
@@ -112,10 +184,24 @@ class TestTheGuard:
         assert load_json_bound_at_import(own) == {"tts_enabled": False}
         assert config_guard.take_requests() == []
 
-    def test_it_protects_the_file_the_app_would_open_from_this_home(self, _real_user_config):
+
+class TestTheFilesItProtects:
+    def test_the_file_the_app_would_open_from_this_home(self, _real_user_config):
         expected = Path.home() / ".config" / "jarvis" / "config.json"
 
         assert config_guard.key(expected) in _real_user_config
+
+    def test_the_file_under_the_config_home_the_environment_names(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config-home"))
+
+        expected = tmp_path / "config-home" / "jarvis" / "config.json"
+        assert config_guard.key(expected) in config_guard.real_user_config_paths()
+
+    def test_the_file_jarvis_config_path_names(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("JARVIS_CONFIG_PATH", str(tmp_path / "named.json"))
+
+        expected = tmp_path / "named.json"
+        assert config_guard.key(expected) in config_guard.real_user_config_paths()
 
 
 # A module of the app's kind: it bound the loader and the path at import.

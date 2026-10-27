@@ -407,11 +407,14 @@ class TestAWindowThatPinsNoPathUsesTheTestsOwnFile:
     user's own."""
 
     def test_a_save_lands_where_the_loader_reads(self, qapp):
+        import config_guard
         from desktop_app import settings_window as sw
         from jarvis.config import _save_json, default_config_path, load_config
 
+        path = default_config_path()
+        assert not config_guard.is_protected(path), path
         flipped = not get_default_config()["low_power_mode"]
-        assert _save_json(default_config_path(), {"intent_judge_model": REMOTE_PINS[0]})
+        assert _save_json(path, {"intent_judge_model": REMOTE_PINS[0]})
         window = sw.SettingsWindow()
         window._widgets["low_power_mode"].setChecked(flipped)
 
