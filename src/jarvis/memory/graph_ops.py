@@ -354,12 +354,14 @@ def _llm_pick_best_child(
     cfg,
     chat_model: str,
     timeout_sec: float = 15.0,
-    thinking: bool = False,
     picker_model: Optional[str] = None,
 ) -> Optional[str]:
     """Ask the LLM which child node best fits a memory fragment.
 
-    Returns the chosen child's id, or None if none fit well.
+    Returns the chosen child's id, or None if none fit well. The model is
+    never asked to think: ``llm_thinking_enabled`` belongs to the reply's
+    model, and the picker model is often a small one with no thinking
+    mode, which refuses a request asking for one.
     """
     if not children:
         return None
@@ -390,7 +392,6 @@ def _llm_pick_best_child(
         system_prompt=system_prompt,
         user_content=user_content,
         timeout_sec=timeout_sec,
-        thinking=thinking,
     )
 
     if not response:
@@ -417,7 +418,6 @@ def find_best_node(
     chat_model: str,
     branch_root_id: str,
     timeout_sec: float = 15.0,
-    thinking: bool = False,
     picker_model: Optional[str] = None,
 ) -> str:
     """Find the best node, inside one fixed branch, to store a memory fragment.
@@ -449,7 +449,7 @@ def find_best_node(
         debug_log(f"graph traversal: depth {depth}, choosing from {[c.name for c in children]}", "memory")
         best = _llm_pick_best_child(
             fragment, children, cfg, chat_model,
-            timeout_sec=timeout_sec, thinking=thinking, picker_model=picker_model,
+            timeout_sec=timeout_sec, picker_model=picker_model,
         )
         if best is None:
             debug_log(f"graph traversal: no children fit at depth {depth}, stopping", "memory")
@@ -578,7 +578,6 @@ def merge_node_data(
     cfg,
     chat_model: str,
     timeout_sec: float = 20.0,
-    thinking: bool = False,
     picker_model: Optional[str] = None,
     node: Optional[MemoryNode] = None,
 ) -> MergeResult:
@@ -610,6 +609,9 @@ def merge_node_data(
 
     Pass ``node`` if the caller has already fetched it; saves a
     redundant SQLite read on the orchestrator's hot path.
+
+    Like the picker, the rewrite never asks its model to think: it runs
+    on the picker model, which may have no thinking mode at all.
     """
     if node is None:
         node = store.get_node(node_id)
@@ -652,7 +654,6 @@ def merge_node_data(
         system_prompt=_MERGE_SYSTEM_PROMPT,
         user_content=user_content,
         timeout_sec=timeout_sec,
-        thinking=thinking,
         temperature=0.0,
     )
 
@@ -923,7 +924,6 @@ def update_graph_from_dialogue(
                 cfg=cfg,
                 chat_model=chat_model,
                 timeout_sec=15.0,
-                thinking=thinking,
                 picker_model=picker_model,
                 branch_root_id=BRANCH_WORLD,
             )
@@ -1018,7 +1018,6 @@ def update_graph_from_dialogue(
                 cfg=cfg,
                 chat_model=chat_model,
                 timeout_sec=20.0,
-                thinking=thinking,
                 picker_model=picker_model,
                 node=node,
             )
@@ -1105,7 +1104,6 @@ def consolidate_all_populated_nodes(
     cfg,
     chat_model: str,
     timeout_sec: float = 20.0,
-    thinking: bool = False,
     picker_model: Optional[str] = None,
 ) -> "Iterator[tuple[str, int, int]]":
     """One-shot self-consolidation across every populated node.
@@ -1141,7 +1139,6 @@ def consolidate_all_populated_nodes(
                 cfg=cfg,
                 chat_model=chat_model,
                 timeout_sec=timeout_sec,
-                thinking=thinking,
                 picker_model=picker_model,
                 node=node,
             )
