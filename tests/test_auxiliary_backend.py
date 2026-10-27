@@ -3,10 +3,11 @@
 Auxiliary tasks (intent judge, tool router, planner) can run on a local
 Ollama model even when the main chat provider is a remote OpenAI-compatible
 server (e.g. OpenRouter). A bare model name without a slash indicates a local
-model tag and is routed to Ollama, while a namespaced tag (vendor/model), the
+model tag and is routed to Ollama, while a namespaced tag (vendor/model) or the
 chat model however it is spelled (unless it is the Ollama chat model an empty
-`llm_chat_model` inherits), or a local OpenAI-compatible endpoint stays on the
-configured LLM backend.
+`llm_chat_model` inherits) stays on the configured LLM backend. On a local
+OpenAI-compatible endpoint a model local Ollama lists runs there, the chat
+model aside, and anything else stays on the configured server.
 """
 
 from __future__ import annotations
@@ -39,16 +40,39 @@ def test_ollama_provider_always_uses_ollama():
     assert isinstance(backend_slash, OllamaBackend)
 
 
-def test_local_openai_compatible_endpoint_keeps_openai_backend():
+def test_a_local_endpoint_keeps_a_model_ollama_lacks(wire):
     cfg = _DummySettings(
         llm_provider="openai_compatible",
         llm_base_url="http://localhost:1234/v1",
     )
-    backend_bare = get_auxiliary_backend(cfg, "qwen2.5:3b")
-    backend_slash = get_auxiliary_backend(cfg, "meta-llama/llama-3.1-8b")
 
-    assert isinstance(backend_bare, (OpenAICompatibleBackend, RedactingBackend))
-    assert isinstance(backend_slash, (OpenAICompatibleBackend, RedactingBackend))
+    for model in ("qwen3-1.7b-instruct", "meta-llama/llama-3.1-8b"):
+        parties = wire(
+            lambda: get_auxiliary_backend(cfg, model).direct(model, "s", "u"),
+            ollama_has=["gemma4:e2b"],
+        )
+
+        assert len(parties) == 1, parties
+        url, sent = parties[0]
+        assert url.startswith(cfg.llm_base_url) and sent == model, parties
+
+
+def test_a_local_endpoint_runs_a_model_ollama_has_on_ollama(wire):
+    """LM Studio for the chat and Ollama beside it: a tag Ollama lists runs
+    where it lives, which LM Studio, or a gateway at that address, is not."""
+    cfg = _DummySettings(
+        llm_provider="openai_compatible",
+        llm_base_url="http://localhost:1234/v1",
+    )
+
+    parties = wire(
+        lambda: get_auxiliary_backend(cfg, "qwen2.5:3b").direct("qwen2.5:3b", "s", "u"),
+        ollama_has=["qwen2.5:3b"],
+    )
+
+    assert len(parties) == 1, parties
+    url, sent = parties[0]
+    assert url.startswith(cfg.ollama_base_url) and sent == "qwen2.5:3b", parties
 
 
 def test_remote_openai_compatible_routes_bare_tag_to_ollama():
@@ -291,3 +315,94 @@ def test_the_judge_keeps_the_room_here_when_the_chat_model_is_inherited(
     url, model = parties[0]
     assert url.startswith(cfg.ollama_base_url), parties
     assert model == cfg.intent_judge_model, parties
+
+
+# ── A server on his own machine, with Ollama beside it ───────────────────
+#
+# On a local OpenAI-compatible endpoint a pin is honoured, and it runs where
+# its model lives: on local Ollama when Ollama lists that tag, on the
+# configured server otherwise. The provider's own chat model stays on the
+# configured server whatever Ollama lists.
+
+
+_LM_STUDIO = {
+    "llm_provider": "openai_compatible",
+    "llm_base_url": "http://localhost:1234/v1",
+    "llm_chat_model": "qwen3-32b-instruct",
+}
+
+
+def test_a_router_pin_ollama_has_runs_on_ollama_beside_his_own_server(
+        tmp_path, monkeypatch, wire):
+    from src.jarvis.tools.builtin import weather
+
+    cfg = _settings_from(tmp_path, monkeypatch,
+                         {**_LM_STUDIO, "tool_router_model": "qwen2.5:3b"},
+                         ollama_reachable=True)
+
+    parties = wire(lambda: weather._extract_place_from_user_text(
+        "quel temps à Paris", cfg), ollama_has=["qwen2.5:3b"])
+
+    assert len(parties) == 1, parties
+    url, model = parties[0]
+    assert url.startswith(cfg.ollama_base_url) and model == "qwen2.5:3b", parties
+
+
+def test_the_judge_pinned_to_a_tag_ollama_has_hears_the_room_on_ollama(
+        tmp_path, monkeypatch, wire):
+    import time
+
+    from src.jarvis.listening.intent_judge import create_intent_judge
+    from src.jarvis.listening.transcript_buffer import TranscriptSegment
+
+    cfg = _settings_from(tmp_path, monkeypatch,
+                         {**_LM_STUDIO, "intent_judge_model": "qwen2.5:3b"},
+                         ollama_reachable=True)
+
+    now = time.time()
+    juge = create_intent_judge(cfg)
+    parties = wire(lambda: juge.judge(
+        [TranscriptSegment(text="jarvis quelle heure est-il",
+                           start_time=now - 2, end_time=now - 1)],
+        wake_timestamp=now - 2), ollama_has=["qwen2.5:3b"])
+
+    assert len(parties) == 1, parties
+    url, model = parties[0]
+    assert url.startswith(cfg.ollama_base_url) and model == "qwen2.5:3b", parties
+
+
+def test_a_router_pin_ollama_lacks_stays_on_his_own_server(
+        tmp_path, monkeypatch, wire):
+    from src.jarvis.tools.builtin import weather
+
+    cfg = _settings_from(tmp_path, monkeypatch,
+                         {**_LM_STUDIO, "tool_router_model": "qwen3-1.7b-instruct"},
+                         ollama_reachable=True)
+
+    parties = wire(lambda: weather._extract_place_from_user_text(
+        "quel temps à Paris", cfg), ollama_has=["qwen2.5:3b"])
+
+    assert len(parties) == 1, parties
+    url, model = parties[0]
+    assert url.startswith(cfg.llm_base_url) and model == "qwen3-1.7b-instruct", parties
+
+
+def test_the_chat_model_stays_on_his_own_server_whatever_ollama_lists(
+        tmp_path, monkeypatch, wire):
+    """The default planner is the chat model, which lives on the configured
+    server. Ollama happening to list the same name does not move it: that
+    would load a second copy of the largest model on a second runtime."""
+    from src.jarvis.reply import planner
+
+    cfg = _settings_from(tmp_path, monkeypatch,
+                         {**_LM_STUDIO, "llm_chat_model": "qwen2.5:3b"},
+                         ollama_reachable=True)
+    model = planner.resolve_planner_model(cfg)
+
+    parties = wire(lambda: planner.call_llm_direct(
+        cfg=cfg, chat_model=model, system_prompt="s", user_content="u"),
+        ollama_has=["qwen2.5:3b"])
+
+    assert len(parties) == 1, parties
+    url, sent = parties[0]
+    assert url.startswith(cfg.llm_base_url) and sent == cfg.llm_chat_model, parties

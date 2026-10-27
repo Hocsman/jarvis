@@ -371,6 +371,20 @@ def test_a_pin_ollama_has_stays_on_ollama_beside_his_own_server(lire, wire):
                for url, model in parties), parties
 
 
+@pytest.mark.parametrize("lire", _CONTEXTES.values(), ids=_CONTEXTES.keys())
+def test_a_router_tag_ollama_has_stays_on_ollama_beside_his_own_server(lire, wire):
+    """No pin of its own; the chain lands on the router's tag, which Ollama
+    lists. It runs there, as any auxiliary call naming it does."""
+    cfg = _cfg(llm_base_url=_LM_STUDIO, llm_chat_model="qwen3-32b-instruct",
+               tool_router_model="qwen2.5:3b")
+
+    parties = wire(lambda: lire(cfg), ollama_has=["qwen2.5:3b"])
+
+    assert parties, "the context sent nothing at all"
+    assert all(_ici(url) and model == "qwen2.5:3b"
+               for url, model in parties), parties
+
+
 def test_a_gateway_at_a_local_address_does_not_get_a_pin_ollama_has(wire):
     """A gateway on localhost (LiteLLM, a tunnel) looks like his own server
     and may forward anywhere. A pin Ollama has never needs to go there."""

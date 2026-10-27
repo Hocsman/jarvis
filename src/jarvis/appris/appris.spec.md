@@ -146,8 +146,9 @@ both the pin and the model it resolved. Either pin, `appris_model` or
 on local Ollama behind a remote endpoint, whatever the tag's shape;
 behind one on his own machine or network, on local Ollama when Ollama
 lists the tag and on the configured server otherwise. The same name
-cannot mean the cloud for his diary. Without a pin, a bare
-local tag reached through the chain runs on local Ollama as well, and
+cannot mean the cloud for his diary. Without a pin, a local tag
+reached through the chain runs on local Ollama as well (behind a local
+endpoint, when Ollama lists it), and
 the chat model or a namespaced model sends the notes to the configured
 provider: the chat model at the end of the chain whatever its spelling
 (unless it is the inherited `ollama_chat_model`, a local tag), which
