@@ -128,6 +128,24 @@ def _is_default_value(val: Any, default_val: Any) -> bool:
     return val is None and default_val in (None, "")
 
 
+def _select_choice(combo: QComboBox, key: str, value: Any) -> None:
+    """Select ``value`` in a choice combo.
+
+    A value the field does not list (a model served by a remote provider, a
+    hand-edited value) is added as its own option and selected, with the
+    value as read for its data, so a Save writes back what was read instead
+    of the first option.
+    """
+    cur_str = str(value) if value not in (None, "") else ""
+    idx = combo.findData(cur_str)
+    if idx < 0 and cur_str:
+        combo.addItem(cur_str, value)
+        idx = combo.count() - 1
+        debug_log(f"{key} keeps a value its options do not list", "settings")
+    if idx >= 0:
+        combo.setCurrentIndex(idx)
+
+
 def _dictation_hotkey_choices() -> list:
     """Build platform-aware dictation hotkey dropdown choices."""
     from jarvis.dictation.dictation_engine import format_hotkey_display
@@ -514,7 +532,7 @@ def _build_field_metadata() -> List[FieldMeta]:
       "reminders", "bool")
     f("reminder_model", "Modèle des rappels",
       "Lit l'heure dans ta phrase. Épingle un modèle local et ta phrase "
-      "ne quitte pas la machine",
+      "reste sur ta machine ou ton réseau",
       "reminders", "str")
     f("reminder_default_hour", "Heure par défaut",
       "Quand tu nommes un jour sans heure. Elle te le dit à voix haute "
@@ -769,11 +787,7 @@ class SettingsWindow(QDialog):
             w = QComboBox()
             for val, display in (fm.choices or []):
                 w.addItem(display, val)
-            # Set current value
-            cur_str = str(current) if current is not None else ""
-            idx = w.findData(cur_str)
-            if idx >= 0:
-                w.setCurrentIndex(idx)
+            _select_choice(w, fm.key, current)
             w.setToolTip(fm.description)
             return w
 
@@ -782,6 +796,8 @@ class SettingsWindow(QDialog):
             devices = get_input_devices()
             for val, display in devices:
                 w.addItem(display, val)
+            # Not _select_choice: an index the list lacks can name another
+            # device after a replug, so an unlisted one is not kept.
             cur_str = str(current) if current not in (None, "") else ""
             idx = w.findData(cur_str)
             if idx >= 0:
@@ -1097,12 +1113,13 @@ class SettingsWindow(QDialog):
 
         if fm.field_type in ("choice", "device"):
             val = w.currentData()
-            # For sample_rate, convert back to int
+            # For sample_rate, convert back to int; a value that names no
+            # number is one the field does not list, and goes back as read.
             if fm.key == "sample_rate":
                 try:
-                    return int(val)
+                    return int(float(val))
                 except (TypeError, ValueError):
-                    return 16000
+                    return val
             return val if val != "" else None
 
         if fm.field_type in ("list", "map"):
@@ -1207,7 +1224,10 @@ class SettingsWindow(QDialog):
             except (TypeError, ValueError):
                 w.setValue(0.0)
 
-        elif fm.field_type in ("choice", "device"):
+        elif fm.field_type == "choice":
+            _select_choice(w, fm.key, value)
+
+        elif fm.field_type == "device":
             cur_str = str(value) if value not in (None, "") else ""
             idx = w.findData(cur_str)
             if idx >= 0:
