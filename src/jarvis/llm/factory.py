@@ -100,6 +100,17 @@ def _build_uncached(
     return OllamaBackend(base_url)
 
 
+def _openai_base_url(settings: Any) -> str:
+    """The OpenAI-compatible server's URL, falling back to Ollama's.
+
+    One reading for the reply's backend and for :func:`chat_is_remote`,
+    so the side a reading is put on is the side the reply goes to.
+    """
+    return _str_attr(settings, "llm_base_url") or _str_attr(
+        settings, "ollama_base_url", _DEFAULT_OLLAMA_URL
+    )
+
+
 def get_llm_backend(settings: Any, model: Optional[str] = None) -> LLMBackend:
     """Return the configured chat backend.
 
@@ -116,9 +127,7 @@ def get_llm_backend(settings: Any, model: Optional[str] = None) -> LLMBackend:
     model_str = (model or "").strip()
     provider = _resolve_provider(getattr(settings, "llm_provider", None))
     if provider == _OPENAI_COMPATIBLE:
-        base_url = _str_attr(settings, "llm_base_url") or _str_attr(
-            settings, "ollama_base_url", _DEFAULT_OLLAMA_URL
-        )
+        base_url = _openai_base_url(settings)
         if model_str and not is_local_endpoint(base_url) and "/" not in model_str:
             return get_llm_backend(_SurLaMachine(settings))
     else:
@@ -249,10 +258,7 @@ def chat_is_remote(settings: Any) -> bool:
     """
     if _resolve_provider(getattr(settings, "llm_provider", None)) != _OPENAI_COMPATIBLE:
         return False
-    base_url = _str_attr(settings, "llm_base_url") or _str_attr(
-        settings, "ollama_base_url", _DEFAULT_OLLAMA_URL
-    )
-    return not is_local_endpoint(base_url)
+    return not is_local_endpoint(_openai_base_url(settings))
 
 
 def get_auxiliary_backend(settings: Any, model: Optional[str] = None) -> LLMBackend:
