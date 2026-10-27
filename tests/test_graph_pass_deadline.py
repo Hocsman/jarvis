@@ -6,13 +6,15 @@ router model must still get to place and merge a fact, so no call is held to
 a figure sized for something faster: each is handed what the pass has left.
 The pass itself is what is bounded. Once its deadline is spent, or a stop
 request arrives, it asks nothing more and finishes on the paths that need no
-model, so a fact is filed less well but never lost.
+model, so a fact once extracted is filed less well but never lost. Facts the
+graph already holds spend none of it, and a summary a stop kept the pass from
+reading is read by the shutdown pass.
 
 That bound is what keeps shutdown whole. The desktop app gives the daemon
 60 s to stop before it kills it, and a kill skips the speaker, the MCP
-sessions and the database close. The diary pass at shutdown, summary and
-graph together, is held to `SHUTDOWN_DIARY_TIMEOUT_SEC`, even when a call
-never comes back.
+sessions and the database close. At shutdown the graph gets what the
+summary leaves of `SHUTDOWN_DIARY_TIMEOUT_SEC`, and is not held past it even
+when a call never comes back.
 
 See src/jarvis/memory/graph.spec.md, "The Pass's Deadline", and
 docs/llm_contexts.md, #10, #11, #11b and #11c.
@@ -37,8 +39,9 @@ NEW_FACT = "Possessor was directed by Brandon Cronenberg."
 KNOWN = "Alien was directed by Ridley Scott."
 TWIN = "Alien's director is Ridley Scott."
 
-# Slower than the 15 s and 20 s the picker and the merge used to be held to,
-# and well inside one chat-model timeout.
+# Seconds a slow chat model takes per call: well inside the chat-model
+# timeout these tests configure, and far beyond what a small router model
+# needs for the same answer.
 SLOW = 25.0
 
 _PICKER_PROMPT_MARK = "Respond with ONLY the number"
@@ -82,6 +85,27 @@ class _SlowChatModel:
         if timeout_sec < self.latency:
             return None
         return _answer(system_prompt, user_content, self.facts)
+
+
+class _StopsDuringExtraction:
+    """He quits while the first extraction is out with the model, and that
+    call never comes back. Every later call answers at once."""
+
+    def __init__(self, stop):
+        self.release = threading.Event()
+        self.stop = stop
+        self.cut = False
+
+    def __call__(self, *, chat_model, system_prompt, user_content, **kwargs):
+        from jarvis.memory import graph_ops
+
+        extraction = (_PICKER_PROMPT_MARK not in system_prompt
+                      and system_prompt != graph_ops._MERGE_SYSTEM_PROMPT)
+        if extraction and not self.cut:
+            self.cut = True
+            self.stop()
+            self.release.wait(30)
+        return _answer(system_prompt, user_content, (NEW_FACT,))
 
 
 class _MergeNeverReturns:
@@ -186,6 +210,23 @@ def test_a_slow_chat_model_files_and_merges_from_the_diary_flush(
     _assert_filed_and_merged(store, cinema.id)
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize("chat_timeout, filed", [(SLOW + 5, True), (SLOW - 5, False)])
+def test_the_pass_is_given_the_chat_models_own_timeout(
+        graph_db, a_window_with_a_lookup, chat_timeout, filed):
+    from jarvis import daemon
+    from jarvis.memory import graph_ops
+
+    _, db, store = graph_db
+    cinema = _seed_cinema(store)
+
+    with patch.object(graph_ops, "call_llm_direct", side_effect=_SlowChatModel(SLOW)):
+        daemon._check_and_update_diary(db, _config(chat_timeout), force=True)
+
+    lines = _cinema_lines(store, cinema.id)
+    assert any("Possessor" in line for line in lines) is filed, lines
+
+
 try:
     import flask as _flask  # noqa: F401
     _HAS_FLASK = True
@@ -275,6 +316,42 @@ def test_once_the_deadline_is_spent_the_pass_stops_asking_and_keeps_every_fact(g
 
 
 @pytest.mark.unit
+def test_facts_the_graph_already_holds_leave_the_deadline_to_the_new_one(graph_db):
+    """The day's summary is cumulative, so every flush extracts again what
+    earlier flushes filed. Those facts cost no model call: the time goes to
+    the one fact this window added."""
+    from jarvis.memory import graph_ops
+    from jarvis.memory.graph import BRANCH_WORLD
+
+    _, _, store = graph_db
+    earlier = (
+        "Videodrome was directed by David Cronenberg.",
+        "Scanners was directed by David Cronenberg.",
+        "The Fly was directed by David Cronenberg.",
+    )
+    cinema = store.create_node(
+        name="Cinema", description="Films and directors",
+        data="\n".join([KNOWN, TWIN, *(f"{f} · web · 2026-10-26" for f in earlier)]),
+        parent_id=BRANCH_WORLD,
+    )
+    clock = _Clock()
+    # Room for the extraction, one placement and one merge.
+    deadline = graph_ops.GraphDeadline(3 * SLOW + 1, clock=clock)
+
+    with patch.object(graph_ops, "call_llm_direct",
+                      side_effect=_SlowChatModel(SLOW, facts=(*earlier, NEW_FACT), clock=clock)):
+        result = graph_ops.update_graph_from_dialogue(
+            store=store, summary="We talked about the Cronenbergs.", cfg=None,
+            chat_model=CHAT, tools_used=["webSearch"], deadline=deadline,
+        )
+
+    _assert_filed_and_merged(store, cinema.id)
+    assert not (store.get_node(BRANCH_WORLD).data or "")
+    assert [f for f, _ in result.stored] == [NEW_FACT]
+    assert result.skipped == len(earlier)
+
+
+@pytest.mark.unit
 def test_a_call_that_never_returns_does_not_hold_the_shutdown_diary_pass(
         graph_db, a_window_with_a_lookup, monkeypatch):
     from jarvis import daemon
@@ -337,3 +414,51 @@ def test_a_stop_request_ends_the_periodic_pass_without_losing_the_fact(
 
     assert elapsed < 2.0, elapsed
     assert any("Possessor" in line for line in _cinema_lines(store, cinema.id))
+
+
+@pytest.mark.unit
+def test_a_window_whose_summary_a_stop_interrupted_is_learned_at_shutdown(
+        graph_db, a_window_with_a_lookup):
+    """The summary marks the window saved, so the shutdown pass that follows
+    finds nothing pending. What the stopped pass never read, it leaves to
+    the shutdown pass."""
+    from jarvis import daemon
+    from jarvis.memory import graph_ops
+
+    _, db, store = graph_db
+    cinema = _seed_cinema(store)
+
+    def summary_then_quit(*args, **kwargs):
+        daemon.request_stop()
+        return ("We talked about Possessor.", "films")
+
+    with patch("jarvis.memory.conversation.generate_conversation_summary",
+               side_effect=summary_then_quit), \
+         patch.object(graph_ops, "call_llm_direct", side_effect=_SlowChatModel(0.0)):
+        daemon._check_and_update_diary(db, _config(), force=True)
+        daemon._save_diary_before_shutdown(db, _config())
+
+    _assert_filed_and_merged(store, cinema.id)
+
+
+@pytest.mark.unit
+def test_a_window_whose_extraction_a_stop_left_behind_is_learned_at_shutdown(
+        graph_db, a_window_with_a_lookup):
+    from jarvis import daemon
+    from jarvis.memory import graph_ops
+
+    _, db, store = graph_db
+    cinema = _seed_cinema(store)
+    model = _StopsDuringExtraction(stop=daemon.request_stop)
+
+    try:
+        with patch.object(graph_ops, "call_llm_direct", side_effect=model):
+            started = time.monotonic()
+            daemon._check_and_update_diary(db, _config(), force=True)
+            elapsed = time.monotonic() - started
+            daemon._save_diary_before_shutdown(db, _config())
+    finally:
+        model.release.set()
+
+    assert elapsed < 2.0, elapsed
+    _assert_filed_and_merged(store, cinema.id)

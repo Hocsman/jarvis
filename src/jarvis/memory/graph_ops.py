@@ -52,6 +52,7 @@ from .graph import (
     MAX_TRAVERSAL_DEPTH,
     MemoryNode,
     SPLIT_THRESHOLD,
+    fact_key,
     normalise_fact,
 )
 
@@ -89,7 +90,9 @@ class GraphDeadline:
     once ``stop`` says the daemon is going down, nothing more is asked and
     the pass finishes on the paths that need no model: a fact stays where
     the descent got to, a node takes a plain append, a split waits for the
-    next flush. Filed less well, never lost.
+    next flush. A fact once extracted is filed less well, never lost; a
+    summary the extraction never read is reported ``unread`` so the caller
+    can give it another pass.
     """
 
     def __init__(self, seconds: float, *, stop: Optional[Callable[[], bool]] = None,
@@ -97,7 +100,13 @@ class GraphDeadline:
         self._clock = clock
         self._end = clock() + max(0.0, float(seconds))
         self._stop = stop
-        self._said = False
+        self._turned_away = False
+
+    @property
+    def turned_away(self) -> bool:
+        """Whether a call has gone unasked or been left behind for want of
+        time. Never reset: a deadline does not come back."""
+        return self._turned_away
 
     def _stopped(self) -> bool:
         return self._stop is not None and bool(self._stop())
@@ -112,10 +121,10 @@ class GraphDeadline:
         per call it turns away."""
         if self.remaining() > 0:
             return False
-        if not self._said:
-            self._said = True
+        if not self._turned_away:
+            self._turned_away = True
             why = "a stop was requested" if self._stopped() else "its deadline passed"
-            debug_log(f"graph pass: {why}, the rest is filed without the model", "memory")
+            debug_log(f"graph pass: {why}, nothing more is asked of the model", "memory")
         return True
 
 
@@ -124,7 +133,7 @@ def _deadline_or_one_chat_timeout(deadline: Optional[GraphDeadline], cfg) -> Gra
 
 
 # How often a call in flight is checked against the deadline and the stop
-# request: the most a stop waits once the call has been left behind.
+# request: the most a stop waits before the call is left behind.
 _WAIT_SLICE_SEC = 0.2
 
 
@@ -160,9 +169,10 @@ def _ask(deadline: GraphDeadline, what: str, **call) -> Optional[str]:
         raise outcome["error"]
     answer = outcome.get("answer")
     if not answer:
-        # Not the same answer as a refusal, though it ends the same way. A
-        # chat model too slow for the whole pass shows up here.
-        debug_log(f"{what}: no answer from {call['chat_model']} within {budget:.0f}s", "memory")
+        # Logged apart from what a caller parses as a refusal (the picker's
+        # NONE): a timeout, an error or an empty reply all land here.
+        debug_log(f"{what}: no answer from {call['chat_model']} "
+                  f"(handed {budget:.0f}s)", "memory")
     return answer
 
 
@@ -567,8 +577,11 @@ def find_best_node(
             deadline=deadline,
         )
         if best is None:
-            debug_log(f"graph traversal: no children fit at depth {depth}, stopping", "memory")
-            break  # None of the children fit — write to current node
+            if deadline.turned_away:
+                debug_log(f"graph traversal: out of time at depth {depth}, stopping", "memory")
+            else:
+                debug_log(f"graph traversal: no children fit at depth {depth}, stopping", "memory")
+            break  # Write to the current node
         matched = store.get_node(best)
         name = matched.name if matched else best[:8]
         debug_log(f"graph traversal: descended into '{name}'", "memory")
@@ -988,15 +1001,32 @@ class GraphUpdateResult(NamedTuple):
     """Result of a graph update pass.
 
     ``stored`` lists newly-appended facts so the CLI can show *what* was
-    learned. ``skipped`` counts facts the picker routed to a node that
-    already contained them. It lets callers print a status line on every
-    flush, even when the cumulative diary re-extraction produces only
-    duplicates, so the "knowledge graph: learned N facts" log does not
-    go silent.
+    learned. ``skipped`` counts facts the World branch already held. It
+    lets callers print a status line on every flush, even when the
+    cumulative diary re-extraction produces only duplicates, so the
+    "knowledge graph: learned N facts" log does not go silent.
+    ``unread`` says the deadline was spent before the extraction
+    answered, so the summary was never read: nothing was learned, and
+    not because there was nothing to learn.
     """
 
     stored: "list[tuple[str, str]]"
     skipped: int
+    unread: bool = False
+
+
+def _fact_homes(store: GraphMemoryStore, branch_root_id: str) -> dict[str, str]:
+    """Every fact a branch holds, by ``fact_key``, with the name of the node
+    it is on. One read of the subtree, no model."""
+    homes: dict[str, str] = {}
+    for node_id, lines in _walk_branch_nodes(store, branch_root_id):
+        node = store.get_node(node_id)
+        name = node.name if node else node_id[:8]
+        for line in lines:
+            key = fact_key(line)
+            if key:
+                homes.setdefault(key, name)
+    return homes
 
 
 def update_graph_from_dialogue(
@@ -1020,10 +1050,10 @@ def update_graph_from_dialogue(
             Passed to extraction to help distinguish daily events from enduring facts.
 
     Returns a ``GraphUpdateResult`` with a ``stored`` list of
-    ``(fact, node_name)`` tuples for each newly-appended fact and a
-    ``skipped`` count of duplicates the picker landed on. Callers read
-    ``result.stored`` / ``result.skipped`` (or destructure the tuple);
-    the result is not a list.
+    ``(fact, node_name)`` tuples for each newly-appended fact, a
+    ``skipped`` count of facts the World branch already held, and
+    ``unread`` when the deadline was spent before the summary was read.
+    Callers read the fields by name; the result is not a list.
     """
     deadline = _deadline_or_one_chat_timeout(deadline, cfg)
 
@@ -1039,22 +1069,56 @@ def update_graph_from_dialogue(
     )
 
     if not facts:
+        if deadline.turned_away:
+            # Not an empty answer: the summary was never read. The caller
+            # can tell the two apart through ``unread``.
+            debug_log("graph update: the summary was not read, the pass had no time left", "memory")
+            return GraphUpdateResult(stored=[], skipped=0, unread=True)
         debug_log("graph update: no facts extracted from summary", "memory")
         return GraphUpdateResult(stored=[], skipped=0)
 
     debug_log(f"graph update: placing {len(facts)} facts into knowledge graph", "memory")
 
-    # Step 2: Place — resolve the destination node for every fact up
-    # front, applying the cheap exact-match dedupe fast-path along the
-    # way. Then group surviving facts by node so the merge step below
-    # rewrites each node at most once per flush instead of once per
-    # fact. Without batching, a 5-fact flush against a populated User
-    # node fires 5 rewrites of the same `data`; with
-    # batching, it's one rewrite that incorporates all five.
-    pending: list[tuple[str, str]] = []  # (fact, node_id)
-    seen_keys_per_node: dict[str, set[str]] = {}
+    # Step 2: Exact-match dedupe (fast-path, no LLM) against every line the
+    # World branch already holds, before anything is placed. The daily
+    # summary is cumulative, so each flush extracts again what earlier
+    # flushes filed; sent down the picker first, those facts would spend
+    # the pass's deadline and leave the new ones to land at the root.
+    # Re-extractions are not fresh learning: they are not reported as
+    # stored and do not touch the access score, but they are counted so
+    # callers can log "nothing new (N duplicates skipped)".
+    known = _fact_homes(store, BRANCH_WORLD)
+    fresh: list[str] = []
+    seen: set[str] = set()
     skipped = 0
     for fact in facts:
+        key = fact_key(fact)
+        if key and key in known:
+            skipped += 1
+            debug_log(
+                f"graph update: skipped duplicate '{fact[:50]}...' → '{known[key]}'",
+                "memory",
+            )
+            continue
+        # Two extractor outputs that fold to the same key are one fact.
+        if key and key in seen:
+            debug_log(
+                f"graph update: skipped intra-flush duplicate '{fact[:50]}...'",
+                "memory",
+            )
+            continue
+        if key:
+            seen.add(key)
+        fresh.append(fact)
+
+    # Step 3: Place — resolve the destination node for every new fact up
+    # front, then group them by node so the merge step below rewrites
+    # each node at most once per flush instead of once per fact. Without
+    # batching, a 5-fact flush against a populated node fires 5 rewrites
+    # of the same `data`; with batching, it's one rewrite that
+    # incorporates all five.
+    pending: list[tuple[str, str]] = []  # (fact, node_id)
+    for fact in fresh:
         try:
             node_id = find_best_node(
                 store=store,
@@ -1067,40 +1131,6 @@ def update_graph_from_dialogue(
         except Exception as e:
             debug_log(f"graph update: traversal failed for '{fact[:50]}...' — {e}", "memory")
             continue
-
-        # Exact-match dedupe (fast-path, no LLM): skip facts already
-        # stored verbatim on the chosen node. Cumulative daily summaries
-        # re-extract the same facts on every flush; the SQL-only check
-        # short-circuits the merge LLM call for the most common no-op
-        # case. Re-extractions are not fresh learning — we don't report
-        # them as newly stored and we don't touch the access score.
-        # Skips are still counted so callers can log "nothing new (N
-        # duplicates skipped)" on all-duplicate flushes.
-        if store.node_contains_fact(node_id, fact):
-            target = store.get_node(node_id)
-            target_name = target.name if target else node_id[:8]
-            skipped += 1
-            debug_log(
-                f"graph update: skipped duplicate '{fact[:50]}...' → "
-                f"'{target_name}'",
-                "memory",
-            )
-            continue
-
-        # Within a single flush, two extractor outputs that fold to the
-        # same key should also dedupe against each other before reaching
-        # the merge step.
-        key = normalise_fact(fact)
-        node_keys = seen_keys_per_node.setdefault(node_id, set())
-        if key and key in node_keys:
-            debug_log(
-                f"graph update: skipped intra-flush duplicate '{fact[:50]}...'",
-                "memory",
-            )
-            continue
-        if key:
-            node_keys.add(key)
-
         pending.append((fact, node_id))
 
     if not pending:
@@ -1132,7 +1162,7 @@ def update_graph_from_dialogue(
         sources.update(_source_index(
             fact_line(f, source, date_utc) for f in node_facts))
 
-        # Step 3: Merge — combine the existing node data with all
+        # Step 4: Merge — combine the existing node data with all
         # queued new facts in a single LLM rewrite. Subsumes
         # supersession (contradictions drop the old line),
         # near-duplicate dedupe (different wordings collapse), and
@@ -1208,7 +1238,7 @@ def update_graph_from_dialogue(
 
         store.touch_node(node_id)
 
-        # Step 4: Auto-split if the node has grown too large.
+        # Step 5: Auto-split if the node has grown too large.
         refreshed = store.get_node(node_id)
         if refreshed is not None and refreshed.data_token_count > SPLIT_THRESHOLD:
             debug_log(
@@ -1259,8 +1289,8 @@ def consolidate_all_populated_nodes(
     and reported with ``lines_after == lines_before``.
 
     Each node gets one chat-model timeout of its own. The sweep is asked
-    for, streams its progress and holds nothing else up, so it is bounded
-    per node rather than as a whole.
+    for and streams its progress, so it is bounded per node rather than as
+    a whole.
     """
     # Snapshot all nodes up front so a rewrite mid-walk doesn't
     # cause us to revisit or skip nodes.

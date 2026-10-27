@@ -26,7 +26,11 @@ from faster_whisper import WhisperModel
 
 from .config import load_settings
 from .memory.db import Database
-from .memory.conversation import DialogueMemory, update_diary_from_dialogue_memory
+from .memory.conversation import (
+    DialogueMemory,
+    settle_owed_graph_pass,
+    update_diary_from_dialogue_memory,
+)
 from .output.tts import create_tts_engine
 from .tools.registry import initialize_mcp_tools
 from .debug import debug_log
@@ -73,8 +77,9 @@ _confirmation_callbacks: dict = {
     "on_delegation_done": None,
 }
 
-# Budget of the final diary pass, summary and knowledge graph together
-# (shorter than normal to allow reasonable quit time).
+# Budget of the final diary pass (shorter than normal to allow reasonable
+# quit time): the summary is asked with all of it, the knowledge graph gets
+# what the summary leaves.
 # Desktop app's stop_daemon() should wait at least this long + buffer
 SHUTDOWN_DIARY_TIMEOUT_SEC = 45.0
 
@@ -1032,14 +1037,16 @@ def _check_and_update_diary(
     """Check if diary should be updated and perform batch update if needed.
 
     Args:
-        timeout_sec: The budget of the whole pass, summary and knowledge graph
-                    together. If None, uses cfg.llm_chat_timeout_sec.
-                    During shutdown, a shorter one is used to allow graceful quit.
+        timeout_sec: The pass's budget: the summary is asked with all of it and
+                    the knowledge graph gets what the summary leaves. If None,
+                    uses cfg.llm_chat_timeout_sec. During shutdown, a shorter
+                    one is used to allow graceful quit.
         use_callbacks: If True, uses the global diary update callbacks for UI updates.
         use_ipc: If True, emits diary events to stdout for IPC with desktop app (subprocess mode).
-        stop: Ends the knowledge-graph pass early. A periodic pass gives way
-              to a stop request, so quitting never waits for it; the pass
-              shutdown itself runs passes None.
+        stop: Ends the knowledge-graph part of the pass early; the summary is
+              not interrupted. The periodic passes keep the default, the stop
+              request; the shutdown pass, which the stop request is why it
+              runs, passes None.
     """
     global _global_dialogue_memory, _diary_update_callbacks
 
@@ -1166,9 +1173,13 @@ def _save_diary_before_shutdown(db: Database, cfg) -> None:
 
     The desktop app kills a daemon that has not stopped within its own
     wait, and a kill skips everything after this pass: the speaker, the MCP
-    sessions, the database close. The stop request is why this pass runs,
-    so it is not one that ends it.
+    sessions, the database close. The knowledge graph therefore gets what
+    the summary leaves of the budget, then a window a stopped periodic pass
+    never read gets what is left after that. The summary, which streams
+    here, and its embedding keep their own timeouts. The stop request is
+    why this pass runs, so it is not one that ends it.
     """
+    started = time.monotonic()
     debug_log("performing final diary update (force=True)...", "jarvis")
     print("📝 Updating diary before shutdown...", flush=True)
 
@@ -1188,6 +1199,12 @@ def _save_diary_before_shutdown(db: Database, cfg) -> None:
         db, cfg, verbose=True, force=True, timeout_sec=SHUTDOWN_DIARY_TIMEOUT_SEC,
         use_callbacks=use_callbacks, use_ipc=use_ipc, stop=None,
     )
+    if _global_dialogue_memory is not None:
+        settle_owed_graph_pass(
+            db, _global_dialogue_memory, cfg,
+            timeout_sec=SHUTDOWN_DIARY_TIMEOUT_SEC - (time.monotonic() - started),
+            thinking=getattr(cfg, 'llm_thinking_enabled', False),
+        )
     print("✅ Diary update complete", flush=True)
     debug_log("diary update complete", "jarvis")
 
