@@ -1,3 +1,4 @@
+import gc
 import ipaddress
 import os
 import shutil
@@ -648,6 +649,17 @@ def qapp():
     if app is None:
         app = QApplication([])
     yield app
+    # A window the test left shown that only a reference cycle holds (a chat
+    # window and its orb) has a paint pending. Collect it now, while Qt is
+    # between events: a collection that fires while Qt paints it frees the
+    # window under the child being painted, and the process dies with an
+    # access violation. When the collector fires depends on every allocation
+    # in the run, so nothing else keeps it out of the paint. Only a shown
+    # window is painted, and a full collection costs a large share of a
+    # second late in the run, so a teardown with none shown skips it.
+    # test_qapp_tears_down_what_only_a_cycle_holds.py holds this to that.
+    if any(widget.isVisible() for widget in app.topLevelWidgets()):
+        gc.collect()
     app.processEvents()
     for widget in list(app.topLevelWidgets()):
         try:
