@@ -1738,7 +1738,6 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 search_params = extract_search_params_for_memory(
                     _extractor_query, cfg, resolve_tool_router_model(cfg),
                     timeout_sec=router_timeout_sec(cfg),
-                    thinking=getattr(cfg, 'llm_thinking_enabled', False),
                     context_hint=context_hint,
                 )
                 # Don't cache a failed extraction. `None` means the pass

@@ -1296,7 +1296,6 @@ def graph_consolidate_all() -> Response:
                 cfg=settings,
                 chat_model=settings.llm_chat_model,
                 timeout_sec=20.0,
-                thinking=getattr(settings, 'llm_thinking_enabled', False),
                 picker_model=picker_model,
             ):
                 node_count += 1
