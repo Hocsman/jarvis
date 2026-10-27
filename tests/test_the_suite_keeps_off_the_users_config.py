@@ -9,7 +9,9 @@ file of its own. They have to reach the modules that did ``from jarvis.config
 import default_config_path`` at import (the settings window, the setup
 wizard, the app), which hold the function rather than the name, and the code
 that runs outside a test's own fixtures: collection, wider fixtures, and the
-pytest sessions those start in a child process. The guard in
+child processes those start. A pytest session a guard's end-to-end test runs
+apart gets a home directory of its own from ``inner_session.py`` on top of
+that, and none of the variables that name a config file. The guard in
 ``config_guard.py`` refuses the user's file to ``_load_json`` and
 ``_save_json`` and fails the test that asked. These tests hold both to that,
 and never put the user's real file at stake: a test checks its path is not
@@ -24,19 +26,17 @@ import importlib
 import os
 import subprocess
 import sys
-import textwrap
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
 
 import config_guard
+import inner_session
 from jarvis.config import _load_json as load_json_bound_at_import
 from jarvis.config import _save_json as save_json_bound_at_import
 from jarvis.config import default_config_path as default_config_path_bound_at_import
 
-TESTS_DIR = Path(__file__).resolve().parent
-SRC_DIR = TESTS_DIR.parent / "src"
+SRC_DIR = Path(__file__).resolve().parent.parent / "src"
 
 
 def test_the_guard_is_armed_for_every_test_in_this_suite(request):
@@ -73,8 +73,8 @@ class TestTheSandbox:
         assert not path.exists()
 
 
-# What a child process started outside a test resolves, as the native guard's
-# end-to-end session would: the path, then the file JARVIS_CONFIG_PATH names.
+# What a child process started outside a test resolves when it inherits the
+# run's environment: the path, then the file JARVIS_CONFIG_PATH names.
 CHILD_RESOLVES = """
 import os
 from jarvis.config import default_config_path
@@ -250,86 +250,52 @@ def test_a_file_of_its_own_is_left_alone(tmp_path):
 USERS_OWN = '{"llm_api_key": "a key the inner session must not see"}'
 
 
-def _run_inner_session(tmp_path: Path):
-    home = tmp_path / "home"
-    users_file = home / ".config" / "jarvis" / "config.json"
-    users_file.parent.mkdir(parents=True)
-    users_file.write_text(USERS_OWN, encoding="utf-8")
-
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
-    (session_dir / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
-    (session_dir / "conftest.py").write_text(textwrap.dedent(INNER_CONFTEST), encoding="utf-8")
-    (session_dir / "bound_at_import.py").write_text(textwrap.dedent(INNER_MODULE), encoding="utf-8")
-    (session_dir / "test_inner.py").write_text(textwrap.dedent(INNER_TESTS), encoding="utf-8")
-    report = tmp_path / "report.xml"
-
-    env = {
-        name: value
-        for name, value in os.environ.items()
-        if name not in ("XDG_CONFIG_HOME", "JARVIS_CONFIG_PATH")
-    }
-    env.update(
-        HOME=str(home),
-        USERPROFILE=str(home),
-        PYTHONPATH=os.pathsep.join([str(TESTS_DIR), str(SRC_DIR)]),
-        PYTHONDONTWRITEBYTECODE="1",
-    )
-    session = subprocess.run(
-        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-q",
-         f"--junitxml={report}", "test_inner.py"],
-        cwd=session_dir, env=env, capture_output=True, text=True, timeout=180,
-    )
-    # A session that could not start writes no report. Say what the process
-    # said instead of failing later on a missing file.
-    assert report.exists(), (
-        f"the inner pytest session wrote no report (exit code {session.returncode})\n"
-        f"--- stdout ---\n{session.stdout}\n--- stderr ---\n{session.stderr}"
-    )
-    outcomes = {}
-    for case in ET.parse(report).getroot().iter("testcase"):
-        failures = [child for child in case if child.tag in ("error", "failure")]
-        outcomes[case.get("name")] = "\n".join(
-            (failure.get("message") or "") + (failure.text or "") for failure in failures
-        )
-    return outcomes, users_file
-
-
 class TestTheGuardEndToEnd:
     """An inner session with the guard and no sandbox, whose home directory
     holds a stand-in for the user's file."""
 
     @pytest.fixture(scope="class")
-    def inner(self, tmp_path_factory):
-        return _run_inner_session(tmp_path_factory.mktemp("inner_session"))
+    def home(self, tmp_path_factory):
+        return tmp_path_factory.mktemp("home")
 
-    @staticmethod
-    def _outcome(inner, name: str) -> str:
-        outcomes, _ = inner
-        assert name in outcomes, f"the inner session reported {sorted(outcomes)}, not {name}"
-        return outcomes[name]
+    @pytest.fixture(scope="class")
+    def users_file(self, home):
+        users_file = home / ".config" / "jarvis" / "config.json"
+        users_file.parent.mkdir(parents=True)
+        users_file.write_text(USERS_OWN, encoding="utf-8")
+        return users_file
+
+    @pytest.fixture(scope="class")
+    def inner(self, tmp_path_factory, home, users_file):
+        return inner_session.run(
+            tmp_path_factory.mktemp("inner_session"),
+            conftest=INNER_CONFTEST,
+            tests=INNER_TESTS,
+            modules={"bound_at_import.py": INNER_MODULE},
+            home=home,
+        )
 
     def test_a_read_the_caller_swallows_still_fails_the_test(self, inner):
-        outcome = self._outcome(inner, "test_a_read_whose_refusal_the_caller_swallows")
+        outcome = inner["test_a_read_whose_refusal_the_caller_swallows"]
 
         assert "asked for the user's own config file" in outcome, outcome
         assert "_load_json(" in outcome, outcome
 
     def test_nothing_of_the_file_reaches_the_test_that_asked(self, inner):
-        outcome = self._outcome(inner, "test_a_read_whose_refusal_the_caller_swallows")
+        outcome = inner["test_a_read_whose_refusal_the_caller_swallows"]
 
         assert "must not see" not in outcome, outcome
 
     def test_a_save_the_caller_swallows_still_fails_the_test(self, inner):
-        outcome = self._outcome(inner, "test_a_save_whose_refusal_the_caller_swallows")
+        outcome = inner["test_a_save_whose_refusal_the_caller_swallows"]
 
         assert "_save_json(" in outcome, outcome
 
-    def test_the_users_file_is_as_it_was(self, inner):
-        _, users_file = inner
-
+    def test_the_users_file_is_as_it_was(self, inner, users_file):
         assert users_file.read_text(encoding="utf-8") == USERS_OWN
         assert sorted(path.name for path in users_file.parent.iterdir()) == [users_file.name]
 
     def test_a_file_of_its_own_passes(self, inner):
-        assert self._outcome(inner, "test_a_file_of_its_own_is_left_alone") == ""
+        outcome = inner["test_a_file_of_its_own_is_left_alone"]
+
+        assert outcome == "", outcome
