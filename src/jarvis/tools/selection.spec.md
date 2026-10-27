@@ -70,7 +70,7 @@ Note: embedding is **not** the default strategy because nomic-embed-text produce
 
 ### LLM Strategy (default)
 
-1. Build a catalogue of `- name: description` lines (descriptions truncated to 120 chars) for every registered tool except always-included ones.
+1. Build a catalogue of `- name: description` lines for every registered tool except always-included ones, each description read as the router reads it (see What the router reads).
 2. Send to `call_llm_direct` with a system prompt asking for the **top 5 most relevant** tool names as a comma-separated list. The prompt instructs the router to prefer 1–3 tools for narrow queries and to return `"none"` for greetings/small talk.
 3. Parse the response, matching tokens against known tool names (unknowns are dropped silently).
 4. Apply a hard `_LLM_MAX_SELECTED` (5) cap regardless of what the router returned, to guard against chatty routers that echo the whole catalogue.
@@ -86,6 +86,35 @@ When the reply engine passes a `context_hint`, it is split into two labelled sem
 - **RECENT DIALOGUE** — recent user/assistant turns. The router is instructed to read the current query as a continuation of this exchange, so short follow-ups (e.g. "I'm in London" after "which city?") route to the tool that answers the combined intent across turns rather than being treated as idle chatter.
 
 The split is the exact marker `"Recent dialogue (short-term memory):"` — any content before it is known facts, content after it is recent dialogue. If no dialogue marker is present, the whole hint is treated as known facts.
+
+#### What the router reads
+
+One line per tool: its name and the whole sentences of its description that fit in 200 characters (`_router_summary`), the first sentence alone when that one is longer, flattened to one line. The planner reads the first 120 characters of the same description. So the sentence that decides routing comes first, and its opening also decides planning.
+
+A description says what the tool does in the words the user asks for it with, because the router matches a request against those words, not against what the tool can technically do:
+
+- `localFiles` finds "the user's files and documents on their computer". Described as acting "within your home directory", it was never offered for "trouve la facture PDF sur mon ordinateur": qwen2.5:3b answered `none`.
+- `fetchWebPage` opens "a web page or article". Described as fetching "a web page URL", a request for an article that gives no address got `webSearch` alone.
+- `setRoutine` shows what a repeat sounds like ("every morning, every Monday"). Without that, a recurring request is routed on what will be fetched each time ("the weather"), never on the fact that it recurs.
+
+The descriptions are read together, so changing one moves requests meant for another. With `fetchWebPage` opening "Fetch and extract text content…", "tous les lundis matin, fais-moi un point sur la météo" went to `getWeather, fetchWebPage, webSearch` and missed `setRoutine` even with `setRoutine`'s current description; the French city-time questions ("quelle heure est-il à Tokyo ?"), where qwen2.5:3b already puts `getWeather` first and `getTime` second, lose `getTime` more often after any change to the catalogue. A description change is therefore measured on the whole router bench, both arms interleaved call by call, never only on its own tool's cases.
+
+The shape of the call counts too. The reply engine always sends the live time and location as KNOWN FACTS; `toolSearchTool` and the bare evals send none. With no KNOWN FACTS block, qwen2.5:3b answers `none` to "trouve la facture PDF sur mon ordinateur" whatever `localFiles` says, and it is the prompt's `none` rule that decides it (the same prompt without that sentence picks a tool). With the block, the request reaches `localFiles`.
+
+Measured on qwen2.5:3b, these three descriptions against their earlier wording, 40 calls an arm, arms interleaved:
+
+| Cases | Earlier wording | This wording |
+|---|---|---|
+| The 62 cases of the router bench (27 English from the evals, 35 French) | 84.0% | 85.6% (p = 0.0008) |
+| 12 requests for these three tools, French and English, bare | 40.0% | 64.0% |
+| The same 12 with the engine's time/location line | 54.2% | 74.2% |
+| "tous les lundis matin, fais-moi un point sur la météo" → `setRoutine`, bare / with the line | 5/40, 2/40 | 37/40, 14/40 |
+| "trouve la facture PDF sur mon ordinateur" → `localFiles`, bare / with the line | 0/40, 0/40 | 1/40, 40/40 |
+| "trouve-moi un article détaillé sur le programme Apollo" → `webSearch` + `fetchWebPage`, bare / with the line | 10/40, 35/40 | 28/40, 39/40 |
+| "quelle heure est-il à Tokyo ?" → `getTime`, bare | 40/40 | 30/40 |
+| Nine requests where these tools do not belong (one-off reminders, screenshots, plain searches) | 360/360 | 360/360 |
+
+On gemma4:e2b (20 calls an arm) the bench does not move (80.4% against 80.0%, p = 0.44) and the 12 bare requests go from 83.3% to 91.2%. On qwen2.5:3b a daily request phrased around its content ("chaque soir à 21 heures, dis-moi ce que j'ai mangé dans la journée") stays at 0 or 1 in 30 whatever `setRoutine` says: it goes to the content tools (`getWeather`, `fetchMeals`) or to `setReminder`. Variants that add "every day or every week" to the examples did not gain it there and lost it on gemma4:e2b (14/20 to 0/20).
 
 ### Interface
 

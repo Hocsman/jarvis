@@ -101,7 +101,38 @@ def test_the_router_sees_that_set_routine_is_for_repeating_things():
     invisible exactly where it is needed."""
     seen = _seen("setRoutine").lower()
 
-    assert "every day" in seen or "every week" in seen
+    assert "repeat" in seen
+
+
+def test_the_router_sees_what_a_repeat_sounds_like():
+    """Without an example of how a repeat is asked, a small router routes
+    "tous les lundis matin, fais-moi un point sur la météo" on what will
+    be fetched (the weather) and never on the fact that it recurs."""
+    seen = _seen("setRoutine").lower()
+
+    assert "every morning" in seen and "every monday" in seen
+
+
+# ── Tools the user names by what they want, not by what they do ──────
+
+
+def test_the_router_sees_that_local_files_finds_things_on_the_computer():
+    """The user asks for a file "on my computer"; a description about "your
+    home directory" read to a small router as somebody else's, and "trouve
+    la facture PDF sur mon ordinateur" was answered 'none'."""
+    seen = _seen("localFiles").lower()
+
+    assert "computer" in seen
+    assert "search" in seen
+
+
+def test_the_router_sees_that_fetch_web_page_reads_articles():
+    """"A detailed article" is what the user asks for, and the page tool
+    is the one that reads it whole after webSearch has found it."""
+    seen = _seen("fetchWebPage").lower()
+
+    assert "article" in seen
+    assert "websearch" in seen
 
 
 def test_the_router_sees_that_set_routine_is_not_set_reminder():

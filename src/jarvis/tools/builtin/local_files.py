@@ -33,7 +33,14 @@ class LocalFilesTool(Tool):
 
     @property
     def description(self) -> str:
-        return "Safely read, write, list, append, or delete files within your home directory."
+        # In the words a file is asked for with: "on my computer", not "your
+        # home directory", which a small router reads as somebody else's.
+        # Measurements: selection.spec.md.
+        return (
+            "Search for, open and read the user's files and documents on "
+            "their computer, or list, write, append or delete them, inside "
+            "their home folder."
+        )
 
     @property
     def inputSchema(self) -> Dict[str, Any]:

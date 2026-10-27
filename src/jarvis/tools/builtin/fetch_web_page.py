@@ -38,7 +38,13 @@ class FetchWebPageTool(Tool):
 
     @property
     def description(self) -> str:
-        return "Fetch and extract text content from a web page URL."
+        # "Article" is what the user asks for. A "fetch" verb in the opening
+        # draws requests meant for other tools ("every Monday, give me the
+        # weather") onto this one. Measurements: selection.spec.md.
+        return (
+            "Open a web page or article from its URL and read its full "
+            "text, such as a result webSearch found."
+        )
 
     @property
     def inputSchema(self) -> Dict[str, Any]:
