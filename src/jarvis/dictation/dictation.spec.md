@@ -99,10 +99,20 @@ After transcription, text passes through these stages in order:
 ### Audio Device Handling
 
 - The engine accepts an optional `voice_device` parameter, passed through from
-  the daemon's configured device.
-- The stream first attempts the target Whisper sample rate (16 kHz).
-- On failure (e.g. PortAudio error -50 on macOS), it falls back to the
-  device's native sample rate and stores it in `_stream_sample_rate`.
+  the daemon's configured device, and resolves it on every press with the
+  listener's resolver (`resolve_input_device` in `jarvis.utils.audio_stream`),
+  so dictation and the wake-word listener record from the same microphone:
+  blank, `default` or `system` is the system default input, a number is a
+  device index, and any other text is the first input-capable device whose
+  name contains it, ignoring case.
+- The device is resolved before anything announces a recording. A name that
+  matches no input (the microphone is unplugged) records nothing: no other
+  input is opened, no start beep plays, the console says the selected
+  microphone was not found, and the next press resolves again. A failed
+  device lookup is handled the same way, without the console line.
+- The stream opens at the selected input's native sample rate (requesting
+  16 kHz fails on many devices, e.g. PortAudio error -50 on macOS), with the
+  listener's format negotiation, and stores the rate in `_stream_sample_rate`.
 - If the stream rate differs from the Whisper target rate, audio is resampled
   via linear interpolation before transcription.
 
@@ -118,6 +128,7 @@ After transcription, text passes through these stages in order:
 | macOS 26+ (Tahoe)         | `pynput` disabled — TSM main-thread assertion crash |
 | Linux / Wayland           | `pynput` requires X11 (limited Wayland support)    |
 | Audio rate mismatch       | Resample via linear interpolation to Whisper rate  |
+| Named microphone unplugged | Records nothing, opens no other input, no start beep; console line; next press retries |
 | LLM filler removal fails  | Falls back to raw transcription (5 s timeout)     |
 | Custom dictionary empty   | No-op, text passes through unchanged               |
 

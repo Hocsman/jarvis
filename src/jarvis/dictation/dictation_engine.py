@@ -20,7 +20,11 @@ from typing import Any, Callable, Optional
 
 from ..debug import debug_log
 from ..utils.audio_lock import portaudio_lock
-from ..utils.audio_stream import open_input_stream
+from ..utils.audio_stream import (
+    InputDeviceNotFound,
+    open_input_stream,
+    resolve_input_device,
+)
 from .history import DictationHistory
 
 _MAX_RECORDING_SECONDS = 600.0  # 10 minutes max safety ceiling
@@ -918,7 +922,22 @@ class DictationEngine:
             if self._session != token or not self._recording:
                 return
 
-        debug_log("dictation recording started", "dictation")
+        # Resolve the microphone before anything announces a recording: a
+        # named one that is unplugged gets no beep and no other input.
+        try:
+            device = resolve_input_device(self._voice_device, sd.query_devices)
+        except InputDeviceNotFound:
+            debug_log("dictation input device did not match an available microphone", "dictation")
+            print("  ❌ Dictation: selected microphone not found. Choose an available input in Settings.", flush=True)
+            self._abandon_session(token)
+            return
+        except Exception as exc:
+            debug_log(f"dictation input device lookup failed: {exc}", "dictation")
+            self._abandon_session(token)
+            return
+
+        input_label = "system default" if device is None else device
+        debug_log(f"dictation recording started (input: {input_label})", "dictation")
         self._audio_frames = []
         self._record_start_time = time.time()
 
@@ -937,11 +956,8 @@ class DictationEngine:
         # (e.g. -50 on macOS when requesting 16 kHz on a 48 kHz device).
         # Audio is resampled to the Whisper target rate after recording.
         stream_kwargs: dict[str, Any] = {}
-        if self._voice_device:
-            try:
-                stream_kwargs["device"] = int(self._voice_device)
-            except (ValueError, TypeError):
-                pass
+        if device is not None:
+            stream_kwargs["device"] = device
 
         # Query native sample rate
         try:

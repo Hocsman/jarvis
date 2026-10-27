@@ -1,13 +1,14 @@
-"""Audio input stream negotiation across voice listener and dictation engine.
+"""Audio input selection and stream negotiation across voice listener and dictation engine.
 
-Provides format negotiation (mono first, then bounded native-rate / multi-channel
-alternatives) for audio hardware that rejects 1-channel mono or 16 kHz capture.
+Resolves the configured ``voice_device`` to one input, and provides format
+negotiation (mono first, then bounded native-rate / multi-channel alternatives)
+for audio hardware that rejects 1-channel mono or 16 kHz capture.
 """
 
 from __future__ import annotations
 
 import contextlib
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 try:
     import sounddevice as sd
@@ -16,6 +17,35 @@ except (ImportError, OSError):
 
 from ..debug import debug_log
 from .audio_lock import portaudio_lock
+
+
+class InputDeviceNotFound(LookupError):
+    """``voice_device`` names a microphone that no input device matches."""
+
+
+def resolve_input_device(
+    voice_device: Optional[str],
+    list_devices: Callable[[], Sequence[Mapping[str, Any]]],
+) -> Optional[int]:
+    """The PortAudio input index ``voice_device`` selects, or None for the system default.
+
+    Blank, ``default`` and ``system`` (any case) mean the system default input.
+    Anything ``int()`` reads is an index. Any other text is a name: the first
+    input-capable device whose name contains it, ignoring case. ``list_devices``
+    is only called for a name. A name no input matches raises
+    ``InputDeviceNotFound`` rather than falling back to another microphone.
+    """
+    wanted = (voice_device or '').strip().lower()
+    if wanted in ('', 'default', 'system'):
+        return None
+    try:
+        return int(wanted)
+    except ValueError:
+        pass
+    for idx, dev in enumerate(list_devices()):
+        if dev.get('max_input_channels', 0) > 0 and wanted in dev.get('name', '').lower():
+            return idx
+    raise InputDeviceNotFound(voice_device)
 
 
 def is_input_format_error(exc: Exception) -> bool:

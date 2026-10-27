@@ -40,8 +40,10 @@ if TYPE_CHECKING:
     from ..memory.conversation import DialogueMemory
 
 from ..utils.audio_stream import (
+    InputDeviceNotFound,
     is_input_format_error,
     open_input_stream,
+    resolve_input_device,
 )
 
 def _open_input_stream(
@@ -2273,19 +2275,14 @@ class VoiceListener(threading.Thread):
 
         # Resolve the same input for the permission probe and continuous capture.
         stream_kwargs = {}
-        device_env = (self.cfg.voice_device or '').strip().lower()
-        if device_env and device_env not in ('default', 'system'):
-            try:
-                stream_kwargs['device'] = int(self.cfg.voice_device)
-            except ValueError:
-                for idx, dev in enumerate(devices):
-                    if dev.get('max_input_channels', 0) > 0 and device_env in dev.get('name', '').lower():
-                        stream_kwargs['device'] = idx
-                        break
-                else:
-                    print("  ❌ Selected microphone not found. Choose an available input in Settings.", flush=True)
-                    debug_log("configured input device did not match an available microphone", "voice")
-                    return
+        try:
+            device = resolve_input_device(self.cfg.voice_device, lambda: devices)
+        except InputDeviceNotFound:
+            print("  ❌ Selected microphone not found. Choose an available input in Settings.", flush=True)
+            debug_log("configured input device did not match an available microphone", "voice")
+            return
+        if device is not None:
+            stream_kwargs['device'] = device
 
         # Windows 11: Test microphone permission by attempting a brief recording
         # This catches privacy settings that silently block audio access.

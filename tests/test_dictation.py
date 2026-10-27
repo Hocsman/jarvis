@@ -457,6 +457,106 @@ class TestRecordingStateMachine:
 
 
 # ---------------------------------------------------------------------------
+# Input device
+# ---------------------------------------------------------------------------
+
+# A desk microphone listed once per Windows host API, next to an output device.
+_DESK = [
+    {"name": "Microsoft Sound Mapper - Input", "max_input_channels": 2, "default_samplerate": 44100.0},
+    {"name": "Microphone (MSI GV60)", "max_input_channels": 2, "default_samplerate": 48000.0},
+    {"name": "Speakers (USB2.0 Device)", "max_input_channels": 0, "default_samplerate": 48000.0},
+    {"name": "Microphone (MSI GV60)", "max_input_channels": 2, "default_samplerate": 48000.0},
+    {"name": "Built-in Microphone", "max_input_channels": 1, "default_samplerate": 16000.0},
+]
+
+
+class TestInputDevice:
+    """Dictation records from the microphone ``voice_device`` names."""
+
+    @pytest.fixture(autouse=True)
+    def _skip_if_no_deps(self):
+        try:
+            import pynput  # noqa: F401
+            import sounddevice  # noqa: F401
+            import numpy  # noqa: F401
+        except ImportError:
+            pytest.skip("required dependencies not installed")
+
+    def _press(self, engine, devices=_DESK, release=True):
+        """Press (and release) the hotkey; return the streams opened and the beep mock."""
+        opened = []
+
+        def query_devices(device=None, kind=None):
+            if isinstance(devices, Exception):
+                raise devices
+            if device is not None:
+                return devices[device]
+            if kind == "input":
+                return devices[0]
+            return devices
+
+        def input_stream(**kwargs):
+            opened.append(kwargs)
+            return MagicMock()
+
+        before = thread_guard.snapshot()
+        with patch("src.jarvis.dictation.dictation_engine.sd") as mock_sd, \
+             patch("src.jarvis.dictation.dictation_engine._play_beep") as beep:
+            mock_sd.query_devices.side_effect = query_devices
+            mock_sd.InputStream.side_effect = input_stream
+            engine._start_recording()
+            thread_guard.wait_for_workers(before)
+            if release:
+                engine._stop_recording(discard=True)
+                thread_guard.wait_for_workers(before)
+        return opened, beep
+
+    def test_a_named_microphone_is_the_one_recorded(self):
+        opened, _ = self._press(_make_engine(voice_device="MSI GV60"))
+        assert [kw["device"] for kw in opened] == [1]
+        assert opened[0]["samplerate"] == 48000
+
+    def test_an_index_is_the_one_recorded(self):
+        opened, _ = self._press(_make_engine(voice_device="4"))
+        assert [kw["device"] for kw in opened] == [4]
+
+    def test_no_device_records_from_the_system_input(self):
+        opened, _ = self._press(_make_engine(voice_device=None))
+        assert len(opened) == 1
+        assert "device" not in opened[0]
+
+    def test_an_unplugged_named_microphone_records_nothing(self, capsys):
+        started = threading.Event()
+        engine = _make_engine(
+            voice_device="Disconnected Headset",
+            on_dictation_start=started.set,
+        )
+        opened, beep = self._press(engine)
+
+        assert opened == [], "must not fall back to another microphone"
+        assert not beep.called, "no start beep for a recording that never began"
+        assert not started.is_set()
+        assert "microphone not found" in capsys.readouterr().out.lower()
+
+    def test_the_microphone_is_found_again_once_plugged_back_in(self):
+        engine = _make_engine(voice_device="MSI GV60")
+        unplugged = [d for d in _DESK if "GV60" not in d["name"]]
+        # No release in between: the refused press must not leave a
+        # recording behind that swallows the next one.
+        assert self._press(engine, unplugged, release=False)[0] == []
+        opened, _ = self._press(engine)
+        assert [kw["device"] for kw in opened] == [1]
+
+    def test_a_failed_device_lookup_records_nothing_and_frees_the_next_press(self):
+        engine = _make_engine(voice_device="MSI GV60")
+        failure = OSError("Error querying device -1")
+        opened, beep = self._press(engine, failure, release=False)
+        assert opened == [] and not beep.called
+        opened, _ = self._press(engine)
+        assert [kw["device"] for kw in opened] == [1]
+
+
+# ---------------------------------------------------------------------------
 # Transcription
 # ---------------------------------------------------------------------------
 
