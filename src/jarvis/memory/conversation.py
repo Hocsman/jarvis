@@ -1717,6 +1717,7 @@ def update_diary_from_dialogue_memory(
     force: bool = False,
     on_token: Optional[Callable[[str], None]] = None,
     thinking: bool = False,
+    stop: Optional[Callable[[], bool]] = None,
 ) -> Optional[int]:
     """
     Update the diary with pending interactions from dialogue memory.
@@ -1726,7 +1727,12 @@ def update_diary_from_dialogue_memory(
     won't be incorrectly marked as saved.
 
     Args:
+        timeout_sec: The whole pass's budget, summary and knowledge graph
+            together: the summary is asked first, with all of it, and the
+            graph pass gets what the summary left.
         on_token: Optional callback for streaming tokens (for live UI updates)
+        stop: Says the daemon is going down. The graph pass asks nothing
+            more once it does; the summary is not interrupted.
 
     Returns the summary ID if successful, None otherwise.
     """
@@ -1735,6 +1741,10 @@ def update_diary_from_dialogue_memory(
     if not force and not dialogue_memory.should_update_diary():
         debug_log("diary update skipped: should_update_diary=False and force=False", "memory")
         return None
+
+    from .graph_ops import GraphDeadline
+
+    deadline = GraphDeadline(timeout_sec, stop=stop)
 
     try:
         # Atomically capture pending chunks AND the snapshot timestamp.
@@ -1784,8 +1794,8 @@ def update_diary_from_dialogue_memory(
 
             # Graph memory (v2): extract facts and store in the node graph.
             # Non-blocking — if this fails, the diary update still succeeded.
-            # Uses a dedicated timeout (30s) rather than the diary chat timeout,
-            # so graph updates don't inflate the diary flush wall time.
+            # Inside the pass's own deadline, so the graph never makes the
+            # flush outlast the budget its caller gave it.
             try:
                 from .graph import GraphMemoryStore
                 from .graph_ops import update_graph_from_dialogue
@@ -1797,10 +1807,6 @@ def update_diary_from_dialogue_memory(
                 summary_text = existing['summary'] if existing else None
 
                 if summary_text:
-                    # Use a shorter timeout for graph operations — extraction (30s),
-                    # placement (15s/fact), and split (45s) each have their own budgets
-                    # inside update_graph_from_dialogue.
-                    graph_timeout = min(timeout_sec, 30.0)
                     result = update_graph_from_dialogue(
                         store=graph_store,
                         summary=summary_text,
@@ -1811,7 +1817,7 @@ def update_diary_from_dialogue_memory(
                         # earlier windows too; what this vouches for is
                         # that *this* flush had a lookup behind it.
                         tools_used=tools_used,
-                        timeout_sec=graph_timeout,
+                        deadline=deadline,
                         thinking=thinking,
                         date_utc=today,
                     )

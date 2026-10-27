@@ -9,19 +9,23 @@ Keeps graph.py as a pure data store (SQLite only). This module handles:
 All LLM calls run on the chat model the caller hands in and go through the
 auxiliary dispatcher (a bare model tag on a remote provider runs on local
 Ollama); the local ``call_llm_direct`` wrapper is the single intercept point
-tests patch.
+tests patch. Every call is made through ``_ask``, inside the pass's
+``GraphDeadline``.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import threading
+import time
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Iterator, NamedTuple, Optional, Sequence
+from typing import Callable, Iterator, NamedTuple, Optional, Sequence
 
 from rapidfuzz import fuzz
 
+from ..config import get_default_config
 from ..debug import debug_log
 from ..llm import get_auxiliary_backend
 from ..utils.redact import redaction_placeholders
@@ -64,6 +68,102 @@ def call_llm_direct(*, cfg, chat_model, system_prompt, user_content,
         timeout_sec=timeout_sec, thinking=thinking,
         num_ctx=num_ctx, temperature=temperature,
     )
+
+
+# ── The pass's deadline ───────────────────────────────────────────────
+
+
+def _chat_timeout_sec(cfg) -> float:
+    """How long one answer from the chat model may take: the user's own
+    figure, the one the reply is held to."""
+    timeout = getattr(cfg, "llm_chat_timeout_sec", None)
+    return float(timeout or get_default_config()["llm_chat_timeout_sec"])
+
+
+class GraphDeadline:
+    """When one graph pass has to be over.
+
+    The calls of a pass share it: each is handed what is left, so a slow
+    chat model gets as long as the pass can give rather than a figure sized
+    for a faster one, and none is waited on past it. Once it is spent, or
+    once ``stop`` says the daemon is going down, nothing more is asked and
+    the pass finishes on the paths that need no model: a fact stays where
+    the descent got to, a node takes a plain append, a split waits for the
+    next flush. Filed less well, never lost.
+    """
+
+    def __init__(self, seconds: float, *, stop: Optional[Callable[[], bool]] = None,
+                 clock: Callable[[], float] = time.monotonic):
+        self._clock = clock
+        self._end = clock() + max(0.0, float(seconds))
+        self._stop = stop
+        self._said = False
+
+    def _stopped(self) -> bool:
+        return self._stop is not None and bool(self._stop())
+
+    def remaining(self) -> float:
+        if self._stopped():
+            return 0.0
+        return max(0.0, self._end - self._clock())
+
+    def spent(self) -> bool:
+        """True once nothing more may be asked. Said once per pass, not once
+        per call it turns away."""
+        if self.remaining() > 0:
+            return False
+        if not self._said:
+            self._said = True
+            why = "a stop was requested" if self._stopped() else "its deadline passed"
+            debug_log(f"graph pass: {why}, the rest is filed without the model", "memory")
+        return True
+
+
+def _deadline_or_one_chat_timeout(deadline: Optional[GraphDeadline], cfg) -> GraphDeadline:
+    return deadline if deadline is not None else GraphDeadline(_chat_timeout_sec(cfg))
+
+
+# How often a call in flight is checked against the deadline and the stop
+# request: the most a stop waits once the call has been left behind.
+_WAIT_SLICE_SEC = 0.2
+
+
+def _ask(deadline: GraphDeadline, what: str, **call) -> Optional[str]:
+    """One model call inside the pass, handed what the deadline has left.
+
+    Waited on here rather than trusted to the HTTP timeout, which bounds
+    the gap between two bytes, not the call: a provider that keeps the
+    connection open would otherwise hold the pass, and shutdown with it. A
+    call left behind runs out on its own thread, and nothing it brings back
+    is read. ``None`` when not asked, left behind or unanswered, which every
+    caller already reads as no answer.
+    """
+    if deadline.spent():
+        return None
+    budget = deadline.remaining()
+    outcome: dict = {}
+
+    def run():
+        try:
+            outcome["answer"] = call_llm_direct(timeout_sec=budget, **call)
+        except Exception as e:
+            outcome["error"] = e
+
+    worker = threading.Thread(target=run, name=f"graph {what}", daemon=True)
+    worker.start()
+    while worker.is_alive():
+        worker.join(min(_WAIT_SLICE_SEC, deadline.remaining()))
+        if worker.is_alive() and deadline.spent():
+            debug_log(f"{what}: left behind, {call['chat_model']} had not answered", "memory")
+            return None
+    if "error" in outcome:
+        raise outcome["error"]
+    answer = outcome.get("answer")
+    if not answer:
+        # Not the same answer as a refusal, though it ends the same way. A
+        # chat model too slow for the whole pass shows up here.
+        debug_log(f"{what}: no answer from {call['chat_model']} within {budget:.0f}s", "memory")
+    return answer
 
 
 # How close a rewritten line must be to a claim we know the source of.
@@ -182,7 +282,7 @@ def extract_graph_memories(
     cfg,
     chat_model: str,
     tools_used: Optional[Sequence[str]],
-    timeout_sec: float = 30.0,
+    deadline: Optional[GraphDeadline] = None,
     thinking: bool = False,
     date_utc: Optional[str] = None,
 ) -> list[str]:
@@ -205,6 +305,8 @@ def extract_graph_memories(
             filtering afterwards would still pay for the call and would
             leave the decision to the same judgement that fails on a
             confidently invented statistic. See ``provenance.spec.md``.
+        deadline: The pass this extraction opens; one chat-model timeout
+            from now when it runs on its own.
         date_utc: Optional date string (YYYY-MM-DD) for the diary entry.
             Included as a date prefix on each fact for temporal context.
     """
@@ -310,18 +412,18 @@ def extract_graph_memories(
     # small models flake on the banned-form list (sometimes obeying,
     # sometimes drifting back into meta-narrative or stale-snapshot
     # extraction); temperature=0 lets the prompt do its job consistently.
-    response = call_llm_direct(
+    response = _ask(
+        _deadline_or_one_chat_timeout(deadline, cfg),
+        "graph memory extraction",
         cfg=cfg,
         chat_model=chat_model,
         system_prompt=system_prompt,
         user_content=user_content,
-        timeout_sec=timeout_sec,
         thinking=thinking,
         temperature=0.0,
     )
 
     if not response:
-        debug_log("graph memory extraction: LLM returned no response", "memory")
         return []
 
     debug_log(f"graph memory extraction: got response ({len(response)} chars)", "memory")
@@ -366,14 +468,14 @@ def _llm_pick_best_child(
     children: list[MemoryNode],
     cfg,
     chat_model: str,
-    timeout_sec: float = 15.0,
+    deadline: Optional[GraphDeadline] = None,
 ) -> Optional[str]:
     """Ask the chat model which child node best fits a memory fragment.
 
     Returns the chosen child's id, or None if none fit well. The model is
-    never asked to think: the answer is one number inside a short budget,
-    asked again at every level of the descent, and a budget spent thinking
-    leaves the fact at the branch root.
+    never asked to think: the answer is one number, asked again at every
+    level of every fact inside the pass's one deadline, and time spent
+    thinking leaves facts at the branch root.
     """
     if not children:
         return None
@@ -394,22 +496,17 @@ def _llm_pick_best_child(
         f"Categories:\n{options_text}"
     )
 
-    response = call_llm_direct(
+    response = _ask(
+        _deadline_or_one_chat_timeout(deadline, cfg),
+        "graph picker",
         cfg=cfg,
         chat_model=chat_model,
         system_prompt=system_prompt,
         user_content=user_content,
-        timeout_sec=timeout_sec,
     )
 
     if not response:
-        # Not the same answer as NONE, though it ends the same way: the
-        # fact stays at this level. A chat model too slow for the budget
-        # shows up here, on every fact.
-        debug_log(
-            f"graph picker: no answer from {chat_model} within {timeout_sec:.0f}s",
-            "memory",
-        )
+        # The fact stays at this level, as on NONE.
         return None
 
     response = response.strip().upper()
@@ -432,7 +529,7 @@ def find_best_node(
     cfg,
     chat_model: str,
     branch_root_id: str,
-    timeout_sec: float = 15.0,
+    deadline: Optional[GraphDeadline] = None,
 ) -> str:
     """Find the best node, inside one fixed branch, to store a memory fragment.
 
@@ -444,8 +541,12 @@ def find_best_node(
     respected: a World fact can never end up in another branch because a
     node there happened to be accessed recently.
 
+    The whole descent shares one deadline (one chat-model timeout from now
+    when none is given): once it is spent, the walk stops where it is.
+
     Returns the id of the best node.
     """
+    deadline = _deadline_or_one_chat_timeout(deadline, cfg)
     debug_log(
         f"graph traversal: placing '{fragment[:60]}...' "
         f"(branch={branch_root_id})",
@@ -463,7 +564,7 @@ def find_best_node(
         debug_log(f"graph traversal: depth {depth}, choosing from {[c.name for c in children]}", "memory")
         best = _llm_pick_best_child(
             fragment, children, cfg, chat_model,
-            timeout_sec=timeout_sec,
+            deadline=deadline,
         )
         if best is None:
             debug_log(f"graph traversal: no children fit at depth {depth}, stopping", "memory")
@@ -591,7 +692,7 @@ def merge_node_data(
     new_facts: list[str],
     cfg,
     chat_model: str,
-    timeout_sec: float = 20.0,
+    deadline: Optional[GraphDeadline] = None,
     node: Optional[MemoryNode] = None,
 ) -> MergeResult:
     """Merge ``new_facts`` into ``node_id``'s data via one LLM rewrite.
@@ -624,8 +725,9 @@ def merge_node_data(
     redundant SQLite read on the orchestrator's hot path.
 
     Like the picker, the rewrite runs on the chat model and never asks it
-    to think: the whole node has to come back inside a fixed budget, and
-    a rewrite that runs out of time drops every new fact to plain append.
+    to think: the whole node has to come back inside the pass's deadline
+    (one chat-model timeout from now when none is given), and a rewrite
+    that runs out of time drops every new fact to plain append.
     """
     if node is None:
         node = store.get_node(node_id)
@@ -661,20 +763,17 @@ def merge_node_data(
             f"consolidate / dedupe / prune only):\n{existing}"
         )
 
-    response = call_llm_direct(
+    response = _ask(
+        _deadline_or_one_chat_timeout(deadline, cfg),
+        "merge",
         cfg=cfg,
         chat_model=chat_model,
         system_prompt=_MERGE_SYSTEM_PROMPT,
         user_content=user_content,
-        timeout_sec=timeout_sec,
         temperature=0.0,
     )
 
     if not response:
-        debug_log(
-            f"merge: no answer from {chat_model} within {timeout_sec:.0f}s",
-            "memory",
-        )
         return MergeResult(success=False)
 
     parsed = _extract_facts_object(response)
@@ -773,13 +872,16 @@ def auto_split_node(
     node_id: str,
     cfg,
     chat_model: str,
-    timeout_sec: float = 45.0,
+    deadline: Optional[GraphDeadline] = None,
     thinking: bool = False,
 ) -> bool:
     """Split a node whose data exceeds SPLIT_THRESHOLD into child nodes.
 
     The LLM proposes 2-5 categories and distributes the facts among them.
     The parent node's data is cleared and its description updated to a summary.
+    Asked inside the pass's deadline (one chat-model timeout from now when
+    none is given); a split that gets no answer is retried by the next
+    flush that finds the node still too large.
 
     Returns True if the split succeeded.
     """
@@ -822,17 +924,17 @@ def auto_split_node(
         f"Facts to organise:\n{node.data}"
     )
 
-    response = call_llm_direct(
+    response = _ask(
+        _deadline_or_one_chat_timeout(deadline, cfg),
+        "auto-split",
         cfg=cfg,
         chat_model=chat_model,
         system_prompt=system_prompt,
         user_content=user_content,
-        timeout_sec=timeout_sec,
         thinking=thinking,
     )
 
     if not response:
-        debug_log("auto-split: LLM returned no response", "memory")
         return False
 
     # Parse JSON from response
@@ -903,7 +1005,7 @@ def update_graph_from_dialogue(
     cfg,
     chat_model: str,
     tools_used: Optional[Sequence[str]],
-    timeout_sec: float = 30.0,
+    deadline: Optional[GraphDeadline] = None,
     thinking: bool = False,
     date_utc: Optional[str] = None,
 ) -> GraphUpdateResult:
@@ -911,6 +1013,9 @@ def update_graph_from_dialogue(
     node, and trigger auto-split if needed.
 
     Args:
+        deadline: When the whole pass has to be over, shared by every call
+            in it (see ``GraphDeadline``). One chat-model timeout from now
+            when none is given.
         date_utc: Optional date string (YYYY-MM-DD) for the diary entry.
             Passed to extraction to help distinguish daily events from enduring facts.
 
@@ -920,13 +1025,15 @@ def update_graph_from_dialogue(
     ``result.stored`` / ``result.skipped`` (or destructure the tuple);
     the result is not a list.
     """
+    deadline = _deadline_or_one_chat_timeout(deadline, cfg)
+
     # Step 1: Extract discrete branch-tagged facts from the summary
     facts = extract_graph_memories(
         summary=summary,
         cfg=cfg,
         chat_model=chat_model,
         tools_used=tools_used,
-        timeout_sec=timeout_sec,
+        deadline=deadline,
         thinking=thinking,
         date_utc=date_utc,
     )
@@ -954,8 +1061,8 @@ def update_graph_from_dialogue(
                 fragment=fact,
                 cfg=cfg,
                 chat_model=chat_model,
-                timeout_sec=15.0,
                 branch_root_id=BRANCH_WORLD,
+                deadline=deadline,
             )
         except Exception as e:
             debug_log(f"graph update: traversal failed for '{fact[:50]}...' — {e}", "memory")
@@ -1047,7 +1154,7 @@ def update_graph_from_dialogue(
                 new_facts=node_facts,
                 cfg=cfg,
                 chat_model=chat_model,
-                timeout_sec=20.0,
+                deadline=deadline,
                 node=node,
             )
         except Exception as e:
@@ -1114,7 +1221,7 @@ def update_graph_from_dialogue(
                     node_id=node_id,
                     cfg=cfg,
                     chat_model=chat_model,
-                    timeout_sec=45.0,
+                    deadline=deadline,
                     thinking=thinking,
                 )
             except Exception as e:
@@ -1132,7 +1239,6 @@ def consolidate_all_populated_nodes(
     store: GraphMemoryStore,
     cfg,
     chat_model: str,
-    timeout_sec: float = 20.0,
 ) -> "Iterator[tuple[str, int, int]]":
     """One-shot self-consolidation across every populated node.
 
@@ -1151,6 +1257,10 @@ def consolidate_all_populated_nodes(
     can surface per-node feedback in real time on graphs with many
     nodes. Fail-open: a node that fails to merge is left untouched
     and reported with ``lines_after == lines_before``.
+
+    Each node gets one chat-model timeout of its own. The sweep is asked
+    for, streams its progress and holds nothing else up, so it is bounded
+    per node rather than as a whole.
     """
     # Snapshot all nodes up front so a rewrite mid-walk doesn't
     # cause us to revisit or skip nodes.
@@ -1166,7 +1276,6 @@ def consolidate_all_populated_nodes(
                 new_facts=[],
                 cfg=cfg,
                 chat_model=chat_model,
-                timeout_sec=timeout_sec,
                 node=node,
             )
         except Exception as e:

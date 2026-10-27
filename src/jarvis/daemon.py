@@ -21,7 +21,7 @@ from .utils.console import force_utf8_console
 
 force_utf8_console()
 
-from typing import Optional
+from typing import Callable, Optional
 from faster_whisper import WhisperModel
 
 from .config import load_settings
@@ -73,7 +73,8 @@ _confirmation_callbacks: dict = {
     "on_delegation_done": None,
 }
 
-# Shutdown timeout for diary update (shorter than normal to allow reasonable quit time)
+# Budget of the final diary pass, summary and knowledge graph together
+# (shorter than normal to allow reasonable quit time).
 # Desktop app's stop_daemon() should wait at least this long + buffer
 SHUTDOWN_DIARY_TIMEOUT_SEC = 45.0
 
@@ -1025,15 +1026,20 @@ def _install_signal_handlers() -> None:
 
 def _check_and_update_diary(
     db: Database, cfg, verbose: bool = False, force: bool = False, timeout_sec: Optional[float] = None,
-    use_callbacks: bool = False, use_ipc: bool = False
+    use_callbacks: bool = False, use_ipc: bool = False,
+    stop: Optional[Callable[[], bool]] = is_stop_requested,
 ) -> None:
     """Check if diary should be updated and perform batch update if needed.
 
     Args:
-        timeout_sec: Optional override for LLM timeout. If None, uses cfg.llm_chat_timeout_sec.
-                    During shutdown, a shorter timeout is used to allow graceful quit.
+        timeout_sec: The budget of the whole pass, summary and knowledge graph
+                    together. If None, uses cfg.llm_chat_timeout_sec.
+                    During shutdown, a shorter one is used to allow graceful quit.
         use_callbacks: If True, uses the global diary update callbacks for UI updates.
         use_ipc: If True, emits diary events to stdout for IPC with desktop app (subprocess mode).
+        stop: Ends the knowledge-graph pass early. A periodic pass gives way
+              to a stop request, so quitting never waits for it; the pass
+              shutdown itself runs passes None.
     """
     global _global_dialogue_memory, _diary_update_callbacks
 
@@ -1123,6 +1129,7 @@ def _check_and_update_diary(
                 force=force,
                 on_token=on_token,
                 thinking=getattr(cfg, 'llm_thinking_enabled', False),
+                stop=stop,
             )
 
             # Flush any remaining tokens in IPC mode
@@ -1151,6 +1158,38 @@ def _check_and_update_diary(
     except Exception as e:
         debug_log(f"diary update check error: {e}", "memory")
         _notify("complete", False)
+
+
+def _save_diary_before_shutdown(db: Database, cfg) -> None:
+    """The final diary pass, summary and knowledge graph inside
+    ``SHUTDOWN_DIARY_TIMEOUT_SEC`` together.
+
+    The desktop app kills a daemon that has not stopped within its own
+    wait, and a kill skips everything after this pass: the speaker, the MCP
+    sessions, the database close. The stop request is why this pass runs,
+    so it is not one that ends it.
+    """
+    debug_log("performing final diary update (force=True)...", "jarvis")
+    print("📝 Updating diary before shutdown...", flush=True)
+
+    # Check dialogue memory status
+    if _global_dialogue_memory is None:
+        print("⚠️ Dialogue memory is None - nothing to save", flush=True)
+    else:
+        # Display-only count; actual save uses the atomic snapshot path.
+        pending = _global_dialogue_memory.get_pending_chunks()
+        print(f"💬 Found {len(pending)} pending conversation chunks", flush=True)
+
+    # Use callbacks if they were set by desktop app (for live UI updates in bundled mode)
+    # Use IPC (stdout events) if callbacks not set (subprocess mode)
+    use_callbacks = any(_diary_update_callbacks.values())
+    use_ipc = not use_callbacks  # Subprocess mode - emit events to stdout
+    _check_and_update_diary(
+        db, cfg, verbose=True, force=True, timeout_sec=SHUTDOWN_DIARY_TIMEOUT_SEC,
+        use_callbacks=use_callbacks, use_ipc=use_ipc, stop=None,
+    )
+    print("✅ Diary update complete", flush=True)
+    debug_log("diary update complete", "jarvis")
 
 
 def _apply_ledger_retention(db) -> None:
@@ -1670,25 +1709,7 @@ def main() -> None:
             debug_log("shutdown diary update skipped by fast stop request", "jarvis")
             print("⏭️ Skipping diary update before shutdown", flush=True)
         else:
-            # Final diary update before shutdown
-            debug_log("performing final diary update (force=True)...", "jarvis")
-            print("📝 Updating diary before shutdown...", flush=True)
-
-            # Check dialogue memory status
-            if _global_dialogue_memory is None:
-                print("⚠️ Dialogue memory is None - nothing to save", flush=True)
-            else:
-                # Display-only count; actual save uses the atomic snapshot path.
-                pending = _global_dialogue_memory.get_pending_chunks()
-                print(f"💬 Found {len(pending)} pending conversation chunks", flush=True)
-
-            # Use callbacks if they were set by desktop app (for live UI updates in bundled mode)
-            # Use IPC (stdout events) if callbacks not set (subprocess mode)
-            use_callbacks = any(_diary_update_callbacks.values())
-            use_ipc = not use_callbacks  # Subprocess mode - emit events to stdout
-            _check_and_update_diary(db, cfg, verbose=True, force=True, timeout_sec=SHUTDOWN_DIARY_TIMEOUT_SEC, use_callbacks=use_callbacks, use_ipc=use_ipc)
-            print("✅ Diary update complete", flush=True)
-            debug_log("diary update complete", "jarvis")
+            _save_diary_before_shutdown(db, cfg)
 
         if tts is not None:
             tts.stop()
