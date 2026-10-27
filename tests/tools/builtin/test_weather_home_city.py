@@ -96,6 +96,38 @@ class TestHomeCityFallback:
         geocode_params = mock_get.call_args_list[0].kwargs.get("params", {})
         assert geocode_params.get("name") == "Lyon"
 
+    @patch.object(WeatherTool, "_get_user_location", return_value=None)
+    @patch("requests.get")
+    def test_assistant_name_from_extractor_falls_through_to_configured_city(
+        self, mock_get, _loc,
+    ):
+        """"Yuba, la météo s'il te plaît": the extractor answers "Yuba", which
+        Open-Meteo would happily geocode to Yuba City. The assistant's own
+        name is not a place, so the configured home city must win."""
+        geo = Mock()
+        geo.json.return_value = {"results": [{
+            "latitude": 48.79, "longitude": 2.31, "name": "Bagneux",
+            "country": "France",
+        }]}
+        geo.raise_for_status = Mock()
+        mock_get.side_effect = [geo, _weather_response(20.0)]
+
+        ctx = _context(weather_city="Bagneux", user_text="Yuba, la météo s'il te plaît")
+        ctx.cfg.llm_chat_model = "test-model"
+        ctx.cfg.llm_tools_timeout_sec = 8.0
+        ctx.cfg.wake_word = "yuba"
+        ctx.cfg.wake_aliases = []
+
+        backend = Mock()
+        backend.direct.return_value = "Yuba"
+        with patch("src.jarvis.tools.builtin.weather.get_auxiliary_backend", return_value=backend):
+            result = self.tool.run({}, ctx)
+
+        assert backend.direct.called, "the extractor must have been consulted"
+        assert result.success is True, result.reply_text
+        geocode_params = mock_get.call_args_list[0].kwargs.get("params", {})
+        assert geocode_params.get("name") == "Bagneux"
+
     @patch.object(WeatherTool, "_get_user_location")
     @patch("requests.get")
     def test_detected_location_wins_over_configured_city(self, mock_get, mock_loc):
