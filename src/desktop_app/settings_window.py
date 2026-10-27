@@ -146,6 +146,35 @@ def _select_choice(combo: QComboBox, key: str, value: Any) -> None:
         combo.setCurrentIndex(idx)
 
 
+def _select_device(combo: QComboBox, key: str, value: Any) -> None:
+    """Select ``value`` in a device combo.
+
+    A device set by name (any value that does not read as an index, as the
+    listener tells them apart) is added as its own option and selected, so a
+    Save writes the name back. An index the list lacks is not kept: after a
+    replug it can name another device, so the combo falls back to System
+    Default, as it does for the words the listener reads as the system default.
+    """
+    cur_str = str(value).strip() if value is not None else ""
+    if cur_str.lower() in ("default", "system"):
+        cur_str = ""
+    idx = combo.findData(cur_str)
+    if idx < 0 and cur_str:
+        try:
+            index = int(cur_str)
+        except ValueError:
+            combo.addItem(f"🎤 {cur_str} (by name)", value)
+            idx = combo.count() - 1
+            debug_log(f"{key} keeps a device set by name", "settings")
+        else:
+            idx = combo.findData(str(index))
+            if idx < 0:
+                debug_log(f"{key} names an index the list lacks, shown as System Default", "settings")
+    if idx < 0:
+        idx = combo.findData("")
+    combo.setCurrentIndex(idx)
+
+
 def _build_field_metadata() -> List[FieldMeta]:
     """Build the metadata registry for all user-facing config fields."""
     from jarvis.dictation.dictation_engine import dictation_hotkey_choices
@@ -781,12 +810,7 @@ class SettingsWindow(QDialog):
             devices = get_input_devices()
             for val, display in devices:
                 w.addItem(display, val)
-            # Not _select_choice: an index the list lacks can name another
-            # device after a replug, so an unlisted one is not kept.
-            cur_str = str(current) if current not in (None, "") else ""
-            idx = w.findData(cur_str)
-            if idx >= 0:
-                w.setCurrentIndex(idx)
+            _select_device(w, fm.key, current)
             w.setToolTip(fm.description)
             return w
 
@@ -1213,10 +1237,7 @@ class SettingsWindow(QDialog):
             _select_choice(w, fm.key, value)
 
         elif fm.field_type == "device":
-            cur_str = str(value) if value not in (None, "") else ""
-            idx = w.findData(cur_str)
-            if idx >= 0:
-                w.setCurrentIndex(idx)
+            _select_device(w, fm.key, value)
 
         elif fm.field_type in ("list", "map"):
             list_w = w._list_widget

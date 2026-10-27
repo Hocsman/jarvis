@@ -2991,8 +2991,8 @@ class JarvisSystemTray:
             show_diary_dialog: If True (and bundled), shows a dialog with live diary update progress.
             skip_diary_update: If True, skips the final shutdown diary LLM pass.
         """
-        # Timeout must be longer than SHUTDOWN_DIARY_TIMEOUT_SEC (45s) in daemon.py
-        # to allow the diary update LLM call to complete before force-killing
+        # Timeout must be longer than SHUTDOWN_DIARY_TIMEOUT_SEC (45s) in daemon.py,
+        # the final diary pass's budget, to let it complete before force-killing
         shutdown_wait_timeout_sec = 60
         diary_dialog = None
 

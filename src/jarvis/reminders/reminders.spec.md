@@ -54,7 +54,7 @@ A dedicated thread, ticking on `reminder_tick_sec`, woken early when something c
 
 `advance_rappel` moves a recurring row to its next occurrence, and refuses a due time that is not strictly ahead of now. The guard sits beside the `prévu` one: that keeps a cancelled row cancelled, this keeps a moved row moved. A row placed on an instant already past is owed again on the very next tick and on every one after it, which is a loop rather than a schedule.
 
-Its own thread rather than the daemon's main loop, which calls the diary pass synchronously and can block for up to 45 seconds — a 09:00 reminder would land anywhere inside that, and never during shutdown. It is stopped and joined **before the listener dies**, because the diary pass takes another 45 seconds after that and the database outlives both: a reminder firing in that window would be settled as said with nothing able to say it.
+Its own thread rather than the daemon's main loop, which calls the diary pass synchronously and can block for up to `llm_chat_timeout_sec` (three minutes by default) — a 09:00 reminder would land anywhere inside that, and never during shutdown. It is stopped and joined **before the listener dies**, because the shutdown diary pass takes up to another `SHUTDOWN_DIARY_TIMEOUT_SEC` (45 seconds) after that and the database outlives both: a reminder firing in that window would be settled as said with nothing able to say it.
 
 **Defer, never drop.** Past `reminder_late_grace_sec` she still says it — she says how late she is. Silently discarding something owed since Thursday would leave one ledger line in a tab nobody has a reason to open.
 
