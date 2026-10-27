@@ -23,7 +23,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Callable, Iterator, NamedTuple, Optional, Sequence
 
-from rapidfuzz import fuzz
+from rapidfuzz import fuzz, process
 
 from ..config import get_default_config
 from ..debug import debug_log
@@ -225,6 +225,52 @@ def _numbers_are_grounded(cleaned, inputs) -> bool:
             if n not in connus:
                 return False
     return True
+
+
+def _match_key(text: str) -> str:
+    """The claim a line makes, folded for comparison across a rewrite.
+
+    Keyed on the claim, never on the whole line: a rewrite is an LLM and
+    will not reproduce a `· web · 2026-08-16` suffix verbatim. Uses the
+    dedupe primitive's Unicode folding plus a tolerant trailing-punctuation
+    strip, since models routinely drop the full stop ("X." → "X").
+    """
+    return normalise_fact(fact_text(text)).rstrip(".,;:!?")
+
+
+# The share of a node's claims a split must carry into its children. A
+# split may leave out filler nobody asked for and lines whose subject is
+# the assistant, and it folds duplicates and repeated activities into one
+# line, so it cannot be held to every claim. Calibrated on recorded split
+# answers for two World nodes of 90 and 101 lines, 8 and 13 of them filler
+# or narration. `google/gemini-2.5-flash` carried at least 84 % of the
+# claims in each of 75 splits under pruning as narrow as the merge's, and
+# 68 % to 100 % in 75 more under a prompt that also dropped what it
+# already knew. Every `gemma4:e2b` answer that parsed (79 of 200) carried
+# at most 69 %, having lost about half the node's niche lookups. The floor
+# sits in that gap and leaves a quarter of the node for what may go.
+_SPLIT_MIN_RETENTION = 0.75
+
+
+def _claims_kept(before, after) -> tuple[int, int]:
+    """How many of the claims in ``before`` a rewrite carried into ``after``.
+
+    Returns ``(kept, total)``. A claim is carried when a line of ``after``
+    makes it: the same key, or a rewording that scores ``_REWRITE_MATCH``,
+    the bar a reworded merge line has to clear to get its source back.
+    Duplicates in ``before`` count once and one line of ``after`` may
+    carry several claims, so folding two wordings of one answer into a
+    single line loses nothing.
+    """
+    claims = {_match_key(line) for line in before} - {""}
+    written = {_match_key(line) for line in after} - {""}
+    choices = list(written)
+    kept = 0
+    for claim in claims:
+        if claim in written or (choices and process.extractOne(
+                claim, choices, scorer=fuzz.ratio, score_cutoff=_REWRITE_MATCH)):
+            kept += 1
+    return kept, len(claims)
 
 
 def _source_index(lines) -> dict:
@@ -847,22 +893,15 @@ def merge_node_data(
         return MergeResult(success=False)
 
     # Identify which of the new facts actually survived the rewrite.
-    # Uses the dedupe primitive's Unicode folding plus a tolerant
-    # trailing-punctuation strip — models routinely rephrase
-    # facts by dropping the trailing full stop ("X." → "X"), and a
-    # strict `normalise_fact` match would then under-report every
-    # batched flush as "0 stored". A new fact missing from the
+    # A strict `normalise_fact` match would under-report every batched
+    # flush as "0 stored" once the model drops a full stop, and matching
+    # whole lines would report every genuinely-merged fact as
+    # consolidated out, since the suffix does not survive — a fact
+    # stored but never announced, which is the failure this file's
+    # provenance work exists to remove. A new fact missing from the
     # cleaned set was consolidated out, treated as a duplicate, or
     # silently dropped — caller can then decide whether to skip
     # reporting or append-fallback.
-    # Keyed on the claim, never on the whole line. The rewrite is an LLM
-    # and will not reproduce a `· web · 2026-08-16` suffix verbatim, so
-    # matching whole lines would report every genuinely-merged fact as
-    # consolidated out — a fact stored but never announced, which is the
-    # failure this file's provenance work exists to remove.
-    def _match_key(text: str) -> str:
-        return normalise_fact(fact_text(text)).rstrip(".,;:!?")
-
     cleaned_keys = {_match_key(line) for line in cleaned if line.strip()}
     incorporated_indices: list[int] = []
     for idx, fact in enumerate(new_facts):
@@ -966,31 +1005,84 @@ def auto_split_node(
     summary = result.get("summary", node.description)
 
     # Validate: need at least 2 categories
-    if len(categories) < 2:
+    if not isinstance(categories, list) or len(categories) < 2:
         debug_log("auto-split: fewer than 2 categories proposed, aborting", "memory")
         return False
 
-    # Validate: each category needs a name and at least one fact
+    # Validate: each category needs a name and at least one fact, and its
+    # facts must be a list of strings. A `facts` given as one string would
+    # be written one character per line, and an item that is not a string
+    # has no sentence to write.
+    children: list[tuple[dict, list[str]]] = []
     for cat in categories:
-        if not cat.get("name") or not cat.get("facts"):
-            debug_log(f"auto-split: invalid category {cat.get('name', '?')}, aborting", "memory")
+        if not isinstance(cat, dict) or not cat.get("name"):
+            debug_log("auto-split: a category has no name, aborting", "memory")
             return False
+        facts = cat.get("facts")
+        if not isinstance(facts, list) or not all(isinstance(f, str) for f in facts):
+            debug_log(
+                f"auto-split: category '{cat['name']}' does not give its facts "
+                "as a list of strings, aborting",
+                "memory",
+            )
+            return False
+        lines = [f.strip() for f in facts if f.strip()]
+        if not lines:
+            debug_log(f"auto-split: category '{cat['name']}' has no facts, aborting", "memory")
+            return False
+        children.append((cat, lines))
+
+    written = [line for _, lines in children for line in lines]
+    before = _split_data_lines(node.data)
+
+    # Clearing the parent is the one step here that cannot be retried, so
+    # what the children leave out is gone for good. A split may drop
+    # filler and narration and fold duplicates, but one that leaves out
+    # more than the floor allows lost answers he asked for.
+    kept, total = _claims_kept(before, written)
+    if kept < _SPLIT_MIN_RETENTION * total:
+        debug_log(
+            f"auto-split: rejected — the children carry {kept} of the node's "
+            f"{total} claims, under the {_SPLIT_MIN_RETENTION:.0%} floor",
+            "memory",
+        )
+        return False
+
+    # The merge's guards, for the same reasons: a figure may be dropped but
+    # not invented, and a remote model sees the node through the redacting
+    # backend, so a marker it hands back stands for a value the node held.
+    if not _numbers_are_grounded(written, before):
+        debug_log(
+            "auto-split: rejected — the children carry a figure the node did not hold",
+            "memory",
+        )
+        return False
+    if _redaction_markers(written) - _redaction_markers(before):
+        debug_log(
+            "auto-split: rejected — the children carry a redaction marker where "
+            "the node held a real value",
+            "memory",
+        )
+        return False
 
     # Create child nodes
-    for cat in categories:
-        child_data = "\n".join(str(f) for f in cat["facts"])
+    for cat, lines in children:
         store.create_node(
             name=str(cat["name"]),
             description=str(cat.get("description", f"Memories about: {cat['name']}")),
-            data=child_data,
+            data="\n".join(lines),
             parent_id=node_id,
         )
-        debug_log(f"  auto-split: created child '{cat['name']}' with {len(cat['facts'])} facts", "memory")
+        debug_log(f"  auto-split: created child '{cat['name']}' with {len(lines)} facts", "memory")
 
     # Clear parent data and update description to summary
     store.update_node(node_id, data="", description=str(summary))
 
-    debug_log(f"auto-split: node '{node.name}' split into {len(categories)} children", "memory")
+    debug_log(
+        f"auto-split: node '{node.name}' split into {len(children)} children, "
+        f"carrying {kept} of its {total} claims",
+        "memory",
+    )
     return True
 
 
