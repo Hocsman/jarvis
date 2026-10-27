@@ -3083,7 +3083,7 @@ def index() -> str:
                             <button class="graph-btn" id="btn-fit" title="Fit to view">📐</button>
                             <button class="graph-btn" id="btn-add-node" title="Add node">✨</button>
                             <button class="graph-btn" id="btn-import-diary" title="Import from Diary">📥</button>
-                            <button class="graph-btn" id="btn-consolidate-all" title="Consolidate every populated node (dedupe / merge contradictions / prune common knowledge)">🧹</button>
+                            <button class="graph-btn" id="btn-consolidate-all" title="Consolidate every populated node under the split size (dedupe / merge contradictions / prune common knowledge)">🧹</button>
                         </div>
                         <canvas id="graph-canvas"></canvas>
                     </div>
@@ -5056,7 +5056,7 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
                 <div class="modal">
                     <h3>🧹 Consolidate All Nodes</h3>
                     <p style="color: var(--text-secondary); margin-bottom: 16px; line-height: 1.5;">
-                        Re-run the merge prompt over every populated node. Dedupes near-duplicate lines, drops contradictions, folds repeated activities into patterns, and prunes common knowledge. Useful after a prompt change to back-fill the new rules across historical data. Every node goes to your chat model, so to its provider when that model runs remotely. Cannot be undone.
+                        Re-run the merge prompt over every populated node small enough to rewrite whole (a node past the split size is left as it is). Dedupes near-duplicate lines, drops contradictions, folds repeated activities into patterns, and prunes common knowledge. Useful after a prompt change to back-fill the new rules across historical data. Every node it rewrites goes to your chat model, so to its provider when that model runs remotely. Cannot be undone.
                     </p>
                     <div id="consolidate-progress" style="display: none;">
                         <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">

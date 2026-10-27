@@ -774,9 +774,9 @@ def merge_node_data(
     model to produce a clean, consolidated, contradiction-free fact
     list, and writes that back as the node's full data. This subsumes
     dedupe, supersession, and per-write consolidation in a single
-    pass — the latest prompt always rewrites the node, so updated
-    conventions propagate to existing data without a separate
-    migration step.
+    pass — the latest prompt rewrites any node under the split
+    threshold whole, so updated conventions propagate to existing data
+    without a separate migration step.
 
     Pass an empty ``new_facts`` list to run a self-consolidation pass
     on the node's existing data alone (dedupe / consolidate / prune
@@ -820,7 +820,7 @@ def merge_node_data(
     if node.data_token_count > SPLIT_THRESHOLD:
         debug_log(
             f"merge: '{node.name}' holds {node.data_token_count} tokens, past the "
-            f"split threshold; its new facts are appended, not merged",
+            f"split threshold; it is left to the split, not rewritten whole",
             "memory",
         )
         return MergeResult(success=False)
@@ -951,32 +951,46 @@ def merge_node_data(
 # ── Auto-split ─────────────────────────────────────────────────────────
 
 
-# How much a node must grow, as a share of its size when its split was
-# refused, before the chat model that refused it is asked again. A refused
-# split leaves the node whole, and on the small tier every split is
-# refused, so without it each flush that touches the node would pay for a
-# full rewrite of the node that is thrown away. Geometric, so a node is
-# asked a handful of times over its life rather than once per flush. A
-# different chat model is asked at once.
+# How many refused split answers in a row, from the same chat model, it
+# takes before that model stops being asked at every flush. A strong model
+# refuses now and then at random (gemini-2.5-flash, 13 of 75 under the
+# current split prompt), and the next answer usually passes; the small
+# tier refuses every time.
+_SPLIT_REFUSALS_BEFORE_BACKOFF = 2
+
+# How much a node must grow, as a share of its size at the last refusal,
+# before a chat model that has backed off is asked again. A refused split
+# leaves the node whole, and on the small tier every split is refused, so
+# without it each flush that touches the node would pay for a full
+# rewrite of the node that is thrown away. Geometric, so a node is asked
+# a handful of times per process rather than once per flush.
 _SPLIT_RETRY_GROWTH = 0.25
 
-# The last refused split of each node, keyed by the graph's database and
-# the node: the chat model that gave the answer and the node's size then.
-# Held for the life of the process, so a restart asks once more.
-_SPLIT_REFUSALS: dict[tuple[str, str], tuple[str, int]] = {}
+# The refused splits of each node, keyed by the graph's database and the
+# node: the chat model that gave the answers, the node's size at the last
+# one, and how many came in a row. Held for the life of the process, so a
+# restart asks once more.
+_SPLIT_REFUSALS: dict[tuple[str, str], tuple[str, int, int]] = {}
 
 
-def _split_worth_asking(store: GraphMemoryStore, node: MemoryNode, chat_model: str) -> bool:
-    """Whether to ask ``chat_model`` to split ``node`` now.
+def _split_retry_at(store: GraphMemoryStore, node: MemoryNode, chat_model: str) -> Optional[int]:
+    """The size ``node`` must reach before ``chat_model`` is asked to split
+    it again, or ``None`` to ask now.
 
-    Only an answer that came back and was refused counts against the node:
-    one the deadline turned away, or that timed out, says nothing about the
-    next attempt.
+    Only answers that came back and were refused count against the node:
+    one the deadline turned away, or that timed out, says nothing about
+    the next attempt. Another chat model is asked at once, and so is a
+    node that has shrunk below the size it was refused at, since only
+    someone editing it makes it smaller.
     """
     refused = _SPLIT_REFUSALS.get((store.db_path, node.id))
-    if refused is None or refused[0] != chat_model:
-        return True
-    return node.data_token_count >= refused[1] * (1 + _SPLIT_RETRY_GROWTH)
+    if refused is None:
+        return None
+    model, size, in_a_row = refused
+    if (model != chat_model or in_a_row < _SPLIT_REFUSALS_BEFORE_BACKOFF
+            or node.data_token_count < size):
+        return None
+    return math.ceil(size * (1 + _SPLIT_RETRY_GROWTH))
 
 
 def auto_split_node(
@@ -993,7 +1007,11 @@ def auto_split_node(
     The parent node's data is cleared and its description updated to a summary.
     Asked inside the pass's deadline (one chat-model timeout from now when
     none is given); a split that gets no answer is retried by the next
-    flush that finds the node still too large.
+    flush that finds the node still too large. An answer that came back
+    and was refused is recorded in ``_SPLIT_REFUSALS``, for the
+    orchestrator to decide when to ask again (``_split_retry_at``), and a
+    split that succeeds clears the record. Called directly, it asks
+    whatever the record says.
 
     Returns True if the split succeeded.
     """
@@ -1053,7 +1071,10 @@ def auto_split_node(
     if plan is None:
         # An answer came back and was refused: remembered, so the same
         # model is not asked again until the node has grown.
-        _SPLIT_REFUSALS[(store.db_path, node_id)] = (chat_model, node.data_token_count)
+        key = (store.db_path, node_id)
+        previous = _SPLIT_REFUSALS.get(key)
+        in_a_row = previous[2] + 1 if previous and previous[0] == chat_model else 1
+        _SPLIT_REFUSALS[key] = (chat_model, node.data_token_count, in_a_row)
         return False
     children, summary, kept, total = plan
     _SPLIT_REFUSALS.pop((store.db_path, node_id), None)
@@ -1348,7 +1369,7 @@ def update_graph_from_dialogue(
         by_node.setdefault(node_id, []).append(fact)
 
     stored: "list[tuple[str, str]]" = []
-    merged: "list[tuple[str, str]]" = []  # (node_id, node_name)
+    touched: "list[tuple[str, str]]" = []  # (node_id, node_name)
     for node_id, node_facts in by_node.items():
         node = store.get_node(node_id)
         node_name = node.name if node else node_id[:8]
@@ -1365,9 +1386,9 @@ def update_graph_from_dialogue(
         # supersession (contradictions drop the old line),
         # near-duplicate dedupe (different wordings collapse), and
         # ongoing consolidation (repeated activities fold into
-        # patterns). The latest prompt always rewrites the whole
-        # node, so updated conventions propagate to old data without
-        # a separate migration step.
+        # patterns). The latest prompt rewrites the whole node (any
+        # node under the split threshold), so updated conventions
+        # propagate to old data without a separate migration step.
         #
         # Fail-open: if the merge returns success=False (empty node,
         # LLM failure, parse failure, empty rewrite, or rewrite that
@@ -1435,21 +1456,21 @@ def update_graph_from_dialogue(
                 )
 
         store.touch_node(node_id)
-        merged.append((node_id, node_name))
+        touched.append((node_id, node_name))
 
     # Step 5: Auto-split the nodes that have grown too large, once every
     # merge of the flush is done. A split can wait for the next flush; a
     # merge the deadline turns away drops its facts to plain append.
-    for node_id, node_name in merged:
+    for node_id, node_name in touched:
         refreshed = store.get_node(node_id)
         if refreshed is None or refreshed.data_token_count <= SPLIT_THRESHOLD:
             continue
-        if not _split_worth_asking(store, refreshed, chat_model):
-            _, refused_at = _SPLIT_REFUSALS[(store.db_path, node_id)]
+        retry_at = _split_retry_at(store, refreshed, chat_model)
+        if retry_at is not None and refreshed.data_token_count < retry_at:
             debug_log(
                 f"graph update: node '{node_name}' is over the threshold, but "
-                f"{chat_model} refused its split at {refused_at} tokens; asked "
-                f"again from {math.ceil(refused_at * (1 + _SPLIT_RETRY_GROWTH))}",
+                f"{chat_model} refused its split {_SPLIT_REFUSALS_BEFORE_BACKOFF}"
+                f" times in a row; asked again from {retry_at} tokens",
                 "memory",
             )
             continue
