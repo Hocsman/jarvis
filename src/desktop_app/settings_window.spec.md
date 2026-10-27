@@ -81,7 +81,7 @@ What the gate asks about before doing it, and how long a card waits.
 The master switch for a subsystem that speaks unprompted, plus the model
 that reads the hour out of his sentence. Both belong here rather than in
 `config.json`: one is the only way to stop it, and the other is the only
-way to keep the sentence he dictated off the network, since the reminder
+way to keep the sentence he dictated on his own machine or network, since the reminder
 chain deliberately skips the cloud-safe rewrite.
 
 What a reminder says and when is not settable here — that is one
