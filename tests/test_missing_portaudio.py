@@ -59,7 +59,7 @@ def _assert_ok(result: subprocess.CompletedProcess) -> None:
 def test_dictation_engine_imports_without_portaudio():
     """Dictation engine must load (audio disabled) when PortAudio is absent."""
     extra = (
-        "from jarvis.dictation.dictation_engine import format_hotkey_display\n"
+        "from jarvis.dictation.hotkeys import format_hotkey_display\n"
         "assert format_hotkey_display('ctrl+alt')"
     )
     result = _run(

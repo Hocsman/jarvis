@@ -977,45 +977,45 @@ class TestListenerPauseFlag:
 class TestFormatHotkeyDisplay:
     """Tests for platform-aware hotkey display formatting."""
 
-    @patch("src.jarvis.dictation.dictation_engine.platform")
+    @patch("src.jarvis.dictation.hotkeys.platform")
     def test_windows_cmd_shows_win(self, mock_platform):
-        from src.jarvis.dictation.dictation_engine import format_hotkey_display
+        from src.jarvis.dictation.hotkeys import format_hotkey_display
         mock_platform.system.return_value = "Windows"
         assert format_hotkey_display("ctrl+cmd") == "Ctrl + Win"
 
-    @patch("src.jarvis.dictation.dictation_engine.platform")
+    @patch("src.jarvis.dictation.hotkeys.platform")
     def test_windows_super_shows_win(self, mock_platform):
-        from src.jarvis.dictation.dictation_engine import format_hotkey_display
+        from src.jarvis.dictation.hotkeys import format_hotkey_display
         mock_platform.system.return_value = "Windows"
         assert format_hotkey_display("ctrl+super") == "Ctrl + Win"
 
-    @patch("src.jarvis.dictation.dictation_engine.platform")
+    @patch("src.jarvis.dictation.hotkeys.platform")
     def test_windows_win_shows_win(self, mock_platform):
-        from src.jarvis.dictation.dictation_engine import format_hotkey_display
+        from src.jarvis.dictation.hotkeys import format_hotkey_display
         mock_platform.system.return_value = "Windows"
         assert format_hotkey_display("ctrl+win") == "Ctrl + Win"
 
-    @patch("src.jarvis.dictation.dictation_engine.platform")
+    @patch("src.jarvis.dictation.hotkeys.platform")
     def test_macos_cmd_shows_cmd(self, mock_platform):
-        from src.jarvis.dictation.dictation_engine import format_hotkey_display
+        from src.jarvis.dictation.hotkeys import format_hotkey_display
         mock_platform.system.return_value = "Darwin"
         assert format_hotkey_display("ctrl+cmd") == "Ctrl + Cmd"
 
-    @patch("src.jarvis.dictation.dictation_engine.platform")
+    @patch("src.jarvis.dictation.hotkeys.platform")
     def test_macos_alt_shows_option(self, mock_platform):
-        from src.jarvis.dictation.dictation_engine import format_hotkey_display
+        from src.jarvis.dictation.hotkeys import format_hotkey_display
         mock_platform.system.return_value = "Darwin"
         assert format_hotkey_display("ctrl+alt") == "Ctrl + Option"
 
-    @patch("src.jarvis.dictation.dictation_engine.platform")
+    @patch("src.jarvis.dictation.hotkeys.platform")
     def test_ctrl_shift_d(self, mock_platform):
-        from src.jarvis.dictation.dictation_engine import format_hotkey_display
+        from src.jarvis.dictation.hotkeys import format_hotkey_display
         mock_platform.system.return_value = "Windows"
         assert format_hotkey_display("ctrl+shift+d") == "Ctrl + Shift + D"
 
-    @patch("src.jarvis.dictation.dictation_engine.platform")
+    @patch("src.jarvis.dictation.hotkeys.platform")
     def test_linux_alt_stays_alt(self, mock_platform):
-        from src.jarvis.dictation.dictation_engine import format_hotkey_display
+        from src.jarvis.dictation.hotkeys import format_hotkey_display
         mock_platform.system.return_value = "Linux"
         assert format_hotkey_display("ctrl+alt") == "Ctrl + Alt"
 

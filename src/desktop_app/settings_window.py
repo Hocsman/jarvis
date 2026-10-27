@@ -177,7 +177,7 @@ def _select_device(combo: QComboBox, key: str, value: Any) -> None:
 
 def _build_field_metadata() -> List[FieldMeta]:
     """Build the metadata registry for all user-facing config fields."""
-    from jarvis.dictation.dictation_engine import dictation_hotkey_choices
+    from jarvis.dictation.hotkeys import dictation_hotkey_choices
 
     fields = []
 

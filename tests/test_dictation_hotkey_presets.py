@@ -46,7 +46,7 @@ def test_a_preset_added_to_the_list_reaches_both_windows(qapp, monkeypatch):
 
 @pytest.mark.parametrize("platform", ["win32", "darwin", "linux"])
 def test_the_platform_default_is_the_one_preset_marked_default(platform, monkeypatch):
-    from jarvis.dictation.dictation_engine import dictation_hotkey_choices
+    from jarvis.dictation.hotkeys import dictation_hotkey_choices
 
     monkeypatch.setattr(sys, "platform", platform)
     default = _default_dictation_hotkey()
