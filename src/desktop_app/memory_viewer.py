@@ -1162,17 +1162,12 @@ def graph_import_diary() -> Response:
     from jarvis.config import load_settings
     from jarvis.memory.db import Database
     from jarvis.memory.graph_ops import update_graph_from_dialogue
-    from jarvis.reply.engine import resolve_tool_router_model
 
     def generate():
         try:
             settings = load_settings()
             db_path = _get_db_path()
             db = Database(db_path, sqlite_vss_path=None)
-            # Run the best-child picker on the small router-chain model so
-            # historical import doesn't page in the big chat model for every
-            # placement decision.
-            picker_model = resolve_tool_router_model(settings)
 
             summaries = db.get_all_conversation_summaries()
             total = len(summaries)
@@ -1207,7 +1202,6 @@ def graph_import_diary() -> Response:
                         timeout_sec=settings.llm_chat_timeout_sec,
                         thinking=getattr(settings, 'llm_thinking_enabled', False),
                         date_utc=date_utc,
-                        picker_model=picker_model,
                     )
                     facts_stored = len(result.stored)
                     total_facts += facts_stored
@@ -1265,12 +1259,10 @@ def graph_consolidate_all() -> Response:
         consolidate_all_populated_nodes,
         is_populated_node,
     )
-    from jarvis.reply.engine import resolve_tool_router_model
 
     def generate():
         try:
             settings = load_settings()
-            picker_model = resolve_tool_router_model(settings)
             store = get_graph_store()
 
             # Count populated nodes upfront so the UI can render a
@@ -1296,7 +1288,6 @@ def graph_consolidate_all() -> Response:
                 cfg=settings,
                 chat_model=settings.llm_chat_model,
                 timeout_sec=20.0,
-                picker_model=picker_model,
             ):
                 node_count += 1
                 total_before += before
@@ -5065,7 +5056,7 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
                 <div class="modal">
                     <h3>🧹 Consolidate All Nodes</h3>
                     <p style="color: var(--text-secondary); margin-bottom: 16px; line-height: 1.5;">
-                        Re-run the merge prompt over every populated node. Dedupes near-duplicate lines, drops contradictions, folds repeated activities into patterns, and prunes common knowledge. Useful after a prompt change to back-fill the new rules across historical data. Cannot be undone.
+                        Re-run the merge prompt over every populated node. Dedupes near-duplicate lines, drops contradictions, folds repeated activities into patterns, and prunes common knowledge. Useful after a prompt change to back-fill the new rules across historical data. Every node goes to your chat model, so to its provider when that model runs remotely. Cannot be undone.
                     </p>
                     <div id="consolidate-progress" style="display: none;">
                         <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">

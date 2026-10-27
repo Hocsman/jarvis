@@ -294,6 +294,10 @@ class Settings:
     dialogue_memory_timeout: float
     memory_enrichment_max_results: int
     memory_enrichment_source: str  # "all", "diary", or "graph"
+    # The model that reads a question for the memory lookup's keywords and
+    # time window. Empty string means "ride the tool router's chain"
+    # (``tool_router_model → intent_judge_model → llm_chat_model``).
+    memory_extractor_model: str
     # Tool-call + tool-result messages from prior replies in the hot window
     # are re-injected into the next turn so follow-ups can reuse them instead
     # of re-fetching. These knobs cap how many prior tool turns survive and
@@ -639,7 +643,7 @@ def _cloud_safe_model(value: str, field: str, provider: str,
     """Keep auxiliary model names valid for the endpoint actually in use.
 
     Jarvis runs several small LLM tasks (intent judge, tool router,
-    planner) on their own configured model. A remote cloud provider
+    planner, memory extractor) on their own configured model. A remote cloud provider
     answers HTTP 400 or 404 to a local tag like ``gemma4:e2b`` (see
     :func:`names_provider_model` for how a provider's own IDs are told
     apart), so the auxiliary task dies for no gain: those get the chat
@@ -655,9 +659,9 @@ def _cloud_safe_model(value: str, field: str, provider: str,
 
     A local OpenAI-compatible server is the opposite case. A bare name is
     the only shape it accepts, and the pin is the whole reason the user
-    set a small model for a small task. So the endpoint decides rather
+    set a model of its own for that task. So the endpoint decides rather
     than the provider name, and a discarded pin is announced: nothing
-    downstream ever shows the effective value, and two of these three
+    downstream ever shows the effective value, and two of these four
     fields have no field in the settings window at all. The Anthropic
     provider is always remote.
     """
@@ -937,6 +941,11 @@ def get_default_config() -> Dict[str, Any]:
         "dialogue_memory_timeout": 300.0,
         "memory_enrichment_max_results": 3,
         "memory_enrichment_source": "all",  # "all", "diary", or "graph"
+        # Empty = reuse the tool router's chain (tool_router_model →
+        # intent_judge_model → chat model). The hard part of this call is
+        # the time window ("what did I say last Thursday?"), which a small
+        # model misreads often enough to be worth naming a better one.
+        "memory_extractor_model": "",
         # Tool carryover: cap re-injected prior tool turns + chars per entry.
         "tool_carryover_max_turns": 2,
         "tool_carryover_per_entry_chars": 1200,
@@ -1272,6 +1281,10 @@ def load_settings() -> Settings:
     memory_enrichment_source = str(merged.get("memory_enrichment_source", "all")).lower()
     if memory_enrichment_source not in ("all", "diary", "graph"):
         memory_enrichment_source = "all"
+    memory_extractor_model = str(merged.get("memory_extractor_model", "") or "").strip()
+    memory_extractor_model = _cloud_safe_model(
+        memory_extractor_model, "memory_extractor_model", llm_provider, llm_base_url, llm_chat_model,
+        ollama_base_url=ollama_base_url)
     tool_carryover_max_turns = max(0, int(merged.get("tool_carryover_max_turns", 2)))
     tool_carryover_per_entry_chars = max(200, int(merged.get("tool_carryover_per_entry_chars", 1200)))
     _digest_raw = merged.get("memory_digest_enabled", None)
@@ -1503,6 +1516,7 @@ def load_settings() -> Settings:
         dialogue_memory_timeout=dialogue_memory_timeout,
         memory_enrichment_max_results=memory_enrichment_max_results,
         memory_enrichment_source=memory_enrichment_source,
+        memory_extractor_model=memory_extractor_model,
         tool_carryover_max_turns=tool_carryover_max_turns,
         tool_carryover_per_entry_chars=tool_carryover_per_entry_chars,
         memory_digest_enabled=memory_digest_enabled,

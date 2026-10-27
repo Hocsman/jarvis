@@ -398,6 +398,21 @@ def resolve_tool_router_model(cfg) -> str:
     return ""
 
 
+def resolve_memory_extractor_model(cfg) -> str:
+    """Pick the LLM model that reads a query for the memory lookup.
+
+    Resolution order: explicit `memory_extractor_model` → the tool router's
+    chain (`resolve_tool_router_model`). Left empty, the extractor rides
+    the router's warm small model; named, it gets a model of its own,
+    because the time window in "what did I say last Thursday?" is the part
+    a small model misreads and a wrong window filters the right memory out.
+    """
+    return (
+        str(getattr(cfg, "memory_extractor_model", "") or "").strip()
+        or resolve_tool_router_model(cfg)
+    )
+
+
 _TEXT_TOOL_SYNTAX_MARKER: str = "\nExact tool-call syntax"
 
 
@@ -1735,8 +1750,10 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 debug_log("memory extractor served from hot-window cache", "memory")
             else:
                 _stage("memory")
+                _extractor_model = resolve_memory_extractor_model(cfg)
+                debug_log(f"memory extractor model: {_extractor_model}", "memory")
                 search_params = extract_search_params_for_memory(
-                    _extractor_query, cfg, resolve_tool_router_model(cfg),
+                    _extractor_query, cfg, _extractor_model,
                     timeout_sec=router_timeout_sec(cfg),
                     context_hint=context_hint,
                 )

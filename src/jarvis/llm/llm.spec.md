@@ -84,7 +84,7 @@ Reasoning is set per role by the flags `llm_thinking_enabled` and `intent_judge_
 
 ### Splitting roles across models
 
-`intent_judge_model` / `tool_router_model` / `planner_model` exist so the classification-shaped calls can run on a different model from the reply. On a cloud provider this is not a micro-optimisation — it dominates latency.
+`intent_judge_model` / `tool_router_model` / `memory_extractor_model` / `planner_model` exist so the classification-shaped calls can run on a different model from the reply. On a cloud provider this is not a micro-optimisation — it dominates latency.
 
 Measured on the memory extractor (same prompt, same query, OpenRouter):
 

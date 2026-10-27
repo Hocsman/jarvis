@@ -63,6 +63,13 @@ def contains_redaction_placeholder(text: str | None) -> bool:
     return bool(_PLACEHOLDER_RE.search(text))
 
 
+def redaction_placeholders(text: str | None) -> list[str]:
+    """Every marker :func:`redact` left in ``text``, in order."""
+    if not text:
+        return []
+    return _PLACEHOLDER_RE.findall(text)
+
+
 def redact(text: str, max_len: int = 8000) -> str:
     scrubbed = text
     for pattern, repl in _REDACTION_RULES:

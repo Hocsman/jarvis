@@ -6,15 +6,17 @@ Keeps graph.py as a pure data store (SQLite only). This module handles:
 - Best-node traversal (greedy descent from a fixed branch root)
 - Auto-split when a node exceeds the token threshold
 
-All LLM calls go through the auxiliary dispatcher (a bare picker model tag
-on a remote provider runs on local Ollama); the local ``call_llm_direct``
-wrapper is the single intercept point tests patch.
+All LLM calls run on the chat model the caller hands in and go through the
+auxiliary dispatcher (a bare model tag on a remote provider runs on local
+Ollama); the local ``call_llm_direct`` wrapper is the single intercept point
+tests patch.
 """
 
 from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Iterator, NamedTuple, Optional, Sequence
 
@@ -22,6 +24,7 @@ from rapidfuzz import fuzz
 
 from ..debug import debug_log
 from ..llm import get_auxiliary_backend
+from ..utils.redact import redaction_placeholders
 from .provenance import (
     SOURCE_UNKNOWN,
     fact_line,
@@ -53,8 +56,8 @@ def call_llm_direct(*, cfg, chat_model, system_prompt, user_content,
                     timeout_sec=10.0, thinking=False, num_ctx=4096,
                     temperature=None):
     """Local indirection: route graph-ops LLM calls through the auxiliary
-    dispatcher, so a bare picker model tag on a remote provider runs on
-    local Ollama instead of dying on its HTTP 400. Tests patch this single
+    dispatcher, so a bare model tag on a remote provider runs on local
+    Ollama instead of dying on its HTTP 400. Tests patch this single
     symbol to intercept every LLM round-trip in this module."""
     return get_auxiliary_backend(cfg, chat_model).direct(
         chat_model, system_prompt, user_content,
@@ -73,6 +76,16 @@ _REWRITE_MATCH = 85
 
 
 _DIGITS = re.compile(r"\d+")
+
+
+def _redaction_markers(lines) -> Counter:
+    """How many of each redaction marker ``lines`` carry.
+
+    Counted rather than merely detected: a node that already held one
+    marker must not cover a second one the rewrite put where a real value
+    stood.
+    """
+    return Counter(m for line in lines for m in redaction_placeholders(line))
 
 
 def _numbers_are_grounded(cleaned, inputs) -> bool:
@@ -354,14 +367,13 @@ def _llm_pick_best_child(
     cfg,
     chat_model: str,
     timeout_sec: float = 15.0,
-    picker_model: Optional[str] = None,
 ) -> Optional[str]:
-    """Ask the LLM which child node best fits a memory fragment.
+    """Ask the chat model which child node best fits a memory fragment.
 
     Returns the chosen child's id, or None if none fit well. The model is
-    never asked to think: ``llm_thinking_enabled`` belongs to the reply's
-    model, and the picker model is often a small one with no thinking
-    mode, which refuses a request asking for one.
+    never asked to think: the answer is one number inside a short budget,
+    asked again at every level of the descent, and a budget spent thinking
+    leaves the fact at the branch root.
     """
     if not children:
         return None
@@ -382,19 +394,22 @@ def _llm_pick_best_child(
         f"Categories:\n{options_text}"
     )
 
-    # Picker is a one-digit classification — reuse the small picker_model
-    # when the caller provides one (resolved from intent_judge_model → chat_model).
-    # Falls back to the chat model when no small model is configured.
-    effective_model = picker_model or chat_model
     response = call_llm_direct(
         cfg=cfg,
-        chat_model=effective_model,
+        chat_model=chat_model,
         system_prompt=system_prompt,
         user_content=user_content,
         timeout_sec=timeout_sec,
     )
 
     if not response:
+        # Not the same answer as NONE, though it ends the same way: the
+        # fact stays at this level. A chat model too slow for the budget
+        # shows up here, on every fact.
+        debug_log(
+            f"graph picker: no answer from {chat_model} within {timeout_sec:.0f}s",
+            "memory",
+        )
         return None
 
     response = response.strip().upper()
@@ -418,7 +433,6 @@ def find_best_node(
     chat_model: str,
     branch_root_id: str,
     timeout_sec: float = 15.0,
-    picker_model: Optional[str] = None,
 ) -> str:
     """Find the best node, inside one fixed branch, to store a memory fragment.
 
@@ -449,7 +463,7 @@ def find_best_node(
         debug_log(f"graph traversal: depth {depth}, choosing from {[c.name for c in children]}", "memory")
         best = _llm_pick_best_child(
             fragment, children, cfg, chat_model,
-            timeout_sec=timeout_sec, picker_model=picker_model,
+            timeout_sec=timeout_sec,
         )
         if best is None:
             debug_log(f"graph traversal: no children fit at depth {depth}, stopping", "memory")
@@ -559,7 +573,7 @@ def _extract_facts_object(response: str) -> Optional[dict]:
             parsed = None
         if isinstance(parsed, dict) and isinstance(parsed.get("facts"), list):
             return parsed
-    # O(n) over the response: at most one `{` per character. Picker
+    # O(n) over the response: at most one `{` per character. Merge
     # responses are bounded (single rewrite, T=0), so this stays cheap.
     for match in re.finditer(r"\{", response):
         try:
@@ -578,7 +592,6 @@ def merge_node_data(
     cfg,
     chat_model: str,
     timeout_sec: float = 20.0,
-    picker_model: Optional[str] = None,
     node: Optional[MemoryNode] = None,
 ) -> MergeResult:
     """Merge ``new_facts`` into ``node_id``'s data via one LLM rewrite.
@@ -610,8 +623,9 @@ def merge_node_data(
     Pass ``node`` if the caller has already fetched it; saves a
     redundant SQLite read on the orchestrator's hot path.
 
-    Like the picker, the rewrite never asks its model to think: it runs
-    on the picker model, which may have no thinking mode at all.
+    Like the picker, the rewrite runs on the chat model and never asks it
+    to think: the whole node has to come back inside a fixed budget, and
+    a rewrite that runs out of time drops every new fact to plain append.
     """
     if node is None:
         node = store.get_node(node_id)
@@ -647,10 +661,9 @@ def merge_node_data(
             f"consolidate / dedupe / prune only):\n{existing}"
         )
 
-    effective_model = picker_model or chat_model
     response = call_llm_direct(
         cfg=cfg,
-        chat_model=effective_model,
+        chat_model=chat_model,
         system_prompt=_MERGE_SYSTEM_PROMPT,
         user_content=user_content,
         timeout_sec=timeout_sec,
@@ -658,6 +671,10 @@ def merge_node_data(
     )
 
     if not response:
+        debug_log(
+            f"merge: no answer from {chat_model} within {timeout_sec:.0f}s",
+            "memory",
+        )
         return MergeResult(success=False)
 
     parsed = _extract_facts_object(response)
@@ -702,9 +719,24 @@ def merge_node_data(
         )
         return MergeResult(success=False)
 
+    # A remote model sees the node through the redacting backend, so an
+    # address or a long number on it comes back as a marker. Written
+    # over the node, the value it hid would be gone for good. A marker
+    # the inputs already carried (redacted diary text) may stay; one
+    # more than they carried stands for a value.
+    if _redaction_markers(cleaned) - _redaction_markers(
+        list(existing_lines) + list(sanitised_new)
+    ):
+        debug_log(
+            "merge: rejected rewrite — it carries a redaction marker where "
+            "the node held a real value",
+            "memory",
+        )
+        return MergeResult(success=False)
+
     # Identify which of the new facts actually survived the rewrite.
     # Uses the dedupe primitive's Unicode folding plus a tolerant
-    # trailing-punctuation strip — picker models routinely rephrase
+    # trailing-punctuation strip — models routinely rephrase
     # facts by dropping the trailing full stop ("X." → "X"), and a
     # strict `normalise_fact` match would then under-report every
     # batched flush as "0 stored". A new fact missing from the
@@ -874,7 +906,6 @@ def update_graph_from_dialogue(
     timeout_sec: float = 30.0,
     thinking: bool = False,
     date_utc: Optional[str] = None,
-    picker_model: Optional[str] = None,
 ) -> GraphUpdateResult:
     """End-to-end: extract memories from a summary, place each in the best
     node, and trigger auto-split if needed.
@@ -911,7 +942,7 @@ def update_graph_from_dialogue(
     # way. Then group surviving facts by node so the merge step below
     # rewrites each node at most once per flush instead of once per
     # fact. Without batching, a 5-fact flush against a populated User
-    # node fires 5 small-model rewrites of the same `data`; with
+    # node fires 5 rewrites of the same `data`; with
     # batching, it's one rewrite that incorporates all five.
     pending: list[tuple[str, str]] = []  # (fact, node_id)
     seen_keys_per_node: dict[str, set[str]] = {}
@@ -924,7 +955,6 @@ def update_graph_from_dialogue(
                 cfg=cfg,
                 chat_model=chat_model,
                 timeout_sec=15.0,
-                picker_model=picker_model,
                 branch_root_id=BRANCH_WORLD,
             )
         except Exception as e:
@@ -1018,7 +1048,6 @@ def update_graph_from_dialogue(
                 cfg=cfg,
                 chat_model=chat_model,
                 timeout_sec=20.0,
-                picker_model=picker_model,
                 node=node,
             )
         except Exception as e:
@@ -1104,7 +1133,6 @@ def consolidate_all_populated_nodes(
     cfg,
     chat_model: str,
     timeout_sec: float = 20.0,
-    picker_model: Optional[str] = None,
 ) -> "Iterator[tuple[str, int, int]]":
     """One-shot self-consolidation across every populated node.
 
@@ -1139,7 +1167,6 @@ def consolidate_all_populated_nodes(
                 cfg=cfg,
                 chat_model=chat_model,
                 timeout_sec=timeout_sec,
-                picker_model=picker_model,
                 node=node,
             )
         except Exception as e:
