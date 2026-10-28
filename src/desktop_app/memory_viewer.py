@@ -3080,7 +3080,7 @@ def index() -> str:
                             <button class="graph-btn" id="btn-fit" title="Fit to view">📐</button>
                             <button class="graph-btn" id="btn-add-node" title="Add node">✨</button>
                             <button class="graph-btn" id="btn-import-diary" title="Import from Diary">📥</button>
-                            <button class="graph-btn" id="btn-consolidate-all" title="Consolidate the World branch (merge duplicates / replace outdated values / drop filler; answers you asked for stay)">🧹</button>
+                            <button class="graph-btn" id="btn-consolidate-all" title="Consolidate the World branch (merge duplicates / replace outdated values / drop filler; answers you asked for stay; a node past the split size is left as it is)">🧹</button>
                         </div>
                         <canvas id="graph-canvas"></canvas>
                     </div>
@@ -5053,7 +5053,7 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
                 <div class="modal">
                     <h3>🧹 Consolidate the World Branch</h3>
                     <p style="color: var(--text-secondary); margin-bottom: 16px; line-height: 1.5;">
-                        Re-run the merge prompt over every populated node of the World branch. Merges near-duplicate lines, replaces outdated values, folds repeated activities into patterns, and drops filler nobody asked for and lines narrating the assistant itself; an answer to something you asked stays, however well known. A line keeps its source unless the rewrite rewords it, which leaves it marked inconnu. Your profile and rules live in the core files and are not touched. Useful after a prompt change to back-fill the new rules across historical data. Every node goes to your chat model, so to its provider when that model runs remotely. Cannot be undone.
+                        Re-run the merge prompt over every populated node of the World branch small enough to rewrite whole (a node past the split size is left as it is). Merges near-duplicate lines, replaces outdated values, folds repeated activities into patterns, and drops filler nobody asked for and lines narrating the assistant itself; an answer to something you asked stays, however well known. A line keeps its source unless the rewrite rewords it, which leaves it marked inconnu. Your profile and rules live in the core files and are not touched. Useful after a prompt change to back-fill the new rules across historical data. Every node it rewrites goes to your chat model, so to its provider when that model runs remotely. Cannot be undone.
                     </p>
                     <div id="consolidate-progress" style="display: none;">
                         <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">

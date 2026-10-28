@@ -670,14 +670,56 @@ class TestAutoSplitNode:
         self._assert_untouched(store, node)
 
     @patch("src.jarvis.memory.graph_ops.call_llm_direct")
-    def test_split_that_hands_back_a_redaction_marker_for_a_real_value_is_rejected(
+    def test_split_that_hands_back_a_marker_standing_for_no_value_of_the_node_is_rejected(
             self, mock_llm, store):
+        # A marker on a line that held no hidden value: the model put it
+        # where nothing can be put back, so the line would be written with
+        # a hole in it.
+        address = "The Arcola Theatre takes group bookings at groups@arcola.example."
+        node = self._make_world_node(store, _LOOKED_UP + [address])
+        rio = _LOOKED_UP[0]
+        kept = [rio.replace("on Monday evenings", "by writing to [REDACTED_EMAIL]")] + _LOOKED_UP[1:] + [address]
+        mock_llm.return_value = _split_answer(kept[:24], kept[24:])
+
+        assert auto_split_node(store, node.id, None, "model") is False
+        self._assert_untouched(store, node)
+
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_split_puts_back_a_value_the_model_saw_only_as_a_marker(self, mock_llm, store):
         # A remote chat model sees the node through the redacting backend,
-        # so the address reaches it as a marker. Written into a child, the
-        # address would be gone for good.
+        # so the address reaches it as a marker, and a faithful split hands
+        # the marker back. The address it stood for is written in its place.
         address = "The Arcola Theatre takes group bookings at groups@arcola.example."
         node = self._make_world_node(store, _LOOKED_UP + [address])
         kept = _LOOKED_UP + ["The Arcola Theatre takes group bookings at [REDACTED_EMAIL]."]
+        mock_llm.return_value = _split_answer(kept[:24], kept[24:])
+
+        assert auto_split_node(store, node.id, None, "model") is True
+        written = "\n".join(c.data for c in store.get_children(node.id))
+        assert "groups@arcola.example" in written
+        assert "[REDACTED" not in written
+
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_split_that_leaves_out_a_line_holding_a_hidden_value_is_rejected(self, mock_llm, store):
+        # The model saw the address only as a marker, so it could not judge
+        # the line, and nothing could bring the address back once the
+        # parent is cleared: one line well inside the quarter the
+        # retention guard allows still refuses the split.
+        address = "The Arcola Theatre takes group bookings at groups@arcola.example."
+        node = self._make_world_node(store, _LOOKED_UP + [address])
+        mock_llm.return_value = _split_answer(_LOOKED_UP[:24], _LOOKED_UP[24:])
+
+        assert auto_split_node(store, node.id, None, "model") is False
+        self._assert_untouched(store, node)
+
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_split_figure_found_only_in_a_provenance_date_is_rejected(self, mock_llm, store):
+        # Every line carries a ` · web · 2026-10-DD` suffix, so 16 is on the
+        # node, but only as a day of the month; no claim says 16 of anything.
+        node = self._make_world_node(store, _LOOKED_UP)
+        assert any(" · web · 2026-10-16" in line for line in node.data.split("\n"))
+        kept = [line.replace("25 metres", "16 metres") for line in _LOOKED_UP]
+        assert kept != _LOOKED_UP
         mock_llm.return_value = _split_answer(kept[:24], kept[24:])
 
         assert auto_split_node(store, node.id, None, "model") is False
@@ -998,6 +1040,34 @@ class TestMergeNodeData:
     """merge_node_data rewrites a node's data via an LLM consolidation pass."""
 
     @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_a_node_past_the_split_threshold_is_not_rewritten_whole(self, mock_llm, store):
+        # Past the threshold the node is the split's to reorganise. A whole
+        # rewrite of it either does not fit a small window or, given room,
+        # comes back short of facts with nothing to refuse it.
+        node = store.create_node(name="World", description="d", data=_stored(_LOOKED_UP), parent_id="root")
+        assert node.data_token_count > SPLIT_THRESHOLD
+        mock_llm.return_value = json.dumps({"facts": _LOOKED_UP[:10]})
+
+        result = merge_node_data(store=store, node_id=node.id,
+                                 new_facts=["Netil Market hosts a flea market on Sundays."],
+                                 cfg=None, chat_model="model")
+
+        assert result.success is False
+        assert not mock_llm.called
+        assert store.get_node(node.id).data == node.data
+
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_a_sweep_leaves_a_node_past_the_split_threshold_as_it_is(self, mock_llm, store):
+        node = store.create_node(name="Venues", description="d", data=_stored(_LOOKED_UP), parent_id="world")
+        mock_llm.return_value = json.dumps({"facts": _LOOKED_UP[:10]})
+
+        results = list(consolidate_world_nodes(store=store, cfg=None, chat_model="model"))
+
+        lines = len(node.data.split("\n"))
+        assert ("Venues", lines, lines) in results
+        assert store.get_node(node.id).data == node.data
+
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
     def test_rewrites_node_with_consolidated_facts(self, mock_llm, store):
         node = store.create_node(
             name="Test",
@@ -1260,7 +1330,7 @@ class TestMergeNodeData:
         """A remote model sees the node through the redacting backend, so
         an address on the node reaches it as [REDACTED_EMAIL] and comes
         back that way. Written over the node, the address would be gone
-        for good."""
+        for good, so the line it stands for is written in its place."""
         line = "Kensington CEX answers at shop.kensington@cex.co.uk."
         node = store.create_node(name="Shops", description="d", data=line, parent_id="user")
         mock_llm.return_value = json.dumps({"facts": [
@@ -1268,14 +1338,15 @@ class TestMergeNodeData:
             "Kensington CEX closes at six on Sundays.",
         ]})
 
-        result = merge_node_data(
+        merge_node_data(
             store=store, node_id=node.id,
             new_facts=["Kensington CEX closes at six on Sundays."],
             cfg=None, chat_model="model",
         )
 
-        assert result.success is False
-        assert store.get_node(node.id).data == line
+        data = store.get_node(node.id).data
+        assert "shop.kensington@cex.co.uk" in data
+        assert "[REDACTED" not in data
 
     @patch("src.jarvis.memory.graph_ops.call_llm_direct")
     def test_a_marker_the_node_already_held_may_stay(self, mock_llm, store):
@@ -1304,12 +1375,13 @@ class TestMergeNodeData:
             "Kensington CEX answers at [REDACTED_EMAIL].",
         ]})
 
-        result = merge_node_data(
+        merge_node_data(
             store=store, node_id=node.id, new_facts=[], cfg=None, chat_model="model",
         )
 
-        assert result.success is False
-        assert store.get_node(node.id).data == data
+        after = store.get_node(node.id).data
+        assert "shop.kensington@cex.co.uk" in after
+        assert after.count("[REDACTED_EMAIL]") == 1
 
     @patch("src.jarvis.memory.graph_ops.call_llm_direct")
     def test_incorporated_indices_tolerant_to_trailing_punctuation(self, mock_llm, store):
@@ -1621,3 +1693,132 @@ class TestUpdateGraphMerge:
         # picker is skipped (no children) and the merge step short-
         # circuits before hitting the LLM.
         assert mock_llm.call_count == 1
+
+
+# ── What the rewrite guards read ──────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestMergeGuardsReadTheClaim:
+    """The merge's guards judge what a line claims, and put back what a
+    remote model could not see."""
+
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_merge_puts_back_a_value_the_model_saw_only_as_a_marker(self, mock_llm, store):
+        node = store.create_node(name="Theatres", description="d", parent_id="world", data=(
+            "The Arcola Theatre takes group bookings at groups@arcola.example. · web · 2026-10-02\n"
+            "The Rio Cinema is in Dalston. · web · 2026-10-02"))
+        new = "Netil Market opens on Saturdays."
+        mock_llm.return_value = json.dumps({"facts": [
+            "The Arcola Theatre takes group bookings at [REDACTED_EMAIL].",
+            "The Rio Cinema is in Dalston.", new]})
+
+        result = merge_node_data(store=store, node_id=node.id, new_facts=[new], cfg=None, chat_model="model")
+
+        assert result.success is True
+        data = store.get_node(node.id).data
+        assert "groups@arcola.example" in data and "[REDACTED" not in data
+
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_merge_refuses_a_marker_that_could_stand_for_two_values(self, mock_llm, store):
+        node = store.create_node(name="Theatres", description="d", parent_id="world", data=(
+            "Group bookings for the Arcola go to groups@arcola.example.\n"
+            "Group bookings for the Arcola go to events@arcola.example.\n"
+            "The Rio Cinema is in Dalston."))
+        new = "Netil Market opens on Saturdays."
+        mock_llm.return_value = json.dumps({"facts": [
+            "Group bookings for the Arcola go to [REDACTED_EMAIL].",
+            "The Rio Cinema is in Dalston.", new]})
+
+        result = merge_node_data(store=store, node_id=node.id, new_facts=[new], cfg=None, chat_model="model")
+
+        assert result.success is False
+        assert store.get_node(node.id).data == node.data
+
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_merge_figure_found_only_in_a_provenance_date_is_rejected(self, mock_llm, store):
+        node = store.create_node(name="Pools", description="d", parent_id="world", data=(
+            "Clissold Leisure Centre's main pool has 8 lanes. · web · 2026-10-16\n"
+            "The Rio Cinema is in Dalston. · web · 2026-10-02"))
+        new = "Netil Market opens on Saturdays."
+        mock_llm.return_value = json.dumps({"facts": [
+            "Clissold Leisure Centre's main pool has 16 lanes.",
+            "The Rio Cinema is in Dalston.", new]})
+
+        result = merge_node_data(store=store, node_id=node.id, new_facts=[new], cfg=None, chat_model="model")
+
+        assert result.success is False
+        assert store.get_node(node.id).data == node.data
+
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_merge_refuses_an_edited_line_rather_than_undo_the_edit(self, mock_llm, store):
+        # The model folded the new fact into the line holding the address,
+        # which it saw as a marker. Putting the old line back would undo
+        # the update and lose the new fact; the merge is refused instead,
+        # so the caller appends the fact.
+        node = store.create_node(name="Theatres", description="d", parent_id="world", data=(
+            "The Arcola box office at boxoffice@arcola.example is open on Mondays. · web · 2026-10-02\n"
+            "The Rio Cinema is in Dalston. · web · 2026-10-02"))
+        new = "The Arcola box office is now closed on Mondays."
+        mock_llm.return_value = json.dumps({"facts": [
+            "The Arcola box office at [REDACTED_EMAIL] is closed on Mondays.",
+            "The Rio Cinema is in Dalston."]})
+
+        result = merge_node_data(store=store, node_id=node.id, new_facts=[new], cfg=None, chat_model="model")
+
+        assert result.success is False
+        assert store.get_node(node.id).data == node.data
+
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_merge_leaves_a_line_that_already_held_a_marker_as_it_was(self, mock_llm, store):
+        # Two venues worded alike, one already redacted on the node. The
+        # model echoes both; each comes back as itself, the Rio claim with
+        # its marker and the Arcola one with its address.
+        node = store.create_node(name="Theatres", description="d", parent_id="world", data=(
+            "Group bookings for the Rio go to [REDACTED_EMAIL].\n"
+            "Group bookings for the Arcola go to groups@arcola.example."))
+        new = "Netil Market opens on Saturdays."
+        mock_llm.return_value = json.dumps({"facts": [
+            "Group bookings for the Rio go to [REDACTED_EMAIL].",
+            "Group bookings for the Arcola go to [REDACTED_EMAIL].", new]})
+
+        merge_node_data(store=store, node_id=node.id, new_facts=[new], cfg=None, chat_model="model")
+
+        data = store.get_node(node.id).data
+        assert "Group bookings for the Rio go to [REDACTED_EMAIL]." in data
+        assert "groups@arcola.example" in data
+
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_merge_keeps_the_value_when_a_redacted_copy_of_its_line_comes_in(self, mock_llm, store):
+        # The diary is redacted before extraction, so a fact the node holds
+        # with its address can come back in a later flush with a marker.
+        # The model folds the two into the marked one; the address stays.
+        line = "Kensington CEX answers at shop.kensington@cex.co.uk."
+        node = store.create_node(name="Shops", description="d", data=line, parent_id="world")
+        again = "Kensington CEX answers at [REDACTED_EMAIL]."
+        mock_llm.return_value = json.dumps({"facts": [again]})
+
+        merge_node_data(store=store, node_id=node.id, new_facts=[again], cfg=None, chat_model="model")
+
+        assert "shop.kensington@cex.co.uk" in store.get_node(node.id).data
+
+
+@pytest.mark.unit
+class TestSplitPutsBackHiddenValues:
+
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_a_child_s_marker_is_put_back_when_another_child_holds_one_the_node_had(self, mock_llm, store):
+        venue = "The venue takes bookings at [REDACTED_EMAIL]."
+        address = "The Arcola Theatre takes group bookings at groups@arcola.example."
+        node = store.create_node(name="World", description="d", parent_id="root",
+                                 data=_stored(_LOOKED_UP + [venue, address]))
+        assert node.data_token_count > SPLIT_THRESHOLD
+        mock_llm.return_value = _split_answer(
+            _LOOKED_UP[:24] + [venue],
+            _LOOKED_UP[24:] + ["The Arcola Theatre takes group bookings at [REDACTED_EMAIL]."],
+        )
+
+        assert auto_split_node(store, node.id, None, "model") is True
+        written = "\n".join(c.data for c in store.get_children(node.id))
+        assert "groups@arcola.example" in written
+        assert venue in written

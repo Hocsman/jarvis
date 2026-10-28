@@ -39,7 +39,7 @@
 - "Stop" commands during speech sometimes get filtered as echo ([upstream #24](https://github.com/isair/jarvis/issues/24))
 - Dictation is not available on macOS 26+ (Tahoe) due to a pynput incompatibility ([upstream #172](https://github.com/isair/jarvis/issues/172))
 - The packaged macOS app starts with the floating orb instead of the dashboard, because Qt WebEngine cannot be shown from that bundle (the memory viewer opens in your browser)
-- With the default `gemma4:e2b` chat model, the knowledge graph does not split a topic that has grown too large: the splits that model proposes lose a third of the facts or more, so they are refused and the topic stays whole. A remote model such as `gemini-2.5-flash` splits it
+- With the default `gemma4:e2b` chat model, the knowledge graph does not split a topic that has grown too large: the splits that model proposes lose a third of the facts or more, so they are refused and the topic stays whole. Its new facts are then added as they come, without being merged with what it already holds. A remote model such as `gemini-2.5-flash` splits it
 
 <details>
 <summary><strong>See it in action</strong> (example conversations)</summary>

@@ -161,3 +161,46 @@ class TestKeysClaudeCodeMightReport:
     ])
     def test_ordinary_text_is_left_alone(self, line):
         assert scrub_secrets(line) == line
+
+
+# ── Naming what the scrub hides ───────────────────────────────────────
+#
+# A rewrite by a remote model sees a line through the scrub. What the
+# scrub took out is what that model cannot write back, so it is what a
+# caller has to check survived.
+
+class TestHiddenValues:
+
+    def test_plain_text_hides_nothing(self):
+        from src.jarvis.utils.redact import hidden_values
+
+        assert hidden_values("The Rio Cinema is in Dalston.") == []
+
+    def test_every_value_named_is_one_the_scrub_takes_out(self):
+        from src.jarvis.utils.redact import hidden_values
+
+        text = ("Group bookings go to groups@arcola.example, and the ISBN is "
+                "978-0-14-118776-1.")
+        values = hidden_values(text)
+
+        assert "groups@arcola.example" in values
+        assert any("978" in v for v in values)
+        scrubbed = scrub_secrets(text)
+        for value in values:
+            assert value in text and value not in scrubbed
+
+    @pytest.mark.parametrize("text", [
+        "Access token: ghp_" + "a" * 36,
+        "API_KEY=abc@d.co",
+        "The admin password: hunter2@example.com is old.",
+    ])
+    def test_a_value_named_is_never_a_piece_of_another_rule_s_marker(self, text):
+        # The rules run one after the other, so a later one can match over
+        # an earlier one's marker; what it matched was never in the text.
+        from src.jarvis.utils.redact import hidden_values
+
+        values = hidden_values(text)
+
+        assert values
+        for value in values:
+            assert value in text and "[REDACTED" not in value

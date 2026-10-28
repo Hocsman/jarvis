@@ -16,6 +16,7 @@ tests patch. Every call is made through ``_ask``, inside the pass's
 from __future__ import annotations
 
 import json
+import math
 import re
 import threading
 import time
@@ -28,7 +29,7 @@ from rapidfuzz import fuzz, process
 from ..config import get_default_config
 from ..debug import debug_log
 from ..llm import get_auxiliary_backend
-from ..utils.redact import redaction_placeholders
+from ..utils.redact import hidden_values, redaction_placeholders, scrub_secrets
 from .provenance import (
     SOURCE_UNKNOWN,
     fact_line,
@@ -215,17 +216,63 @@ def _numbers_are_grounded(cleaned, inputs) -> bool:
     different fact wearing the same words, and it is the shape a later
     answer quotes with confidence.
 
+    Figures are read from the claim, not from its provenance suffix: a
+    node whose lines carry ` · web · 2026-10-16` would otherwise vouch for
+    an invented 16, 10 or 2026 in any line of the rewrite.
+
     Refusing is safe: the caller falls back to plain append, so a false
     positive costs consolidation, never a fact.
     """
     connus = set()
     for line in inputs:
-        connus.update(_DIGITS.findall(line or ""))
+        connus.update(_DIGITS.findall(fact_text(line or "")))
     for line in cleaned:
-        for n in _DIGITS.findall(line or ""):
+        for n in _DIGITS.findall(fact_text(line or "")):
             if n not in connus:
                 return False
     return True
+
+
+def _restore_hidden_values(written, inputs) -> list:
+    """Put back, in a rewrite's lines, the values a remote model saw only as markers.
+
+    The redacting backend hands a remote model ``scrub_secrets`` of every
+    line, so a line it copies faithfully comes back with an address or a
+    long number as a ``[REDACTED_*]`` marker. A written line carrying a
+    marker whose claim is exactly the scrubbed claim of an input line (the
+    same ``_match_key``) is replaced by that line, value and all. Lines that
+    differ only by their provenance suffix count as one. Anything looser is
+    left as it came for the redaction guard to judge: a line the model
+    reworded may carry an edit or a fact it folded in, and putting the old
+    line back would undo it; a marker matching no input line, or input lines
+    that hid different values, has no single value to give back.
+    """
+    if not any(redaction_placeholders(line) for line in written):
+        return list(written)
+    sources: dict[str, dict[str, str]] = {}
+    for line in inputs:
+        scrubbed = scrub_secrets(line)
+        if scrubbed != line:
+            sources.setdefault(_match_key(scrubbed), {}).setdefault(fact_text(line), line)
+    restored = []
+    put_back = held = 0
+    for line in written:
+        if not redaction_placeholders(line):
+            restored.append(line)
+            continue
+        originals = sources.get(_match_key(line), {})
+        if len(originals) == 1:
+            restored.append(next(iter(originals.values())))
+            put_back += 1
+        else:
+            restored.append(line)
+            held += 1
+    debug_log(
+        f"hidden values: {put_back} marked line(s) put back as the input held "
+        f"them, {held} left with their marker",
+        "memory",
+    )
+    return restored
 
 
 def _match_key(text: str) -> str:
@@ -840,9 +887,9 @@ def merge_node_data(
     model to produce a clean, consolidated, contradiction-free fact
     list, and writes that back as the node's full data. This subsumes
     dedupe, supersession, and per-write consolidation in a single
-    pass — the latest prompt always rewrites the node, so updated
-    conventions propagate to existing data without a separate
-    migration step.
+    pass — the latest prompt rewrites any node under the split
+    threshold whole, so updated conventions propagate to existing data
+    without a separate migration step.
 
     Pass an empty ``new_facts`` list to run a self-consolidation pass
     on the node's existing data alone (dedupe / consolidate / prune
@@ -854,6 +901,9 @@ def merge_node_data(
     beyond ``len(existing_lines) + len(new_facts) + 2`` entries.
     Consolidation should only ever shrink or hold; runaway growth
     means the model invented content.
+
+    A node past ``SPLIT_THRESHOLD`` is not asked about at all: the
+    split reorganises it, and its new facts are appended.
 
     Fail-open on any error (LLM failure, parse failure, empty
     rewrite, oversized rewrite). Caller's append path then writes the
@@ -879,6 +929,21 @@ def merge_node_data(
     if node is None:
         node = store.get_node(node_id)
     if node is None:
+        return MergeResult(success=False)
+
+    # Past the threshold the node is the split's to reorganise, not the
+    # merge's to rewrite whole. On a small local window the rewrite of such
+    # a node does not fit: measured on gemma4:e2b at 4096 tokens, none of 40
+    # came back whole (101 and 152 lines; past the window the instruction to
+    # answer in JSON is cut away with the start of the prompt). Given room
+    # (8192), 7 of 20 were accepted and kept as little as 62 % of the node,
+    # with no guard here that counts lost lines.
+    if node.data_token_count > SPLIT_THRESHOLD:
+        debug_log(
+            f"merge: '{node.name}' holds {node.data_token_count} tokens, past the "
+            f"split threshold; it is left to the split, not rewritten whole",
+            "memory",
+        )
         return MergeResult(success=False)
 
     existing_lines = _split_data_lines(node.data)
@@ -941,6 +1006,11 @@ def merge_node_data(
     if not cleaned:
         return MergeResult(success=False)
 
+    # A remote model saw an address or a long number on the node only as a
+    # marker; where the line it hands back can be traced to one line that
+    # went in, that line is written instead, value and all.
+    cleaned = _restore_hidden_values(cleaned, list(existing_lines) + list(sanitised_new))
+
     # Hallucination guard: bound the output relative to the input.
     # Consolidation rules can shrink or hold but should never grow
     # beyond `existing + new + small slack` — anything larger means
@@ -965,11 +1035,11 @@ def merge_node_data(
         )
         return MergeResult(success=False)
 
-    # A remote model sees the node through the redacting backend, so an
-    # address or a long number on it comes back as a marker. Written
-    # over the node, the value it hid would be gone for good. A marker
-    # the inputs already carried (redacted diary text) may stay; one
-    # more than they carried stands for a value.
+    # A marker left after the restoration above stands for a value no
+    # single input line can give back. Written over the node, the value it
+    # hid would be gone for good. A marker the inputs already carried
+    # (redacted diary text) may stay; one more than they carried stands for
+    # a value.
     if _redaction_markers(cleaned) - _redaction_markers(
         list(existing_lines) + list(sanitised_new)
     ):
@@ -1011,6 +1081,49 @@ def merge_node_data(
 
 
 # ── Auto-split ─────────────────────────────────────────────────────────
+
+
+# How many refused split answers in a row, from the same chat model, it
+# takes before that model stops being asked at every flush. A strong model
+# can refuse now and then at random (gemini-2.5-flash refused 13 of 75
+# under a prompt that also dropped what it already knew, none of 75
+# under the current one), and the next answer usually passes; the small
+# tier refuses every time.
+_SPLIT_REFUSALS_BEFORE_BACKOFF = 2
+
+# How much a node must grow, as a share of its size at the last refusal,
+# before a chat model that has backed off is asked again. A refused split
+# leaves the node whole, and on the small tier every split is refused, so
+# without it each flush that touches the node would pay for a full
+# rewrite of the node that is thrown away. Geometric, so a node is asked
+# a handful of times per process rather than once per flush.
+_SPLIT_RETRY_GROWTH = 0.25
+
+# The refused splits of each node, keyed by the graph's database and the
+# node: the chat model that gave the answers, the node's size at the last
+# one, and how many came in a row. Held for the life of the process, so a
+# restart asks once more.
+_SPLIT_REFUSALS: dict[tuple[str, str], tuple[str, int, int]] = {}
+
+
+def _split_retry_at(store: GraphMemoryStore, node: MemoryNode, chat_model: str) -> Optional[int]:
+    """The size ``node`` must reach before ``chat_model`` is asked to split
+    it again, or ``None`` to ask now.
+
+    Only answers that came back and were refused count against the node:
+    one the deadline turned away, or that timed out, says nothing about
+    the next attempt. Another chat model is asked at once, and so is a
+    node that has shrunk below the size it was refused at, since only
+    someone editing it makes it smaller.
+    """
+    refused = _SPLIT_REFUSALS.get((store.db_path, node.id))
+    if refused is None:
+        return None
+    model, size, in_a_row = refused
+    if (model != chat_model or in_a_row < _SPLIT_REFUSALS_BEFORE_BACKOFF
+            or node.data_token_count < size):
+        return None
+    return math.ceil(size * (1 + _SPLIT_RETRY_GROWTH))
 
 
 _SPLIT_SYSTEM_PROMPT = (
@@ -1070,7 +1183,11 @@ def auto_split_node(
     description updated to a summary.
     Asked inside the pass's deadline (one chat-model timeout from now when
     none is given); a split that gets no answer is retried by the next
-    flush that finds the node still too large.
+    flush that finds the node still too large. An answer that came back
+    and was refused is recorded in ``_SPLIT_REFUSALS``, for the
+    orchestrator to decide when to ask again (``_split_retry_at``), and a
+    split that succeeds clears the record. Called directly, it asks
+    whatever the record says.
 
     Returns True if the split succeeded.
     """
@@ -1099,101 +1216,17 @@ def auto_split_node(
     if not response:
         return False
 
-    # Parse JSON from response
-    json_match = re.search(r'\{.*\}', response, re.DOTALL)
-    if not json_match:
-        debug_log("auto-split: no JSON found in response", "memory")
+    plan = _read_split(node, response)
+    if plan is None:
+        # An answer came back and was refused: remembered, so the same
+        # model is not asked again until the node has grown.
+        key = (store.db_path, node_id)
+        previous = _SPLIT_REFUSALS.get(key)
+        in_a_row = previous[2] + 1 if previous and previous[0] == chat_model else 1
+        _SPLIT_REFUSALS[key] = (chat_model, node.data_token_count, in_a_row)
         return False
-
-    try:
-        result = json.loads(json_match.group())
-    except (json.JSONDecodeError, ValueError) as e:
-        debug_log(f"auto-split: JSON parse failed — {e}", "memory")
-        return False
-
-    categories = result.get("categories", [])
-    summary = result.get("summary")
-
-    # Validate: need a list of at least 2 categories
-    if not isinstance(categories, list):
-        debug_log("auto-split: categories are not a list, aborting", "memory")
-        return False
-    if len(categories) < 2:
-        debug_log("auto-split: fewer than 2 categories proposed, aborting", "memory")
-        return False
-
-    # Validate: each category needs a name and at least one fact, and its
-    # facts must be a list of strings. A `facts` given as one string would
-    # be written one character per line, and an item that is not a string
-    # has no sentence to write.
-    children: list[tuple[str, str, list[str]]] = []
-    for cat in categories:
-        name = cat.get("name") if isinstance(cat, dict) else None
-        if not isinstance(name, str) or not name.strip():
-            debug_log("auto-split: a category has no name, aborting", "memory")
-            return False
-        name = name.strip()
-        facts = cat.get("facts")
-        if not isinstance(facts, list) or not all(isinstance(f, str) for f in facts):
-            debug_log(
-                f"auto-split: category '{name}' does not give its facts "
-                "as a list of strings, aborting",
-                "memory",
-            )
-            return False
-        # One fact per line, as a node holds them: an item that packs
-        # several lines is measured and written as those lines.
-        lines = [part.strip() for f in facts for part in f.split("\n") if part.strip()]
-        if not lines:
-            debug_log(f"auto-split: category '{name}' has no facts, aborting", "memory")
-            return False
-        description = cat.get("description")
-        if not isinstance(description, str) or not description.strip():
-            description = f"Memories about: {name}"
-        children.append((name, description.strip(), lines))
-
-    written = [line for _, _, lines in children for line in lines]
-    before = _split_data_lines(node.data)
-
-    # Clearing the parent is the one step here that cannot be undone, so
-    # what the children leave out is gone for good. A split may drop what
-    # its prompt prunes and fold duplicates and repeated activities, but
-    # one that leaves out more than the floor allows lost answers he asked
-    # for.
-    kept, total = _claims_kept(before, written)
-    if kept < _SPLIT_MIN_RETENTION * total:
-        debug_log(
-            f"auto-split: rejected — the children carry {kept} of the node's "
-            f"{total} claims, under the {_SPLIT_MIN_RETENTION:.0%} floor",
-            "memory",
-        )
-        return False
-
-    # The merge's guards, for the same reasons: a split redistributes and
-    # consolidates, so it may shrink a node but not grow it; a figure may
-    # be dropped but not invented; and a remote model sees the node through
-    # the redacting backend, so a marker it hands back stands for a value
-    # the node held.
-    if len(written) > len(before) + _MERGE_GROWTH_SLACK:
-        debug_log(
-            f"auto-split: rejected — the children hold {len(written)} lines "
-            f"against the node's {len(before)}",
-            "memory",
-        )
-        return False
-    if not _numbers_are_grounded(written, before):
-        debug_log(
-            "auto-split: rejected — the children carry a figure the node did not hold",
-            "memory",
-        )
-        return False
-    if _redaction_markers(written) - _redaction_markers(before):
-        debug_log(
-            "auto-split: rejected — the children carry a redaction marker where "
-            "the node held a real value",
-            "memory",
-        )
-        return False
+    children, summary, kept, total = plan
+    _SPLIT_REFUSALS.pop((store.db_path, node_id), None)
 
     # Create child nodes
     for name, description, lines in children:
@@ -1207,8 +1240,8 @@ def auto_split_node(
 
     # Clear parent data and update description to summary; a summary that
     # is not text leaves the description as it was.
-    if isinstance(summary, str) and summary.strip():
-        store.update_node(node_id, data="", description=summary.strip())
+    if summary:
+        store.update_node(node_id, data="", description=summary)
     else:
         store.update_node(node_id, data="")
 
@@ -1218,6 +1251,132 @@ def auto_split_node(
         "memory",
     )
     return True
+
+
+def _read_split(node: MemoryNode, response: str):
+    """The children a split answer proposes, or ``None`` when it is refused.
+
+    Returns ``(children, summary, kept, total)``: each child as
+    ``(name, description, lines)``, the summary when it is text (``None``
+    otherwise), and the claims the children carry out of the node's. Every
+    refusal is logged with its reason.
+    """
+    # Parse JSON from response
+    json_match = re.search(r'\{.*\}', response, re.DOTALL)
+    if not json_match:
+        debug_log("auto-split: no JSON found in response", "memory")
+        return None
+
+    try:
+        result = json.loads(json_match.group())
+    except (json.JSONDecodeError, ValueError) as e:
+        debug_log(f"auto-split: JSON parse failed — {e}", "memory")
+        return None
+
+    categories = result.get("categories", [])
+    summary = result.get("summary")
+    summary = summary.strip() if isinstance(summary, str) and summary.strip() else None
+
+    # Validate: need a list of at least 2 categories
+    if not isinstance(categories, list):
+        debug_log("auto-split: categories are not a list, aborting", "memory")
+        return None
+    if len(categories) < 2:
+        debug_log("auto-split: fewer than 2 categories proposed, aborting", "memory")
+        return None
+
+    # Validate: each category needs a name and at least one fact, and its
+    # facts must be a list of strings. A `facts` given as one string would
+    # be written one character per line, and an item that is not a string
+    # has no sentence to write.
+    children: list[tuple[str, str, list[str]]] = []
+    for cat in categories:
+        name = cat.get("name") if isinstance(cat, dict) else None
+        if not isinstance(name, str) or not name.strip():
+            debug_log("auto-split: a category has no name, aborting", "memory")
+            return None
+        name = name.strip()
+        facts = cat.get("facts")
+        if not isinstance(facts, list) or not all(isinstance(f, str) for f in facts):
+            debug_log(
+                f"auto-split: category '{name}' does not give its facts "
+                "as a list of strings, aborting",
+                "memory",
+            )
+            return None
+        # One fact per line, as a node holds them: an item that packs
+        # several lines is measured and written as those lines.
+        lines = [part.strip() for f in facts for part in f.split("\n") if part.strip()]
+        if not lines:
+            debug_log(f"auto-split: category '{name}' has no facts, aborting", "memory")
+            return None
+        description = cat.get("description")
+        if not isinstance(description, str) or not description.strip():
+            description = f"Memories about: {name}"
+        children.append((name, description.strip(), lines))
+
+    before = _split_data_lines(node.data)
+    # A remote model saw an address or a long number on the node only as a
+    # marker; where a child's line can be traced to one line of the node,
+    # that line is written instead, value and all.
+    children = [(name, description, _restore_hidden_values(lines, before))
+                for name, description, lines in children]
+    written = [line for _, _, lines in children for line in lines]
+
+    # Clearing the parent is the one step here that cannot be undone, so
+    # what the children leave out is gone for good. A split may drop what
+    # its prompt prunes and fold duplicates and repeated activities, but
+    # one that leaves out more than the floor allows lost answers he asked
+    # for.
+    kept, total = _claims_kept(before, written)
+    if kept < _SPLIT_MIN_RETENTION * total:
+        debug_log(
+            f"auto-split: rejected — the children carry {kept} of the node's "
+            f"{total} claims, under the {_SPLIT_MIN_RETENTION:.0%} floor",
+            "memory",
+        )
+        return None
+
+    # An address or a long number is what a remote model sees only as a
+    # marker: it cannot judge the line it sits on, and once the parent is
+    # cleared nothing brings the value back. So every such value must be
+    # carried, however small a share of the node its line is.
+    carried = "\n".join(written)
+    lost = sum(1 for line in before for value in hidden_values(line) if value not in carried)
+    if lost:
+        debug_log(
+            f"auto-split: rejected — the children leave out {lost} value(s) the "
+            f"redacting backend hides",
+            "memory",
+        )
+        return None
+
+    # The merge's guards, for the same reasons: a split redistributes and
+    # consolidates, so it may shrink a node but not grow it; a figure may
+    # be dropped but not invented; and a marker left after the restoration
+    # above stands for a value no single line of the node can give back.
+    if len(written) > len(before) + _MERGE_GROWTH_SLACK:
+        debug_log(
+            f"auto-split: rejected — the children hold {len(written)} lines "
+            f"against the node's {len(before)}",
+            "memory",
+        )
+        return None
+    if not _numbers_are_grounded(written, before):
+        debug_log(
+            "auto-split: rejected — the children carry a figure the node did not hold",
+            "memory",
+        )
+        return None
+    if _redaction_markers(written) - _redaction_markers(before):
+        debug_log(
+            "auto-split: rejected — the children carry a redaction marker where "
+            "the node held a real value",
+            "memory",
+        )
+        return None
+
+    return children, summary, kept, total
 
 
 # ── Orchestrator ───────────────────────────────────────────────────────
@@ -1375,6 +1534,7 @@ def update_graph_from_dialogue(
         by_node.setdefault(node_id, []).append(fact)
 
     stored: "list[tuple[str, str]]" = []
+    touched: "list[tuple[str, str]]" = []  # (node_id, node_name)
     for node_id, node_facts in by_node.items():
         node = store.get_node(node_id)
         node_name = node.name if node else node_id[:8]
@@ -1384,9 +1544,9 @@ def update_graph_from_dialogue(
         # supersession (contradictions drop the old line),
         # near-duplicate dedupe (different wordings collapse), and
         # ongoing consolidation (repeated activities fold into
-        # patterns). The latest prompt always rewrites the whole
-        # node, so updated conventions propagate to old data without
-        # a separate migration step.
+        # patterns). The latest prompt rewrites the whole node (any
+        # node under the split threshold), so updated conventions
+        # propagate to old data without a separate migration step.
         #
         # Fail-open: if the merge returns success=False (empty node,
         # LLM failure, parse failure, empty rewrite, or rewrite that
@@ -1445,25 +1605,39 @@ def update_graph_from_dialogue(
                 )
 
         store.touch_node(node_id)
+        touched.append((node_id, node_name))
 
-        # Step 5: Auto-split if the node has grown too large.
+    # Step 5: Auto-split the nodes that have grown too large, once every
+    # merge of the flush is done. A split can wait for the next flush; a
+    # merge the deadline turns away drops its facts to plain append.
+    for node_id, node_name in touched:
         refreshed = store.get_node(node_id)
-        if refreshed is not None and refreshed.data_token_count > SPLIT_THRESHOLD:
+        if refreshed is None or refreshed.data_token_count <= SPLIT_THRESHOLD:
+            continue
+        retry_at = _split_retry_at(store, refreshed, chat_model)
+        if retry_at is not None and refreshed.data_token_count < retry_at:
             debug_log(
-                f"graph update: node '{node_name}' exceeded threshold, splitting",
+                f"graph update: node '{node_name}' is over the threshold, but "
+                f"{chat_model} refused its split {_SPLIT_REFUSALS_BEFORE_BACKOFF}"
+                f" times in a row; asked again from {retry_at} tokens",
                 "memory",
             )
-            try:
-                auto_split_node(
-                    store=store,
-                    node_id=node_id,
-                    cfg=cfg,
-                    chat_model=chat_model,
-                    deadline=deadline,
-                    thinking=thinking,
-                )
-            except Exception as e:
-                debug_log(f"graph update: auto-split failed for '{node_name}' — {e}", "memory")
+            continue
+        debug_log(
+            f"graph update: node '{node_name}' exceeded threshold, splitting",
+            "memory",
+        )
+        try:
+            auto_split_node(
+                store=store,
+                node_id=node_id,
+                cfg=cfg,
+                chat_model=chat_model,
+                deadline=deadline,
+                thinking=thinking,
+            )
+        except Exception as e:
+            debug_log(f"graph update: auto-split failed for '{node_name}' — {e}", "memory")
 
     debug_log(
         f"graph update: stored {len(stored)}/{len(facts)} facts "

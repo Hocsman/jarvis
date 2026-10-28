@@ -80,6 +80,29 @@ def redact(text: str, max_len: int = 8000) -> str:
     return scrubbed
 
 
+def hidden_values(text: str | None) -> list[str]:
+    """The values :func:`scrub_secrets` takes out of ``text``, rule by rule.
+
+    What a remote model never sees of a line: a rewrite it returns cannot
+    have written one of these back, so a caller that must not lose them
+    checks that they survived. The rules run one after another, so a later
+    one can match over an earlier one's marker (``token: [REDACTED_GH_TOKEN``);
+    such a match was never in ``text`` and is not a value, since the earlier
+    rule already named what it hid.
+    """
+    if not text:
+        return []
+    found: list[str] = []
+    remaining = text
+    for pattern, repl in _REDACTION_RULES:
+        found.extend(
+            m.group(0) for m in pattern.finditer(remaining)
+            if not _PLACEHOLDER_RE.search(m.group(0)) and m.group(0) in text
+        )
+        remaining = pattern.sub(repl, remaining)
+    return found
+
+
 def scrub_secrets(text: str) -> str:
     """Apply the structural scrub rules without whitespace collapse or length cap.
 
