@@ -24,6 +24,7 @@ speakers, and which callbacks fired.
 
 from __future__ import annotations
 
+import contextlib
 import sys
 import threading
 import time
@@ -35,7 +36,7 @@ import pytest
 
 from jarvis.output import tts as tts_module
 
-ENGINES = ["piper", "kokoro", "chatterbox"]
+ENGINES = ["piper", "kokoro", "chatterbox", "kyutai"]
 
 
 class Rig:
@@ -202,14 +203,63 @@ def _chatterbox_rig(monkeypatch) -> Rig:
     return rig
 
 
+def _kyutai_rig(monkeypatch) -> Rig:
+    rig = Rig()
+    frame = np.zeros((1, 33, 1), dtype=np.int64)
+
+    class _Pcm:
+        def cpu(self):
+            return self
+
+        def numpy(self):
+            return np.zeros((1, 1, 480), dtype=np.float32)
+
+    class _Mimi:
+        sample_rate = 24000
+
+        def streaming(self, batch_size):
+            return contextlib.nullcontext()
+
+        def decode(self, codes):
+            return _Pcm()
+
+    class _Model:
+        mimi = _Mimi()
+
+        def prepare_script(self, script, padding_between=0):
+            rig.begin(script[0])
+            return ["entry"]
+
+        def make_condition_attributes(self, voices, cfg_coef=None):
+            return "condition"
+
+        def generate(self, entries, conditions, on_frame=None):
+            on_frame(frame)
+            rig.pause()
+            on_frame(frame)
+            return SimpleNamespace(frames=[])
+
+    monkeypatch.setitem(sys.modules, "sounddevice", rig.sounddevice())
+    _silent_state(monkeypatch, tts_module.KyutaiTTS)
+
+    engine = tts_module.KyutaiTTS(enabled=True)
+    engine._model = _Model()
+    engine._voice_path = "voice"
+    engine._initialized = True
+    rig.engine = engine
+    return rig
+
+
 @pytest.fixture(params=ENGINES)
 def rig(request, monkeypatch, tmp_path):
     if request.param == "piper":
         made = _piper_rig(monkeypatch, tmp_path)
     elif request.param == "kokoro":
         made = _kokoro_rig(monkeypatch)
-    else:
+    elif request.param == "chatterbox":
         made = _chatterbox_rig(monkeypatch)
+    else:
+        made = _kyutai_rig(monkeypatch)
     made.start_worker()
     yield made
     made.close()
@@ -399,6 +449,26 @@ def test_a_stop_word_landing_as_the_worker_takes_an_item_up_is_not_lost(rig):
     assert fired == []
     assert rig.heard == ["Autre réponse."]
     assert "Déjà prise." not in rig.synthesised
+
+
+@pytest.mark.unit
+def test_an_item_stopped_as_the_worker_takes_it_up_does_not_publish_speaking(rig):
+    """The listener answers a stop word by publishing IDLE. A SPEAKING that
+    followed it, from an item the stop had already cancelled, would stay on
+    the orb until the next wake word."""
+    engine = rig.engine
+    published = []
+    engine._notify_speaking_state = published.append
+    engine._is_speaking = _InterruptsWhenTheWorkerPicksUpAnItem(engine)
+
+    engine.speak("Déjà prise.")
+    assert _until(lambda: not engine._is_speaking.armed)
+    assert _speak_and_wait(engine, "Autre réponse.")
+
+    # The engines also call the hook when speech ends, which publishes nothing.
+    assert [speaking for speaking in published if speaking] == [True], (
+        "only the sentence that was spoken says so"
+    )
 
 
 # ── Nothing to stop ─────────────────────────────────────────────────────

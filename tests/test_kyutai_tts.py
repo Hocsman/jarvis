@@ -52,16 +52,14 @@ class _Mimi:
         return _Pcm(np.full((1, 1, SAMPLES_PER_FRAME), 0.25, dtype=np.float32))
 
 
-class _Cancelled(Exception):
-    pass
-
-
 class Stage:
     """The fake model, the fake speakers, and what the tests want to know."""
 
     def __init__(self):
         self.load_attempts = 0
         self.load_error = None
+        self.load_gate = None     # a model load waits on it
+        self.load_started = threading.Event()
         self.loaded = []          # keyword arguments of each model load
         self.voices = []          # names asked of the voice repository
         self.conditioned = []     # voices a synthesis was conditioned on
@@ -115,6 +113,9 @@ def _install_fake_moshi(monkeypatch, stage):
         @classmethod
         def from_checkpoint_info(cls, info, **kwargs):
             stage.load_attempts += 1
+            stage.load_started.set()
+            if stage.load_gate is not None:
+                stage.load_gate.wait(10)
             if stage.load_error is not None:
                 raise stage.load_error
             stage.loaded.append(kwargs)
@@ -234,7 +235,7 @@ def stage(monkeypatch):
     s = Stage()
     _install_fake_moshi(monkeypatch, s)
     _install_fake_sounddevice(monkeypatch, s)
-    monkeypatch.setattr(tts_module.KyutaiTTS, "_cuda_available", staticmethod(lambda: True))
+    monkeypatch.setattr(tts_module.KyutaiTTS, "_cuda_problem", staticmethod(lambda: None))
     monkeypatch.setattr(tts_module.KyutaiTTS, "_triton_available", staticmethod(lambda: True))
     monkeypatch.setattr(tts_module, "_sound_started", lambda: s.first_sounds.append(
         bool(s.streams) and s.streams[-1].started))
@@ -358,12 +359,13 @@ class TestInitialisation:
 
     def test_without_a_gpu_it_fails_with_a_reason_and_loads_nothing(
             self, stage, make_engine, monkeypatch):
-        monkeypatch.setattr(tts_module.KyutaiTTS, "_cuda_available", staticmethod(lambda: False))
+        monkeypatch.setattr(tts_module.KyutaiTTS, "_cuda_problem",
+                            staticmethod(lambda: "no NVIDIA GPU was found"))
         tts = make_engine()
 
         assert tts._ensure_initialized() is False
 
-        assert tts._init_error
+        assert "no NVIDIA GPU was found" in tts._init_error
         assert stage.load_attempts == 0
 
     def test_without_the_package_it_fails_and_names_it(self, stage, make_engine, monkeypatch):
@@ -491,6 +493,41 @@ class TestVoice:
 
         assert str(missing) in tts._init_error
         assert stage.voices == []
+        assert stage.load_attempts == 0, "the model was loaded for a voice file that is not there"
+
+    @pytest.mark.parametrize("name", [
+        "cml-tts/fr/577_394_000070-0001_enhanced.wav",
+        "unmute-prod-website/developpeuse-3.wav",
+        "ears/p001/freeform_speech_01.wav",
+    ])
+    def test_the_names_of_the_voice_repository_are_accepted(self, stage, make_engine, name):
+        tts = make_engine(voice=name)
+
+        assert tts._ensure_initialized() is True
+
+        assert stage.voices == [name]
+
+    @pytest.mark.parametrize("value", [
+        r"C:\Users\Alice\Documents\me.wav",
+        "/home/alice/me.wav",
+        "~/me.wav",
+        "hf://some-org/some-repo/x.wav",
+        "file:///etc/hosts",
+        "folder\\me.wav",
+        "a/../b.wav",
+        "a//b.wav",
+    ])
+    def test_a_value_that_is_not_a_repository_name_never_reaches_the_network(
+            self, stage, make_engine, value):
+        """A local path would travel inside the request for the voice file,
+        with the user's name and folders in it."""
+        tts = make_engine(voice=value)
+
+        assert tts._ensure_initialized() is False
+
+        assert tts._init_error
+        assert stage.voices == [], "the voice repository was asked for a local path"
+        assert stage.load_attempts == 0, "the model was loaded for a voice that cannot be used"
 
 
 # ── What is played, and what is promised ──────────────────────────────
@@ -621,7 +658,8 @@ class TestFailures:
 
     def test_an_engine_that_could_not_start_says_nothing_and_settles_nothing(
             self, stage, make_engine, monkeypatch):
-        monkeypatch.setattr(tts_module.KyutaiTTS, "_cuda_available", staticmethod(lambda: False))
+        monkeypatch.setattr(tts_module.KyutaiTTS, "_cuda_problem",
+                            staticmethod(lambda: "no NVIDIA GPU was found"))
         tts = make_engine()
         said = []
 
@@ -699,3 +737,115 @@ class TestInterrupt:
         tts.stop()
 
         assert tts._thread is None
+
+    def test_a_stop_during_the_load_abandons_the_item_before_it_is_synthesised(
+            self, stage, make_engine):
+        """The first item waits for the model to load, which can take minutes.
+        A stop that lands meanwhile has to cost the GPU nothing."""
+        stage.load_gate = threading.Event()
+        tts = make_engine()
+        said = []
+
+        tts.speak("Périmée.", completion_callback=lambda: said.append(1))
+        assert stage.load_started.wait(5)
+        assert _until(tts.is_speaking)
+
+        tts.interrupt()
+        stage.load_gate.set()
+
+        assert _until(lambda: not tts.is_speaking())
+        assert stage.scripts == [tts._WARMUP_TEXT]
+        assert said == []
+
+
+class TestLifecycle:
+    def test_start_loads_the_model_in_the_background_before_anything_is_said(
+            self, stage, make_engine):
+        stage.load_gate = threading.Event()
+        tts = make_engine()
+
+        tts.start()
+
+        assert stage.load_started.wait(5), "start() did not begin loading"
+        assert "kyutai-init" in [t.name for t in threading.enumerate()]
+        assert tts._q.empty() and stage.streams == []
+        stage.load_gate.set()
+        assert _until(lambda: tts._initialized)
+        assert stage.load_attempts == 1
+
+    def test_starting_twice_leaves_the_first_worker_in_place(self, stage, make_engine):
+        tts = make_engine()
+        tts.start()
+        worker = tts._thread
+        assert _until(lambda: tts._initialized)
+
+        tts.start()
+
+        assert tts._thread is worker
+        assert stage.load_attempts == 1
+
+    def test_a_sentence_arriving_during_the_load_waits_for_it_and_the_model_loads_once(
+            self, stage, make_engine):
+        stage.load_gate = threading.Event()
+        tts = make_engine()
+        done = threading.Event()
+
+        tts.speak("Arrivée pendant le chargement.", completion_callback=done.set)
+        assert stage.load_started.wait(5)
+        assert _until(tts.is_speaking), "the worker never took the sentence up"
+        assert not done.is_set()
+        stage.load_gate.set()
+
+        assert done.wait(5)
+        assert stage.load_attempts == 1
+        assert stage.scripts == [tts._WARMUP_TEXT, "Arrivée pendant le chargement."]
+
+    def test_an_engine_that_cannot_start_says_why_and_does_not_try_again(
+            self, stage, make_engine, monkeypatch, capsys):
+        asked = []
+        monkeypatch.setattr(
+            tts_module.KyutaiTTS, "_cuda_problem",
+            staticmethod(lambda: asked.append(1) or "no NVIDIA GPU was found"))
+        tts = make_engine()
+        reached = threading.Event()
+
+        tts.speak("Une.")
+        tts.speak("Deux.")
+        tts.speak("", completion_callback=reached.set)
+
+        assert reached.wait(5)
+        assert "no NVIDIA GPU was found" in capsys.readouterr().out
+        assert asked == [1]
+
+
+class TestHardware:
+    """A PyTorch that cannot be loaded, one built without CUDA and a machine
+    without a GPU are three different fixes, so they are told apart."""
+
+    @staticmethod
+    def _fake_torch(monkeypatch, *, cuda_build, available):
+        torch = types.ModuleType("torch")
+        torch.version = SimpleNamespace(cuda="12.8" if cuda_build else None)
+        torch.cuda = SimpleNamespace(is_available=lambda: available)
+        monkeypatch.setitem(sys.modules, "torch", torch)
+
+    def test_a_usable_gpu_is_no_problem(self, monkeypatch):
+        self._fake_torch(monkeypatch, cuda_build=True, available=True)
+
+        assert tts_module.KyutaiTTS._cuda_problem() is None
+
+    def test_a_pytorch_that_cannot_be_loaded_is_reported_with_its_own_error(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "torch", None)
+
+        reason = tts_module.KyutaiTTS._cuda_problem()
+
+        assert reason and "torch" in reason.lower()
+
+    def test_a_pytorch_built_without_cuda_is_not_reported_as_a_missing_gpu(self, monkeypatch):
+        self._fake_torch(monkeypatch, cuda_build=False, available=False)
+        no_build = tts_module.KyutaiTTS._cuda_problem()
+        self._fake_torch(monkeypatch, cuda_build=True, available=False)
+        no_gpu = tts_module.KyutaiTTS._cuda_problem()
+
+        assert no_build and no_gpu and no_build != no_gpu
+        assert "CUDA" in no_build

@@ -80,9 +80,10 @@ Kokoro first imports its package on the calling thread, because loading
 PyTorch, SciPy and OpenBLAS DLLs concurrently deadlocks the Windows
 loader. Chatterbox loads its model on `start`. Kyutai warms its model on
 a background thread named `kyutai-init`, ending with one throwaway
-synthesis whose audio is discarded: the first synthesis captures the CUDA
-graphs the model replays afterwards, which takes tens of seconds, so it is
-paid at startup rather than on the first reply. On Windows `start` first
+synthesis whose audio is discarded: the first synthesis pays the model's
+one-off costs (kernel and module loading, allocator warm-up), which take
+tens of seconds, so they are paid at startup rather than on the first
+reply. On Windows `start` first
 sets the compile switch (see "Kyutai") and imports the package on the
 calling thread, for the loader reason given for Kokoro.
 
@@ -142,9 +143,11 @@ before playback starts. It does not fire when nothing was synthesised.
 
 **Speaking state.** When an item starts, the engine publishes SPEAKING
 through the shared state (`state.spec.md`). Publishing never raises, so
-the engine calls it bare and speech never depends on it. Nothing in this
-module clears the state when speech ends; whoever owns the transitions
-does.
+the engine calls it bare and speech never depends on it. An item that a
+stop word has already cancelled when the worker takes it up publishes
+nothing: the listener answers a stop with IDLE, and a SPEAKING after it
+would stay on the orb until the next wake word. Nothing in this module
+clears the state when speech ends; whoever owns the transitions does.
 
 **First sound.** Once an item's audio stream is running (Piper, Kokoro
 and Kyutai: after the output stream starts; Chatterbox: after playback
@@ -188,14 +191,19 @@ compares the count at every step (before synthesis, between the pieces
 the model returns, after synthesis, in the audio callback and in the
 playback wait) and counts as unspoken once it has changed. Stamping at
 the moment of queueing is what makes an interrupt that lands between the
-worker taking an item up and starting it impossible to lose, which a flag
-cleared as each item starts could not promise; and it is what lets the
-reply that follows a stop be spoken, since its items carry the new count.
+worker taking an item up and starting it impossible to lose, and it is
+what lets the reply that follows a stop be spoken, since its items carry
+the new count.
 
 Nothing upstream does this work. A stop word is heard on the listener's
 own thread, which also dispatches the reply, so it is only heard once
 generation has ended and the whole reply (every chunk, the tail and the
 marker) is already waiting in the engine's queue.
+
+An interrupted reply never reaches its completion callback, so nothing the
+engine does takes the published state out of SPEAKING: the listener, which
+heard the stop, publishes IDLE right after calling `interrupt()`
+(`state.spec.md`).
 
 Kyutai compares the count at every frame the model produces as well, so an
 item still being synthesised is abandoned within one frame of audio rather
@@ -218,10 +226,10 @@ engine owes the listener four things:
 4. the completion callback, which is what opens the hot window.
 
 Where no exact duration is known the detector estimates from `tts_rate`
-(words per minute). Piper, Kokoro and Chatterbox ignore `tts_rate`
-themselves: Piper's pace is `length_scale`, Kokoro's is `speed`, and
-`tts_rate` and `tts_voice` are accepted by the factory for interface
-compatibility only.
+(words per minute). Piper, Kokoro, Chatterbox and Kyutai ignore `tts_rate`
+themselves: Piper's pace is `length_scale`, Kokoro's is `speed`, Kyutai has
+no pace setting, and `tts_rate` and `tts_voice` are accepted by the factory
+for interface compatibility only (Kyutai is handed neither).
 
 ## The thinking tune
 
@@ -236,10 +244,10 @@ can open it straight away.
 
 ## Audio output
 
-Each item is synthesised whole, then played. Piper and Kokoro play it
-through a `sounddevice.OutputStream` (mono; Piper in `int16` at the
-voice's own sample rate, Kokoro and Kyutai in `float32` at 24 kHz) in blocks of
-1024 frames so an abort lands quickly. Chatterbox writes a temporary WAV
+Each item is synthesised whole, then played. Piper, Kokoro and Kyutai play
+it through a `sounddevice.OutputStream` (mono; Piper in `int16` at the
+voice's own sample rate, Kokoro and Kyutai in `float32` at 24 kHz) in
+blocks of 1024 frames so an abort lands quickly. Chatterbox writes a temporary WAV
 and plays it through the pygame mixer. Opening, starting, aborting and
 closing a stream all happen under `portaudio_lock`
 (`listening.spec.md`, "Serialised PortAudio Lifecycle").
@@ -391,17 +399,25 @@ the text itself. Its voice comes from `tts_kyutai_voice` and nothing else:
 **Voice.** The value is either a name in the `kyutai/tts-voices`
 repository (a recording with a precomputed embedding, for example
 `cml-tts/fr/577_394_000070-0001_enhanced.wav`), fetched on first use, or
-the path of a `.safetensors` embedding file, used as it is. A path that
-does not exist fails initialisation: a voice the user named is never
+the path of a `.safetensors` embedding file, used as it is. A name is
+slash-separated segments of letters, digits, dots, hyphens and
+underscores; anything else (a drive letter or an absolute path, a
+backslash, `~`, `..`, a URL scheme) is refused before the network is
+touched, because the repository would be asked for it and a local path
+would travel in that request with the user's name and folders in it. A
+refused value, and a `.safetensors` path that does not exist, fail
+initialisation before the model is loaded: a voice the user named is never
 replaced by another. The default is a French female voice.
 
 **Hardware.** The engine needs an NVIDIA GPU (CUDA). Without one,
 initialisation fails and the reason is kept in `_init_error`; each item
-prints it and speaks nothing. There is no CPU mode: a model of this size
-synthesises far slower than real time there.
+prints it and speaks nothing. The reason says which of three things is
+wrong: PyTorch cannot be loaded (with its own error), this PyTorch was
+built without CUDA support, or no NVIDIA GPU was found. There is no CPU
+mode: a model of this size synthesises far slower than real time there.
 
 **Compilation.** `torch.compile` needs Triton, which has no Windows build.
-When Triton cannot be imported the engine sets `NO_TORCH_COMPILE=1`,
+When Triton is not installed the engine sets `NO_TORCH_COMPILE=1`,
 unless the user already set it, before `moshi` is first imported, because
 the package reads the variable at import. The CUDA graphs stay on: with
 them the model runs faster than real time, without them several times
@@ -410,15 +426,18 @@ slower, so the engine never sets `NO_CUDA_GRAPH`.
 **Synthesis.** One item is one model call: the text is prepared as a
 single-speaker script and conditioned on the voice, with the sampling
 temperature and guidance coefficient the model was released with (fixed,
-not settings). Frames are decoded to audio as the model produces them, and
+not settings). Each synthesis builds the model's generation state afresh,
+CUDA graphs included, so every sentence pays a set-up cost on top of the
+audio itself. Frames are decoded to audio as the model produces them, and
 the first audible frame arrives about a second in. Like the other engines
 the item is played once all of it exists, so the exact duration is known
 before playback starts.
 
 **Failure.** Initialisation is attempted once and its outcome is kept for
-the life of the engine. A missing `moshi` package, a missing GPU, a model
-that fails to load, a voice that cannot be resolved: each fails
-initialisation with its reason, and nothing is said. A synthesis that
+the life of the engine. A `moshi` package (or one of its dependencies) that
+cannot be imported, a missing GPU or CUDA build, a model that fails to
+load, a voice that cannot be used: each fails initialisation with its
+reason, and nothing is said. A synthesis that
 raises, or produces no audio, fires no completion callback.
 
 **Installation.** `moshi` is not in `requirements.txt`: it declares a
@@ -480,9 +499,12 @@ language. The line is not added for Kokoro or Kyutai.
   and fire neither their callbacks nor the end-of-reply marker's. The
   item in hand is not heard (or, playing, is cut), and the items queued
   after the interrupt are spoken to the end with their callbacks, so are
-  the ones after a second stop. Held for each of the three engines.
+  the ones after a second stop. Held for each engine.
 - An interrupt landing just as the worker takes an item up is not lost,
   and an interrupt with nothing to stop swallows nothing queued after it.
+- An item that a stop word cancelled as the worker took it up publishes no
+  SPEAKING, and the listener answers a stop word, heard by the text check
+  or by the intent judge, with IDLE.
 - Chatterbox does not play audio generated for an item interrupted during
   generation.
 - A missing voice that cannot be fetched falls back to a cached fallback
@@ -526,7 +548,13 @@ language. The line is not added for Kokoro or Kyutai.
   setting, and the config layer keeps it as a valid `tts_engine`.
 - A Kyutai engine without a GPU, or without the `moshi` package, speaks
   nothing, fires no completion callback, reports the reason, and does not
-  retry on the next item.
+  retry on the next item. A PyTorch that cannot be loaded, one built
+  without CUDA and a machine without a GPU give three different reasons.
+- Kyutai's `start` begins loading in a background thread named
+  `kyutai-init` before anything is said and a second `start` leaves the
+  first worker in place; a sentence arriving during the load waits for it
+  and the model loads once; a stop that lands during the load abandons the
+  item before it is synthesised.
 - With Triton absent the compile switch is set before `moshi` is first
   imported, a value the user set is left alone, and the CUDA graphs are
   never switched off.
@@ -534,7 +562,9 @@ language. The line is not added for Kokoro or Kyutai.
   discarded, nothing queued or played).
 - A voice name is resolved through the model's voice repository, a
   `.safetensors` path is used as it is, and a path that does not exist
-  fails initialisation.
+  fails initialisation before the model is loaded. A value that is not a
+  repository name (a local path, a URL, a path going up) never reaches the
+  network.
 - Kyutai's audio is played at the codec's rate, the duration callback
   gets its exact length before playback, and the completion callback
   fires only after the audio played to its end.

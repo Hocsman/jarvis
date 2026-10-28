@@ -683,8 +683,12 @@ class ChatterboxTTS:
         # stays owed until the speech has finished.
         spoken = False
         
-        # Publish the speaking state
-        self._notify_speaking_state(True)
+        # SPEAKING goes out only for an item that is still live: a stop word
+        # that landed since the worker took it up has been answered with IDLE
+        # (`state.spec.md`), and a SPEAKING after it would stay on the orb
+        # until the next wake word.
+        if not cancelled():
+            self._notify_speaking_state(True)
 
         try:
             # Check if model is available
@@ -1183,8 +1187,12 @@ class PiperTTS:
         # stays owed until the speech has finished.
         spoken = False
 
-        # Publish the speaking state
-        self._notify_speaking_state(True)
+        # SPEAKING goes out only for an item that is still live: a stop word
+        # that landed since the worker took it up has been answered with IDLE
+        # (`state.spec.md`), and a SPEAKING after it would stay on the orb
+        # until the next wake word.
+        if not cancelled():
+            self._notify_speaking_state(True)
 
         try:
             # The voice is chosen per item, from the language of the reply,
@@ -1655,7 +1663,12 @@ class KokoroTTS:
         # stays owed until the speech has finished.
         spoken = False
 
-        self._notify_speaking_state(True)
+        # SPEAKING goes out only for an item that is still live: a stop word
+        # that landed since the worker took it up has been answered with IDLE
+        # (`state.spec.md`), and a SPEAKING after it would stay on the orb
+        # until the next wake word.
+        if not cancelled():
+            self._notify_speaking_state(True)
 
         try:
             if not self._ensure_initialized():
@@ -1799,16 +1812,15 @@ class _SynthesisCancelled(Exception):
 class KyutaiTTS:
     """TTS implementation using Kyutai TTS 1.6B (English and French).
 
-    The most natural of the local engines. It runs through the ``moshi``
-    package on an NVIDIA GPU, faster than real time once the CUDA graphs
-    the model replays have been captured (the warm-up pays for that at
-    startup). Model and voice download once from Hugging Face
-    (``kyutai/tts-1.6b-en_fr``, ``kyutai/tts-voices``).
+    The most natural of the local engines. It runs in-process through the
+    ``moshi`` package on an NVIDIA GPU, faster than real time once the
+    model's one-off costs (kernel loading, allocator warm-up) have been
+    paid, which the warm-up does at startup. Model and voice download once
+    from Hugging Face (``kyutai/tts-1.6b-en_fr``, ``kyutai/tts-voices``).
 
-    Mirrors :class:`KokoroTTS` (queue, worker, playback, callbacks) with one
-    difference: every interruption is counted, and an item carries the count
-    it was queued under, so ``interrupt`` drops what was queued before it
-    and abandons a synthesis in flight at its next frame.
+    Mirrors :class:`KokoroTTS` (queue, worker, playback, callbacks). It
+    differs where the model does: it needs CUDA, and a synthesis in flight
+    is abandoned at the model's next frame rather than run to its end.
     """
 
     # A digit rather than a word: it has a reading in both languages.
@@ -1846,13 +1858,22 @@ class KyutaiTTS:
         self._audio_lock = threading.Lock()
 
     @staticmethod
-    def _cuda_available() -> bool:
+    def _cuda_problem() -> Optional[str]:
+        """Why this machine cannot run the model on a GPU, or None when it
+        can. A PyTorch that cannot be loaded, one built without CUDA and a
+        machine without a GPU are three different fixes, so each says which."""
         try:
             import torch
-
-            return bool(torch.cuda.is_available())
-        except Exception:
-            return False
+        except Exception as e:
+            return f"PyTorch could not be loaded ({e})"
+        try:
+            if torch.cuda.is_available():
+                return None
+        except Exception as e:
+            return f"CUDA could not be queried ({e})"
+        if getattr(torch.version, "cuda", None) is None:
+            return "this PyTorch was built without CUDA support, install a CUDA build"
+        return "no NVIDIA GPU was found"
 
     @staticmethod
     def _triton_available() -> bool:
@@ -1877,19 +1898,37 @@ class KyutaiTTS:
             os.environ["NO_TORCH_COMPILE"] = "1"
             debug_log("Kyutai TTS: Triton not found, torch.compile switched off", "tts")
 
-    def _resolve_voice(self, model) -> str:
-        """The embedding file for ``self.voice``: a ``.safetensors`` path is
-        used as it is, any other value is a name in the voice repository."""
+    # A name in the voice repository: path segments of plain characters, never
+    # absolute, never going up, never a scheme or a drive.
+    _VOICE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*")
+
+    def _local_voice_file(self) -> Optional[str]:
+        """The embedding file ``self.voice`` names on this machine, or None
+        when it names a voice in the repository.
+
+        A value that is neither is refused before the network is touched: the
+        repository would be asked for it, and a local path would travel inside
+        that request with the user's name and folders in it.
+        """
         if self.voice.lower().endswith(".safetensors"):
             path = Path(self.voice).expanduser()
             if not path.is_file():
                 raise FileNotFoundError(f"Kyutai voice file not found: {path}")
             return str(path)
-        return str(model.get_voice_path(self.voice))
+        if not self._VOICE_NAME.fullmatch(self.voice):
+            raise ValueError(
+                "tts_kyutai_voice must be a name in the kyutai/tts-voices repository "
+                "(for example cml-tts/fr/577_394_000070-0001_enhanced.wav) or the "
+                f"path of a .safetensors file, not {self.voice!r}"
+            )
+        return None
 
     def _load(self) -> None:
-        if not self._cuda_available():
-            self._init_error = "Kyutai TTS needs an NVIDIA GPU (CUDA), none was found"
+        local_voice = self._local_voice_file()
+
+        problem = self._cuda_problem()
+        if problem:
+            self._init_error = f"Kyutai TTS needs an NVIDIA GPU with CUDA: {problem}"
             return
 
         self._configure_environment()
@@ -1897,7 +1936,7 @@ class KyutaiTTS:
             from moshi.models.loaders import CheckpointInfo
             from moshi.models.tts import DEFAULT_DSM_TTS_REPO, TTSModel
         except ImportError as e:
-            self._init_error = f"moshi is not installed, see the README ({e})"
+            self._init_error = f"moshi or one of its dependencies could not be imported, see the README ({e})"
             return
 
         debug_log("Kyutai TTS loading model", "tts")
@@ -1905,16 +1944,17 @@ class KyutaiTTS:
         model = TTSModel.from_checkpoint_info(
             checkpoint, n_q=self._CODEBOOKS, temp=self._TEMPERATURE, device="cuda"
         )
-        voice_path = self._resolve_voice(model)
+        voice_path = local_voice or str(model.get_voice_path(self.voice))
         self._model = model
         self._voice_path = voice_path
         self._sample_rate = int(model.mimi.sample_rate)
         debug_log(f"Kyutai TTS model loaded, voice {self.voice}", "tts")
 
-        # The first synthesis captures the CUDA graphs and takes tens of
-        # seconds; pay for it here rather than on the first reply. The audio
-        # is discarded, and a failure leaves the model loaded: it surfaces
-        # at speak time, as without the warm-up.
+        # The first synthesis pays the model's one-off costs (kernel and
+        # module loading, allocator warm-up) and takes tens of seconds; pay
+        # for them here rather than on the first reply. The audio is
+        # discarded, and a failure leaves the model loaded: it surfaces at
+        # speak time, as without the warm-up.
         try:
             self._synthesise(self._WARMUP_TEXT, lambda: False)
             debug_log("Kyutai TTS warm-up complete", "tts")
@@ -2064,10 +2104,7 @@ class KyutaiTTS:
                 debug_log(f"Kyutai TTS error in _speak_once: {e}", "tts")
                 continue
 
-    def _speak_once(self, text: str, epoch: Optional[int] = None) -> None:
-        if epoch is None:
-            epoch = self._epoch
-
+    def _speak_once(self, text: str, epoch: int) -> None:
         def cancelled() -> bool:
             return self._epoch != epoch
 
@@ -2081,12 +2118,23 @@ class KyutaiTTS:
         # reminder as said (`reminders.spec.md`).
         spoken = False
 
-        self._notify_speaking_state(True)
+        # SPEAKING goes out only for an item that is still live: a stop word
+        # that landed since the worker took it up has been answered with IDLE
+        # (`state.spec.md`), and a SPEAKING after it would stay on the orb
+        # until the next wake word.
+        if not cancelled():
+            self._notify_speaking_state(True)
 
         try:
             if not self._ensure_initialized():
                 if self._init_error:
                     print(f"  ⚠️ Kyutai TTS: {self._init_error}", flush=True)
+                return
+
+            # The load can take minutes on first use, and a stop word may
+            # have landed meanwhile: such an item costs the GPU nothing.
+            if cancelled():
+                debug_log("Kyutai TTS interrupted before synthesis", "tts")
                 return
 
             import sounddevice as sd
