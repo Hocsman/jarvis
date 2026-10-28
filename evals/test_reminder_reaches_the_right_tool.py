@@ -103,8 +103,9 @@ def _run(case, mock_config, eval_db, eval_dialogue_memory, tmp_path):
     mock_config.ollama_base_url = "http://localhost:11434"
     mock_config.ollama_chat_model = JUDGE_MODEL
     mock_config.db_path = str(tmp_path / "jarvis.db")
-    # Pinned, or the chain resolves to a local model that is not running
-    # here and every extraction fails for the wrong reason.
+    # Pinned, or with the chat at home the chain resolves to a local model
+    # that is not running here and every extraction fails for the wrong
+    # reason. With the chat remote, the chat model reads the time anyway.
     mock_config.reminder_model = JUDGE_MODEL
     mock_config.reminder_timeout_sec = 20.0
     mock_config.reminder_default_hour = 9

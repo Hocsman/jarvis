@@ -1024,7 +1024,7 @@ class TestWhisperModelOptions:
             # Multilingual models should NOT have .en suffix
             assert not model_id.endswith(".en"), f"Multilingual model should not end with .en: {model_id}"
 
-    def test_turbo_hidden_when_faster_whisper_unsupported(self):
+    def test_turbo_hidden_when_faster_whisper_unsupported(self, installed_faster_whisper):
         """large-v3-turbo is filtered from options when faster-whisper is too old."""
         from desktop_app.setup_wizard import WhisperSetupPage
 
@@ -1034,13 +1034,13 @@ class TestWhisperModelOptions:
         page.WHISPER_MODEL_OPTIONS = WhisperSetupPage.WHISPER_MODEL_OPTIONS
         page.WHISPER_MODEL_OPTIONS_EN = WhisperSetupPage.WHISPER_MODEL_OPTIONS_EN
 
-        with patch("desktop_app.setup_wizard._is_faster_whisper_turbo_supported", return_value=False):
-            options = WhisperSetupPage._listed_model_options(page)
+        installed_faster_whisper("1.0.3")
+        options = WhisperSetupPage._listed_model_options(page)
         model_ids = [m[0] for m in options]
         assert "large-v3-turbo" not in model_ids
         assert "small" in model_ids
 
-    def test_turbo_shown_when_faster_whisper_supported(self):
+    def test_turbo_shown_when_faster_whisper_supported(self, installed_faster_whisper):
         """large-v3-turbo is available when faster-whisper supports it."""
         from desktop_app.setup_wizard import WhisperSetupPage
 
@@ -1050,12 +1050,12 @@ class TestWhisperModelOptions:
         page.WHISPER_MODEL_OPTIONS = WhisperSetupPage.WHISPER_MODEL_OPTIONS
         page.WHISPER_MODEL_OPTIONS_EN = WhisperSetupPage.WHISPER_MODEL_OPTIONS_EN
 
-        with patch("desktop_app.setup_wizard._is_faster_whisper_turbo_supported", return_value=True):
-            options = WhisperSetupPage._listed_model_options(page)
+        installed_faster_whisper("1.1.1")
+        options = WhisperSetupPage._listed_model_options(page)
         model_ids = [m[0] for m in options]
         assert "large-v3-turbo" in model_ids
 
-    def test_turbo_always_shown_on_apple_silicon(self):
+    def test_turbo_always_shown_on_apple_silicon(self, installed_faster_whisper):
         """large-v3-turbo is always available on Apple Silicon (MLX backend)."""
         from desktop_app.setup_wizard import WhisperSetupPage
 
@@ -1065,8 +1065,8 @@ class TestWhisperModelOptions:
         page.WHISPER_MODEL_OPTIONS = WhisperSetupPage.WHISPER_MODEL_OPTIONS
         page.WHISPER_MODEL_OPTIONS_EN = WhisperSetupPage.WHISPER_MODEL_OPTIONS_EN
 
-        with patch("desktop_app.setup_wizard._is_faster_whisper_turbo_supported", return_value=False):
-            options = WhisperSetupPage._listed_model_options(page)
+        installed_faster_whisper("1.0.3")
+        options = WhisperSetupPage._listed_model_options(page)
         model_ids = [m[0] for m in options]
         assert "large-v3-turbo" in model_ids
 
@@ -1465,12 +1465,12 @@ class TestPagesWithNoConfiguredValue:
     @pytest.mark.parametrize("case", CASES)
     def test_dictation_page_selects_the_default_hotkey(self, qapp, wizard_config, case):
         from desktop_app.setup_wizard import DictationPage
-        from jarvis.config import get_default_config
+        from jarvis.config import DICTATION_HOTKEY_PRESETS, get_default_config
 
         self._prepare(wizard_config, case, "dictation_hotkey")
         page = DictationPage()
 
-        assert page._hotkey_combo.count() == len(DictationPage._hotkey_options())
+        assert page._hotkey_combo.count() == len(DICTATION_HOTKEY_PRESETS)
         assert page._hotkey_combo.currentData() == get_default_config()["dictation_hotkey"]
 
 
@@ -1617,7 +1617,7 @@ class TestWhisperSetupPageKeepsAnUnlistedModel:
 
         assert wizard_config.read()["whisper_model"] == value
 
-    def test_every_model_the_settings_window_offers_is_listed(self, qapp, wizard_config):
+    def test_every_model_the_settings_window_offers_is_listed(self, qapp, wizard_config, installed_faster_whisper):
         """A size picked in Settings comes back as that size, shown with its
         size details as a listed option rather than kept raw."""
         from desktop_app.settings_window import FIELD_METADATA
@@ -1625,18 +1625,18 @@ class TestWhisperSetupPageKeepsAnUnlistedModel:
         from jarvis.config import SUPPORTED_WHISPER_MODELS
 
         fm = next(f for f in FIELD_METADATA if f.key == "whisper_model")
-        with patch("desktop_app.setup_wizard._is_faster_whisper_turbo_supported", return_value=True):
-            for value, _label in fm.choices:
-                wizard_config.write({"whisper_model": value})
+        installed_faster_whisper("1.1.1")
+        for value, _label in fm.choices:
+            wizard_config.write({"whisper_model": value})
 
-                page = WhisperSetupPage()
-                page.initializePage()
-                page.validatePage()
+            page = WhisperSetupPage()
+            page.initializePage()
+            page.validatePage()
 
-                assert wizard_config.read()["whisper_model"] == value
-                assert SUPPORTED_WHISPER_MODELS[value]["size"] in page._model_info_label.text()
+            assert wizard_config.read()["whisper_model"] == value
+            assert SUPPORTED_WHISPER_MODELS[value]["size"] in page._model_info_label.text()
 
-    def test_switching_a_large_model_to_english_keeps_the_largest_english_size(self, qapp, wizard_config):
+    def test_switching_a_large_model_to_english_keeps_the_largest_english_size(self, qapp, wizard_config, installed_faster_whisper):
         """Large models have no English-only variant: switching lands on the
         largest English size, not the smallest."""
         from desktop_app.setup_wizard import WhisperSetupPage
@@ -1645,15 +1645,15 @@ class TestWhisperSetupPageKeepsAnUnlistedModel:
         large = [m[0] for m in WhisperSetupPage.WHISPER_MODEL_OPTIONS
                  if f"{m[0]}.en" not in {e[0] for e in WhisperSetupPage.WHISPER_MODEL_OPTIONS_EN}]
         assert large
-        with patch("desktop_app.setup_wizard._is_faster_whisper_turbo_supported", return_value=True):
-            for model in large:
-                wizard_config.write({"whisper_model": model})
-                page = WhisperSetupPage()
-                page.initializePage()
-                page._english_btn.click()
-                page.validatePage()
+        installed_faster_whisper("1.1.1")
+        for model in large:
+            wizard_config.write({"whisper_model": model})
+            page = WhisperSetupPage()
+            page.initializePage()
+            page._english_btn.click()
+            page.validatePage()
 
-                assert wizard_config.read()["whisper_model"] == largest_english
+            assert wizard_config.read()["whisper_model"] == largest_english
 
     def test_reentering_the_page_reselects_the_configured_size(self, qapp, wizard_config):
         """Back then Next re-reads the config: a size dragged to but never
@@ -1692,13 +1692,13 @@ class TestWhisperSetupPageKeepsAnUnlistedModel:
 
         assert widths[0] == widths[1]
 
-    def test_turbo_is_kept_when_the_engine_cannot_run_it(self, qapp, wizard_config):
+    def test_turbo_is_kept_when_the_engine_cannot_run_it(self, qapp, wizard_config, installed_faster_whisper):
         from desktop_app.setup_wizard import WhisperSetupPage
 
         wizard_config.write({"whisper_model": "large-v3-turbo"})
+        installed_faster_whisper("1.0.3")
 
-        with patch("desktop_app.setup_wizard.is_apple_silicon", return_value=False), \
-                patch("desktop_app.setup_wizard._is_faster_whisper_turbo_supported", return_value=False):
+        with patch("desktop_app.setup_wizard.is_apple_silicon", return_value=False):
             page = WhisperSetupPage()
             page.initializePage()
             page.validatePage()
@@ -1760,8 +1760,9 @@ class TestDictationPageKeepsAnUnlistedHotkey:
 
     def test_unlisted_hotkey_is_written_back_unchanged(self, qapp, wizard_config):
         from desktop_app.setup_wizard import DictationPage
+        from jarvis.config import DICTATION_HOTKEY_PRESETS
 
-        assert self.UNLISTED not in [v for v, _ in DictationPage._hotkey_options()]
+        assert self.UNLISTED not in DICTATION_HOTKEY_PRESETS
         wizard_config.write({"dictation_hotkey": self.UNLISTED})
 
         page = DictationPage()
@@ -1781,9 +1782,10 @@ class TestDictationPageKeepsAnUnlistedHotkey:
 
     def test_choosing_a_preset_replaces_it(self, qapp, wizard_config):
         from desktop_app.setup_wizard import DictationPage
+        from jarvis.config import DICTATION_HOTKEY_PRESETS
 
         wizard_config.write({"dictation_hotkey": self.UNLISTED})
-        preset = DictationPage._hotkey_options()[0][0]
+        preset = DICTATION_HOTKEY_PRESETS[0]
 
         page = DictationPage()
         page._hotkey_combo.setCurrentIndex(page._hotkey_combo.findData(preset))

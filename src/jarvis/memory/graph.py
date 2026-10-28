@@ -2,7 +2,7 @@
 🧠 Knowledge Graph
 
 A self-organising node graph that stores the assistant's accumulated world
-knowledge — anything learned during conversations that it wouldn't already know.
+knowledge — what it looked up during conversations.
 Placement descends greedily from a fixed branch root; recent nodes and top
 nodes stay available as ranked queries.
 
@@ -109,6 +109,46 @@ def fold_for_search(text: str) -> str:
         return ""
     decomposed = unicodedata.normalize("NFKD", text)
     return "".join(c for c in decomposed if not unicodedata.combining(c)).casefold()
+
+
+def node_preview(data: str, words, budget: int) -> str:
+    """What of a node's data to show for a search, within ``budget`` characters.
+
+    A node that fits is shown whole. One that does not is shown by its
+    lines that name the most of ``words``, most first, as many as fit:
+    `search_nodes` matches a node's whole text, so in a node that has grown
+    long the line that answers the search can sit anywhere, and its first
+    lines are no more likely than any others to be it. Lines are matched
+    the way the search matches them (``fold_for_search``, a word anywhere in
+    the line), so the line that made the node a hit is the line shown.
+    When the best line alone is longer than the budget, it is cut to the
+    budget rather than passed over for a weaker one. When no line holds a
+    word (the node was found by its name or its description), the node's
+    first ``budget`` characters are shown.
+    """
+    if not data:
+        return ""
+    if len(data) <= budget:
+        return data
+    folded_words = {fold_for_search(w) for w in words if w and w.strip()}
+    scored = []
+    for i, line in enumerate(line for line in data.split("\n") if line.strip()):
+        folded = fold_for_search(line)
+        scored.append((sum(w in folded for w in folded_words), i, line))
+    scored.sort(key=lambda t: (-t[0], t[1]))
+    shown: list[str] = []
+    used = 0
+    for score, _, line in scored:
+        if score == 0:
+            break
+        cost = len(line) + (1 if shown else 0)
+        if used + cost > budget:
+            if not shown:
+                return line[:budget]
+            continue
+        shown.append(line)
+        used += cost
+    return "\n".join(shown) if shown else data[:budget]
 
 
 # ── Configuration defaults ──────────────────────────────────────────────────

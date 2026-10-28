@@ -95,10 +95,17 @@ class SetRoutineTool(Tool):
         # opening. This tool and `setReminder` share a prefix and the
         # entire temporal vocabulary, so the discrimination has to land
         # before the first full stop or it is invisible where it matters.
+        # The examples show what a repeat sounds like: without them a small
+        # router routes "every Monday, give me the weather" on what will be
+        # fetched and never on the fact that it recurs. "routine" opens it:
+        # the word the user says when asking for one. The first two
+        # sentences fit the router's 200 characters together, so it sees
+        # the setReminder line too. Measurements: selection.spec.md, What
+        # the router reads.
         return (
-            "Set up a repeating routine Yuba runs on her own at a fixed "
-            "hour, ONLY when the user asks for something to happen every "
-            "day or every week. One thing to be said once is setReminder, "
+            "Set up a routine: any task Yuba does on her own at a fixed "
+            "hour (every morning, every Monday), ONLY when the user asks "
+            "for it to repeat. One thing to be said once is setReminder, "
             "a different tool. This never lists existing routines and "
             "never runs one now."
         )

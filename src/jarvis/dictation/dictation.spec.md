@@ -20,10 +20,16 @@ Defaults are aligned with WisprFlow. Modifier-only combos are supported
 key required).
 
 The hotkey is configurable as a dropdown in both the setup wizard and settings
-window, with four preset options: `ctrl+alt`, `ctrl+cmd`, `ctrl+shift+d`,
-`ctrl+shift`. A hotkey written by hand that no preset matches is added to the
-dropdown as its raw value and selected, so opening either window and saving
-keeps it.
+window. The presets are `DICTATION_HOTKEY_PRESETS` in `jarvis/config.py`,
+beside `_default_dictation_hotkey()`, and every platform's default is one of
+them. Both dropdowns are built by `dictation_hotkey_choices()` in
+`hotkeys.py`: each preset labelled with `format_hotkey_display()`, the platform
+default's label ending in `(default)`. `hotkeys.py` is plain string work and
+imports neither sounddevice, numpy nor pynput, so labelling a dropdown loads
+none of the engine's audio or keyboard libraries. A preset added to the list
+reaches both windows. A hotkey written by hand that no preset matches is added
+to the dropdown as its raw value and selected, so opening either window and
+saving keeps it.
 
 ## Core Flow
 
@@ -37,6 +43,11 @@ keeps it.
    publish `DICTATION_PROCESSING`, transcribe via shared Whisper model, apply
    post-processing pipeline, paste result into focused app via clipboard,
    publish `IDLE`, resume main voice listener.
+
+Only a fresh press of the hotkey starts a recording. The OS repeats a held
+key's press, and a repeat never starts one, so a press that was refused (no
+microphone, Whisper not loaded) is tried again only once the hotkey is
+released and pressed again.
 
 The published state therefore moves through three distinct values across a
 dictation cycle: `DICTATING` while recording, `DICTATION_PROCESSING` while the
@@ -95,16 +106,36 @@ After transcription, text passes through these stages in order:
   module must always import cleanly even when they are broken or missing
   (e.g. `import sounddevice` raises **OSError**, not ImportError, when the
   PortAudio shared library is absent; `pynput` can raise display errors on
-  headless Linux). Importers such as the setup wizard rely on this: a
+  headless Linux). The daemon's dictation start-up relies on this, and in
+  the bundled app the daemon runs inside the desktop app's process: a
   missing audio backend must never crash the app.
 
 ### Audio Device Handling
 
 - The engine accepts an optional `voice_device` parameter, passed through from
-  the daemon's configured device.
-- The stream first attempts the target Whisper sample rate (16 kHz).
-- On failure (e.g. PortAudio error -50 on macOS), it falls back to the
-  device's native sample rate and stores it in `_stream_sample_rate`.
+  the daemon's configured device, and resolves it on every press with the
+  shared resolver the wake-word listener also uses (`resolve_input_device` in
+  `jarvis.utils.audio_stream`), so both record from the same microphone:
+  blank, `default` or `system` is the system default input, a number is a
+  device index, and any other text is the first input-capable device whose
+  name contains it, ignoring case.
+- PortAudio reads the device list once, when the app starts, and every press
+  resolves against that list. A microphone connected later is found once the
+  app is quit and reopened.
+- The device is resolved first, before the Whisper check and before anything
+  announces a recording. A name that matches no input (the microphone was not
+  connected when the app started, so the listener refused it too) records
+  nothing: no other input is opened, no start beep plays, and the console says
+  the selected microphone was not found. A failed device lookup is handled the
+  same way, without the console line.
+- A microphone unplugged while the app runs is still in that list, so its name
+  still matches: the start beep plays, its stream fails to open, the console
+  says the microphone could not be opened, and the recording ends with nothing
+  captured.
+- The stream opens at the selected input's native sample rate (requesting
+  16 kHz fails on many devices, e.g. PortAudio error -50 on macOS), with
+  `open_input_stream`'s format negotiation, and stores the rate in
+  `_stream_sample_rate`.
 - If the stream rate differs from the Whisper target rate, audio is resampled
   via linear interpolation before transcription.
 
@@ -120,6 +151,9 @@ After transcription, text passes through these stages in order:
 | macOS 26+ (Tahoe)         | `pynput` disabled — TSM main-thread assertion crash |
 | Linux / Wayland           | `pynput` requires X11 (limited Wayland support)    |
 | Audio rate mismatch       | Resample via linear interpolation to Whisper rate  |
+| Named microphone missing at startup | Records nothing, opens no other input, no start beep; console line |
+| Named microphone unplugged while running | Start beep, stream fails to open, console line, nothing recorded |
+| Hotkey held after a refused press | Key repeat does not retry it; the next fresh press does |
 | LLM filler removal fails  | Falls back to raw transcription (5 s timeout)     |
 | Custom dictionary empty   | No-op, text passes through unchanged               |
 

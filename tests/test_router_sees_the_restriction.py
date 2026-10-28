@@ -1,7 +1,8 @@
 """What the tool router actually reads.
 
-The router is given one line per tool: the name, and the first 120
-characters of the description. Everything past that is invisible to it —
+The router is given one line per tool: the name, and the whole
+sentences of the description that fit in 200 characters
+(`_router_summary`). Everything past that is invisible to it —
 so a description whose opening sentence invites and whose restriction
 comes second is, to the router, an unrestricted invitation.
 
@@ -13,8 +14,8 @@ user said "can't you write to me in the conversation?", the router
 matched on the one word the two had in common, and the model filed her
 own previous answer as a permanent fact about him.
 
-The lesson generalises past that one tool: the first 120 characters have
-to carry the discrimination, because they are all the router gets.
+The lesson generalises past that one tool: the sentences within the cut
+have to carry the discrimination, because they are all the router gets.
 """
 
 from __future__ import annotations
@@ -101,7 +102,38 @@ def test_the_router_sees_that_set_routine_is_for_repeating_things():
     invisible exactly where it is needed."""
     seen = _seen("setRoutine").lower()
 
-    assert "every day" in seen or "every week" in seen
+    assert "repeat" in seen
+
+
+def test_the_router_sees_what_a_repeat_sounds_like():
+    """Without an example of how a repeat is asked, a small router routes
+    "tous les lundis matin, fais-moi un point sur la météo" on what will
+    be fetched (the weather) and never on the fact that it recurs."""
+    seen = _seen("setRoutine").lower()
+
+    assert "every morning" in seen and "every monday" in seen
+
+
+# ── Tools the user names by what they want, not by what they do ──────
+
+
+def test_the_router_sees_that_local_files_finds_things_on_the_computer():
+    """The user asks for a file "on my computer"; a description about "your
+    home directory" read to a small router as somebody else's, and "trouve
+    la facture PDF sur mon ordinateur" was answered 'none'."""
+    seen = _seen("localFiles").lower()
+
+    assert "computer" in seen
+    assert "search" in seen
+
+
+def test_the_router_sees_that_fetch_web_page_reads_articles():
+    """"A detailed article" is what the user asks for, and the page tool
+    is the one that reads it whole after webSearch has found it."""
+    seen = _seen("fetchWebPage").lower()
+
+    assert "article" in seen
+    assert "websearch" in seen
 
 
 def test_the_router_sees_that_set_routine_is_not_set_reminder():

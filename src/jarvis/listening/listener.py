@@ -24,6 +24,7 @@ from .state_manager import StateManager, ListeningState
 from ..utils.audio_lock import portaudio_lock
 from .wake_detection import is_wake_word_detected, extract_query_after_wake, is_stop_command
 from .transcript_buffer import TranscriptBuffer
+from .whisper_turbo import is_faster_whisper_turbo_supported
 from .intent_judge import (
     IntentJudge,
     _is_low_power_mode_enabled,
@@ -40,8 +41,10 @@ if TYPE_CHECKING:
     from ..memory.conversation import DialogueMemory
 
 from ..utils.audio_stream import (
+    InputDeviceNotFound,
     is_input_format_error,
     open_input_stream,
+    resolve_input_device,
 )
 
 def _open_input_stream(
@@ -372,16 +375,6 @@ def _query_is_an_unfinished_fragment(heard: str, query: str) -> bool:
         return False
     plat = re.sub(r"\s+", " ", heard.rstrip("… .").lower())
     return re.sub(r"\s+", " ", query.lower()) in plat
-
-
-def _is_faster_whisper_turbo_supported() -> bool:
-    """Check if the installed faster-whisper supports the large-v3-turbo model."""
-    try:
-        import faster_whisper
-        from packaging.version import Version
-        return Version(faster_whisper.__version__) >= Version("1.1.0")
-    except Exception:
-        return False
 
 
 def _get_mlx_model_repo(model_name: str) -> str:
@@ -2273,19 +2266,14 @@ class VoiceListener(threading.Thread):
 
         # Resolve the same input for the permission probe and continuous capture.
         stream_kwargs = {}
-        device_env = (self.cfg.voice_device or '').strip().lower()
-        if device_env and device_env not in ('default', 'system'):
-            try:
-                stream_kwargs['device'] = int(self.cfg.voice_device)
-            except ValueError:
-                for idx, dev in enumerate(devices):
-                    if dev.get('max_input_channels', 0) > 0 and device_env in dev.get('name', '').lower():
-                        stream_kwargs['device'] = idx
-                        break
-                else:
-                    print("  ❌ Selected microphone not found. Choose an available input in Settings.", flush=True)
-                    debug_log("configured input device did not match an available microphone", "voice")
-                    return
+        try:
+            device = resolve_input_device(self.cfg.voice_device, lambda: devices)
+        except InputDeviceNotFound:
+            print("  ❌ Selected microphone not found. Choose an available input in Settings.", flush=True)
+            debug_log("configured input device did not match an available microphone", "voice")
+            return
+        if device is not None:
+            stream_kwargs['device'] = device
 
         # Windows 11: Test microphone permission by attempting a brief recording
         # This catches privacy settings that silently block audio access.
@@ -2400,7 +2388,7 @@ class VoiceListener(threading.Thread):
 
         # Validate large-v3-turbo support for faster-whisper backend
         if model_name == "large-v3-turbo" and self._whisper_backend != "mlx":
-            if not _is_faster_whisper_turbo_supported():
+            if not is_faster_whisper_turbo_supported():
                 debug_log(
                     "faster-whisper does not support large-v3-turbo, "
                     "falling back to large-v3", "voice",

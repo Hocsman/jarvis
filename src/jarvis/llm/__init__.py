@@ -33,6 +33,7 @@ from .backend import LLMBackend, ToolsNotSupportedError, strip_nonstandard_messa
 from .ollama import OllamaBackend, extract_text_from_response
 from .openai_compatible import OpenAICompatibleBackend
 from .factory import (
+    chat_is_remote,
     clear_backend_cache,
     get_auxiliary_backend,
     get_embedding_backend,
@@ -41,6 +42,7 @@ from .factory import (
 )
 
 __all__ = [
+    "chat_is_remote",
     "get_auxiliary_backend",
     "get_private_backend",
     "LLMBackend",

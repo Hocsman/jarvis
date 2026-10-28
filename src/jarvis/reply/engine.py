@@ -816,6 +816,11 @@ _STOP_WORDS = frozenset({
 # stop-word set. Cheap language-agnostic backstop against generic 1–2 char noise.
 _MIN_CONTENT_WORD_LEN = 3
 
+# Characters of each matched graph node that reach the prompt. A node
+# larger than this is shown by its lines that name the search
+# (`node_preview`), so the budget stays the same however large it grows.
+_GRAPH_PREVIEW_CHARS = 300
+
 
 def _is_content_word(word: str) -> bool:
     """True if `word` looks like a meaningful content token (not stop word, not too short)."""
@@ -861,25 +866,29 @@ def _plan_step_lookup_words(step: str) -> set:
     }
 
 
-def _memory_already_answers(step: str, memory_text: str) -> bool:
-    """True when every word this step would look up is already in the
+def _memory_already_answers(step: str, memory_facts) -> bool:
+    """True when every word this step would look up is in one fact of the
     memory that reaches the model's prompt.
 
     Total coverage, never partial. A step asking what a machine costs is
     not answered by a note about its memory, and a rule that accepted
     the overlap would cancel the one search carrying the missing half.
+    And within one fact: a line naming the machine and another naming
+    the price of a kettle do not say what the machine costs, so the
+    words are not pooled across facts. A graph fact carries its node's
+    path, since a node's lines need not repeat its name.
     Two content words minimum, for the same reason the graph search has
     a floor: one generic term coincides with anything.
     """
     from ..memory.graph import fold_for_search
 
-    if not memory_text:
-        return False
     words = _plan_step_lookup_words(step)
     if len(words) < 2:
         return False
-    haystack = fold_for_search(memory_text)
-    return all(w in haystack for w in words)
+    return any(
+        all(w in folded for w in words)
+        for folded in (fold_for_search(fact) for fact in memory_facts if fact)
+    )
 
 
 def _step_only_reads(step: str) -> bool:
@@ -1718,6 +1727,9 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
     # marginally-relevant diary / graph text.
     raw_diary_entries: list[str] = []
     raw_graph_parts: list[str] = []
+    # One entry per graph line shown, each with its node's path: the facts
+    # a plan step can be measured against (`_memory_already_answers`).
+    graph_facts: list[str] = []
     keywords = []
 
     questions: list[str] = []
@@ -1855,7 +1867,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         else:
             graph_store = None
             try:
-                from ..memory.graph import GraphMemoryStore
+                from ..memory.graph import GraphMemoryStore, node_preview
                 graph_store = GraphMemoryStore(cfg.db_path)
 
                 graph_parts: list[str] = []
@@ -1883,9 +1895,10 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                     for node in graph_nodes:
                         ancestors = graph_store.get_ancestors(node.id)
                         path = " > ".join(a.name for a in ancestors)
-                        data_preview = node.data[:300] if node.data else ""
+                        data_preview = node_preview(node.data, search_words, _GRAPH_PREVIEW_CHARS)
                         if data_preview:
                             graph_parts.append(f"[{path}] {data_preview}")
+                            graph_facts.extend(f"[{path}] {line}" for line in data_preview.split("\n"))
                             # Whichever list drove the search explains the hit.
                             matched_q = _match_question(
                                 data_preview,
@@ -2055,6 +2068,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
     # skip — the whole reason this defect survived was that nothing said
     # anything.
     _prompt_memory = graph_context or memory_digest_text
+    _prompt_facts = graph_facts if graph_context else memory_digest_text.split("\n")
     if raw_graph_parts and not _prompt_memory:
         debug_log(
             f"{len(raw_graph_parts)} graph hit(s) retrieved but nothing survived "
@@ -2068,7 +2082,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
             if (
                 _step in _tool_steps
                 and _step_only_reads(_step)
-                and _memory_already_answers(_step, _prompt_memory)
+                and _memory_already_answers(_step, _prompt_facts)
             ):
                 print(
                     f"    ⏭️ Lookup skipped — already in memory: {_step[:60]}",

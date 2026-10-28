@@ -15,13 +15,21 @@ are caught before they land. Known motivating failures:
   - "should I order pizza tonight?" → router picked [stop] only. fetchMeals
     never reached the LLM, so the agent could not ground its advice in
     today's intake.
+  - "tous les lundis matin, fais-moi un point sur la météo" → the router
+    picked the weather and the web, never setRoutine (qwen2.5:3b, 3 runs in
+    3); "trouve la facture PDF sur mon ordinateur" → 'none', never
+    localFiles (3 in 3).
 
 Principles locked in here:
   1. Implicit-intent queries (no tool-name keywords) must still route to the
      correct tool.
-  2. The router must NEVER collapse to only `stop` when the query has a clear
-     actionable intent — that is a "silently useless" failure mode.
+  2. The router must NEVER collapse to only the mandatory tools when the
+     query has a clear actionable intent — that is a "silently useless"
+     failure mode.
   3. Multi-intent queries must surface each relevant tool (or a superset).
+  4. A request whose job only one tool can do (repeat something on a
+     schedule, find a file, read an article) must reach that tool, in
+     every language it is asked in.
 
 Run:
     EVAL_JUDGE_MODEL=gemma4:e2b pytest evals/test_tool_router_implicit.py -v
@@ -56,8 +64,9 @@ def _route(query: str, context_hint=None):
 
 
 def _real_tools(selected):
-    """Filter out the always-present `stop` sentinel."""
-    return [t for t in selected if t != "stop"]
+    """What the router chose beyond the tools that always come back."""
+    from jarvis.tools.selection import _ALWAYS_INCLUDED
+    return [t for t in selected if t not in _ALWAYS_INCLUDED]
 
 
 # =============================================================================
@@ -122,12 +131,14 @@ class TestImplicitIntent:
         print(f"  Selected: {selected}")
 
         # Floor invariant (soft — small router models sometimes collapse to
-        # only 'stop' on dietary/advisory queries). Tracked as xfail so a
-        # future router improvement flips this to an unexpected pass.
+        # only the mandatory tools on dietary/advisory queries). Tracked as
+        # xfail so a future router improvement flips this to an unexpected
+        # pass.
         if not real:
             pytest.xfail(
-                f"Router collapsed to only 'stop' for an actionable query on "
-                f"{JUDGE_MODEL}. Query: {query!r}. Rationale: {rationale}"
+                f"Router collapsed to only the mandatory tools for an "
+                f"actionable query on {JUDGE_MODEL}. Query: {query!r}. "
+                f"Rationale: {rationale}"
             )
 
         matched = [t for t in must_include_any if t in selected]
@@ -185,8 +196,8 @@ class TestMultiToolIntent:
 
         if not real:
             pytest.xfail(
-                f"Router collapsed to only 'stop' for a multi-intent query on "
-                f"{JUDGE_MODEL}. Query: {query!r}."
+                f"Router collapsed to only the mandatory tools for a "
+                f"multi-intent query on {JUDGE_MODEL}. Query: {query!r}."
             )
 
         missing = [t for t in must_include_all if t not in selected]
@@ -198,12 +209,13 @@ class TestMultiToolIntent:
 
 
 # =============================================================================
-# Floor Invariant — router must never silently collapse to only `stop`
+# Floor Invariant — router must never silently collapse to the mandatory tools
 # =============================================================================
 
 # Queries that have an unambiguous tool-shaped answer. The router may legitimately
-# narrow the catalogue, but returning only [stop] for any of these is a bug: it
-# means the main model will have no way to act on the user's clear request.
+# narrow the catalogue, but returning only the mandatory tools for any of these is
+# a bug: it means the main model will have no way to act on the user's clear
+# request.
 NEVER_EMPTY_CASES = [
     "take a screenshot",
     "what's on my screen right now?",
@@ -217,7 +229,7 @@ NEVER_EMPTY_CASES = [
 @pytest.mark.eval
 @requires_judge_llm
 class TestRouterNeverCollapses:
-    """Regression guard for the 'selected only stop' failure mode."""
+    """Regression guard for the 'selected only the mandatory tools' failure mode."""
 
     @pytest.mark.parametrize("query", NEVER_EMPTY_CASES)
     def test_clear_intent_keeps_at_least_one_real_tool(self, query):
@@ -226,7 +238,86 @@ class TestRouterNeverCollapses:
         print(f"\n  Query: {query}")
         print(f"  Selected: {selected}")
         assert real, (
-            f"Router collapsed to only 'stop' for a clearly actionable query. "
-            f"Query: {query!r}. This silently disables the agent — every main-"
+            f"Router collapsed to only the mandatory tools for a clearly "
+            f"actionable query. Query: {query!r}. This silently disables the agent — every main-"
             f"model tool_call would be dropped as out-of-catalogue."
+        )
+
+
+# =============================================================================
+# Task Tools — the request is a job only one tool can do
+# =============================================================================
+
+# A time and location line in the place of the one the reply engine hands
+# the router on every turn (`_build_enrichment_context_hint`, which words
+# the date differently); the router reads both as KNOWN FACTS. Measured in
+# this shape, not bare, because the bare shape is not the one the user's
+# sentences meet: with no KNOWN FACTS block, qwen2.5:3b answers 'none' to
+# "trouve la facture PDF sur mon ordinateur" whatever localFiles says, and
+# does so because of the router prompt's 'none' rule (removed, it picks a
+# tool).
+_LIVE_FACTS = (
+    "Current local time: Tuesday, 2026-10-27 17:42 (Europe/Paris). "
+    "Location: Paris, Île-de-France, France."
+)
+
+# (query, must_include_all, rationale), each asked in French and in English.
+TASK_TOOL_CASES = [
+    pytest.param(
+        "tous les lundis matin, fais-moi un point sur la météo",
+        ["setRoutine"],
+        "Something to happen every week is a routine; the weather is only "
+        "what the routine will fetch.",
+        id="FR: weekly weather report → setRoutine",
+    ),
+    pytest.param(
+        "every Monday morning, give me a weather update",
+        ["setRoutine"],
+        "Same request in English.",
+        id="EN: weekly weather report → setRoutine",
+    ),
+    pytest.param(
+        "trouve la facture PDF sur mon ordinateur",
+        ["localFiles"],
+        "A file on the user's own computer, not on the web.",
+        id="FR: invoice on the computer → localFiles",
+    ),
+    pytest.param(
+        "find the invoice PDF on my computer",
+        ["localFiles"],
+        "Same request in English.",
+        id="EN: invoice on the computer → localFiles",
+    ),
+    pytest.param(
+        "trouve-moi un article détaillé sur le programme Apollo",
+        ["webSearch", "fetchWebPage"],
+        "An article is found by searching and read by opening it.",
+        id="FR: detailed article → webSearch + fetchWebPage",
+    ),
+    pytest.param(
+        "find me a detailed article about the Apollo program",
+        ["webSearch", "fetchWebPage"],
+        "Same request in English.",
+        id="EN: detailed article → webSearch + fetchWebPage",
+    ),
+]
+
+
+@pytest.mark.eval
+@requires_judge_llm
+class TestRouterOffersTheTaskTool:
+    """Router must offer the tool that does the job the user asked for."""
+
+    @pytest.mark.parametrize("query, must_include_all, rationale", TASK_TOOL_CASES)
+    def test_task_reaches_its_tool(self, query, must_include_all, rationale):
+        selected = _route(query, context_hint=_LIVE_FACTS)
+
+        print(f"\n  Query: {query}")
+        print(f"  Rationale: {rationale}")
+        print(f"  Selected: {selected}")
+
+        missing = [t for t in must_include_all if t not in selected]
+        assert not missing, (
+            f"Router did not offer {missing} on {JUDGE_MODEL}. Got: {selected}. "
+            f"Rationale: {rationale}"
         )

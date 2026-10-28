@@ -51,6 +51,8 @@ def _setup(mock_config, tmp_path, *, verdict="Demande"):
     # every approval would come back `flou`, and the eval would be
     # measuring an unreachable endpoint.
     mock_config.confirmation_model = JUDGE_MODEL
+    # The routine's schedule: read by this pin with the chat at home, by
+    # the chat model when it is remote.
     mock_config.reminder_model = JUDGE_MODEL
     mock_config.reminder_timeout_sec = 30.0
     mock_config.reminder_default_hour = 9
