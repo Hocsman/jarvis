@@ -238,12 +238,11 @@ class OllamaBackend(LLMBackend):
             "cache_prompt": True,
             "options": {"num_ctx": 8192},
         }
-        # A request carrying tools never says ``think: false``. Ollama reads
-        # an explicit false as an instruction about the model's reasoning
-        # mode, and on a model that has no such mode it suppresses native
-        # tool calls outright: measured on gemma4:e2b, the same request
-        # scores 3/3 tool calls with the key absent and 0/3 with the flag,
-        # for ``remember`` and ``getWeather`` alike.
+        # A request carrying tools never says ``think: false``. gemma4:e2b
+        # has a thinking mode, and an explicit false that switches it off
+        # also stops its native tool calls: with the persona prompt, 0/20
+        # calls with the flag against 16/20 with the key absent, for
+        # ``remember`` and ``getWeather`` alike (llm.spec.md has the run).
         #
         # Only tool-carrying requests drop it. On tool-free calls the flag
         # earns its place: the same model extracts nothing at all from a
