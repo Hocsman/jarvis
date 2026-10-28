@@ -31,6 +31,10 @@ JUDGE_MODEL = os.environ.get("EVAL_JUDGE_MODEL", "gemma4:e2b")
 # extracts times and reads approvals. Pinning them together measures a
 # configuration nobody runs, so this exists to measure the one they do.
 SMALL_MODEL = os.environ.get("EVAL_SMALL_MODEL", "") or JUDGE_MODEL
+
+# The memory lookup's own model. Empty, the lookup rides the small chain,
+# as it does on a machine where `memory_extractor_model` is not set.
+MEMORY_EXTRACTOR_MODEL = os.environ.get("EVAL_MEMORY_EXTRACTOR_MODEL", "")
 JUDGE_BASE_URL = os.environ.get("EVAL_JUDGE_BASE_URL", "http://localhost:11434")
 
 # Which backend the suite runs against. Ollama by default, because the
@@ -336,6 +340,7 @@ class MockConfig:
     tool_router_model: str = SMALL_MODEL
     reminder_model: str = SMALL_MODEL
     confirmation_model: str = SMALL_MODEL
+    memory_extractor_model: str = MEMORY_EXTRACTOR_MODEL
     ollama_embed_model: str = "nomic-embed-text"
     db_path: str = ":memory:"
     sqlite_vss_path: Optional[str] = None
