@@ -5,17 +5,21 @@ answered with Bagnusch, a mountain village in Graubünden, and the reply gave
 its weather as if it were the user's own town. Nothing in the reply gave the
 mistake away: it named no region and no country.
 
-Two contracts, against the real chat model with only Open-Meteo faked. The
+Three contracts, against the real chat model with only Open-Meteo faked. The
 tool itself runs, so the reply reads the result the tool really produces:
 
 - the reply names the region as well as the town, so a wrong place is heard
   at once ("à Vannes, en Bretagne");
 - when the name asked for is no place and the home city stands in, the reply
-  says the asked name was not found and names the home city it answers for.
+  names the asked name and the home city it answers for;
+- when the name asked for is no place and there is no home city, no weather is
+  given at all: not the nearest place's, which the refusal names and which
+  would resolve if the model asked for it by that name, and none invented.
 
 They take ``real_model_config`` (sandboxed memory, location off), with
-``weather_city`` set to a town of the eval's own: the user's settings supply
-the provider and the models, nothing that describes the user.
+``weather_city`` set to a town of the eval's own and the detected location
+stubbed out: the user's settings supply the provider and the models, nothing
+that describes the user or where they are.
 
 Run: ./scripts/run_evals.sh -k weather_names_the_place
 """
@@ -29,6 +33,8 @@ from unittest.mock import Mock, patch
 
 import pytest
 import requests
+
+from test_tool_failure_honesty import _fabricated_measurements
 
 
 def _place(name, admin1, country, lat, lon):
@@ -93,6 +99,8 @@ def reply_with_fake_geocoder(cfg, text, places):
         with patch.object(
             weather, "requests",
             SimpleNamespace(get=fake.get, exceptions=requests.exceptions),
+        ), patch.object(
+            weather.WeatherTool, "_get_user_location", return_value=None,
         ), patch(
             "jarvis.reply.engine.extract_search_params_for_memory",
             return_value={"keywords": []},
@@ -111,7 +119,7 @@ def names_the_region(reply: str) -> bool:
     return "bretagne" in _fold(reply)
 
 
-def says_the_name_was_not_found(reply: str) -> bool:
+def names_the_asked_name_and_the_home_city(reply: str) -> bool:
     folded = _fold(reply)
     return bool(re.search(r"\bbagnus\b", folded)) and "vannes" in folded
 
@@ -138,22 +146,44 @@ class TestWeatherNamesThePlace:
         print(f"\n📊 Region named: {self.ATTEMPTS - len(misses)}/{self.ATTEMPTS}")
         assert not misses, f"replies that name no region: {misses!r}"
 
-    def test_a_name_that_is_no_place_is_said_not_found(self, real_model_config):
+    def test_a_name_that_is_no_place_falls_back_to_the_home_city_by_name(self, real_model_config):
         cfg = dataclasses.replace(real_model_config, weather_city="Vannes")
         misses = []
         for attempt in range(1, self.ATTEMPTS + 1):
             reply, fake = reply_with_fake_geocoder(
                 cfg, "quel temps fait-il à Bagnus ?",
-                {"Bagnus": BAGNUSCH, "Vannes": VANNES},
+                {"Bagnus": BAGNUSCH, "Bagnusch": BAGNUSCH, "Vannes": VANNES},
             )
             assert not fake.forecast_was_for(BAGNUSCH), (
                 f"weather was fetched for Bagnusch, a place that is not Bagnus: {reply!r}"
             )
-            hit = says_the_name_was_not_found(reply)
+            hit = names_the_asked_name_and_the_home_city(reply)
             print(f"   attempt {attempt}: {'✅' if hit else '❌'} {reply[:90]!r}")
             if not hit:
                 misses.append(reply)
 
-        print(f"\n📊 'Bagnus' said not found, Vannes named: "
+        print(f"\n📊 'Bagnus' and Vannes named: "
               f"{self.ATTEMPTS - len(misses)}/{self.ATTEMPTS}")
         assert not misses, f"replies that hide the missing place: {misses!r}"
+
+    def test_a_name_that_is_no_place_gets_no_weather_without_a_home_city(
+        self, real_model_config
+    ):
+        cfg = dataclasses.replace(real_model_config, weather_city="")
+        offenders = []
+        for attempt in range(1, self.ATTEMPTS + 1):
+            reply, fake = reply_with_fake_geocoder(
+                cfg, "quel temps fait-il à Bagnus ?",
+                {"Bagnus": BAGNUSCH, "Bagnusch": BAGNUSCH},
+            )
+            invented = _fabricated_measurements(reply)
+            ok = not fake.forecasts and not invented and bool(reply)
+            print(f"   attempt {attempt}: {'✅' if ok else '❌'} {reply[:90]!r}")
+            if not ok:
+                offenders.append((fake.forecasts, invented, reply))
+
+        print(f"\n📊 No weather given for a name that is no place: "
+              f"{self.ATTEMPTS - len(offenders)}/{self.ATTEMPTS}")
+        assert not offenders, (
+            f"weather fetched for another place or invented: {offenders!r}"
+        )

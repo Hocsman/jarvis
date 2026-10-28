@@ -161,6 +161,46 @@ class TestAMisheardNameIsNotAnotherPlace:
         assert result.success is False
         assert fake.forecasts == []
 
+    def test_a_refusal_names_the_place_it_passed_over(self):
+        fake = FakeOpenMeteo({
+            ("Bagnus", "fr"): [BAGNUSCH_FR],
+            ("Bagnus", "en"): [BAGNUSCH_EN],
+        })
+
+        result = _run(fake, {"location": "Bagnus"}, _context(language="fr"))
+
+        assert "Bagnusch" in result.reply_text
+
+    def test_a_home_city_that_fails_is_reported_as_the_configured_city(self):
+        """The user named nothing: asking what was meant by a name never
+        said would be wrong. The result says it is the configured city."""
+        munich_en = _place("Munich", "Bavaria", "Germany", 48.14, 11.58)
+        fake = FakeOpenMeteo({("München", "en"): [munich_en]})
+
+        result = _run(fake, {}, _context(language=None, weather_city="München"))
+
+        assert result.success is False
+        assert fake.forecasts == []
+        assert "home city" in result.reply_text.lower()
+        assert "München" in result.reply_text
+
+    def test_when_the_named_place_and_the_home_city_both_fail_both_are_said(self):
+        fake = FakeOpenMeteo({
+            ("Bagnus", "fr"): [BAGNUSCH_FR],
+            ("Bagnus", "en"): [BAGNUSCH_EN],
+            ("Bagnex", "fr"): [_place("Bagnes", "Valais", "Suisse", 46.08, 7.22)],
+            ("Bagnex", "en"): [_place("Bagnes", "Valais", "Switzerland", 46.08, 7.22)],
+        })
+
+        result = _run(fake, {"location": "Bagnus"},
+                      _context(language="fr", weather_city="Bagnex"))
+
+        assert result.success is False
+        assert fake.forecasts == []
+        assert "Bagnus" in result.reply_text
+        assert "Bagnex" in result.reply_text
+        assert "home city" in result.reply_text.lower()
+
     def test_a_name_nobody_has_falls_back_to_the_home_city(self):
         fake = FakeOpenMeteo({("Bagneux", "en"): [BAGNEUX_EN]})
 
@@ -235,6 +275,14 @@ class TestWhatCountsAsTheSameName:
         assert self._accepts("Saint Denis", "Saint-Denis")
         assert self._accepts("L'Haÿ-les-Roses", "L’Hay les Roses")
 
+    def test_letters_with_a_stroke_or_without_a_dot_fold_like_accents(self):
+        """NFKD leaves ø, ł, ı and œ whole; a keyboard or a transcript that
+        drops them still names the same place."""
+        assert self._accepts("Tromso", "Tromsø")
+        assert self._accepts("Lodz", "Łódź")
+        assert self._accepts("Diyarbakir", "Diyarbakır")
+        assert self._accepts("Oeuilly", "Œuilly")
+
     def test_one_name_may_be_the_others_leading_words(self):
         assert self._accepts("New York City", "New York")
         assert self._accepts("Paris 13e", "Paris 13e Arrondissement")
@@ -264,6 +312,23 @@ class TestThePlaceCanBeHeard:
         result = _run(fake, {"location": "Bagneux"}, _context(language="fr"))
 
         assert '"Bagneux, Île-de-France"' in result.reply_text
+
+    def test_a_place_with_no_region_of_its_own_is_said_with_its_country(self):
+        tbilisi = _place("Tbilisi", "Tbilisi", "Georgia", 41.69, 44.83)
+        fake = FakeOpenMeteo({("Tbilisi", "en"): [tbilisi]})
+
+        result = _run(fake, {"location": "Tbilisi"}, _context())
+
+        assert '"Tbilisi, Georgia"' in result.reply_text
+
+    def test_a_city_state_is_not_named_twice(self):
+        monaco = _place("Monaco", "Monaco", "Monaco", 43.73, 7.42)
+        fake = FakeOpenMeteo({("Monaco", "en"): [monaco]})
+
+        result = _run(fake, {"location": "Monaco"}, _context())
+
+        assert result.success is True, result.reply_text
+        assert "Monaco, Monaco" not in result.reply_text
 
     def test_a_detected_location_is_said_with_its_region_too(self):
         ctx = _context()

@@ -196,9 +196,9 @@ These are ephemeral stdout prints (`context.user_print`). They are not persisted
 ### Per-utterance language
 
 `ToolContext.language` carries the ISO-639-1 code Whisper detected at
-the listener site. It is currently consumed only by the Wikipedia
-fallback to pick the right subdomain, but any future locale-sensitive
-tool can read it. `None` on non-voice entrypoints (evals, unit tests,
+the listener site. Here the Wikipedia fallback reads it to pick the
+right subdomain; `getWeather` reads it to search place names in the
+user's language ([weather.spec.md](weather.spec.md)). `None` on non-voice entrypoints (evals, unit tests,
 text input) — tools must treat `None` as "no signal" and choose a safe
 default.
 
