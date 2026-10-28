@@ -236,39 +236,41 @@ def _restore_hidden_values(written, inputs) -> list:
     """Put back, in a rewrite's lines, the values a remote model saw only as markers.
 
     The redacting backend hands a remote model ``scrub_secrets`` of every
-    line, so a faithful rewrite returns an address or a long number as a
-    ``[REDACTED_*]`` marker. A written line carrying a marker is matched
-    against the inputs' scrubbed lines the way ``_claims_kept`` matches a
-    claim (the same key, or ``_REWRITE_MATCH`` and every figure), and is
-    replaced by the one input line it stands for. A marker that matches no
-    input line, or two that hid different values, is left in place for the
-    redaction guard to refuse.
+    line, so a line it copies faithfully comes back with an address or a
+    long number as a ``[REDACTED_*]`` marker. A written line carrying a
+    marker whose claim is exactly the scrubbed claim of an input line (the
+    same ``_match_key``) is replaced by that line, value and all. Lines that
+    differ only by their provenance suffix count as one. Anything looser is
+    left as it came for the redaction guard to judge: a line the model
+    reworded may carry an edit or a fact it folded in, and putting the old
+    line back would undo it; a marker matching no input line, or input lines
+    that hid different values, has no single value to give back.
     """
-    if not (_redaction_markers(written) - _redaction_markers(inputs)):
+    if not any(redaction_placeholders(line) for line in written):
         return list(written)
-    sources: dict[str, set] = {}
+    sources: dict[str, dict[str, str]] = {}
     for line in inputs:
         scrubbed = scrub_secrets(line)
         if scrubbed != line:
-            sources.setdefault(_match_key(scrubbed), set()).add(line)
-    figures = {key: set(_DIGITS.findall(key)) for key in sources}
-    choices = list(sources)
+            sources.setdefault(_match_key(scrubbed), {}).setdefault(fact_text(line), line)
     restored = []
+    put_back = held = 0
     for line in written:
-        key = _match_key(line)
-        if not redaction_placeholders(line) or not choices:
+        if not redaction_placeholders(line):
             restored.append(line)
             continue
-        originals = sources.get(key)
-        if originals is None:
-            held = set(_DIGITS.findall(key))
-            originals = set()
-            for choice, _, _ in process.extract(
-                    key, choices, scorer=fuzz.ratio,
-                    score_cutoff=_REWRITE_MATCH, limit=None):
-                if figures[choice] <= held:
-                    originals |= sources[choice]
-        restored.append(next(iter(originals)) if len(originals) == 1 else line)
+        originals = sources.get(_match_key(line), {})
+        if len(originals) == 1:
+            restored.append(next(iter(originals.values())))
+            put_back += 1
+        else:
+            restored.append(line)
+            held += 1
+    debug_log(
+        f"hidden values: {put_back} marked line(s) put back as the input held "
+        f"them, {held} left with their marker",
+        "memory",
+    )
     return restored
 
 

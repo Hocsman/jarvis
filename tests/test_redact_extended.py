@@ -188,3 +188,19 @@ class TestHiddenValues:
         scrubbed = scrub_secrets(text)
         for value in values:
             assert value in text and value not in scrubbed
+
+    @pytest.mark.parametrize("text", [
+        "Access token: ghp_" + "a" * 36,
+        "API_KEY=abc@d.co",
+        "The admin password: hunter2@example.com is old.",
+    ])
+    def test_a_value_named_is_never_a_piece_of_another_rule_s_marker(self, text):
+        # The rules run one after the other, so a later one can match over
+        # an earlier one's marker; what it matched was never in the text.
+        from src.jarvis.utils.redact import hidden_values
+
+        values = hidden_values(text)
+
+        assert values
+        for value in values:
+            assert value in text and "[REDACTED" not in value
