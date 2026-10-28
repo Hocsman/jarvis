@@ -652,12 +652,13 @@ def qapp():
     # A window the test left shown that only a reference cycle holds (a chat
     # window and its orb) has a paint pending. Collect it now, while Qt is
     # between events: a collection that fires while Qt paints it frees the
-    # window under the child being painted, and the process dies with an
-    # access violation. When the collector fires depends on every allocation
-    # in the run, so nothing else keeps it out of the paint. Only a shown
-    # window is painted, and a full collection costs a large share of a
-    # second late in the run, so a teardown with none shown skips it.
-    # test_qapp_tears_down_what_only_a_cycle_holds.py holds this to that.
+    # window under the child being painted, and the process dies in native
+    # code. When the collector fires depends on every allocation in the run,
+    # so nothing else keeps it out of the paint.
+    # test_qapp_tears_down_what_only_a_cycle_holds.py holds the collection to
+    # that. Only a shown window is painted, and a full collection costs a
+    # large share of a second late in the run, so a teardown with none shown
+    # skips it.
     if any(widget.isVisible() for widget in app.topLevelWidgets()):
         gc.collect()
     app.processEvents()

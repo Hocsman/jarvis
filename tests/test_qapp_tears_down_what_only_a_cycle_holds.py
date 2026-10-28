@@ -3,12 +3,16 @@
 A test that ends with a window only a cycle holds (a chat window and its orb,
 say) leaves it shown, with a paint pending. If the cyclic garbage collector
 runs while Qt paints it, it frees the window while its child is still in its
-paint event, and the process dies with an access violation that no test can
-fail on. Whether that happens depends only on when the collector fires, which
-is any allocation, so a change elsewhere in the suite is enough to start it.
+paint event, and the process dies in native code, where no test can fail on
+it. Whether that happens depends only on when the collector fires, which any
+allocation of a container can set off, so a change elsewhere in the suite is
+enough to start it.
 
 The case in ``qapp_teardown_case.py`` makes the collection happen during the
-paint every time, and runs in a session of its own.
+paint every time. It runs in a session of its own, since a failure ends the
+process, started from the repository root and given the case by path, so the
+``qapp`` it tears down is the suite's own from ``conftest.py`` and not a copy
+in a conftest of the session's.
 """
 
 import os
