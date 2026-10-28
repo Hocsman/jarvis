@@ -166,7 +166,10 @@ The engine consumes the plan in two phases.
   Scoped to prompt memory rather than "what you already know", so it
   cannot be read as licence to answer a chained-research step from
   training priors. The engine drops a step deterministically when every
-  word it would look up is covered; this clause is what reaches the
+  word it would look up is covered by one fact of that memory (one graph
+  line, read with its node's path, or one line of the digest): words
+  pooled across facts do not count, since a line naming the machine and
+  another naming a kettle's price do not say what the machine costs; this clause is what reaches the
   cases no lexical rule can — chiefly a step and a stored note written
   in different languages.
 - `progress_nudge(steps, tool_results_so_far)` produces a remainder
