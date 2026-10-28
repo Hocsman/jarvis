@@ -992,6 +992,31 @@ class TestDigestLoopForMaxTurns:
 
         assert self._model_used(cfg) == "judge:1b"
 
+    def test_digests_on_a_judge_with_no_thinking_mode_when_the_chat_model_thinks(self):
+        """``llm_thinking_enabled`` is the chat model's setting. A judge
+        model with no thinking mode refuses a request asking for one, as
+        the backends answer an HTTP 400, and the user would get the raw
+        half-finished candidate instead of the digest."""
+        from jarvis.reply.enrichment import digest_loop_for_max_turns
+
+        class _JudgeWithoutThinking:
+            def direct(self, model, system_prompt, user_content, *, thinking=False, **kwargs):
+                return None if thinking else "I ran out of time. London looks cloudy."
+
+        cfg = self._cfg(
+            llm_chat_model="chat:20b", intent_judge_model="judge:3b",
+            llm_thinking_enabled=True,
+        )
+        with patch("jarvis.reply.enrichment.get_auxiliary_backend",
+                   return_value=_JudgeWithoutThinking()):
+            out = digest_loop_for_max_turns(
+                user_query="what's the weather in London?",
+                loop_messages=[{"role": "assistant", "content": "Checking London."}],
+                cfg=cfg,
+            )
+
+        assert out == "I ran out of time. London looks cloudy."
+
     def test_falls_back_to_the_resolved_chat_model_without_a_judge(self):
         """``ollama_chat_model`` is the on-disk alias; the loader has already
         promoted it into ``llm_chat_model``, which is the field to read."""

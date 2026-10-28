@@ -87,7 +87,7 @@ Every distinct LLM call in Jarvis, what feeds it, what consumes it, and how it i
 
 - **File**: [src/jarvis/reply/enrichment.py](src/jarvis/reply/enrichment.py) — `digest_loop_for_max_turns()`.
 - **Trigger**: when the loop exhausts `agentic_max_turns` without producing a natural-language reply (e.g. pure tool-call loop).
-- **Model / gating**: `_resolve_loop_digest_model(cfg)` takes the first of `intent_judge_model` and `llm_chat_model` that is set, so the fallback is the provider-aware chat model. Dispatched via `get_auxiliary_backend(cfg, model)` (the enrichment shim): a local `intent_judge_model` tag on a remote provider routes to local Ollama, and the fallback, the provider's own chat model, stays on the provider whatever its spelling.
+- **Model / gating**: `_resolve_loop_digest_model(cfg)` takes the first of `intent_judge_model` and `llm_chat_model` that is set, so the fallback is the provider-aware chat model. Dispatched via `get_auxiliary_backend(cfg, model)` (the enrichment shim): a local `intent_judge_model` tag on a remote provider routes to local Ollama, and the fallback, the provider's own chat model, stays on the provider whatever its spelling. Never asks for thinking, whichever model it lands on: `llm_thinking_enabled` is the chat model's, and a model without a thinking mode refuses such a request outright.
 - **Inputs**: user query + loop activity (tool calls, results summaries, any prose).
 - **System prompt**: `_LOOP_DIGEST_SYSTEM_PROMPT` — caveat-prefixed, user-language, concise.
 - **Output**: caveat-prefixed final reply. Fails open to the last raw candidate or generic error.

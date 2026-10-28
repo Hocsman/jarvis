@@ -913,6 +913,10 @@ def digest_loop_for_max_turns(
 
     Returns the reply text on success, or ``None`` on failure so the
     caller can fall back to the raw last-candidate behaviour.
+
+    The model is never asked to think. ``llm_thinking_enabled`` belongs to
+    the chat model, and the digest usually runs on the intent judge's: a
+    model with no thinking mode refuses a request that asks for one.
     """
     query = (user_query or "").strip()
     if not query:
@@ -930,7 +934,6 @@ def digest_loop_for_max_turns(
         timeout_sec = float(getattr(cfg, "llm_digest_timeout_sec", 8.0))
     except (TypeError, ValueError):
         timeout_sec = 8.0
-    thinking = bool(getattr(cfg, "llm_thinking_enabled", False))
 
     user_content = (
         f"USER'S ORIGINAL REQUEST:\n{query}\n\n"
@@ -946,7 +949,6 @@ def digest_loop_for_max_turns(
             system_prompt=_LOOP_DIGEST_SYSTEM_PROMPT,
             user_content=user_content,
             timeout_sec=timeout_sec,
-            thinking=thinking,
         )
     except Exception as e:
         debug_log(f"max-turn loop digest failed: {e}", "planning")
