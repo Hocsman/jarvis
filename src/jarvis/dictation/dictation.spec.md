@@ -116,8 +116,9 @@ After transcription, text passes through these stages in order:
   the daemon's configured device, and resolves it on every press with the
   shared resolver the wake-word listener also uses (`resolve_input_device` in
   `jarvis.utils.audio_stream`), so both record from the same microphone:
-  blank, `default` or `system` is the system default input, a number is a
-  device index, and any other text is the first input-capable device whose
+  blank, `default` or `system` is the system default input, a number is the
+  index of an input-capable device, and any other text is the first
+  input-capable device whose
   name contains it, ignoring case.
 - PortAudio reads the device list once, when the app starts, and every press
   resolves against that list. A microphone connected later is found once the

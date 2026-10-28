@@ -15,10 +15,12 @@ continuous capture use this negotiation and input selection.
 
 The input comes from `voice_device` through `resolve_input_device`
 (`jarvis.utils.audio_stream`), the resolver hold-to-dictate also uses: blank,
-`default` or `system` is the system default input, a number is a device index,
-and any other text is the first input-capable device whose name contains it,
-ignoring case, so output-only devices are skipped. A missing named microphone
-produces an actionable error rather than silently selecting another input.
+`default` or `system` is the system default input, a number is the index of an
+input-capable device, and any other text is the first input-capable device whose
+name contains it, ignoring case, so output-only devices are skipped. A missing
+named microphone, or an index that names no input (out of range, or an
+output-only device), produces an actionable error rather than silently
+selecting another input.
 Multichannel samples are averaged to mono before framing and speech detection.
 
 Frames always span the configured 10, 20 or
