@@ -1809,6 +1809,28 @@ class _SynthesisCancelled(Exception):
     """Raised inside the model's frame callback to abandon a synthesis."""
 
 
+class _ThreadLocalCapture:
+    """``torch.cuda`` as ``moshi`` sees it, capturing graphs per thread.
+
+    torch captures a CUDA graph in "global" mode unless told otherwise: a CUDA
+    call made by any other thread during the capture (an allocation, a
+    synchronisation) invalidates it, and the process aborts. Whisper keeps the
+    GPU busy in the listener's thread while she speaks, and ``moshi`` builds
+    its graphs afresh for every sentence. In "thread_local" mode only the
+    capturing thread is checked. Everything but ``graph`` is torch's own.
+    """
+
+    def __init__(self, cuda) -> None:
+        self._cuda = cuda
+
+    def __getattr__(self, name):
+        return getattr(self._cuda, name)
+
+    def graph(self, *args, **kwargs):
+        kwargs.setdefault("capture_error_mode", "thread_local")
+        return self._cuda.graph(*args, **kwargs)
+
+
 class KyutaiTTS:
     """TTS implementation using Kyutai TTS 1.6B (English and French).
 
@@ -1898,6 +1920,22 @@ class KyutaiTTS:
             os.environ["NO_TORCH_COMPILE"] = "1"
             debug_log("Kyutai TTS: Triton not found, torch.compile switched off", "tts")
 
+    @staticmethod
+    def _capture_graphs_per_thread() -> None:
+        """Make ``moshi`` capture its CUDA graphs per thread: replace the
+        ``cuda`` that ``moshi.utils.compile`` takes from torch with
+        :class:`_ThreadLocalCapture`. A ``moshi.utils.compile`` that has no
+        ``cuda`` to replace is left as it is: the engine still works, without
+        the protection."""
+        import importlib
+
+        try:
+            compile_module = importlib.import_module("moshi.utils.compile")
+            if not isinstance(compile_module.cuda, _ThreadLocalCapture):
+                compile_module.cuda = _ThreadLocalCapture(compile_module.cuda)
+        except Exception as e:
+            debug_log(f"Kyutai TTS: CUDA graphs not isolated per thread: {e}", "tts")
+
     # A name in the voice repository: path segments of plain characters, never
     # absolute, never going up, never a scheme or a drive.
     _VOICE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*")
@@ -1938,6 +1976,7 @@ class KyutaiTTS:
         except ImportError as e:
             self._init_error = f"moshi or one of its dependencies could not be imported, see the README ({e})"
             return
+        self._capture_graphs_per_thread()
 
         debug_log("Kyutai TTS loading model", "tts")
         checkpoint = CheckpointInfo.from_hf_repo(DEFAULT_DSM_TTS_REPO)
