@@ -423,6 +423,16 @@ the package reads the variable at import. The CUDA graphs stay on: with
 them the model runs faster than real time, without them several times
 slower, so the engine never sets `NO_CUDA_GRAPH`.
 
+**Graph capture.** `moshi` captures its CUDA graphs in torch's default
+"global" mode, in which a CUDA call made by any other thread during a
+capture (an allocation, a synchronisation) invalidates it and aborts the
+process. Whisper keeps the GPU busy in the listener's thread while she
+speaks, and every synthesis captures afresh, so the engine has `moshi`
+capture per thread instead (`capture_error_mode="thread_local"`), where
+only the capturing thread is checked. A capture mode `moshi` asks for
+itself is kept, and a `moshi` without the hook this relies on is left as it
+is: the engine still works, without the protection.
+
 **Synthesis.** One item is one model call: the text is prepared as a
 single-speaker script and conditioned on the voice, with the sampling
 temperature and guidance coefficient the model was released with (fixed,
@@ -558,6 +568,11 @@ language. The line is not added for Kokoro or Kyutai.
 - With Triton absent the compile switch is set before `moshi` is first
   imported, a value the user set is left alone, and the CUDA graphs are
   never switched off.
+- `moshi` captures its CUDA graphs per thread, so a CUDA call from another
+  thread (Whisper) cannot invalidate a capture; a capture mode `moshi`
+  chooses itself is kept, the hook is installed once, and a `moshi` without
+  it still loads. Kyutai speaking while Whisper transcribes on the same GPU
+  does not abort the process.
 - Kyutai's initialisation ends with one throwaway synthesis (audio
   discarded, nothing queued or played).
 - A voice name is resolved through the model's voice repository, a

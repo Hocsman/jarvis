@@ -73,6 +73,8 @@ class Stage:
         self.env_at_import = []   # NO_TORCH_COMPILE whenever the package is used
         self.streams = []
         self.first_sounds = []
+        self.captures = []        # (graph, keyword arguments) of each CUDA graph capture
+        self.compile_module = None  # the stand-in for moshi.utils.compile
 
     @property
     def seconds(self):
@@ -152,7 +154,24 @@ def _install_fake_moshi(monkeypatch, stage):
         {"TTSModel": TTSModel, "DEFAULT_DSM_TTS_REPO": "stand-in/tts"},
         stage,
     )
+    class _Cuda:
+        """What moshi.utils.compile calls ``cuda``: torch.cuda, as far as graphs go."""
+
+        CUDAGraph = object()
+
+        def graph(self, graph, **kwargs):
+            stage.captures.append((graph, kwargs))
+            return graph
+
+    compile_module = types.ModuleType("moshi.utils.compile")
+    compile_module.cuda = _Cuda()
+    stage.compile_module = compile_module
+    utils_module = types.ModuleType("moshi.utils")
+    utils_module.compile = compile_module
+
     monkeypatch.setitem(sys.modules, "moshi", types.ModuleType("moshi"))
+    monkeypatch.setitem(sys.modules, "moshi.utils", utils_module)
+    monkeypatch.setitem(sys.modules, "moshi.utils.compile", compile_module)
     monkeypatch.setitem(sys.modules, "moshi.models", types.ModuleType("moshi.models"))
     monkeypatch.setitem(sys.modules, "moshi.models.loaders", loaders)
     monkeypatch.setitem(sys.modules, "moshi.models.tts", tts)
@@ -816,6 +835,58 @@ class TestLifecycle:
         assert reached.wait(5)
         assert "no NVIDIA GPU was found" in capsys.readouterr().out
         assert asked == [1]
+
+
+class TestGraphCapture:
+    """Whisper keeps the GPU busy in the listener's thread while she speaks, and
+    moshi builds its CUDA graphs afresh for every sentence. torch captures in
+    "global" mode by default, where a CUDA call made by any other thread during
+    a capture invalidates it and the process aborts. Captured per thread, only
+    the capturing thread is checked."""
+
+    def test_moshi_captures_its_graphs_without_watching_the_other_threads(
+            self, stage, make_engine):
+        make_engine()._ensure_initialized()
+
+        stage.compile_module.cuda.graph("a graph")
+
+        assert stage.captures == [("a graph", {"capture_error_mode": "thread_local"})]
+
+    def test_a_capture_mode_chosen_by_moshi_itself_is_respected(self, stage, make_engine):
+        make_engine()._ensure_initialized()
+
+        stage.compile_module.cuda.graph("a graph", capture_error_mode="relaxed")
+
+        assert stage.captures == [("a graph", {"capture_error_mode": "relaxed"})]
+
+    def test_everything_else_moshi_asks_of_cuda_is_untouched(self, stage, make_engine):
+        original = stage.compile_module.cuda
+        make_engine()._ensure_initialized()
+
+        assert stage.compile_module.cuda.CUDAGraph is original.CUDAGraph
+
+    def test_a_second_engine_does_not_wrap_the_wrapper(self, stage, make_engine):
+        make_engine()._ensure_initialized()
+        make_engine()._ensure_initialized()
+
+        stage.compile_module.cuda.graph("a graph")
+
+        assert stage.captures == [("a graph", {"capture_error_mode": "thread_local"})]
+
+    def test_a_moshi_without_that_module_still_loads(self, stage, make_engine, monkeypatch):
+        monkeypatch.setitem(sys.modules, "moshi.utils.compile", None)
+        tts = make_engine()
+
+        assert tts._ensure_initialized() is True
+        assert tts._init_error is None
+
+    def test_the_installed_moshi_still_has_the_hook_this_relies_on(self):
+        """Not run where moshi is not installed (it is optional)."""
+        import inspect
+
+        compile_module = pytest.importorskip("moshi.utils.compile")
+
+        assert "capture_error_mode" in inspect.signature(compile_module.cuda.graph).parameters
 
 
 class TestHardware:
