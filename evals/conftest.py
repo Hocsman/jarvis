@@ -88,6 +88,7 @@ CLASS_DESCRIPTIONS = {
     "TestHelpfulness": "Tests that agent uses tools proactively instead of deflecting",
     "TestDiaryRecencyOrder": "Tests that diary search returns newer entries before older ones",
     "TestGraphRecencySuperseding": "Tests that graph handles contradicting facts with date context",
+    "TestSplitPruning": "Tests that a node split keeps every asked-for answer and drops only filler and narration",
     "TestRecencyJudge": "LLM judge evaluates whether newer information is preferred over older",
     "TestMalformedResponseAfterTools": "Tests that malformed LLM output after tool results is not surfaced",
     "TestCelebrityIdentityThenFollowUp": "Two-turn celebrity flow: identity query then pronoun follow-up",

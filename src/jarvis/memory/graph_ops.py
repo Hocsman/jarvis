@@ -880,6 +880,46 @@ def merge_node_data(
 # ── Auto-split ─────────────────────────────────────────────────────────
 
 
+_SPLIT_SYSTEM_PROMPT = (
+    "You are a knowledge organiser. A collection of facts has grown too "
+    "large for a single node. Organise them into 2-5 categories.\n\n"
+    "Rules:\n"
+    "- Each fact you keep must be assigned to exactly one category\n"
+    "- Category names should be concise (2-4 words)\n"
+    "- Descriptions should be 1-2 sentences explaining what the category covers\n\n"
+    "Consolidation — apply while distributing:\n"
+    "- Merge duplicate or near-duplicate facts into one\n"
+    "- If repeated similar activities appear across different dates "
+    "(e.g. ate X on Monday, ate X on Thursday), consolidate into a pattern "
+    '(e.g. "Regularly eats X") — drop individual occurrences\n'
+    "- Preserve date context only for significant events "
+    "(e.g. started new job on 2025-03-01)\n\n"
+    "Pruning — drop only what nobody asked for:\n"
+    "- Drop generic filler nobody asked for: stock advice, encyclopaedic "
+    "padding, how-to steps for everyday tasks. Advice that would fit anyone "
+    "and names no particular thing ('Wearing sunscreen protects your skin', "
+    "'It is wise to stretch before running') is filler, however true\n"
+    "- Being already in your training data is not by itself a reason to "
+    "drop a fact: these facts are here because the user asked about "
+    "them, so an answer to a real question stays even when you already "
+    "knew it. A name, a date, a place or a figure about one particular "
+    "thing is such an answer ('Dune (2021) is directed by Denis "
+    "Villeneuve' stays, 'An avocado contains about 240 calories' "
+    "stays)\n\n"
+    "Then, as you write each fact into its category, check whose "
+    "sentence it is. If the fact you are about to write has the "
+    "assistant as its SUBJECT ('The assistant suggested grilled salmon', "
+    "'The assistant is unable to navigate to a web page', 'I (the "
+    "assistant) ...', or that same shape in any other language), do not "
+    "write it. The verb does not matter; the subject is the tell. A fact "
+    "whose subject is anything in the world gets written, even if the "
+    "assistant once looked it up.\n\n"
+    "Respond with ONLY valid JSON in this format:\n"
+    '{"categories": [{"name": "Category Name", "description": "What this covers", '
+    '"facts": ["fact 1", "fact 2"]}], "summary": "1-2 sentence summary of everything"}'
+)
+
+
 def auto_split_node(
     store: GraphMemoryStore,
     node_id: str,
@@ -890,8 +930,11 @@ def auto_split_node(
 ) -> bool:
     """Split a node whose data exceeds SPLIT_THRESHOLD into child nodes.
 
-    The LLM proposes 2-5 categories and distributes the facts among them.
-    The parent node's data is cleared and its description updated to a summary.
+    The LLM proposes 2-5 categories and distributes the facts among them,
+    dropping only filler nobody asked for and lines narrating the
+    assistant: an answer the user asked for stays however well known
+    (graph.spec.md, Auto-Split). The parent node's data is cleared and its
+    description updated to a summary.
     Asked inside the pass's deadline (one chat-model timeout from now when
     none is given); a split that gets no answer is retried by the next
     flush that finds the node still too large.
@@ -904,33 +947,6 @@ def auto_split_node(
 
     debug_log(f"auto-split: node '{node.name}' ({node_id[:8]}) has {node.data_token_count} tokens", "memory")
 
-    system_prompt = (
-        "You are a knowledge organiser. A collection of facts has grown too "
-        "large for a single node. Organise them into 2-5 categories.\n\n"
-        "Rules:\n"
-        "- Each fact must be assigned to exactly one category\n"
-        "- Category names should be concise (2-4 words)\n"
-        "- Descriptions should be 1-2 sentences explaining what the category covers\n\n"
-        "Consolidation — apply while distributing:\n"
-        "- Merge duplicate or near-duplicate facts into one\n"
-        "- If repeated similar activities appear across different dates "
-        "(e.g. ate X on Monday, ate X on Thursday), consolidate into a pattern "
-        '(e.g. "Regularly eats X") — drop individual occurrences\n'
-        "- Preserve date context only for significant events "
-        "(e.g. started new job on 2025-03-01)\n\n"
-        "Pruning — DROP facts that are common knowledge:\n"
-        "- Remove anything you already know from your training data "
-        "(e.g. general nutrition facts, well-known places, public figures' "
-        "basic info, how-to steps for common tasks)\n"
-        "- Only keep knowledge that is NOVEL to you: user-specific details, "
-        "local/niche information, personal circumstances, recent events "
-        "after your training cutoff, or corrections to what you'd assume\n"
-        "- When in doubt, keep it — but actively look for things to prune\n\n"
-        "Respond with ONLY valid JSON in this format:\n"
-        '{"categories": [{"name": "Category Name", "description": "What this covers", '
-        '"facts": ["fact 1", "fact 2"]}], "summary": "1-2 sentence summary of everything"}'
-    )
-
     user_content = (
         f"Current node: {node.name}\n"
         f"Current description: {node.description}\n\n"
@@ -942,7 +958,7 @@ def auto_split_node(
         "auto-split",
         cfg=cfg,
         chat_model=chat_model,
-        system_prompt=system_prompt,
+        system_prompt=_SPLIT_SYSTEM_PROMPT,
         user_content=user_content,
         thinking=thinking,
     )

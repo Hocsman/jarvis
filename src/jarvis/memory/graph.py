@@ -2,7 +2,7 @@
 🧠 Knowledge Graph
 
 A self-organising node graph that stores the assistant's accumulated world
-knowledge — anything learned during conversations that it wouldn't already know.
+knowledge — what it looked up during conversations.
 Placement descends greedily from a fixed branch root; recent nodes and top
 nodes stay available as ranked queries.
 
