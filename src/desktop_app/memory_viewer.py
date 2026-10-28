@@ -1246,19 +1246,18 @@ def graph_import_diary() -> Response:
 
 @app.route("/api/graph/consolidate-all", methods=["POST"])
 def graph_consolidate_all() -> Response:
-    """Run the merge prompt's consolidation rules over every populated node.
+    """Run the merge prompt's consolidation rules over the World branch.
 
-    Migration path for nodes that accumulated contradictions before
-    merge-on-write landed: under merge-on-write, a node only gets
-    cleaned when a new related fact arrives, so backlog stays dirty
-    until something nudges it. This endpoint nudges everything at
-    once via `consolidate_all_populated_nodes`, streaming NDJSON
-    progress so the UI can show per-node line-count deltas.
+    A node is otherwise only rewritten when a new fact lands on it, so
+    data written under older rules stays as it was until something
+    nudges it. This endpoint nudges the whole branch at once via
+    `consolidate_world_nodes`, streaming NDJSON progress so the UI can
+    show per-node line-count deltas.
     """
     from jarvis.config import load_settings
     from jarvis.memory.graph_ops import (
-        consolidate_all_populated_nodes,
-        is_populated_node,
+        consolidate_world_nodes,
+        populated_world_nodes,
     )
 
     def generate():
@@ -1266,16 +1265,14 @@ def graph_consolidate_all() -> Response:
             settings = load_settings()
             store = get_graph_store()
 
-            # Count populated nodes upfront so the UI can render a
-            # real progress bar. Reuses the shared predicate from
-            # `graph_ops` so the count can never drift from the set
-            # the generator actually walks. The double scan is
-            # acceptable here — `get_all_nodes` is one cheap SQLite
-            # read and the bar's accuracy is worth more than the saved
-            # walk on the rarely-pressed maintenance op.
-            total_nodes = sum(
-                1 for n in store.get_all_nodes() if is_populated_node(n)
-            )
+            # Count the nodes upfront so the UI can render a real
+            # progress bar. Reuses the walk from `graph_ops`, so the
+            # count is defined as the set the generator visits; only a
+            # node filled in the moment between the two walks can make
+            # them differ, and the bar clamps at 100%. The double walk
+            # costs a few SQLite reads per node, nothing next to one
+            # merge call, on a rarely-pressed maintenance op.
+            total_nodes = len(populated_world_nodes(store))
             yield json.dumps({"type": "start", "total": total_nodes}) + "\n"
 
             total_before = 0
@@ -1284,7 +1281,7 @@ def graph_consolidate_all() -> Response:
             # Stream per-node deltas as the generator yields them so
             # the UI gets real-time feedback on graphs with many
             # nodes — buffering the full sweep would defeat NDJSON.
-            for name, before, after in consolidate_all_populated_nodes(
+            for name, before, after in consolidate_world_nodes(
                 store=store,
                 cfg=settings,
                 chat_model=settings.llm_chat_model,
@@ -3083,7 +3080,7 @@ def index() -> str:
                             <button class="graph-btn" id="btn-fit" title="Fit to view">📐</button>
                             <button class="graph-btn" id="btn-add-node" title="Add node">✨</button>
                             <button class="graph-btn" id="btn-import-diary" title="Import from Diary">📥</button>
-                            <button class="graph-btn" id="btn-consolidate-all" title="Consolidate every populated node (dedupe / merge contradictions / prune common knowledge)">🧹</button>
+                            <button class="graph-btn" id="btn-consolidate-all" title="Consolidate the World branch (merge duplicates / replace outdated values / drop filler; answers you asked for stay)">🧹</button>
                         </div>
                         <canvas id="graph-canvas"></canvas>
                     </div>
@@ -5054,9 +5051,9 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
         function showConsolidateAllModal() {
             openModal(`
                 <div class="modal">
-                    <h3>🧹 Consolidate All Nodes</h3>
+                    <h3>🧹 Consolidate the World Branch</h3>
                     <p style="color: var(--text-secondary); margin-bottom: 16px; line-height: 1.5;">
-                        Re-run the merge prompt over every populated node. Dedupes near-duplicate lines, drops contradictions, folds repeated activities into patterns, and prunes common knowledge. Useful after a prompt change to back-fill the new rules across historical data. Every node goes to your chat model, so to its provider when that model runs remotely. Cannot be undone.
+                        Re-run the merge prompt over every populated node of the World branch. Merges near-duplicate lines, replaces outdated values, folds repeated activities into patterns, and drops filler nobody asked for and lines narrating the assistant itself; an answer to something you asked stays, however well known. A line keeps its source unless the rewrite rewords it, which leaves it marked inconnu. Your profile and rules live in the core files and are not touched. Useful after a prompt change to back-fill the new rules across historical data. Every node goes to your chat model, so to its provider when that model runs remotely. Cannot be undone.
                     </p>
                     <div id="consolidate-progress" style="display: none;">
                         <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
