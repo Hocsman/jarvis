@@ -142,13 +142,13 @@ nothing was new.
 else the reminder chain (`reminder_model → tool_router_model →
 intent_judge_model → llm_chat_model`), and `get_private_backend` is given
 both the pin and the model it resolved. Either pin, `appris_model` or
-`reminder_model`, keeps the fortnight where a reminder runs that model:
-on local Ollama behind a remote endpoint, whatever the tag's shape;
-behind one on his own machine or network, on local Ollama when Ollama
-lists the tag and on the configured server otherwise. The same name
-cannot mean the cloud for his diary. Without a pin, a local tag
-reached through the chain runs on local Ollama as well (behind a local
-endpoint, when Ollama lists it), and
+`reminder_model`, keeps the fortnight where the goal judge runs that
+model, wherever the chat runs: on local Ollama behind a remote endpoint,
+whatever the tag's shape; behind one on his own machine or network, on
+local Ollama when Ollama lists the tag and on the configured server
+otherwise. The same name cannot mean the cloud for his diary. Without a
+pin, a local tag reached through the chain runs on local Ollama as well
+(behind a local endpoint, when Ollama lists it), and
 the chat model or a namespaced model sends the notes to the configured
 provider: the chat model at the end of the chain whatever its spelling
 (unless it is the inherited `ollama_chat_model`, a local tag), which

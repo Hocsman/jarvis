@@ -48,6 +48,7 @@ from .graph import (
     BRANCH_USER,
     BRANCH_WORLD,
     FIXED_BRANCHES,
+    FIXED_BRANCH_IDS,
     GraphMemoryStore,
     MAX_TRAVERSAL_DEPTH,
     MemoryNode,
@@ -244,9 +245,9 @@ def _match_key(text: str) -> str:
 # to every claim. Calibrated on recorded split answers for two World nodes
 # of 90 and 101 lines, 8 and 13 of them filler or narration.
 # `google/gemini-2.5-flash` carried at least 84 % of the claims in each of
-# 75 splits under pruning as narrow as the merge's, and 68 % to 100 % in
-# 75 more under the split prompt's wider pruning, which also drops what
-# the model already knows (62 of those pass). Every `gemma4:e2b` answer
+# 75 splits under the split prompt, whose pruning is as narrow as the
+# merge's, and 68 % to 100 % in 75 more under a wider prompt that also
+# dropped what the model already knew (62 of those pass). Every `gemma4:e2b` answer
 # that parsed (79 of 200) carried at most 69 %, having lost about half the
 # node's niche lookups. The floor sits in that gap and leaves a quarter of
 # the node for everything a split may drop.
@@ -286,20 +287,40 @@ def _claims_kept(before, after) -> tuple[int, int]:
     return kept, len(claims)
 
 
+def _claim(line: str) -> str:
+    """The line's claim with every trailing provenance suffix removed.
+
+    `fact_text` strips one; a line that somehow carries two would keep
+    the first as part of its claim.
+    """
+    claim, previous = fact_text(line), line
+    while claim != previous:
+        claim, previous = fact_text(claim), claim
+    return claim
+
+
 def _source_index(lines) -> dict:
     """Map each line's claim to the provenance suffix it carried.
 
     Built from what a node held before a merge plus what this flush is
-    adding, so the repair afterwards can recognise either.
+    adding, so the repair afterwards can recognise either. A dated
+    `inconnu` suffix is kept too, for its date; when two lines carry the
+    same claim, a known source wins over `inconnu`, and otherwise the
+    later line wins. A bare line has nothing to give back. Only the last
+    suffix is kept, the one `fact_source` reads, so a line that carries
+    two comes back from the repair with one.
     """
     index: dict = {}
     for line in lines:
         if not line or not line.strip():
             continue
-        source = fact_source(line)
-        if source == SOURCE_UNKNOWN:
+        suffix = line[len(fact_text(line)):]
+        if not suffix.strip():
             continue
-        index[normalise_fact(fact_text(line))] = line[len(fact_text(line)):]
+        key = normalise_fact(_claim(line))
+        if fact_source(line) == SOURCE_UNKNOWN and key in index:
+            continue
+        index[key] = suffix
     return index
 
 
@@ -316,13 +337,20 @@ def _reattach_sources(lines, index: dict) -> list:
     Wording is never touched. A line the rewrite reworded matches nothing
     and stays bare, which reads as `inconnu` — the truthful answer, since
     after a rewrite nobody can say what that sentence rested on.
+
+    Whatever suffix the rewrite handed back is dropped first. The model
+    is shown the node's lines with their suffixes, so it can move one onto
+    a line it does not belong to, or leave one on a sentence it folded
+    two claims into: a line's source comes from the index, never from the
+    model's own text.
     """
     repare = []
     for line in lines:
-        if not line or not line.strip() or fact_source(line) != SOURCE_UNKNOWN:
+        if not line or not line.strip():
             repare.append(line)
             continue
-        cle = normalise_fact(fact_text(line))
+        line = _claim(line)
+        cle = normalise_fact(line)
         suffixe = index.get(cle)
         if suffixe is None and index:
             # The rewrite retypesets and rewords, so an exact key matches
@@ -686,14 +714,51 @@ def _split_data_lines(data: Optional[str]) -> list[str]:
     return [l for l in (data or "").split("\n") if l.strip()]
 
 
-def is_populated_node(node: MemoryNode) -> bool:
-    """A node worth visiting in a consolidate-all sweep.
+def _populated_nodes_under(
+    store: GraphMemoryStore, branch_root_id: str,
+) -> Iterator[MemoryNode]:
+    """Yield every node holding data in a subtree, its root included.
 
-    Shared predicate so the streaming endpoint can pre-count nodes
-    using the same definition the generator walks with — drift here
-    would silently desynchronise the UI's progress bar from reality.
+    The walk never crosses into another fixed branch. Nothing in the
+    store stops one being re-parented, and a User branch filed under
+    World would otherwise be swept, or a World branch filed under User
+    handed over to the core.
     """
-    return node.id != "root" and bool((node.data or "").strip())
+    if store.get_node(branch_root_id) is None:
+        return
+
+    queue: list[str] = [branch_root_id]
+    visited: set[str] = set()
+    while queue:
+        node_id = queue.pop(0)
+        if node_id in visited:
+            continue
+        visited.add(node_id)
+        node = store.get_node(node_id)
+        if node is None:
+            continue
+        if _split_data_lines(node.data):
+            yield node
+        for child in store.get_children(node_id):
+            if child.id not in FIXED_BRANCH_IDS:
+                queue.append(child.id)
+
+
+def populated_world_nodes(store: GraphMemoryStore) -> list[MemoryNode]:
+    """The nodes a 🧹 sweep visits: every World node holding data, the
+    branch root included.
+
+    The User and Directives subtrees belong to the core, which is written
+    only when the user asks or corrects. A node still holding data there
+    is waiting on its hand-over: rewriting it would put a model's wording
+    into the user's profile as `migré`, after sending that profile to
+    whichever provider runs the chat model.
+
+    Shared so the streaming endpoint pre-counts the very walk the sweep
+    takes; drift here would desynchronise the UI's progress bar from
+    reality.
+    """
+    return list(_populated_nodes_under(store, BRANCH_WORLD))
 
 
 # Slack added to the hallucination-guard cap. Consolidation should
@@ -715,7 +780,7 @@ class MergeResult:
     True if the cleaned output contains that fact under
     `normalise_fact` folding (so it's safe to consider it landed in
     the node). A fact whose index is missing was either consolidated
-    out, dropped as common knowledge, or silently lost — caller
+    out, dropped as filler or assistant narration, or silently lost — caller
     decides whether to append it as a fallback or skip.
     """
 
@@ -766,6 +831,8 @@ def merge_node_data(
     chat_model: str,
     deadline: Optional[GraphDeadline] = None,
     node: Optional[MemoryNode] = None,
+    source: Optional[str] = None,
+    date_utc: Optional[str] = None,
 ) -> MergeResult:
     """Merge ``new_facts`` into ``node_id``'s data via one LLM rewrite.
 
@@ -795,6 +862,14 @@ def merge_node_data(
 
     Pass ``node`` if the caller has already fetched it; saves a
     redundant SQLite read on the orchestrator's hot path.
+
+    The node's lines go to the model with their suffixes (their dates are
+    what the supersession rule reads) and ``new_facts`` go bare. Whatever
+    suffix comes back is ignored: each line's is put back from its claim
+    before the write, so a line the node already carried keeps its own,
+    and ``new_facts`` take ``source`` and ``date_utc``, as the plain-append
+    path would have stamped them. A line the rewrite reworded matches
+    nothing and stays `inconnu`.
 
     Like the picker, the rewrite runs on the chat model and never asks it
     to think: the whole node has to come back inside the pass's deadline
@@ -924,12 +999,58 @@ def merge_node_data(
         if key and key in cleaned_keys:
             incorporated_indices.append(idx)
 
-    new_data = "\n".join(cleaned)
+    # The repair lives here rather than with a caller because the flush
+    # and the 🧹 sweep both rewrite through this function, and a caller
+    # left to do it itself can skip it: every line it touched would then
+    # read `inconnu`.
+    new_lines = [fact_line(f, source, date_utc) for f in sanitised_new] if source else []
+    sources = _source_index([*existing_lines, *new_lines])
+    new_data = "\n".join(_reattach_sources(cleaned, sources))
     store.update_node(node_id, data=new_data)
     return MergeResult(success=True, incorporated_indices=incorporated_indices)
 
 
 # ── Auto-split ─────────────────────────────────────────────────────────
+
+
+_SPLIT_SYSTEM_PROMPT = (
+    "You are a knowledge organiser. A collection of facts has grown too "
+    "large for a single node. Organise them into 2-5 categories.\n\n"
+    "Rules:\n"
+    "- Each fact you keep must be assigned to exactly one category\n"
+    "- Category names should be concise (2-4 words)\n"
+    "- Descriptions should be 1-2 sentences explaining what the category covers\n\n"
+    "Consolidation — apply while distributing:\n"
+    "- Merge duplicate or near-duplicate facts into one\n"
+    "- If repeated similar activities appear across different dates "
+    "(e.g. ate X on Monday, ate X on Thursday), consolidate into a pattern "
+    '(e.g. "Regularly eats X") — drop individual occurrences\n'
+    "- Preserve date context only for significant events "
+    "(e.g. started new job on 2025-03-01)\n\n"
+    "Pruning — drop only what nobody asked for:\n"
+    "- Drop generic filler nobody asked for: stock advice, encyclopaedic "
+    "padding, how-to steps for everyday tasks. Advice that would fit anyone "
+    "and names no particular thing ('Wearing sunscreen protects your skin', "
+    "'It is wise to stretch before running') is filler, however true\n"
+    "- Being already in your training data is not by itself a reason to "
+    "drop a fact: these facts are here because the user asked about "
+    "them, so an answer to a real question stays even when you already "
+    "knew it. A name, a date, a place or a figure about one particular "
+    "thing is such an answer ('Dune (2021) is directed by Denis "
+    "Villeneuve' stays, 'An avocado contains about 240 calories' "
+    "stays)\n\n"
+    "Then, as you write each fact into its category, check whose "
+    "sentence it is. If the fact you are about to write has the "
+    "assistant as its SUBJECT ('The assistant suggested grilled salmon', "
+    "'The assistant is unable to navigate to a web page', 'I (the "
+    "assistant) ...', or that same shape in any other language), do not "
+    "write it. The verb does not matter; the subject is the tell. A fact "
+    "whose subject is anything in the world gets written, even if the "
+    "assistant once looked it up.\n\n"
+    "Respond with ONLY valid JSON in this format:\n"
+    '{"categories": [{"name": "Category Name", "description": "What this covers", '
+    '"facts": ["fact 1", "fact 2"]}], "summary": "1-2 sentence summary of everything"}'
+)
 
 
 def auto_split_node(
@@ -942,8 +1063,11 @@ def auto_split_node(
 ) -> bool:
     """Split a node whose data exceeds SPLIT_THRESHOLD into child nodes.
 
-    The LLM proposes 2-5 categories and distributes the facts among them.
-    The parent node's data is cleared and its description updated to a summary.
+    The LLM proposes 2-5 categories and distributes the facts among them,
+    dropping only filler nobody asked for and lines narrating the
+    assistant: an answer the user asked for stays however well known
+    (graph.spec.md, Auto-Split). The parent node's data is cleared and its
+    description updated to a summary.
     Asked inside the pass's deadline (one chat-model timeout from now when
     none is given); a split that gets no answer is retried by the next
     flush that finds the node still too large.
@@ -956,33 +1080,6 @@ def auto_split_node(
 
     debug_log(f"auto-split: node '{node.name}' ({node_id[:8]}) has {node.data_token_count} tokens", "memory")
 
-    system_prompt = (
-        "You are a knowledge organiser. A collection of facts has grown too "
-        "large for a single node. Organise them into 2-5 categories.\n\n"
-        "Rules:\n"
-        "- Each fact must be assigned to exactly one category\n"
-        "- Category names should be concise (2-4 words)\n"
-        "- Descriptions should be 1-2 sentences explaining what the category covers\n\n"
-        "Consolidation — apply while distributing:\n"
-        "- Merge duplicate or near-duplicate facts into one\n"
-        "- If repeated similar activities appear across different dates "
-        "(e.g. ate X on Monday, ate X on Thursday), consolidate into a pattern "
-        '(e.g. "Regularly eats X") — drop individual occurrences\n'
-        "- Preserve date context only for significant events "
-        "(e.g. started new job on 2025-03-01)\n\n"
-        "Pruning — DROP facts that are common knowledge:\n"
-        "- Remove anything you already know from your training data "
-        "(e.g. general nutrition facts, well-known places, public figures' "
-        "basic info, how-to steps for common tasks)\n"
-        "- Only keep knowledge that is NOVEL to you: user-specific details, "
-        "local/niche information, personal circumstances, recent events "
-        "after your training cutoff, or corrections to what you'd assume\n"
-        "- When in doubt, keep it — but actively look for things to prune\n\n"
-        "Respond with ONLY valid JSON in this format:\n"
-        '{"categories": [{"name": "Category Name", "description": "What this covers", '
-        '"facts": ["fact 1", "fact 2"]}], "summary": "1-2 sentence summary of everything"}'
-    )
-
     user_content = (
         f"Current node: {node.name}\n"
         f"Current description: {node.description}\n\n"
@@ -994,7 +1091,7 @@ def auto_split_node(
         "auto-split",
         cfg=cfg,
         chat_model=chat_model,
-        system_prompt=system_prompt,
+        system_prompt=_SPLIT_SYSTEM_PROMPT,
         user_content=user_content,
         thinking=thinking,
     )
@@ -1148,13 +1245,11 @@ def _fact_homes(store: GraphMemoryStore, branch_root_id: str) -> dict[str, str]:
     """Every fact a branch holds, by ``fact_key``, with the name of the node
     it is on. One read of the subtree, no model."""
     homes: dict[str, str] = {}
-    for node_id, lines in _walk_branch_nodes(store, branch_root_id):
-        node = store.get_node(node_id)
-        name = node.name if node else node_id[:8]
-        for line in lines:
-            key = fact_key(line)
+    for node in _populated_nodes_under(store, branch_root_id):
+        for line in _split_data_lines(node.data):
+            key = fact_key(line.strip())
             if key:
-                homes.setdefault(key, name)
+                homes.setdefault(key, node.name)
     return homes
 
 
@@ -1272,9 +1367,9 @@ def update_graph_from_dialogue(
     # that merely wrote a reminder looked nothing up.
     source = source_for_tools(lookup_tools(tools_used) if tools_used else tools_used)
 
-    # Grouped bare, so the merge is never handed a format to preserve.
-    # The suffix is written by the plain-append path, and put back by
-    # `_reattach_sources` after a rewrite.
+    # Grouped bare: the new facts reach the merge without a suffix. The
+    # suffix is written by the plain-append path, and put back by the
+    # merge itself after a rewrite.
     by_node: dict[str, list[str]] = {}
     for fact, node_id in pending:
         by_node.setdefault(node_id, []).append(fact)
@@ -1283,13 +1378,6 @@ def update_graph_from_dialogue(
     for node_id, node_facts in by_node.items():
         node = store.get_node(node_id)
         node_name = node.name if node else node_id[:8]
-
-        # What every claim in play rests on, read before the rewrite can
-        # lose it: the node's existing lines keep whatever they carried,
-        # and this flush's facts get the window's source.
-        sources = _source_index((node.data or "").split("\n") if node else [])
-        sources.update(_source_index(
-            fact_line(f, source, date_utc) for f in node_facts))
 
         # Step 4: Merge — combine the existing node data with all
         # queued new facts in a single LLM rewrite. Subsumes
@@ -1315,28 +1403,19 @@ def update_graph_from_dialogue(
                 chat_model=chat_model,
                 deadline=deadline,
                 node=node,
+                source=source,
+                date_utc=date_utc,
             )
         except Exception as e:
             debug_log(f"graph update: merge failed for node '{node_name}' — {e}", "memory")
 
         if merge_result.success:
-            # The rewrite hands lines back bare. Give them their
-            # provenance again before anything else reads the node: a
-            # line it reworded matches nothing and stays `inconnu`,
-            # which is the truthful reading of a sentence nobody can
-            # trace any more.
-            rewritten = store.get_node(node_id)
-            if rewritten and rewritten.data:
-                repare = "\n".join(
-                    _reattach_sources(rewritten.data.split("\n"), sources))
-                if repare != rewritten.data:
-                    store.update_node(node_id, data=repare)
-
-            # Merge wrote the consolidated data. Only the facts the
-            # rewrite actually retained get reported as stored — a
-            # fact that was consolidated out (e.g. folded into a
-            # pattern, or treated as a near-duplicate) was not
-            # newly learned and shouldn't be claimed as such.
+            # Merge wrote the consolidated data, its lines' sources
+            # back on. Only the facts the rewrite actually retained get
+            # reported as stored — a fact that was consolidated out
+            # (e.g. folded into a pattern, or treated as a
+            # near-duplicate) was not newly learned and shouldn't be
+            # claimed as such.
             incorporated = set(merge_result.incorporated_indices)
             for idx, fact in enumerate(node_facts):
                 if idx in incorporated:
@@ -1394,22 +1473,21 @@ def update_graph_from_dialogue(
     return GraphUpdateResult(stored=stored, skipped=skipped)
 
 
-def consolidate_all_populated_nodes(
+def consolidate_world_nodes(
     store: GraphMemoryStore,
     cfg,
     chat_model: str,
 ) -> "Iterator[tuple[str, int, int]]":
-    """One-shot self-consolidation across every populated node.
+    """One-shot self-consolidation across the World branch.
 
-    Walks every node with non-empty `data` and runs `merge_node_data`
-    with an empty new-facts list, so the merge prompt's rules
-    (contradiction handling, near-duplicate collapse, consolidation,
-    pruning) tidy the existing data in place. This is the migration
-    path for nodes that accumulated contradictions before the
-    merge-on-write step landed: under merge-on-write, a node only
-    gets cleaned when a new related fact arrives, so backlog stays
-    dirty until something nudges it. Calling this op nudges
-    everything at once.
+    Runs `merge_node_data` with an empty new-facts list on every node
+    `populated_world_nodes` returns, so the merge prompt's current rules
+    (supersession, near-duplicate collapse, consolidation, narrow
+    pruning) tidy the existing data in place. A node is otherwise only
+    rewritten when a new fact lands on it, so data written under older
+    rules stays as it was until something nudges it; this op nudges the
+    whole branch at once. Each surviving line keeps its source, through
+    the same repair the merge applies on every flush.
 
     Yields ``(node_name, lines_before, lines_after)`` per node as the
     walk progresses, so a streaming caller (e.g. an NDJSON endpoint)
@@ -1421,13 +1499,16 @@ def consolidate_all_populated_nodes(
     for and streams its progress, so it is bounded per node rather than as
     a whole.
     """
-    # Snapshot all nodes up front so a rewrite mid-walk doesn't
-    # cause us to revisit or skip nodes.
-    all_nodes = store.get_all_nodes()
-    for node in all_nodes:
-        if not is_populated_node(node):
-            continue
-        before = len(_split_data_lines(node.data))
+    # Snapshot the walk up front so a rewrite mid-walk doesn't
+    # cause us to revisit or skip nodes. Each node's data is read again
+    # when the sweep reaches it: a sweep runs for minutes, and the daemon
+    # flushes into the same file meanwhile, so a rewrite from the
+    # snapshot would overwrite whatever it filed since.
+    nodes = populated_world_nodes(store)
+    debug_log(f"consolidate-all: {len(nodes)} World node(s) to sweep", "memory")
+    for node in nodes:
+        current = store.get_node(node.id)
+        before = len(_split_data_lines(current.data)) if current else 0
         try:
             result = merge_node_data(
                 store=store,
@@ -1435,8 +1516,8 @@ def consolidate_all_populated_nodes(
                 new_facts=[],
                 cfg=cfg,
                 chat_model=chat_model,
-                node=node,
-            )
+                node=current,
+            ) if current else MergeResult(success=False)
         except Exception as e:
             debug_log(f"consolidate-all: failed for '{node.name}' — {e}", "memory")
             result = MergeResult(success=False)
@@ -1487,7 +1568,8 @@ def migrate_graph_branches_into_core(store: GraphMemoryStore, core: MemoryCore) 
     """
     written = 0
     for branch_id, section in _BRANCH_TO_CORE_SECTION.items():
-        for node_id, facts in _walk_branch_nodes(store, branch_id):
+        for node in _populated_nodes_under(store, branch_id):
+            facts = [line.strip() for line in _split_data_lines(node.data)]
             handed_over = True
             for text in facts:
                 if core.knows(section, text):
@@ -1499,31 +1581,7 @@ def migrate_graph_branches_into_core(store: GraphMemoryStore, core: MemoryCore) 
                     handed_over = False
                     debug_log(f"core migration skipped '{text[:40]}': {e}", "memory")
             if handed_over:
-                store.update_node(node_id, data="")
+                store.update_node(node.id, data="")
     if written:
         debug_log(f"core migration: {written} entries moved from the graph", "memory")
     return written
-
-
-def _walk_branch_nodes(
-    store: GraphMemoryStore, branch_root_id: str,
-) -> Iterator[tuple[str, list[str]]]:
-    """Yield ``(node_id, facts)`` for every populated node in a subtree."""
-    if store.get_node(branch_root_id) is None:
-        return
-
-    queue: list[str] = [branch_root_id]
-    visited: set[str] = set()
-    while queue:
-        node_id = queue.pop(0)
-        if node_id in visited:
-            continue
-        visited.add(node_id)
-        node = store.get_node(node_id)
-        if node is None:
-            continue
-        facts = [line.strip() for line in _split_data_lines(node.data)]
-        if facts:
-            yield node_id, facts
-        for child in store.get_children(node_id):
-            queue.append(child.id)

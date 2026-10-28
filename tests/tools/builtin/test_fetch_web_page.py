@@ -44,7 +44,7 @@ class TestFetchWebPageTool:
     def test_tool_properties(self):
         """Test tool metadata properties."""
         assert self.tool.name == "fetchWebPage"
-        assert "fetch" in self.tool.description.lower()
+        assert "web page" in self.tool.description.lower()
         assert self.tool.inputSchema["type"] == "object"
         assert "url" in self.tool.inputSchema["required"]
 

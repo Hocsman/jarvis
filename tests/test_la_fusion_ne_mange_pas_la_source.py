@@ -150,6 +150,7 @@ def test_a_fact_written_into_a_populated_node_keeps_its_source(mock_llm, tmp_pat
     assert fact_source(ligne[0]) == SOURCE_WEB, (
         f"la fusion a mangé la source : {ligne[0]!r}"
     )
+    assert ligne[0].endswith("2026-08-16"), f"la fusion a mangé la date : {ligne[0]!r}"
 
 
 # ── Ce que la vraie fusion fait, mesuré sur sa base ────────────────────
@@ -200,3 +201,81 @@ def test_a_fact_consolidated_beyond_recognition_falls_to_unknown():
                               index)
 
     assert fact_source(rendu[0]) == SOURCE_UNKNOWN
+
+
+# ── The model sees the suffixes, so what it writes back is not trusted ──
+
+
+def test_a_suffix_the_rewrite_moved_does_not_stick():
+    """The node's lines go to the model with their suffixes, and it can
+    hand one back on the wrong line. The line keeps its own."""
+    index = _source_index([ANCIEN, NOUVEAU])
+
+    rendu = _reattach_sources(["Le DGX Spark a 128 Go · web · 2026-08-16"], index)
+
+    assert rendu == [ANCIEN]
+
+
+def test_a_suffix_echoed_on_a_merged_line_is_not_trusted():
+    """Two claims folded into one sentence rest on nothing anybody can
+    name, whatever suffix the rewrite left at the end of it."""
+    index = _source_index([ANCIEN, NOUVEAU])
+
+    rendu = _reattach_sources(
+        ["Le DGX Spark a 128 Go et une barrette DDR5 coûte 450 € · web · 2026-08-16"],
+        index)
+
+    assert fact_source(rendu[0]) == SOURCE_UNKNOWN
+    assert "·" not in rendu[0]
+
+
+def test_a_line_comes_back_with_one_suffix():
+    """A diary import stamps `inconnu`; the same claim also looked up on
+    the web is the near-duplicate a merge exists to collapse."""
+    claim = "Une barrette DDR5 coûte 450 €"
+    index = _source_index([NOUVEAU, fact_line(claim, SOURCE_UNKNOWN, "2026-03-03")])
+
+    rendu = _reattach_sources([fact_line(claim, SOURCE_UNKNOWN, "2026-03-03")], index)
+
+    assert rendu == [NOUVEAU]
+
+
+def test_a_dated_unknown_line_keeps_its_date():
+    importe = fact_line("Le Mac Studio a 512 Go", SOURCE_UNKNOWN, "2026-03-03")
+
+    rendu = _reattach_sources(["Le Mac Studio a 512 Go"], _source_index([importe]))
+
+    assert rendu == [importe]
+
+
+@pytest.mark.parametrize("ordre", [1, -1])
+def test_a_known_source_wins_over_unknown_for_the_same_claim(ordre):
+    claim = "Une barrette DDR5 coûte 450 €"
+    lignes = [NOUVEAU, fact_line(claim, SOURCE_UNKNOWN, "2026-03-03")][::ordre]
+
+    rendu = _reattach_sources([claim], _source_index(lignes))
+
+    assert rendu == [NOUVEAU]
+
+
+@patch("src.jarvis.memory.graph_ops.call_llm_direct")
+def test_a_merge_gives_the_new_facts_and_the_old_lines_their_own_sources(mock_llm, tmp_path):
+    from src.jarvis.memory.graph import GraphMemoryStore
+    from src.jarvis.memory.graph_ops import merge_node_data
+
+    store = GraphMemoryStore(str(tmp_path / "g.db"))
+    node = store.create_node(name="Matériel", description="d", data=ANCIEN, parent_id="world")
+    # The rewrite keeps both claims, and moves the old line's suffix
+    # onto the new one, as it can since it sees the suffixes.
+    mock_llm.return_value = (
+        '{"facts": ["Le DGX Spark a 128 Go", '
+        '"Une barrette DDR5 coûte 450 € · outil · 2026-01-02"]}'
+    )
+
+    merge_node_data(store=store, node_id=node.id,
+                    new_facts=["Une barrette DDR5 coûte 450 €"], cfg=None,
+                    chat_model="model", source=SOURCE_WEB, date_utc="2026-08-16")
+
+    data = store.get_node(node.id).data
+    store.close()
+    assert data.split("\n") == [ANCIEN, NOUVEAU]

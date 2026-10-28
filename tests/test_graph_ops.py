@@ -28,7 +28,7 @@ from src.jarvis.memory.graph_ops import (
     auto_split_node,
     update_graph_from_dialogue,
     merge_node_data,
-    consolidate_all_populated_nodes,
+    consolidate_world_nodes,
     MergeResult,
     _MERGE_GROWTH_SLACK,
     _SPLIT_MIN_RETENTION,
@@ -682,6 +682,22 @@ class TestAutoSplitNode:
 
         assert auto_split_node(store, node.id, None, "model") is False
         self._assert_untouched(store, node)
+
+    def test_the_prompt_keeps_an_answer_however_well_known(self):
+        """A split rewrites every fact of a node at once, so its pruning
+        rule must be the merge's narrow one: being in the model's
+        training data is no reason to drop a line, and a line with the
+        assistant as its subject is not written. Pinned on what the
+        prompt must say, never on its layout (graph.spec.md, Auto-Split).
+        """
+        from src.jarvis.memory.graph_ops import _SPLIT_SYSTEM_PROMPT as prompt
+
+        assert "not by itself a reason to drop" in prompt
+        assert "stays" in prompt
+        assert "SUBJECT" in prompt
+        assert "do not write it" in prompt.lower()
+        # Never a rule that prunes by what the model already knows.
+        assert "remove anything you already know" not in prompt.lower()
 
 
 # ── append_to_node ─────────────────────────────────────────────────────
@@ -1436,30 +1452,31 @@ class TestMergeSystemPromptInvariants:
 
 
 @pytest.mark.unit
-class TestConsolidateAllPopulatedNodes:
-    """consolidate_all_populated_nodes runs a self-merge pass on every
-    populated node. Migration path for the contradiction backlog."""
+class TestConsolidateWorldNodes:
+    """consolidate_world_nodes runs a self-merge pass on every populated
+    node of the World branch, so the latest rules reach older data."""
 
     @patch("src.jarvis.memory.graph_ops.call_llm_direct")
     def test_walks_only_populated_nodes(self, mock_llm, store):
         # Two populated nodes + one empty node + the seeded branch roots.
         store.create_node(
             name="A", description="d",
-            data="Line 1.\nContradicts line 1.", parent_id="user",
+            data="Line 1.\nContradicts line 1.", parent_id="world",
         )
         store.create_node(
             name="B", description="d",
             data="Line X.\nDuplicate of line X.", parent_id="world",
         )
-        store.create_node(name="Empty", description="d", data="", parent_id="user")
+        store.create_node(name="Empty", description="d", data="", parent_id="world")
 
-        # Two LLM calls expected (one per populated node).
-        mock_llm.side_effect = [
-            '{"facts": ["Line 1."]}',
-            '{"facts": ["Line X."]}',
-        ]
+        # Two LLM calls expected (one per populated node), answered by
+        # content so the walk's order does not matter.
+        mock_llm.side_effect = lambda *, user_content, **kw: (
+            '{"facts": ["Line 1."]}' if "Line 1." in user_content
+            else '{"facts": ["Line X."]}'
+        )
 
-        results = list(consolidate_all_populated_nodes(
+        results = list(consolidate_world_nodes(
             store=store,
             cfg=None,
             chat_model="model",
@@ -1476,13 +1493,13 @@ class TestConsolidateAllPopulatedNodes:
 
     @patch("src.jarvis.memory.graph_ops.call_llm_direct")
     def test_failure_per_node_does_not_abort_the_rest(self, mock_llm, store):
-        store.create_node(name="A", description="d", data="X.", parent_id="user")
+        store.create_node(name="A", description="d", data="X.", parent_id="world")
         store.create_node(name="B", description="d", data="Y.", parent_id="world")
 
         # First node's LLM returns junk → fail-open. Second succeeds.
         mock_llm.side_effect = ["garbage", '{"facts": ["Y."]}']
 
-        results = list(consolidate_all_populated_nodes(
+        results = list(consolidate_world_nodes(
             store=store,
             cfg=None,
             chat_model="model",
@@ -1498,11 +1515,11 @@ class TestConsolidateAllPopulatedNodes:
         """The op must be a generator that yields each result as the
         walk progresses — buffering the whole sweep before yielding
         defeats the streaming NDJSON endpoint that wraps it."""
-        store.create_node(name="A", description="d", data="A.", parent_id="user")
+        store.create_node(name="A", description="d", data="A.", parent_id="world")
         store.create_node(name="B", description="d", data="B.", parent_id="world")
         mock_llm.side_effect = ['{"facts": ["A."]}', '{"facts": ["B."]}']
 
-        gen = consolidate_all_populated_nodes(
+        gen = consolidate_world_nodes(
             store=store,
             cfg=None,
             chat_model="model",

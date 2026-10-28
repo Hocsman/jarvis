@@ -175,25 +175,10 @@ def _select_device(combo: QComboBox, key: str, value: Any) -> None:
     combo.setCurrentIndex(idx)
 
 
-def _dictation_hotkey_choices() -> list:
-    """Build platform-aware dictation hotkey dropdown choices."""
-    from jarvis.dictation.dictation_engine import format_hotkey_display
-    from jarvis.config import _default_dictation_hotkey
-    default = _default_dictation_hotkey()
-    options = [
-        ("ctrl+alt", format_hotkey_display("ctrl+alt")),
-        ("ctrl+cmd", format_hotkey_display("ctrl+cmd")),
-        ("ctrl+shift+d", format_hotkey_display("ctrl+shift+d")),
-        ("ctrl+shift", format_hotkey_display("ctrl+shift")),
-    ]
-    return [
-        (val, f"{label} (default)" if val == default else label)
-        for val, label in options
-    ]
-
-
 def _build_field_metadata() -> List[FieldMeta]:
     """Build the metadata registry for all user-facing config fields."""
+    from jarvis.dictation.hotkeys import dictation_hotkey_choices
+
     fields = []
 
     def f(key, label, desc, cat, ftype, **kw):
@@ -507,7 +492,7 @@ def _build_field_metadata() -> List[FieldMeta]:
       "features", "bool")
     f("dictation_hotkey", "Dictation Hotkey",
       "Key combination to hold for dictation. Double-tap for hands-free mode.",
-      "features", "choice", choices=_dictation_hotkey_choices())
+      "features", "choice", choices=dictation_hotkey_choices())
     f("dictation_filler_removal", "Filler Word Removal",
       "Use the local LLM to remove filler words (um, uh, like) from dictation output",
       "features", "bool")
@@ -552,18 +537,20 @@ def _build_field_metadata() -> List[FieldMeta]:
     # A reminder speaks at a time he is not necessarily at the machine
     # for, so the master switch belongs somewhere he can find it —
     # `routines_enabled` next door has had one all along. `reminder_model`
-    # is here for a second reason: this prompt carries the sentence he
-    # dictated about his own life, and the reminder chain deliberately
-    # skips the cloud-safe rewrite, so pinning a local model is how he
-    # keeps it off the network. A privacy control nobody can find is a
+    # is here for a second reason: the reminder chain deliberately skips
+    # the cloud-safe rewrite, so pinning a local model is how the goal
+    # judge and the journal stay on this machine, and how the time is read
+    # here when the chat is too. A privacy control nobody can find is a
     # privacy control nobody uses.
     f("reminders_enabled", "Rappels",
       "Ce qu'elle te dit à l'heure dite. Coupé, rien ne part, "
       "et rien n'est perdu",
       "reminders", "bool")
     f("reminder_model", "Modèle des rappels",
-      "Lit l'heure dans ta phrase. Épingle un modèle local et ta phrase "
-      "reste sur ta machine ou ton réseau",
+      "Lit l'heure dans ta phrase quand le chat tourne sur ta machine ou "
+      "ton réseau. Avec un chat dans le cloud, c'est lui qui la lit : ta "
+      "phrase y est déjà partie. Épinglé, il garde aussi tes objectifs et "
+      "ton journal sur ta machine ou ton réseau",
       "reminders", "str")
     f("reminder_default_hour", "Heure par défaut",
       "Quand tu nommes un jour sans heure. Elle te le dit à voix haute "
