@@ -13,7 +13,7 @@ the synthesis that produced no audio, the exception caught above. A
 broken voice does not delay the reminder, it deletes it — and the ledger
 records that she said it.
 
-Interruption is the case the flag was written for and it stays: an
+Interruption is the case `interrupted` was written for and it stays: an
 interrupted reminder is unheard, so it must stay owed as well.
 """
 
@@ -31,7 +31,7 @@ def _kokoro():
     import threading
 
     moteur._is_speaking = threading.Event()
-    moteur._should_interrupt = threading.Event()
+    moteur._epoch = 0
     moteur._audio_lock = threading.Lock()
     moteur._audio_stream = None
     moteur._last_spoken_text = ""
@@ -53,15 +53,18 @@ def test_an_engine_that_cannot_start_does_not_report_the_words_as_spoken():
     assert dit == [], "une synthèse qui n'a pas démarré a réglé le rappel"
 
 
-def test_the_promise_the_flag_was_written_for_still_holds():
+def test_an_interrupted_reminder_is_not_reported_as_spoken_either():
     """An interrupted reminder is unheard, so it stays owed too. This is
-    the case `interrupted` already covered, kept green."""
+    the case the interruption count already covered, kept green: the
+    item was queued before the stop word, so it is cancelled when the
+    worker takes it up."""
     moteur = _kokoro()
-    moteur._should_interrupt.set()
+    queued_under = moteur._epoch
+    moteur._epoch += 1
     dit = []
     moteur._completion_callback = lambda: dit.append(1)
 
-    moteur._speak_once("rappel : appeler l'oncologue")
+    moteur._speak_once("rappel : appeler l'oncologue", queued_under)
 
     assert dit == []
 

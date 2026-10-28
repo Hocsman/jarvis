@@ -508,7 +508,10 @@ class ChatterboxTTS:
         self._last_spoken_text: str = ""
         self._completion_callback: Optional[Callable[[], None]] = None
         self._duration_callback: Optional[Callable[[float], None]] = None
-        self._should_interrupt = threading.Event()
+        # Interruptions so far. Each queued item carries the count it was
+        # queued under; an item whose count is no longer current was queued
+        # before an interrupt and is not spoken (`tts.spec.md`, "Interrupting").
+        self._epoch = 0
 
         # Chatterbox model (eagerly loaded during initialization)
         self._model = None
@@ -592,7 +595,7 @@ class ChatterboxTTS:
             pass
         self._stop.set()
         try:
-            self._q.put_nowait(("", None, None))
+            self._q.put_nowait(("", None, None, self._epoch))
         except Exception:
             pass
         self._thread.join(timeout=2.0)
@@ -620,24 +623,30 @@ class ChatterboxTTS:
         # utterance, and a reply spoken sentence by sentence would fire
         # the last chunk's callback after the first chunk finished —
         # opening the hot window mid-reply. Only the worker writes them,
-        # as it dequeues the item it is about to speak.
+        # as it dequeues the item it is about to speak. The count of
+        # interruptions travels with them: an item queued before an
+        # interrupt is dropped when the worker reaches it, one queued after
+        # is spoken.
         _callbacks = (completion_callback, duration_callback)
         # Preprocess text for speech (convert links to readable descriptions)
         processed_text = _preprocess_for_speech(text)
         try:
-            self._q.put_nowait((processed_text, *_callbacks))
+            self._q.put_nowait((processed_text, *_callbacks, self._epoch))
         except Exception:
             pass
 
     def interrupt(self) -> None:
-        """Stop current speech immediately"""
-        self._should_interrupt.set()
+        """Stop current speech immediately and drop what is queued."""
+        self._epoch += 1
 
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                texte, _fin, _duree = self._q.get(timeout=0.5)
+                texte, _fin, _duree, epoch = self._q.get(timeout=0.5)
             except queue.Empty:
+                continue
+            if epoch != self._epoch:
+                debug_log("Chatterbox TTS dropped an item queued before an interrupt", "tts")
                 continue
             if not texte:
                 if _fin is not None:
@@ -650,14 +659,19 @@ class ChatterboxTTS:
             self._duration_callback = _duree
             text = texte
             try:
-                self._speak_once(text)
+                self._speak_once(text, epoch)
             except Exception:
                 continue
 
-    def _speak_once(self, text: str) -> None:
+    def _speak_once(self, text: str, epoch: Optional[int] = None) -> None:
+        if epoch is None:
+            epoch = self._epoch
+
+        def cancelled() -> bool:
+            return self._epoch != epoch
+
         self._is_speaking.set()
         self._last_spoken_text = text
-        self._should_interrupt.clear()
         interrupted = False
         # Positive rather than negative: `interrupted` only ever became
         # True inside the playback loop, so every other way out of this
@@ -684,6 +698,10 @@ class ChatterboxTTS:
             import pygame
             import os
 
+            if cancelled():
+                debug_log("Chatterbox TTS interrupted before synthesis", "tts")
+                return
+
             # Generate speech
             wav = self._model.generate(
                 text,
@@ -691,6 +709,12 @@ class ChatterboxTTS:
                 exaggeration=self.exaggeration,
                 cfg_weight=self.cfg_weight
             )
+
+            # The model call cannot be cut short; what it made for an item
+            # interrupted meanwhile is thrown away rather than played.
+            if cancelled():
+                debug_log("Chatterbox TTS interrupted during synthesis", "tts")
+                return
 
             # Calculate exact duration from audio samples
             exact_duration = wav.shape[-1] / self._model.sr
@@ -720,13 +744,13 @@ class ChatterboxTTS:
 
                 # Wait for playback to complete or interruption
                 while pygame.mixer.music.get_busy():
-                    if self._should_interrupt.is_set():
+                    if cancelled():
                         pygame.mixer.music.stop()
                         interrupted = True
                         break
                     pygame.time.wait(100)  # Check every 100ms
 
-                spoken = not interrupted
+                spoken = not (interrupted or cancelled())
 
             finally:
                 # Cleanup
@@ -814,7 +838,10 @@ class PiperTTS:
         self._last_spoken_text: str = ""
         self._completion_callback: Optional[Callable[[], None]] = None
         self._duration_callback: Optional[Callable[[float], None]] = None
-        self._should_interrupt = threading.Event()
+        # Interruptions so far. Each queued item carries the count it was
+        # queued under; an item whose count is no longer current was queued
+        # before an interrupt and is not spoken (`tts.spec.md`, "Interrupting").
+        self._epoch = 0
 
         # Piper voice (lazy loaded)
         self._voice = None
@@ -1054,7 +1081,7 @@ class PiperTTS:
             pass
         self._stop.set()
         try:
-            self._q.put_nowait(("", None, None, None))
+            self._q.put_nowait(("", None, None, None, self._epoch))
         except Exception:
             pass
         self._thread.join(timeout=2.0)
@@ -1087,18 +1114,21 @@ class PiperTTS:
         # utterance, and a reply spoken sentence by sentence would fire
         # the last chunk's callback after the first chunk finished —
         # opening the hot window mid-reply. Only the worker writes them,
-        # as it dequeues the item it is about to speak.
+        # as it dequeues the item it is about to speak. The count of
+        # interruptions travels with them: an item queued before an
+        # interrupt is dropped when the worker reaches it, one queued after
+        # is spoken.
         _callbacks = (completion_callback, duration_callback)
         # Preprocess text for speech
         processed_text = _preprocess_for_speech(text)
         try:
-            self._q.put_nowait((processed_text, *_callbacks, language))
+            self._q.put_nowait((processed_text, *_callbacks, language, self._epoch))
         except Exception:
             pass
 
     def interrupt(self) -> None:
-        """Stop current speech immediately."""
-        self._should_interrupt.set()
+        """Stop current speech immediately and drop what is queued."""
+        self._epoch += 1
         with self._audio_lock:
             if self._audio_stream is not None:
                 try:
@@ -1110,8 +1140,11 @@ class PiperTTS:
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                texte, _fin, _duree, _langue = self._q.get(timeout=0.5)
+                texte, _fin, _duree, _langue, epoch = self._q.get(timeout=0.5)
             except queue.Empty:
+                continue
+            if epoch != self._epoch:
+                debug_log("Piper TTS dropped an item queued before an interrupt", "tts")
                 continue
             if not texte:
                 if _fin is not None:
@@ -1124,15 +1157,21 @@ class PiperTTS:
             self._duration_callback = _duree
             text = texte
             try:
-                self._speak_once(text, _langue)
+                self._speak_once(text, _langue, epoch)
             except Exception as e:
                 debug_log(f"Piper TTS error in _speak_once: {e}", "tts")
                 continue
 
-    def _speak_once(self, text: str, language: Optional[str] = None) -> None:
+    def _speak_once(self, text: str, language: Optional[str] = None,
+                    epoch: Optional[int] = None) -> None:
+        if epoch is None:
+            epoch = self._epoch
+
+        def cancelled() -> bool:
+            return self._epoch != epoch
+
         self._is_speaking.set()
         self._last_spoken_text = text
-        self._should_interrupt.clear()
         interrupted = False
         # Positive rather than negative: `interrupted` only ever became
         # True inside the playback loop, so every other way out of this
@@ -1165,7 +1204,7 @@ class PiperTTS:
             debug_log(f"Piper TTS starting synthesis: {len(text.split())} words", "tts")
 
             # Check for interruption before synthesis
-            if self._should_interrupt.is_set():
+            if cancelled():
                 debug_log("Piper TTS interrupted before synthesis", "tts")
                 return
 
@@ -1179,13 +1218,13 @@ class PiperTTS:
             )
             audio_chunks = []
             for chunk in piper_voice.synthesize(text, syn_config):
-                if self._should_interrupt.is_set():
+                if cancelled():
                     debug_log("Piper TTS interrupted during synthesis", "tts")
                     return
                 audio_chunks.append(chunk.audio_int16_array)
 
             # Check for interruption after synthesis
-            if self._should_interrupt.is_set():
+            if cancelled():
                 debug_log("Piper TTS interrupted after synthesis", "tts")
                 return
 
@@ -1216,7 +1255,7 @@ class PiperTTS:
             blocksize = 1024  # Small blocks for responsive interruption
 
             def audio_callback(outdata, frames, time_info, status):
-                if self._should_interrupt.is_set():
+                if cancelled():
                     raise sd.CallbackAbort()
 
                 start = play_position[0]
@@ -1248,7 +1287,7 @@ class PiperTTS:
                 _sound_started()
                 # Wait for playback to complete
                 while self._audio_stream is not None and self._audio_stream.active:
-                    if self._should_interrupt.is_set():
+                    if cancelled():
                         interrupted = True
                         with self._audio_lock:
                             if self._audio_stream is not None:
@@ -1269,7 +1308,7 @@ class PiperTTS:
                             pass
                         self._audio_stream = None
 
-            interrupted = interrupted or self._should_interrupt.is_set()
+            interrupted = interrupted or cancelled()
             spoken = not interrupted
             actual_duration = time.time() - start_time
             debug_log(f"Piper TTS complete: actual={actual_duration:.2f}s (audio={exact_duration:.2f}s)", "tts")
@@ -1365,7 +1404,10 @@ class KokoroTTS:
         self._last_spoken_text: str = ""
         self._completion_callback: Optional[Callable[[], None]] = None
         self._duration_callback: Optional[Callable[[float], None]] = None
-        self._should_interrupt = threading.Event()
+        # Interruptions so far. Each queued item carries the count it was
+        # queued under; an item whose count is no longer current was queued
+        # before an interrupt and is not spoken (`tts.spec.md`, "Interrupting").
+        self._epoch = 0
 
         # Kokoro pipeline (lazy loaded).
         self._pipe = None
@@ -1519,7 +1561,7 @@ class KokoroTTS:
             pass
         self._stop.set()
         try:
-            self._q.put_nowait(("", None, None))
+            self._q.put_nowait(("", None, None, self._epoch))
         except Exception:
             pass
         self._thread.join(timeout=2.0)
@@ -1546,17 +1588,20 @@ class KokoroTTS:
         # utterance, and a reply spoken sentence by sentence would fire
         # the last chunk's callback after the first chunk finished —
         # opening the hot window mid-reply. Only the worker writes them,
-        # as it dequeues the item it is about to speak.
+        # as it dequeues the item it is about to speak. The count of
+        # interruptions travels with them: an item queued before an
+        # interrupt is dropped when the worker reaches it, one queued after
+        # is spoken.
         _callbacks = (completion_callback, duration_callback)
         processed_text = _preprocess_for_speech(text)
         try:
-            self._q.put_nowait((processed_text, *_callbacks))
+            self._q.put_nowait((processed_text, *_callbacks, self._epoch))
         except Exception:
             pass
 
     def interrupt(self) -> None:
-        """Stop current speech immediately."""
-        self._should_interrupt.set()
+        """Stop current speech immediately and drop what is queued."""
+        self._epoch += 1
         with self._audio_lock:
             if self._audio_stream is not None:
                 try:
@@ -1568,8 +1613,11 @@ class KokoroTTS:
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                texte, _fin, _duree = self._q.get(timeout=0.5)
+                texte, _fin, _duree, epoch = self._q.get(timeout=0.5)
             except queue.Empty:
+                continue
+            if epoch != self._epoch:
+                debug_log("Kokoro TTS dropped an item queued before an interrupt", "tts")
                 continue
             if not texte:
                 if _fin is not None:
@@ -1582,15 +1630,20 @@ class KokoroTTS:
             self._duration_callback = _duree
             text = texte
             try:
-                self._speak_once(text)
+                self._speak_once(text, epoch)
             except Exception as e:
                 debug_log(f"Kokoro TTS error in _speak_once: {e}", "tts")
                 continue
 
-    def _speak_once(self, text: str) -> None:
+    def _speak_once(self, text: str, epoch: Optional[int] = None) -> None:
+        if epoch is None:
+            epoch = self._epoch
+
+        def cancelled() -> bool:
+            return self._epoch != epoch
+
         self._is_speaking.set()
         self._last_spoken_text = text
-        self._should_interrupt.clear()
         interrupted = False
         # Positive rather than negative: `interrupted` only ever became
         # True inside the playback loop, so every other way out of this
@@ -1616,7 +1669,7 @@ class KokoroTTS:
             start_time = time.time()
             debug_log(f"Kokoro TTS starting synthesis: {len(text.split())} words", "tts")
 
-            if self._should_interrupt.is_set():
+            if cancelled():
                 return
 
             # The pipeline yields one (graphemes, phonemes, audio) tuple per
@@ -1624,12 +1677,12 @@ class KokoroTTS:
             # float32 numpy array for sounddevice.
             audio_chunks = []
             for _gs, _ps, audio in self._pipe(text, voice=self._resolved_voice(), speed=self.speed):
-                if self._should_interrupt.is_set():
+                if cancelled():
                     return
                 arr = audio.detach().cpu().numpy() if hasattr(audio, "detach") else np.asarray(audio)
                 audio_chunks.append(arr.astype(np.float32))
 
-            if self._should_interrupt.is_set():
+            if cancelled():
                 return
             if not audio_chunks:
                 debug_log("Kokoro TTS: no audio generated", "tts")
@@ -1654,7 +1707,7 @@ class KokoroTTS:
             blocksize = 1024
 
             def audio_callback(outdata, frames, time_info, status):
-                if self._should_interrupt.is_set():
+                if cancelled():
                     raise sd.CallbackAbort()
                 start = play_position[0]
                 end = start + frames
@@ -1681,7 +1734,7 @@ class KokoroTTS:
 
                 _sound_started()
                 while self._audio_stream is not None and self._audio_stream.active:
-                    if self._should_interrupt.is_set():
+                    if cancelled():
                         interrupted = True
                         with self._audio_lock:
                             if self._audio_stream is not None:
@@ -1702,7 +1755,7 @@ class KokoroTTS:
                             pass
                         self._audio_stream = None
 
-            interrupted = interrupted or self._should_interrupt.is_set()
+            interrupted = interrupted or cancelled()
             spoken = not interrupted
             actual_duration = time.time() - start_time
             debug_log(f"Kokoro TTS complete: actual={actual_duration:.2f}s (audio={exact_duration:.2f}s)", "tts")

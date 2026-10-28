@@ -248,16 +248,6 @@ class TestPiperTTSWithMocking:
         # Queue should be empty
         assert tts._q.empty()
 
-    def test_interrupt_sets_flag(self):
-        """PiperTTS.interrupt should set the interrupt flag."""
-        from src.jarvis.output.tts import PiperTTS
-
-        tts = PiperTTS(enabled=True)
-
-        assert not tts._should_interrupt.is_set()
-        tts.interrupt()
-        assert tts._should_interrupt.is_set()
-
     def test_interrupt_marks_interrupted_when_stream_active_drops_first(self):
         """When interrupt() is called and stream.active drops before the sleep loop evaluates,
         the utterance must still be marked interrupted, and completion callback must not be called."""
@@ -293,8 +283,8 @@ class TestPiperTTSWithMocking:
                 # after the stream opens must not depend on how fast the
                 # machine gets there. ``interrupt()`` itself is not called
                 # here, it takes the audio lock the engine holds around
-                # ``start()``.
-                tts._should_interrupt.set()
+                # ``start()``; counting the interruption is its first step.
+                tts._epoch += 1
                 mock_stream.active = False
 
             mock_stream.start.side_effect = interrupt_as_the_stream_ends

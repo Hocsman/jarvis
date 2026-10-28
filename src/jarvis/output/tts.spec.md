@@ -90,11 +90,11 @@ calling thread, for the loader reason given for Kokoro.
 
 One worker thread per engine takes items from a FIFO queue and speaks
 them one at a time. An item is `(text, completion_callback,
-duration_callback)`, and for Piper a fourth field, the language. The
-language belongs to the item, not to the engine: sentences of two
-replies in two languages can wait in the queue together, each spoken in
-its own voice. Kyutai's fourth field is the count of interruptions at the
-moment the item was queued (see "Interrupting").
+duration_callback)`, then the engine's own fields: for Piper the
+language, and last in every engine the count of interruptions at the
+moment the item was queued (see "Interrupting"). The language belongs to
+the item, not to the engine: sentences of two replies in two languages
+can wait in the queue together, each spoken in its own voice.
 
 **Text is processed when it is queued.** `_preprocess_for_speech`
 replaces links with a spoken description of the domain and strips
@@ -174,18 +174,32 @@ talking, completely. The contract is the one `streaming.spec.md` states
   follows a stop is not swallowed.
 
 `interrupt()` is safe from any thread, safe when nothing is speaking,
-and safe to call repeatedly. `stop()` calls it. Chatterbox can only
-interrupt playback: the generation of one item is a single model call
-that cannot be cut short.
+and safe to call repeatedly. `stop()` calls it. Chatterbox cannot cut a
+generation short: the item is a single model call, so what it made for an
+item interrupted meanwhile is thrown away when the call returns, never
+played.
 
-Kyutai keeps the whole contract. `interrupt()` counts the interruption and
-every item carries the count it was queued under, so an item queued before
-the call is dropped, callbacks and end-of-reply marker included, when the
-worker reaches it, and one queued after is spoken. The count is compared
-again at every frame the model produces, so an item still being
-synthesised is abandoned within one frame of audio rather than run to its
-end, and an interruption that lands between the worker taking an item and
-starting it cannot be lost.
+**How the contract is kept.** An engine counts its interruptions.
+`interrupt()` adds one, and `speak` stamps every item with the count
+current when it was queued. The worker drops an item whose stamp is no
+longer current before doing anything else with it: no synthesis, no
+callback, and for the end-of-reply marker no firing. The item in hand
+compares the count at every step (before synthesis, between the pieces
+the model returns, after synthesis, in the audio callback and in the
+playback wait) and counts as unspoken once it has changed. Stamping at
+the moment of queueing is what makes an interrupt that lands between the
+worker taking an item up and starting it impossible to lose, which a flag
+cleared as each item starts could not promise; and it is what lets the
+reply that follows a stop be spoken, since its items carry the new count.
+
+Nothing upstream does this work. A stop word is heard on the listener's
+own thread, which also dispatches the reply, so it is only heard once
+generation has ended and the whole reply (every chunk, the tail and the
+marker) is already waiting in the engine's queue.
+
+Kyutai compares the count at every frame the model produces as well, so an
+item still being synthesised is abandoned within one frame of audio rather
+than run to its end.
 
 ## What she owes the echo detector
 
@@ -461,9 +475,16 @@ language. The line is not added for Kokoro or Kyutai.
   for a callback with no text.
 - The completion callback does not fire when the engine could not start
   or the item was interrupted.
-- An interrupt during one item leaves the items queued behind it
-  unspoken, and fires neither their callbacks nor the end-of-reply
-  marker's.
+- An interrupt discards the items queued before it, whether the stop
+  lands during synthesis or during playback: they are never synthesised
+  and fire neither their callbacks nor the end-of-reply marker's. The
+  item in hand is not heard (or, playing, is cut), and the items queued
+  after the interrupt are spoken to the end with their callbacks, so are
+  the ones after a second stop. Held for each of the three engines.
+- An interrupt landing just as the worker takes an item up is not lost,
+  and an interrupt with nothing to stop swallows nothing queued after it.
+- Chatterbox does not play audio generated for an item interrupted during
+  generation.
 - A missing voice that cannot be fetched falls back to a cached fallback
   voice, never to another voice when pinned, and reports the reason when
   there is nothing to fall back to.
