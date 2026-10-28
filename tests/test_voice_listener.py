@@ -381,8 +381,9 @@ class TestWindowsCudaDetection:
 class TestLargeV3TurboFallback:
     """Tests for large-v3-turbo runtime fallback when faster-whisper is too old."""
 
-    def test_turbo_falls_back_to_large_v3_when_unsupported(self, capsys):
+    def test_turbo_falls_back_to_large_v3_when_unsupported(self, capsys, installed_faster_whisper):
         """large-v3-turbo config falls back to large-v3 when faster-whisper < 1.1.0."""
+        installed_faster_whisper("1.0.3")
         mock_whisper_model = MagicMock()
 
         with patch("jarvis.listening.listener.sys") as mock_sys:
@@ -391,25 +392,25 @@ class TestLargeV3TurboFallback:
                 with patch("jarvis.listening.listener.MLX_WHISPER_AVAILABLE", False):
                     with patch("jarvis.listening.listener.WhisperModel", return_value=mock_whisper_model) as mock_class:
                         with patch("jarvis.listening.listener.sd") as mock_sd:
-                            with patch("jarvis.listening.listener._is_faster_whisper_turbo_supported", return_value=False):
-                                mock_sd.query_devices.return_value = [{"name": "Test Mic", "max_input_channels": 1}]
-                                mock_sd.InputStream.side_effect = Exception("Stop test here")
+                            mock_sd.query_devices.return_value = [{"name": "Test Mic", "max_input_channels": 1}]
+                            mock_sd.InputStream.side_effect = Exception("Stop test here")
 
-                                from jarvis.listening.listener import VoiceListener
+                            from jarvis.listening.listener import VoiceListener
 
-                                mock_cfg = _create_mock_config(whisper_model="large-v3-turbo")
-                                listener = VoiceListener(MagicMock(), mock_cfg, MagicMock(), MagicMock())
-                                listener.run()
+                            mock_cfg = _create_mock_config(whisper_model="large-v3-turbo")
+                            listener = VoiceListener(MagicMock(), mock_cfg, MagicMock(), MagicMock())
+                            listener.run()
 
-                                # Should load large-v3 instead of large-v3-turbo
-                                mock_class.assert_called_once()
-                                assert mock_class.call_args[0][0] == "large-v3"
+                            # Should load large-v3 instead of large-v3-turbo
+                            mock_class.assert_called_once()
+                            assert mock_class.call_args[0][0] == "large-v3"
 
         captured = capsys.readouterr()
         assert "large-v3-turbo is not supported" in captured.out
 
-    def test_turbo_kept_when_faster_whisper_supports_it(self):
+    def test_turbo_kept_when_faster_whisper_supports_it(self, installed_faster_whisper):
         """large-v3-turbo config is kept when faster-whisper >= 1.1.0."""
+        installed_faster_whisper("1.1.1")
         mock_whisper_model = MagicMock()
 
         with patch("jarvis.listening.listener.sys") as mock_sys:
@@ -418,19 +419,18 @@ class TestLargeV3TurboFallback:
                 with patch("jarvis.listening.listener.MLX_WHISPER_AVAILABLE", False):
                     with patch("jarvis.listening.listener.WhisperModel", return_value=mock_whisper_model) as mock_class:
                         with patch("jarvis.listening.listener.sd") as mock_sd:
-                            with patch("jarvis.listening.listener._is_faster_whisper_turbo_supported", return_value=True):
-                                mock_sd.query_devices.return_value = [{"name": "Test Mic", "max_input_channels": 1}]
-                                mock_sd.InputStream.side_effect = Exception("Stop test here")
+                            mock_sd.query_devices.return_value = [{"name": "Test Mic", "max_input_channels": 1}]
+                            mock_sd.InputStream.side_effect = Exception("Stop test here")
 
-                                from jarvis.listening.listener import VoiceListener
+                            from jarvis.listening.listener import VoiceListener
 
-                                mock_cfg = _create_mock_config(whisper_model="large-v3-turbo")
-                                listener = VoiceListener(MagicMock(), mock_cfg, MagicMock(), MagicMock())
-                                listener.run()
+                            mock_cfg = _create_mock_config(whisper_model="large-v3-turbo")
+                            listener = VoiceListener(MagicMock(), mock_cfg, MagicMock(), MagicMock())
+                            listener.run()
 
-                                # Should keep large-v3-turbo
-                                mock_class.assert_called_once()
-                                assert mock_class.call_args[0][0] == "large-v3-turbo"
+                            # Should keep large-v3-turbo
+                            mock_class.assert_called_once()
+                            assert mock_class.call_args[0][0] == "large-v3-turbo"
 
 
 class TestRepetitiveHallucinationDetection:

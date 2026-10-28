@@ -3,7 +3,8 @@
 Receives full context (transcript buffer, TTS history, state) and makes
 informed decisions about whether speech is directed at the assistant and
 what the actual query is. Routes through ``jarvis.llm.get_auxiliary_backend``
-so a bare judge-model tag on a remote provider runs on local Ollama.
+so a bare judge-model tag on a remote provider runs on local Ollama,
+unless it is the provider's own chat model.
 """
 
 import json
@@ -40,8 +41,8 @@ def warm_up_chat_model(cfg, model: str, timeout: float) -> bool:
 
     Thin wrapper over :meth:`LLMBackend.warm_up` so callers don't need to
     construct a backend just to ask for a warmup. Returns whatever the
-    backend's warmup result is — for runtimes without an unloading model
-    (OpenAI-compatible servers) this is always ``True``.
+    backend's warmup result: on a remote provider, whether one minimal
+    request to it succeeded.
     """
     if not model:
         return False
@@ -555,7 +556,7 @@ def create_intent_judge(cfg) -> IntentJudge:
 
     The judge dispatches every chat call through
     ``get_auxiliary_backend(cfg, model)``, so the active provider
-    (Ollama / OpenAI-compatible) handles the wire shape automatically.
+    (Ollama / OpenAI-compatible / Anthropic) handles the wire shape automatically.
     """
     config = IntentJudgeConfig(
         assistant_name=str(getattr(cfg, "wake_word", "jarvis")).capitalize(),

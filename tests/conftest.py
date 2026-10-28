@@ -1,7 +1,9 @@
 import ipaddress
 import os
+import shutil
 import socket
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -16,6 +18,11 @@ from thread_guard import _no_thread_outlives_its_test  # noqa: F401
 # The autouse guard that keeps a test off the native inference runtimes. It
 # lives in its own module for the same reason.
 from native_guard import _no_native_inference  # noqa: F401
+
+# The autouse guard that refuses a test the user's own config file. It lives in
+# its own module for the same reason.
+import config_guard
+from config_guard import _no_real_user_config, _real_user_config  # noqa: F401
 
 # Robustly locate repository root (directory containing src/jarvis)
 _this_file = Path(__file__).resolve()
@@ -139,18 +146,32 @@ def _bac_a_sable(tmp_path_factory):
 
 @pytest.fixture(autouse=True)
 def _isolate_user_config_path(_bac_a_sable, request, monkeypatch):
-    """Redirect ``default_config_path`` to a per-session tempfile so a test
-    that calls ``load_settings`` (or any other code path that resolves the
-    user's config) cannot read or overwrite ``~/.config/jarvis/config.json``.
+    """Give every test a config file of its own, so a test that calls
+    ``load_settings`` (or any other code path that resolves the user's
+    config) cannot read or overwrite ``~/.config/jarvis/config.json``, nor
+    what another test saved. Outside a test's own fixtures, the run's config
+    home set in ``pytest_configure`` holds instead.
+
+    ``default_config_path()`` reads ``XDG_CONFIG_HOME`` on every call, so the
+    variable points at a directory of the test's own. That reaches every
+    caller, including the modules that did ``from jarvis.config import
+    default_config_path`` at import (the settings window, the setup wizard,
+    the app) and so hold the function rather than the name, which a patch on
+    ``jarvis.config`` would miss. ``JARVIS_CONFIG_PATH`` names the file that
+    function answers, so the loader and every other caller read and write
+    one file.
 
     Tests that need to exercise the loader against specific JSON should
     monkey-patch ``_load_json`` (and ``_save_json`` if the migration would
-    trigger a write) directly. This fixture is a belt-and-braces guard so
-    a half-mocked test cannot reach the real config file.
+    trigger a write) directly, or write that file. The guard in
+    ``config_guard.py`` fails a test that reaches the real config file all
+    the same.
     """
-    sandbox = _bac_a_sable / f"config-{abs(hash(request.node.nodeid)):x}.json"
-    monkeypatch.setattr("jarvis.config.default_config_path", lambda: sandbox)
-    monkeypatch.setenv("JARVIS_CONFIG_PATH", str(sandbox))
+    from jarvis.config import default_config_path
+
+    config_home = _bac_a_sable / f"config-{abs(hash(request.node.nodeid)):x}"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    monkeypatch.setenv("JARVIS_CONFIG_PATH", str(default_config_path()))
 
 
 @pytest.fixture(autouse=True)
@@ -423,6 +444,40 @@ def pytest_configure(config):
         # collection, so a module that probes a server at import is covered.
         sys.addaudithook(_refuse_the_network)
         _network_guard_installed = True
+    _give_the_run_a_config_home()
+
+
+# The directory ``_give_the_run_a_config_home`` made, removed when the run ends.
+_run_config_home: Optional[str] = None
+
+
+def _give_the_run_a_config_home() -> None:
+    """Point the config path at a directory of the run's own, before collection.
+
+    The per-test sandbox (``_isolate_user_config_path``) holds only inside a
+    test's own fixtures. Collection, class- and module-scoped fixtures, a
+    thread that outlives its test, and the child processes some of those
+    start all run outside it, and would resolve the user's own
+    ``config.json``: a child that logs reads it through ``debug_log``. The
+    pytest sessions a guard's end-to-end test runs apart get a home of their
+    own from ``inner_session.py`` instead, with these variables pointing
+    inside it. The guard takes the files it protects first, from the
+    environment the run started in, so it protects the user's file and not
+    this one.
+    """
+    global _run_config_home
+    config_guard.arm()
+    if _run_config_home is None:
+        _run_config_home = tempfile.mkdtemp(prefix="jarvis-config-")
+    from jarvis.config import default_config_path
+
+    os.environ["XDG_CONFIG_HOME"] = _run_config_home
+    os.environ["JARVIS_CONFIG_PATH"] = str(default_config_path())
+
+
+def pytest_unconfigure(config):
+    if _run_config_home is not None:
+        shutil.rmtree(_run_config_home, ignore_errors=True)
 
 
 @pytest.fixture
@@ -604,6 +659,29 @@ def qapp():
             pass
     app.processEvents()
 
+
+@pytest.fixture
+def installed_faster_whisper(monkeypatch):
+    """``installed_faster_whisper(version)``: the installed faster-whisper
+    reads as *version*, or as absent when *version* is None. Every other
+    distribution keeps its real metadata."""
+    import importlib.metadata
+
+    real_version = importlib.metadata.version
+
+    def install(version):
+        def fake_version(name):
+            if name.replace("_", "-").lower() != "faster-whisper":
+                return real_version(name)
+            if version is None:
+                raise importlib.metadata.PackageNotFoundError(name)
+            return version
+
+        monkeypatch.setattr(importlib.metadata, "version", fake_version)
+
+    return install
+
+
 @pytest.fixture
 def tools_unrestricted(monkeypatch):
     """Run tool calls with the policy gate standing aside.
@@ -707,6 +785,81 @@ def get_like_requests():
 
         return get
     return make
+
+
+def _clear_llm_backend_caches():
+    # The two import paths are distinct module instances, each with its
+    # own cache.
+    for name in ("src.jarvis.llm.factory", "jarvis.llm.factory"):
+        module = sys.modules.get(name)
+        if module is not None:
+            module.clear_backend_cache()
+
+
+class _OllamaTags:
+    """Ollama's answer to ``GET /api/tags``."""
+
+    def __init__(self, names):
+        self._names = list(names)
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return {"models": [{"name": name} for name in self._names]}
+
+
+@pytest.fixture
+def wire(monkeypatch):
+    """``wire(call, ollama_has=None)``: every chat request ``call`` makes,
+    as ``(url, model)``, sent nowhere.
+
+    A routing rule is held at the wire: where the request went and the
+    model it named, through any wrapper. ``ollama_has`` is the tag list
+    local Ollama answers with; ``None`` means nothing answers there. A call
+    that raised before anything reached the wire fails here with what it
+    raised, rather than later with only "sent nothing".
+
+    The LLM factory's caches are cleared around the test and before each
+    call, since a backend or a tag list cached by one would answer for the
+    next. The files that route requests share this one double rather than
+    each keeping a copy, since two copies drift."""
+    import requests
+
+    def sent(call, ollama_has=None):
+        _clear_llm_backend_caches()
+        parties = []
+
+        def _post(url, **kw):
+            parties.append((url, (kw.get("json") or {}).get("model")))
+            raise requests.exceptions.Timeout("intercepted")
+
+        def _session_post(self, url, **kw):
+            return _post(url, **kw)
+
+        def _get(url, **kw):
+            if ollama_has is not None and url.endswith("/api/tags"):
+                return _OllamaTags(ollama_has)
+            raise requests.exceptions.ConnectionError("nothing answers here")
+
+        with monkeypatch.context() as m:
+            m.setattr(requests, "post", _post)
+            m.setattr(requests.Session, "post", _session_post)
+            m.setattr(requests, "get", _get)
+            try:
+                call()
+            except Exception as erreur:
+                # Every caller reports a timeout its own way: raising, or
+                # answering quietly. Where the request went is all this
+                # asks, unless it never left.
+                if not parties:
+                    raise AssertionError(
+                        f"nothing was sent at all: {erreur!r}") from erreur
+        return parties
+
+    _clear_llm_backend_caches()
+    yield sent
+    _clear_llm_backend_caches()
 
 
 class ViewerClient:

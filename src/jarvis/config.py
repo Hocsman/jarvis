@@ -48,6 +48,44 @@ def get_supported_model_ids() -> set[str]:
     return set(SUPPORTED_CHAT_MODELS.keys())
 
 
+# Whisper models offered by the setup wizard and the settings window, smallest
+# first. An id ending in ``.en`` is English-only; the others cover ~99
+# languages. File sizes from HuggingFace (Systran/faster-whisper-*), VRAM from
+# OpenAI.
+SUPPORTED_WHISPER_MODELS: Dict[str, Dict[str, str]] = {
+    "tiny": {"name": "Tiny", "size": "~75MB", "vram": "~1GB VRAM",
+             "description": "Fastest, lower accuracy"},
+    "tiny.en": {"name": "Tiny", "size": "~75MB", "vram": "~1GB VRAM",
+                "description": "Fastest, English optimised"},
+    "base": {"name": "Base", "size": "~140MB", "vram": "~1GB VRAM",
+             "description": "Fast, decent accuracy"},
+    "base.en": {"name": "Base", "size": "~140MB", "vram": "~1GB VRAM",
+                "description": "Fast, English optimised"},
+    "small": {"name": "Small", "size": "~465MB", "vram": "~2GB VRAM",
+              "description": "Good balance of speed and accuracy"},
+    "small.en": {"name": "Small", "size": "~465MB", "vram": "~2GB VRAM",
+                 "description": "Good balance of speed and accuracy"},
+    "medium": {"name": "Medium", "size": "~1.5GB", "vram": "~5GB VRAM",
+               "description": "Best balance (Recommended)"},
+    "medium.en": {"name": "Medium", "size": "~1.5GB", "vram": "~5GB VRAM",
+                  "description": "Best balance (Recommended)"},
+    "large-v3-turbo": {"name": "Large V3 Turbo", "size": "~1.5GB", "vram": "~6GB VRAM",
+                       "description": "Near Large V3 accuracy, much faster"},
+    "large-v3": {"name": "Large V3", "size": "~3GB", "vram": "~10GB VRAM",
+                 "description": "Best accuracy, slowest, needs the most VRAM"},
+}
+
+
+# The values ``llm_provider`` accepts. Anything else reads as ``ollama``.
+LLM_PROVIDERS = ("ollama", "openai_compatible", "anthropic")
+
+# Where the ``anthropic`` provider sends every request. Fixed rather than
+# read from ``llm_base_url``: that field outlives a switch away from an
+# OpenAI-compatible provider, and the Anthropic key must never be sent to
+# the server it still names.
+ANTHROPIC_BASE_URL = "https://api.anthropic.com"
+
+
 def _default_dictation_hotkey() -> str:
     """Return the platform-appropriate default dictation hotkey.
 
@@ -63,6 +101,11 @@ def _default_dictation_hotkey() -> str:
         return "ctrl+alt"
     else:
         return "ctrl+alt"
+
+
+# The dictation hotkeys the setup wizard and the settings window offer, in
+# dropdown order. Every platform's default above is one of them.
+DICTATION_HOTKEY_PRESETS = ("ctrl+alt", "ctrl+cmd", "ctrl+shift+d", "ctrl+shift")
 
 
 def _default_db_path() -> str:
@@ -101,16 +144,18 @@ class Settings:
     # Provider-aware fields (see src/jarvis/llm/llm.spec.md). The
     # `ollama_*` fields below are kept as aliases so any caller still
     # reading them keeps working when the provider is Ollama.
-    llm_provider: str  # "ollama" | "openai_compatible"
+    llm_provider: str  # one of LLM_PROVIDERS
     llm_base_url: str
-    # Resolved API key for the OpenAI-compatible provider. When
+    # Resolved API key for the remote provider. When
     # ``llm_api_key_env`` names an environment variable that is set, the
     # parser populates this from that variable so the secret never has
     # to live in config.json. Otherwise it falls back to the literal
     # ``llm_api_key`` value from the config file.
     llm_api_key: str
     # Name of the environment variable to read the API key from (e.g.
-    # "OPENROUTER_API_KEY"). Empty = use the literal ``llm_api_key``.
+    # "OPENROUTER_API_KEY", or one of the user's own for Anthropic: never
+    # "ANTHROPIC_API_KEY", which Claude Code would bill against). Empty =
+    # use the literal ``llm_api_key``.
     llm_api_key_env: str
     llm_chat_model: str
     # Provider-specific extra request fields merged into every cloud chat
@@ -120,10 +165,10 @@ class Settings:
     llm_extra_body: Dict[str, Any]
     # Scrub secret-shaped tokens (emails, API keys, JWTs, password/
     # token/secret pairs) from prompts before they leave the machine
-    # for a remote OpenAI-compatible provider. Default True (privacy-
-    # first). No effect when the provider is local Ollama.
+    # for a remote provider (OpenAI-compatible or Anthropic). Default True
+    # (privacy-first). No effect when the provider is local Ollama.
     auto_redact_before_cloud: bool
-    embedding_provider: str  # "" (= same as llm_provider) | "ollama" | "openai_compatible"
+    embedding_provider: str  # "" (= same as llm_provider; Ollama under anthropic) | "ollama" | "openai_compatible"
     embedding_base_url: str
     embedding_api_key: str
     embedding_model: str
@@ -568,6 +613,23 @@ def is_local_endpoint(base_url: str) -> bool:
                 or ip.is_reserved or ip.is_unspecified)
 
 
+def names_provider_model(provider: str, model: str) -> bool:
+    """Whether ``model`` names a model the remote provider serves, rather
+    than a local Ollama tag.
+
+    A remote OpenAI-compatible endpoint namespaces its IDs ``vendor/model``,
+    so the slash tells them apart from a tag like ``qwen2.5:3b``. Anthropic's
+    IDs carry no slash (``claude-haiku-5-5``) and all begin ``claude-``,
+    which no Ollama tag the project ships or suggests does.
+    """
+    name = (model or "").strip()
+    if provider == "anthropic":
+        return name.lower().startswith("claude-")
+    if provider == "openai_compatible":
+        return "/" in name
+    return True
+
+
 _ollama_reachable_cache: dict[str, tuple[float, bool]] = {}
 
 # How long a reachability verdict is reused. The settings parser runs on
@@ -613,29 +675,33 @@ def _cloud_safe_model(value: str, field: str, provider: str,
                       ollama_base_url: str = "http://127.0.0.1:11434") -> str:
     """Keep auxiliary model names valid for the endpoint actually in use.
 
-    Jarvis runs several auxiliary LLM tasks (intent judge, tool router,
-    planner, memory extractor) on a model of their own. A remote
-    cloud endpoint namespaces its model IDs as ``vendor/model`` and
-    answers HTTP 400 ("X is not a valid model ID") to a bare local tag
-    like ``gemma4:e2b``, so the auxiliary task dies for no gain: those get
-    the chat model instead when no local Ollama instance is reachable.
+    Jarvis runs several small LLM tasks (intent judge, tool router,
+    planner, memory extractor) on their own configured model. A remote cloud provider
+    answers HTTP 400 or 404 to a local tag like ``gemma4:e2b`` (see
+    :func:`names_provider_model` for how a provider's own IDs are told
+    apart), so the auxiliary task dies for no gain: those get the chat
+    model instead when no local Ollama instance is reachable.
 
-    When local Ollama is reachable, bare model tags are kept because the
+    When local Ollama is reachable, local tags are kept because the
     auxiliary backend dispatcher will route them to Ollama, eliminating cloud
     latency for intent judging and tool routing.
+
+    A pin equal to the chat model is the chat model: the dispatcher sends
+    it wherever it sends the chat model, so there is nothing to keep,
+    replace or announce.
 
     A local OpenAI-compatible server is the opposite case. A bare name is
     the only shape it accepts, and the pin is the whole reason the user
     set a model of its own for that task. So the endpoint decides rather
     than the provider name, and a discarded pin is announced: nothing
     downstream ever shows the effective value, and two of these four
-    fields have no field in the settings window at all.
+    fields have no field in the settings window at all. The Anthropic
+    provider is always remote.
     """
     if not value:
         return value
-    if provider != "openai_compatible" or "/" in value:
-        return value
-    if is_local_endpoint(base_url):
+    if (names_provider_model(provider, value) or is_local_endpoint(base_url)
+            or value == fallback):
         return value
     if is_ollama_reachable(ollama_base_url):
         mark = (field, value, "kept")
@@ -648,7 +714,7 @@ def _cloud_safe_model(value: str, field: str, provider: str,
                 "config",
             )
         return value
-    if not fallback or fallback == value:
+    if not fallback:
         return value
     mark = (field, value, fallback)
     if mark not in _announced_pins:
@@ -827,7 +893,8 @@ def get_default_config() -> Dict[str, Any]:
         # but says how late she is rather than pretending it is now.
         "reminders_enabled": True,
         # Empty = the warm small chain. Pin a local model to keep the
-        # user's own sentence about their own life off the network.
+        # user's own sentence about their own life on their own machine
+        # or network.
         "reminder_model": "",
         "reminder_timeout_sec": 8.0,
         # Where a bare day lands when no hour was said: "jeudi" means
@@ -1052,16 +1119,19 @@ def load_settings() -> Settings:
 
     # Provider-aware fields. The two field sets are per-provider: the
     # ``ollama_*`` fields are authoritative when the provider is Ollama,
-    # the ``llm_*`` / ``embedding_*`` fields when it is OpenAI-compatible.
+    # the ``llm_*`` / ``embedding_*`` fields when it is a remote one.
     # Resolving the active model this way (rather than a blanket
     # ``llm_chat_model or ollama_chat_model``) keeps the Ollama model
     # picker — which writes ``ollama_chat_model`` — authoritative on the
     # Ollama path, so a stale ``llm_chat_model`` (e.g. promoted by the v2
     # migration) can never shadow it.
     llm_provider = str(merged.get("llm_provider", "ollama") or "ollama").strip().lower()
-    if llm_provider not in ("ollama", "openai_compatible"):
+    if llm_provider not in LLM_PROVIDERS:
         llm_provider = "ollama"
     llm_base_url = str(merged.get("llm_base_url", "") or "").strip() or ollama_base_url
+    # The endpoint the chat provider actually talks to, which is what
+    # decides whether an auxiliary pin is local or remote.
+    provider_endpoint = ANTHROPIC_BASE_URL if llm_provider == "anthropic" else llm_base_url
     # API key resolution: prefer the named environment variable (keeps
     # the secret out of config.json), fall back to the literal field.
     llm_api_key_env = str(merged.get("llm_api_key_env", "") or "").strip()
@@ -1073,7 +1143,7 @@ def load_settings() -> Settings:
     auto_redact_before_cloud = bool(merged.get("auto_redact_before_cloud", True))
     raw_extra_body = merged.get("llm_extra_body", {})
     llm_extra_body = raw_extra_body if isinstance(raw_extra_body, dict) else {}
-    if llm_provider == "openai_compatible":
+    if llm_provider != "ollama":
         llm_chat_model = str(merged.get("llm_chat_model", "") or "").strip() or ollama_chat_model
     else:
         llm_chat_model = ollama_chat_model
@@ -1231,7 +1301,7 @@ def load_settings() -> Settings:
     # Intent Judge - always used when available
     intent_judge_model = str(merged.get("intent_judge_model", "gemma4:e2b"))
     intent_judge_model = _cloud_safe_model(
-        intent_judge_model, "intent_judge_model", llm_provider, llm_base_url, llm_chat_model,
+        intent_judge_model, "intent_judge_model", llm_provider, provider_endpoint, llm_chat_model,
         ollama_base_url=ollama_base_url)
     intent_judge_timeout_sec = float(merged.get("intent_judge_timeout_sec", 10.0))
 
@@ -1268,11 +1338,11 @@ def load_settings() -> Settings:
         tool_selection_strategy = "llm"
     tool_router_model = str(merged.get("tool_router_model", "") or "").strip()
     tool_router_model = _cloud_safe_model(
-        tool_router_model, "tool_router_model", llm_provider, llm_base_url, llm_chat_model,
+        tool_router_model, "tool_router_model", llm_provider, provider_endpoint, llm_chat_model,
         ollama_base_url=ollama_base_url)
     planner_model = str(merged.get("planner_model", "") or "").strip()
     planner_model = _cloud_safe_model(
-        planner_model, "planner_model", llm_provider, llm_base_url, llm_chat_model,
+        planner_model, "planner_model", llm_provider, provider_endpoint, llm_chat_model,
         ollama_base_url=ollama_base_url)
     planner_enabled = bool(merged.get("planner_enabled", True))
     try:

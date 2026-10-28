@@ -59,10 +59,15 @@ annotated-types 0.8.0
     Home: https://github.com/annotated-types/annotated-types
     Required by: pydantic
 
+anthropic 2.3.0
+    Licence: Apache-2.0
+    Home: https://github.com/anthropics/anthropic-sdk-python
+    Required by: requirements.txt
+
 anyio 4.15.1
     Licence: MIT
     Home: https://anyio.readthedocs.io/en/latest/
-    Required by: httpx, mcp, sse-starlette, starlette
+    Required by: anthropic, httpx, httpx2, mcp, sse-starlette, starlette
 
 attrs 26.1.0
     Licence: MIT
@@ -114,6 +119,11 @@ ctranslate2 4.8.2
     Home: https://opennmt.net
     Required by: faster-whisper
 
+docstring_parser 0.18.0
+    Licence: MIT
+    Home: https://github.com/rr-/docstring_parser
+    Required by: anthropic
+
 faiss-cpu 1.15.0
     Licence: MIT
     Home: https://github.com/facebookresearch/faiss
@@ -157,7 +167,7 @@ geoip2 4.8.0
 h11 0.16.0
     Licence: MIT
     Home: https://github.com/python-hyper/h11
-    Required by: httpcore, uvicorn
+    Required by: httpcore, httpcore2, uvicorn
 
 html2text 2025.4.15
     Licence: GPL-3.0-or-later
@@ -170,6 +180,11 @@ httpcore 1.0.9
     Home: https://www.encode.io/httpcore/
     Required by: httpx
 
+httpcore2 2.16.0
+    Licence: BSD-3-Clause
+    Home: https://github.com/pydantic/httpx2
+    Required by: httpx2
+
 httpx 0.28.1
     Licence: BSD-3-Clause
     Home: https://github.com/encode/httpx
@@ -180,6 +195,11 @@ httpx-sse 0.4.3
     Home: https://github.com/florimondmanca/httpx-sse
     Required by: mcp
 
+httpx2 2.16.0
+    Licence: BSD-3-Clause
+    Home: https://github.com/pydantic/httpx2
+    Required by: anthropic
+
 huggingface_hub 0.36.2
     Licence: Apache
     Home: https://github.com/huggingface/huggingface_hub
@@ -188,7 +208,7 @@ huggingface_hub 0.36.2
 idna 3.19
     Licence: BSD-3-Clause
     Home: https://github.com/kjd/idna
-    Required by: anyio, httpx, requests, yarl
+    Required by: anyio, httpx, httpx2, requests, yarl
 
 itsdangerous 2.2.0
     Licence: BSD License
@@ -199,6 +219,11 @@ Jinja2 3.1.6
     Licence: BSD License
     Home: https://github.com/pallets/jinja/
     Required by: flask
+
+jiter 0.18.0
+    Licence: MIT
+    Home: https://github.com/pydantic/jiter/
+    Required by: anthropic
 
 jsonschema 4.26.0
     Licence: MIT
@@ -254,6 +279,11 @@ onnxruntime 1.29.0
     Home: https://onnxruntime.ai
     Required by: requirements.txt, faster-whisper, piper-tts
 
+opentelemetry-api 1.45.1
+    Licence: Apache-2.0
+    Home: https://github.com/open-telemetry/opentelemetry-python/tree/main/opentelemetry-api
+    Required by: anthropic
+
 packaging 26.3
     Licence: Apache-2.0 OR BSD-2-Clause
     Home: https://github.com/pypa/packaging
@@ -298,7 +328,7 @@ pycparser 3.0
 pydantic 2.13.5
     Licence: MIT
     Home: https://github.com/pydantic/pydantic
-    Required by: mcp, pydantic-settings
+    Required by: anthropic, mcp, pydantic-settings
 
 pydantic_core 2.46.5
     Licence: MIT
@@ -411,6 +441,11 @@ six 1.17.0
     Home: https://github.com/benjaminp/six
     Required by: pynput
 
+sniffio 1.3.1
+    Licence: MIT OR Apache-2.0
+    Home: https://github.com/python-trio/sniffio
+    Required by: anthropic
+
 sounddevice 0.4.7
     Licence: MIT
     Home: http://python-sounddevice.readthedocs.io/
@@ -441,10 +476,15 @@ tqdm 4.70.0
     Home: https://tqdm.github.io
     Required by: faster-whisper, huggingface-hub
 
+truststore 0.10.5
+    Licence: MIT
+    Home: https://github.com/sethmlarson/truststore
+    Required by: httpcore2, httpx2
+
 typing_extensions 4.16.0
     Licence: PSF-2.0
     Home: https://github.com/python/typing_extensions
-    Required by: aiohttp, aiosignal, anyio, beautifulsoup4, huggingface-hub, pydantic, pydantic-core, referencing, starlette, typing-inspection
+    Required by: aiohttp, aiosignal, anthropic, anyio, beautifulsoup4, httpx2, huggingface-hub, opentelemetry-api, pydantic, pydantic-core, referencing, starlette, typing-inspection
 
 typing-inspection 0.4.4
     Licence: MIT

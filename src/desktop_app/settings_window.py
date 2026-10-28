@@ -25,7 +25,7 @@ from PyQt6.QtGui import QFont
 from jarvis.config import (
     get_default_config, load_config,
     default_config_path, _save_json, _load_json,
-    SUPPORTED_CHAT_MODELS,
+    SUPPORTED_CHAT_MODELS, SUPPORTED_WHISPER_MODELS,
 )
 from jarvis.debug import debug_log
 from desktop_app.themes import apply_theme
@@ -128,25 +128,57 @@ def _is_default_value(val: Any, default_val: Any) -> bool:
     return val is None and default_val in (None, "")
 
 
-def _dictation_hotkey_choices() -> list:
-    """Build platform-aware dictation hotkey dropdown choices."""
-    from jarvis.dictation.dictation_engine import format_hotkey_display
-    from jarvis.config import _default_dictation_hotkey
-    default = _default_dictation_hotkey()
-    options = [
-        ("ctrl+alt", format_hotkey_display("ctrl+alt")),
-        ("ctrl+cmd", format_hotkey_display("ctrl+cmd")),
-        ("ctrl+shift+d", format_hotkey_display("ctrl+shift+d")),
-        ("ctrl+shift", format_hotkey_display("ctrl+shift")),
-    ]
-    return [
-        (val, f"{label} (default)" if val == default else label)
-        for val, label in options
-    ]
+def _select_choice(combo: QComboBox, key: str, value: Any) -> None:
+    """Select ``value`` in a choice combo.
+
+    A value the field does not list (a model served by a remote provider, a
+    hand-edited value) is added as its own option and selected, with the
+    value as read for its data, so a Save writes back what was read instead
+    of the first option.
+    """
+    cur_str = str(value) if value not in (None, "") else ""
+    idx = combo.findData(cur_str)
+    if idx < 0 and cur_str:
+        combo.addItem(cur_str, value)
+        idx = combo.count() - 1
+        debug_log(f"{key} keeps a value its options do not list", "settings")
+    if idx >= 0:
+        combo.setCurrentIndex(idx)
+
+
+def _select_device(combo: QComboBox, key: str, value: Any) -> None:
+    """Select ``value`` in a device combo.
+
+    A device set by name (any value that does not read as an index, as the
+    listener tells them apart) is added as its own option and selected, so a
+    Save writes the name back. An index the list lacks is not kept: after a
+    replug it can name another device, so the combo falls back to System
+    Default, as it does for the words the listener reads as the system default.
+    """
+    cur_str = str(value).strip() if value is not None else ""
+    if cur_str.lower() in ("default", "system"):
+        cur_str = ""
+    idx = combo.findData(cur_str)
+    if idx < 0 and cur_str:
+        try:
+            index = int(cur_str)
+        except ValueError:
+            combo.addItem(f"🎤 {cur_str} (by name)", value)
+            idx = combo.count() - 1
+            debug_log(f"{key} keeps a device set by name", "settings")
+        else:
+            idx = combo.findData(str(index))
+            if idx < 0:
+                debug_log(f"{key} names an index the list lacks, shown as System Default", "settings")
+    if idx < 0:
+        idx = combo.findData("")
+    combo.setCurrentIndex(idx)
 
 
 def _build_field_metadata() -> List[FieldMeta]:
     """Build the metadata registry for all user-facing config fields."""
+    from jarvis.dictation.hotkeys import dictation_hotkey_choices
+
     fields = []
 
     def f(key, label, desc, cat, ftype, **kw):
@@ -191,23 +223,32 @@ def _build_field_metadata() -> List[FieldMeta]:
     # fields below are nullable: leaving them empty falls back to the Ollama
     # settings on the "LLM & AI Models" page, so a default (Ollama) install
     # never needs to touch this page.
-    f("llm_provider", "Provider", "Which local runtime serves the LLM",
+    f("llm_provider", "Provider", "Which runtime serves the LLM (Anthropic is remote)",
       "llm_provider", "choice",
       choices=[("ollama", "Ollama (local)"),
-               ("openai_compatible", "OpenAI-compatible server")])
+               ("openai_compatible", "OpenAI-compatible server"),
+               ("anthropic", "Anthropic (Claude API, remote)")])
     f("llm_base_url", "Base URL",
-      "Provider API base URL (e.g. http://localhost:1234/v1 for LM Studio). "
-      "Leave empty to use the Ollama URL.",
+      "OpenAI-compatible server URL (e.g. http://localhost:1234/v1 for LM Studio). "
+      "Leave empty to use the Ollama URL. Not used by Anthropic.",
+      "llm_provider", "str", nullable=True)
+    f("llm_api_key_env", "API Key Variable",
+      "Name of the environment variable holding the provider's key, so the "
+      "key never sits in config.json. Wins over the API Key field when set.",
       "llm_provider", "str", nullable=True)
     f("llm_api_key", "API Key",
-      "Bearer token for the provider, if it requires one. Leave empty for none.",
+      "The provider's key, if it requires one and no variable is named above. "
+      "Leave empty for none.",
       "llm_provider", "password", nullable=True)
     f("llm_chat_model", "Chat Model",
-      "Model name the provider exposes. Leave empty to use the Ollama chat model.",
+      "Model name the provider serves (e.g. claude-haiku-5-5 on Anthropic). "
+      "Left empty, the Ollama chat model's name is sent, which a remote "
+      "provider does not know.",
       "llm_provider", "str", nullable=True)
     f("embedding_provider", "Embedding Provider",
       "Runtime for embeddings. Leave on 'Same as chat provider' unless your "
-      "chat runtime has no embeddings endpoint (then route them to Ollama).",
+      "chat runtime has no embeddings endpoint (then route them to Ollama). "
+      "Anthropic has none, so with it 'Same as chat provider' means Ollama.",
       "llm_provider", "choice",
       choices=[("", "Same as chat provider"),
                ("ollama", "Ollama (local)"),
@@ -312,11 +353,13 @@ def _build_field_metadata() -> List[FieldMeta]:
       "How loosely to match the wake word (0.0–1.0)",
       "wake", "float", min_val=0.5, max_val=1.0, step=0.01)
     # --- Whisper ---
+    whisper_choices = [
+        (mid, f"{info['name']} (English only)" if mid.endswith(".en") else info["name"])
+        for mid, info in SUPPORTED_WHISPER_MODELS.items()
+    ]
     f("whisper_model", "Model Size",
       "Whisper model size (tiny/base/small/medium/large)",
-      "whisper", "choice",
-      choices=[("tiny", "Tiny"), ("base", "Base"), ("small", "Small"),
-               ("medium", "Medium"), ("large-v3", "Large v3")])
+      "whisper", "choice", choices=whisper_choices)
     f("whisper_backend", "Backend",
       "Speech recognition backend",
       "whisper", "choice",
@@ -389,9 +432,10 @@ def _build_field_metadata() -> List[FieldMeta]:
       "memory", "choice", choices=[("diary", "Diary only"), ("graph", "Graph only"), ("all", "All (diary + graph)")])
     f("memory_extractor_model", "Memory Lookup Model",
       "Model that reads each question for the keywords and dates memory is "
-      "searched with. Empty = the tool router's model. A vendor/model name "
-      "runs on your OpenAI-compatible provider; a bare tag (qwen2.5:3b) runs "
-      "on local Ollama when it is reachable, otherwise the chat model is used",
+      "searched with. Empty = the tool router's model. A name your provider "
+      "serves (vendor/model, or claude-... on Anthropic) runs there; a local "
+      "tag (qwen2.5:3b) runs on local Ollama when it is reachable, otherwise "
+      "the chat model is used",
       "memory", "str")
     f("tool_carryover_max_turns", "Tool Carryover Turns",
       "How many prior replies' tool results to keep visible for follow-up questions",
@@ -448,7 +492,7 @@ def _build_field_metadata() -> List[FieldMeta]:
       "features", "bool")
     f("dictation_hotkey", "Dictation Hotkey",
       "Key combination to hold for dictation. Double-tap for hands-free mode.",
-      "features", "choice", choices=_dictation_hotkey_choices())
+      "features", "choice", choices=dictation_hotkey_choices())
     f("dictation_filler_removal", "Filler Word Removal",
       "Use the local LLM to remove filler words (um, uh, like) from dictation output",
       "features", "bool")
@@ -504,7 +548,7 @@ def _build_field_metadata() -> List[FieldMeta]:
       "reminders", "bool")
     f("reminder_model", "Modèle des rappels",
       "Lit l'heure dans ta phrase. Épingle un modèle local et ta phrase "
-      "ne quitte pas la machine",
+      "reste sur ta machine ou ton réseau",
       "reminders", "str")
     f("reminder_default_hour", "Heure par défaut",
       "Quand tu nommes un jour sans heure. Elle te le dit à voix haute "
@@ -759,11 +803,7 @@ class SettingsWindow(QDialog):
             w = QComboBox()
             for val, display in (fm.choices or []):
                 w.addItem(display, val)
-            # Set current value
-            cur_str = str(current) if current is not None else ""
-            idx = w.findData(cur_str)
-            if idx >= 0:
-                w.setCurrentIndex(idx)
+            _select_choice(w, fm.key, current)
             w.setToolTip(fm.description)
             return w
 
@@ -772,10 +812,7 @@ class SettingsWindow(QDialog):
             devices = get_input_devices()
             for val, display in devices:
                 w.addItem(display, val)
-            cur_str = str(current) if current not in (None, "") else ""
-            idx = w.findData(cur_str)
-            if idx >= 0:
-                w.setCurrentIndex(idx)
+            _select_device(w, fm.key, current)
             w.setToolTip(fm.description)
             return w
 
@@ -1087,12 +1124,13 @@ class SettingsWindow(QDialog):
 
         if fm.field_type in ("choice", "device"):
             val = w.currentData()
-            # For sample_rate, convert back to int
+            # For sample_rate, convert back to int; a value that names no
+            # number is one the field does not list, and goes back as read.
             if fm.key == "sample_rate":
                 try:
-                    return int(val)
+                    return int(float(val))
                 except (TypeError, ValueError):
-                    return 16000
+                    return val
             return val if val != "" else None
 
         if fm.field_type in ("list", "map"):
@@ -1197,11 +1235,11 @@ class SettingsWindow(QDialog):
             except (TypeError, ValueError):
                 w.setValue(0.0)
 
-        elif fm.field_type in ("choice", "device"):
-            cur_str = str(value) if value not in (None, "") else ""
-            idx = w.findData(cur_str)
-            if idx >= 0:
-                w.setCurrentIndex(idx)
+        elif fm.field_type == "choice":
+            _select_choice(w, fm.key, value)
+
+        elif fm.field_type == "device":
+            _select_device(w, fm.key, value)
 
         elif fm.field_type in ("list", "map"):
             list_w = w._list_widget

@@ -10,7 +10,7 @@ The Settings Window provides a graphical interface for editing `config.json` wit
 
 1. **Metadata-driven**: All fields are defined in a `FIELD_METADATA` registry. Adding a new config parameter to the settings UI requires only adding a `FieldMeta` entry — no widget code changes.
 2. **Minimal config files**: Only non-default values are written to `config.json`. Removing a field from the config reverts it to the default.
-3. **Preserves unknown keys**: Keys not managed by the UI (e.g. `mcps`, `_config_version`, future additions) are preserved when saving.
+3. **Preserves unknown keys and values**: Keys not managed by the UI (e.g. `mcps`, `_config_version`, future additions) are preserved when saving, and so is a value a `choice` field has no option for, and a microphone set by name (a `device` field still drops an index it cannot show, see "Hardware Device Selection").
 4. **Theme-consistent**: Uses the shared Jarvis theme from `themes.py`.
 
 ## Architecture
@@ -40,8 +40,8 @@ FieldMeta (dataclass)
 | `float` | QDoubleSpinBox | With bounds, step, suffix |
 | `str` | QLineEdit | Placeholder if nullable |
 | `password` | QLineEdit (EchoMode.Password) | Masked input for API keys; same value extraction as `str` |
-| `choice` | QComboBox | Pre-defined options |
-| `device` | QComboBox | Dynamically populated from sounddevice |
+| `choice` | QComboBox | Pre-defined options. A current value the field does not list (a model served by a remote provider, such as an `intent_judge_model` pin, or a hand-edited value) is added as its own option, shown as the raw value, and selected |
+| `device` | QComboBox | Dynamically populated from sounddevice. A device set by name is added as its own option and selected; an index the list lacks is not (see "Hardware Device Selection") |
 | `list` | QListWidget + Add/Edit/Remove buttons | Stores as JSON array in config |
 | `map` | QListWidget + Add/Edit/Remove buttons | One `key -> value` row per entry; stores as a JSON object in config. A row that names no key or no value is refused when added, and dropped on save if it got in some other way. Only the first arrow separates, so a value may contain one; a key listed twice keeps its last value |
 
@@ -81,7 +81,7 @@ What the gate asks about before doing it, and how long a card waits.
 The master switch for a subsystem that speaks unprompted, plus the model
 that reads the hour out of his sentence. Both belong here rather than in
 `config.json`: one is the only way to stop it, and the other is the only
-way to keep the sentence he dictated off the network, since the reminder
+way to keep the sentence he dictated on his own machine or network, since the reminder
 chain deliberately skips the cloud-safe rewrite.
 
 What a reminder says and when is not settable here — that is one
@@ -113,12 +113,15 @@ written to `config.json`.
 
 ### LLM Provider
 
-Selects the local runtime that serves the LLM and holds the provider-aware
-connection fields: `llm_provider` (Ollama / OpenAI-compatible), `llm_base_url`,
+Selects the runtime that serves the LLM and holds the provider-aware
+connection fields: `llm_provider` (Ollama / OpenAI-compatible / Anthropic, the
+values of `LLM_PROVIDERS`), `llm_base_url`, `llm_api_key_env` (the name of the
+environment variable holding the key, plain text since it is not a secret),
 `llm_api_key` (password), `llm_chat_model`, and the four `embedding_*` fields
 (`embedding_provider`, `embedding_base_url`, `embedding_api_key`,
-`embedding_model`). The model fields are free-text `str` — an OpenAI-compatible
-server's model name is not in the Ollama `SUPPORTED_CHAT_MODELS` catalogue.
+`embedding_model`). The model fields are free-text `str` — a remote provider's
+model name is not in the Ollama `SUPPORTED_CHAT_MODELS` catalogue. The
+Anthropic provider is set here only: the setup wizard does not offer it.
 
 Every connection/credential/model field is nullable: leaving it empty falls
 back to the Ollama settings on the "LLM & AI Models" page. A default Ollama
@@ -133,6 +136,13 @@ clear would wipe the supported "Ollama chat + remote embeddings" split
 values are harmless because the backend resolves per-provider: the Ollama path
 uses `ollama_base_url` / `ollama_chat_model` and `OllamaBackend` ignores any
 API key. To drop a leftover value, clear that field and save.
+
+### Speech Recognition (Whisper)
+
+The `whisper_model` dropdown lists every model in `SUPPORTED_WHISPER_MODELS`
+(`jarvis/config.py`), the list the setup wizard's Whisper page draws its
+slider from, so a size picked in either one is listed by the other. An
+English-only id (`.en`) reads as its size name followed by "(English only)".
 
 ### Features
 
@@ -150,6 +160,11 @@ dedicated page:
 - `dictation_filler_removal`
 - `dictation_custom_dictionary`
 
+`dictation_hotkey` is a dropdown of `DICTATION_HOTKEY_PRESETS` (`jarvis/config.py`)
+built by `dictation_hotkey_choices()` (`jarvis/dictation/hotkeys.py`), the same builder the setup wizard's
+Dictation page uses, so both windows offer the same presets with the platform
+default marked `(default)`.
+
 `low_power_mode` is a boolean toggle. When enabled, the voice listener skips
 LLM startup warmup and the Ollama keep-alive windows used by warmup and the
 intent judge are short. The setting is saved only when it differs from the
@@ -161,11 +176,16 @@ works when the user asks (see "Update System" in `desktop_app.spec.md`).
 
 ## Hardware Device Selection
 
-The Voice Input tab includes a device dropdown populated at window open time via `sounddevice.query_devices()`. It lists all input-capable devices with their index and name. The stored value is the device index as a string, or empty string for system default.
+The Voice Input tab includes a device dropdown populated at window open time via `sounddevice.query_devices()`. It lists every input-capable device by name. Choosing one stores the device index as a string; choosing System Default stores nothing. A stored index in any form the listener reads as that index (`"1"`, `1`, `"01"`) selects it.
+
+The config can also name a microphone (`"voice_device": "MSI GV60"`), which the listener matches against the input device names. A stored value that does not read as an index is such a name: it is added as its own option, shown as `🎤 <name> (by name)` whether or not a connected device matches it, and selected, so a Save writes it back as it was read. A name stays true across a replug. Choosing a listed option, or Reset, replaces it.
+
+A stored index the list does not contain (a device unplugged when the window opens, or an output-only one) is not kept: the dropdown falls back to System Default and a Save drops the key. An index can name a different device after a replug, so the window does not keep one it cannot show. A blank value, and `default` or `system` in any letter case, which the config and the listener read as the system default, also show as System Default.
 
 ## Save Behaviour
 
 - Only keys that differ from `get_default_config()` are written.
+- A `choice` value the field does not list, and a microphone set by name, are written back exactly as they were read: saving another setting never moves one to the first option or to the default. Choosing a listed option, or Reset, still replaces it.
 - Existing keys not managed by the UI are preserved (e.g. `mcps`, `active_profiles`, `wake_aliases`, `allowlist_bundles`, `stop_commands`).
 - After save, a dialog confirms success and reminds the user to restart.
 - If the daemon is running when save completes, the tray app offers to restart it.
@@ -180,7 +200,7 @@ The Voice Input tab includes a device dropdown populated at window open time via
 
 - Accessed via "⚙️ Settings" in the system tray menu.
 - Opens as a modal QDialog.
-- Lazy-imported to avoid loading sounddevice at startup.
+- Imported from `show_settings` when the window is first opened. Importing the module loads none of sounddevice, numpy or pynput: the hotkey labels come from `jarvis/dictation/hotkeys.py`. sounddevice is imported when the window is built, to list the input devices for the Voice Input tab.
 
 ## MCP Servers Section
 

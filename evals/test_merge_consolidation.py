@@ -370,7 +370,6 @@ class TestNearDuplicateDedupe:
             new_facts=case.new_facts,
             cfg=_cfg(),
             chat_model=JUDGE_MODEL,
-            timeout_sec=30.0,
         )
 
         merged = graph_store.get_node(node.id).data
@@ -417,7 +416,6 @@ class TestPatternConsolidation:
             new_facts=case.new_facts,
             cfg=_cfg(),
             chat_model=JUDGE_MODEL,
-            timeout_sec=30.0,
         )
 
         merged = graph_store.get_node(node.id).data
@@ -465,7 +463,6 @@ class TestPatternBoundary:
             new_facts=case.new_facts,
             cfg=_cfg(),
             chat_model=JUDGE_MODEL,
-            timeout_sec=30.0,
         )
 
         merged = graph_store.get_node(node.id).data
@@ -506,7 +503,6 @@ class TestIndependenceOfUnrelatedFacts:
             new_facts=case.new_facts,
             cfg=_cfg(),
             chat_model=JUDGE_MODEL,
-            timeout_sec=30.0,
         )
 
         merged = graph_store.get_node(node.id).data
@@ -553,7 +549,6 @@ class TestMetaNarrativePruning:
             new_facts=case.new_facts,
             cfg=_cfg(),
             chat_model=JUDGE_MODEL,
-            timeout_sec=30.0,
         )
 
         merged = graph_store.get_node(node.id).data
@@ -611,7 +606,6 @@ class TestBatchedMerge:
             new_facts=case.new_facts,
             cfg=_cfg(),
             chat_model=JUDGE_MODEL,
-            timeout_sec=30.0,
         )
 
         merged = graph_store.get_node(node.id).data

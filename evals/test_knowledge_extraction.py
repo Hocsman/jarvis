@@ -224,7 +224,6 @@ def _run_extraction(case: ExtractionTestCase, config: MockConfig) -> list[str]:
         # something up; whether an empty window extracts at all is a
         # separate, deterministic question with its own unit suite.
         tools_used=["webSearch"],
-        timeout_sec=config.llm_chat_timeout_sec,
         thinking=False,
         date_utc=case.date_utc,
     )

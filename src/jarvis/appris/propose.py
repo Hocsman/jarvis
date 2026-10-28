@@ -32,6 +32,7 @@ from ..debug import debug_log
 from ..llm import get_private_backend
 from ..memory.core import SECTION_PROFILE, SECTION_RULES
 from ..memory.graph import fold_for_search, normalise_fact
+from ..reminders.extract import _reminder_pin, _resolve_reminder_model
 from ..utils.redact import contains_redaction_placeholder
 from .page import ETAT_RAYEE, SECTION_PROFIL, SECTION_REGLES, render_proposition
 
@@ -172,6 +173,16 @@ class Lecture:
     mal_formes: int = 0
 
 
+def _epingle(cfg) -> str:
+    """The pin this reading honours: its own, else the reminder chain's.
+
+    The reminder pin counts as a pin here too. A reminder runs that model
+    on this machine or his own server, and the same name cannot mean the
+    cloud when what it carries is a fortnight of his diary.
+    """
+    return str(getattr(cfg, "appris_model", "") or "").strip() or _reminder_pin(cfg)
+
+
 def resolve_appris_model(cfg) -> str:
     """The model that reads his journal.
 
@@ -179,28 +190,18 @@ def resolve_appris_model(cfg) -> str:
     one is deliberately not rescued by the cloud-safe filter: what it
     reads is a fortnight of his life. The last link is the chat model,
     which is honest rather than reassuring — the summariser that wrote
-    this input already sent it there, so pinning nothing changes nothing,
-    and pinning something is the only way to keep it local.
+    this input already sent it there, so pinning nothing changes nothing.
+    Whichever link answers, the request goes where that model lives.
     """
-    for candidate in (
-        getattr(cfg, "appris_model", ""),
-        getattr(cfg, "reminder_model", ""),
-        getattr(cfg, "tool_router_model", ""),
-        getattr(cfg, "intent_judge_model", ""),
-        getattr(cfg, "llm_chat_model", ""),
-    ):
-        if candidate:
-            return candidate
-    return ""
+    return _epingle(cfg) or _resolve_reminder_model(cfg)
 
 
 def _appeler_modele(*, cfg, system_prompt, user_content, timeout_sec):
     """Local indirection, patched wholesale by this module's tests."""
 
-    return get_private_backend(
-        cfg, str(getattr(cfg, "appris_model", "") or "").strip()
-    ).direct(
-        resolve_appris_model(cfg), system_prompt, user_content,
+    modele = resolve_appris_model(cfg)
+    return get_private_backend(cfg, _epingle(cfg), modele).direct(
+        modele, system_prompt, user_content,
         timeout_sec=timeout_sec, thinking=False, num_ctx=8192,
         temperature=0.0,
     )

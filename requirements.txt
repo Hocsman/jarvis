@@ -20,6 +20,9 @@ miniupnpc==2.2.8
 pytest==8.3.2
 pytest-repeat==0.9.3
 pyyaml>=6.0
+# The Anthropic provider (llm_provider: anthropic). 2.x speaks API version
+# 2026-10-21, the one src/jarvis/llm/anthropic_backend.py is written for.
+anthropic==2.3.0
 mcp==1.13.1
 # mcp 1.13.1 imports eval_type_backport from pydantic's private internals,
 # which pydantic 2.14 no longer provides: with it, importing the MCP client
