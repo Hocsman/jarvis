@@ -37,6 +37,7 @@ def _moteur(classe_nom):
     m.enabled = True
     m._completion_callback = None
     m._duration_callback = None
+    m._epoch = 0                  # read by the engines that count interruptions
     return m
 
 
