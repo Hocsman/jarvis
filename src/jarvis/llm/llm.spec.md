@@ -45,7 +45,7 @@ Two interchangeable styles dispatch to the same backend:
 | `list_models(*, timeout_sec)` | `List[str]` | Names of models the runtime has available. Returns `[]` on error. |
 | `warm_up(model, *, timeout_sec, keep_alive)` | `bool` | Page `model` into resident memory ahead of the first real request. Default impl returns `True` (no-op for runtimes without per-call unloading). Ollama overrides this to issue a minimal `/api/generate` ping with the caller-provided `keep_alive` duration, defaulting to `"30m"`; the remote backends send one minimal, billed request that opens the connection. |
 
-`direct()` and `streaming()` are convenience methods over `chat()`: they construct the `[system, user]` messages array internally so callers running classification-shaped passes (planner, intent judge, enrichment extractor) do not have to. `chat()` is the low-level primitive for arbitrary message arrays — multi-turn dialogue, native tool calls, and anything that needs custom roles.
+`direct()` and `streaming()` take a system prompt and one user message, so callers running classification-shaped passes (planner, intent judge, enrichment extractor) never build a messages array. Each backend builds their requests itself rather than going through `chat()`, and they never carry tools. `chat()` is the low-level primitive for arbitrary message arrays — multi-turn dialogue, native tool calls, and anything that needs custom roles.
 
 ### Tool calling
 
