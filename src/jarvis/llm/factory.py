@@ -168,6 +168,20 @@ def _on_a_remote_provider(settings: Any) -> bool:
     return provider != _OLLAMA and not is_local_endpoint(base_url)
 
 
+def chat_is_remote(settings: Any) -> bool:
+    """Whether the reply goes to a provider off home.
+
+    The reading :func:`get_llm_backend` makes for the reply, which passes
+    no model (:func:`_on_a_remote_provider`): Anthropic, or an
+    OpenAI-compatible server at an address ``is_local_endpoint`` does not
+    recognise. The Ollama provider counts as home whatever its URL, as it
+    does for :func:`get_private_backend`. A prompt carrying only what the
+    reply sends there anyway can go there too without anything new
+    leaving.
+    """
+    return _on_a_remote_provider(settings)
+
+
 def _names_the_providers_chat_model(settings: Any, model: str) -> bool:
     """Whether ``model`` is the chat model, named for the provider.
 
@@ -337,10 +351,12 @@ def _pin_runs_on_ollama(settings: Any, pin: str) -> bool:
 def get_private_backend(settings: Any, pinned: str, model: str) -> LLMBackend:
     """The backend for a prompt carrying the user's own life.
 
-    Four contexts read his own sentences: the time he said out loud, the
-    routine he described, the goal he is working towards, and the
-    fortnight of diary the learning step mines. Each specifies that
-    pinning a model is how he keeps that sentence off the network.
+    Four contexts read his own sentences: the goal he is working towards
+    and the fortnight of diary the learning step mines, wherever the chat
+    runs, and the time he said out loud and the routine he described when
+    the chat is at home (with the chat remote, those two are read where
+    the chat model lives; see :func:`chat_is_remote`). Each specifies that
+    pinning a model is how he keeps that sentence off the network here.
 
     A name alone does not do that. Called without a model,
     :func:`get_llm_backend` picks the endpoint from ``llm_provider``

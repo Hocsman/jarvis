@@ -14,24 +14,22 @@ There is deliberately no shape finer than a day. A routine that fires on
 a tick empties a rate limit and a wallet overnight, so the vocabulary
 simply cannot say it.
 
-It rides the reminder chain, including the pin: one privacy decision
-rather than two things to get wrong, and this prompt carries the user's
-own sentence about their own life just as that one does.
+It is read where a reminder is read, through the same call: ``setRoutine``
+is a tool of the reply loop too, so this sentence reaches the chat model
+in its turn just as a reminder's does. One rule rather than two things
+to get wrong.
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Optional
 
 from ..debug import debug_log
-from ..llm import get_private_backend
 from ..reminders.extract import (
     ExtractionFailed,
+    _ask_model,
     _parse_body,
-    _reminder_pin,
-    _resolve_reminder_model,
 )
 from ..utils.redact import contains_redaction_placeholder
 from ..utils.time_context import format_reference_moment
@@ -82,24 +80,6 @@ class Lecture:
     regle: Regle
     quoi: str
     heure_supposee: bool
-
-
-def _resolve_model(cfg) -> str:
-    """The same chain, and the same pin, as the reminder extractor."""
-    return _resolve_reminder_model(cfg)
-
-
-def _ask_model(cfg, system: str, user: str, timeout_sec: float) -> Optional[str]:
-
-    model = _resolve_model(cfg)
-    response = get_private_backend(cfg, _reminder_pin(cfg), model).chat(
-        model,
-        [{"role": "system", "content": system}, {"role": "user", "content": user}],
-        timeout_sec=timeout_sec,
-    )
-    if not isinstance(response, dict):
-        return None
-    return (response.get("message") or {}).get("content")
 
 
 def extract_routine_rule(cfg, utterance: str) -> Lecture:

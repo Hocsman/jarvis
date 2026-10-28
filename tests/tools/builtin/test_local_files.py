@@ -119,3 +119,16 @@ class TestLocalFilesTool:
         assert isinstance(result, ToolExecutionResult)
         assert result.success is False
         assert "Unknown localFiles operation" in result.reply_text
+
+    @pytest.mark.parametrize("asked", ["search", "open", "find"])
+    def test_an_operation_named_after_the_request_says_which_ones_exist(self, asked):
+        """The user asks to find or open a file, and a small model writes
+        the verb it heard into `operation`. The reply has to carry the way
+        back: every real operation, and that finding is a list with a glob,
+        so the next call can be the right one instead of the same guess."""
+        result = self.tool.run({"operation": asked, "path": "~"}, self.context)
+
+        assert result.success is False
+        for operation in LocalFilesTool.OPERATIONS:
+            assert operation in result.reply_text
+        assert "glob" in result.reply_text and "recursive" in result.reply_text

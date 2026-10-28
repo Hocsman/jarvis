@@ -187,18 +187,6 @@ def test_the_weekday_convention_is_stated_to_the_model():
     assert "0" in _EXTRACT_SYSTEM and "6" in _EXTRACT_SYSTEM
 
 
-# ── It rides the same chain as the reminder extractor ─────────────────
-
-
-def test_it_uses_the_reminder_model_chain():
-    """One pin, one privacy decision. A second key would be a second
-    thing to get wrong."""
-    from src.jarvis.reminders.extract import _resolve_reminder_model
-    from src.jarvis.routines.extract import _resolve_model
-
-    assert _resolve_model(_Cfg()) == _resolve_reminder_model(_Cfg())
-
-
 # ── An hour nobody said ───────────────────────────────────────────────
 
 

@@ -6,10 +6,11 @@ for a good reason: a stale local Ollama tag sent to a remote endpoint
 fails with a 400, and the auxiliary task dies for no gain.
 
 But it is applied per model, and two of them are deliberately left out —
-`confirmation_model` and now `reminder_model`. Those two carry the user's
-own sentence about their own life: "rappelle-moi d'appeler l'oncologue
-jeudi". On a machine whose provider is a remote endpoint, pinning a local
-model is the only way to keep that sentence off the network, and running
+`confirmation_model` and `reminder_model`. `reminder_model` is the pin
+of the reminder chain, which reads the user's own life: the goal judge
+and the journal reader ride it wherever the chat runs, and the time they
+said out loud when the chat is at home. On a machine whose provider is a
+remote endpoint, that pin is what keeps those readings here, and running
 it through the filter would silently undo exactly that.
 
 The asymmetry is the point, so it is asserted rather than assumed. A
@@ -91,13 +92,12 @@ def test_an_out_of_range_setting_is_clamped(tmp_path, monkeypatch, key, value, l
 
 
 def test_a_pinned_local_model_survives_a_cloud_provider(tmp_path, monkeypatch):
-    """The whole reason `reminder_model` exists.
+    """The whole reason `reminder_model` survives the filter.
 
-    The user's sentence about their own life goes to whichever model
-    reads it. On a machine pointed at a remote endpoint, pinning a local
-    tag is the only way to keep it here — and running that pin through
-    `_cloud_safe_model` would rewrite it to the cloud model and send the
-    sentence anyway.
+    The goal judge and the journal reader read the user's own life with
+    the pinned model, wherever the chat runs. Running that pin through
+    `_cloud_safe_model` would rewrite it to the cloud model and send
+    their inputs there anyway.
     """
     got = _settings_from(tmp_path, monkeypatch, {
         "llm_provider": "openai_compatible",

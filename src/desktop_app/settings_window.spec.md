@@ -79,10 +79,13 @@ What the gate asks about before doing it, and how long a card waits.
 ### ⏰ Rappels
 
 The master switch for a subsystem that speaks unprompted, plus the model
-that reads the hour out of his sentence. Both belong here rather than in
-`config.json`: one is the only way to stop it, and the other is the only
-way to keep the sentence he dictated on his own machine or network, since the reminder
-chain deliberately skips the cloud-safe rewrite.
+of the reminder chain. Both belong here rather than in `config.json`:
+one is the only way to stop it, and the other is the pin that keeps the
+goal judge and the journal reader on his own machine or network wherever
+the chat runs, since the reminder chain deliberately skips the cloud-safe
+rewrite. With the chat at home it also reads the hour out of the
+sentence; with the chat in the cloud the chat model reads it, because the
+turn has already sent it the sentence. The field's description says both.
 
 What a reminder says and when is not settable here — that is one
 sentence about one promise, not a number that applies to all of them.
@@ -160,6 +163,11 @@ dedicated page:
 - `dictation_filler_removal`
 - `dictation_custom_dictionary`
 
+`dictation_hotkey` is a dropdown of `DICTATION_HOTKEY_PRESETS` (`jarvis/config.py`)
+built by `dictation_hotkey_choices()` (`jarvis/dictation/hotkeys.py`), the same builder the setup wizard's
+Dictation page uses, so both windows offer the same presets with the platform
+default marked `(default)`.
+
 `low_power_mode` is a boolean toggle. When enabled, the voice listener skips
 LLM startup warmup and the Ollama keep-alive windows used by warmup and the
 intent judge are short. The setting is saved only when it differs from the
@@ -195,7 +203,7 @@ A stored index the list does not contain (a device unplugged when the window ope
 
 - Accessed via "⚙️ Settings" in the system tray menu.
 - Opens as a modal QDialog.
-- Lazy-imported to avoid loading sounddevice at startup.
+- Imported from `show_settings` when the window is first opened. Importing the module loads none of sounddevice, numpy or pynput: the hotkey labels come from `jarvis/dictation/hotkeys.py`. sounddevice is imported when the window is built, to list the input devices for the Voice Input tab.
 
 ## MCP Servers Section
 

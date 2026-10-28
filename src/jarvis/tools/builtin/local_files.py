@@ -10,6 +10,9 @@ from ..types import ToolExecutionResult
 class LocalFilesTool(Tool):
     """Tool for safe local file operations within user's home directory."""
 
+    # Every value `operation` takes. Finding a file is `list` with a glob.
+    OPERATIONS = ("list", "read", "write", "append", "delete")
+
     # Operations that leave the filesystem exactly as they found it.
     # Anything absent from this set — including a missing or misspelt
     # operation — is treated as destructive: the tool itself defaults to
@@ -33,14 +36,21 @@ class LocalFilesTool(Tool):
 
     @property
     def description(self) -> str:
-        return "Safely read, write, list, append, or delete files within your home directory."
+        # In the words a file is asked for with ("on my computer"). Those
+        # verbs are not operations; an unknown one is answered with the list
+        # in run(). Measurements: selection.spec.md, What the router reads.
+        return (
+            "Search for, open and read the user's files and documents on "
+            "their computer, or list, write, append or delete them, inside "
+            "their home folder."
+        )
 
     @property
     def inputSchema(self) -> Dict[str, Any]:
         return {
             "type": "object",
             "properties": {
-                "operation": {"type": "string", "description": "Operation to perform: list, read, write, append, delete"},
+                "operation": {"type": "string", "description": f"Operation to perform: {', '.join(self.OPERATIONS)}"},
                 "path": {"type": "string", "description": "File or directory path (relative to home directory)"},
                 "content": {"type": "string", "description": "Content to write/append (for write/append operations)"},
                 "glob": {"type": "string", "description": "Glob pattern for listing (default: *)"},
@@ -209,7 +219,16 @@ class LocalFilesTool(Tool):
                 except Exception as e:
                     return ToolExecutionResult(success=False, reply_text=f"Delete failed: {e}")
 
-            return ToolExecutionResult(success=False, reply_text=f"Unknown localFiles operation: {operation}")
+            # A small model writes the user's verb ("search", "open") here;
+            # the reply names the real operations so the next call can be one.
+            return ToolExecutionResult(
+                success=False,
+                reply_text=(
+                    f"Unknown localFiles operation: {operation}. Operations: "
+                    f"{', '.join(self.OPERATIONS)}. To find a file, use list "
+                    "with a glob pattern and recursive true."
+                ),
+            )
         except PermissionError as pe:
             return ToolExecutionResult(success=False, reply_text=f"Permission error: {pe}")
         except Exception as e:
