@@ -429,8 +429,10 @@ capture (an allocation, a synchronisation) invalidates it and aborts the
 process. Whisper keeps the GPU busy in the listener's thread while she
 speaks, and every synthesis captures afresh, so the engine has `moshi`
 capture per thread instead (`capture_error_mode="thread_local"`), where
-only the capturing thread is checked. A capture mode `moshi` asks for
-itself is kept, and a `moshi` without the hook this relies on is left as it
+only the capturing thread is checked. The engine replaces the `cuda` that
+`moshi.utils.compile` takes from torch, and does so before the model's
+first synthesis (the warm-up). A capture mode `moshi` passes by keyword is
+kept, and a `moshi.utils.compile` with no `cuda` to replace is left as it
 is: the engine still works, without the protection.
 
 **Synthesis.** One item is one model call: the text is prepared as a
@@ -568,11 +570,13 @@ language. The line is not added for Kokoro or Kyutai.
 - With Triton absent the compile switch is set before `moshi` is first
   imported, a value the user set is left alone, and the CUDA graphs are
   never switched off.
-- `moshi` captures its CUDA graphs per thread, so a CUDA call from another
-  thread (Whisper) cannot invalidate a capture; a capture mode `moshi`
-  chooses itself is kept, the hook is installed once, and a `moshi` without
-  it still loads. Kyutai speaking while Whisper transcribes on the same GPU
-  does not abort the process.
+- `moshi` captures its CUDA graphs per thread, the capture made while the
+  model warms up and the one made for each sentence alike, and `moshi`'s own
+  capture code asks torch for it; a capture mode `moshi` passes by keyword is
+  kept, a second engine keeps the wrapper the first one installed, and a
+  `moshi.utils.compile` with no `cuda` to replace still loads. That Kyutai
+  can speak while Whisper transcribes on the same GPU is checked by hand
+  with a reproduction, as it needs the GPU.
 - Kyutai's initialisation ends with one throwaway synthesis (audio
   discarded, nothing queued or played).
 - A voice name is resolved through the model's voice repository, a

@@ -1922,9 +1922,11 @@ class KyutaiTTS:
 
     @staticmethod
     def _capture_graphs_per_thread() -> None:
-        """Make ``moshi`` capture its CUDA graphs per thread
-        (:class:`_ThreadLocalCapture`). A ``moshi`` that has no such hook is
-        left as it is: the engine still works, without the protection."""
+        """Make ``moshi`` capture its CUDA graphs per thread: replace the
+        ``cuda`` that ``moshi.utils.compile`` takes from torch with
+        :class:`_ThreadLocalCapture`. A ``moshi.utils.compile`` that has no
+        ``cuda`` to replace is left as it is: the engine still works, without
+        the protection."""
         import importlib
 
         try:
