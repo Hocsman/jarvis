@@ -70,7 +70,7 @@ Note: embedding is **not** the default strategy because nomic-embed-text produce
 
 ### LLM Strategy (default)
 
-1. Build a catalogue of `- name: description` lines (descriptions truncated to 120 chars) for every registered tool except always-included ones.
+1. Build a catalogue of `- name: description` lines for every registered tool except always-included ones, each description read as the router reads it (see What the router reads).
 2. Send to `call_llm_direct` with a system prompt asking for the **top 5 most relevant** tool names as a comma-separated list. The prompt instructs the router to prefer 1–3 tools for narrow queries and to return `"none"` for greetings/small talk.
 3. Parse the response, matching tokens against known tool names (unknowns are dropped silently).
 4. Apply a hard `_LLM_MAX_SELECTED` (5) cap regardless of what the router returned, to guard against chatty routers that echo the whole catalogue.
@@ -86,6 +86,38 @@ When the reply engine passes a `context_hint`, it is split into two labelled sem
 - **RECENT DIALOGUE** — recent user/assistant turns. The router is instructed to read the current query as a continuation of this exchange, so short follow-ups (e.g. "I'm in London" after "which city?") route to the tool that answers the combined intent across turns rather than being treated as idle chatter.
 
 The split is the exact marker `"Recent dialogue (short-term memory):"` — any content before it is known facts, content after it is recent dialogue. If no dialogue marker is present, the whole hint is treated as known facts.
+
+#### What the router reads
+
+One line per tool: its name and the whole sentences of its description that fit in 200 characters (`_router_summary`), the first sentence alone when that one is longer, the whole text when it has no sentence end, flattened to one line. The planner reads the first 120 characters of the same description. So the sentence that decides routing comes first, and its opening also decides planning. The keyword and embedding strategies read the whole description.
+
+A description says what the tool does in the words the user asks for it with, because the router matches a request against those words, not against what the tool can technically do:
+
+- `localFiles` finds "the user's files and documents on their computer". Described as acting "within your home directory", it is not offered for "trouve la facture PDF sur mon ordinateur": qwen2.5:3b answers `none`. The user's verbs are not its operations, so a call naming one ("search", "open") is answered with the operations there are and how to find a file (`list` with a glob, recursive).
+- `fetchWebPage` opens "a web page or article". Described as fetching "a web page URL", a request for an article that gives no address gets `webSearch` alone.
+- `setRoutine` opens with "routine", the word the user says when asking for one, and shows what a repeat sounds like ("every morning, every Monday"). Without the examples, a recurring request is routed on what will be fetched each time ("the weather"), never on the fact that it recurs.
+
+The descriptions are read together, so changing one moves requests meant for another. With `fetchWebPage` opening "Fetch and extract text content…", "tous les lundis matin, fais-moi un point sur la météo" goes to `getWeather, fetchWebPage, webSearch`; changing `fetchWebPage` and `localFiles` alone, `setRoutine` as it was, takes it from 8 to 22 of 30 on qwen2.5:3b. The French city-time questions ("quelle heure est-il à Tokyo ?"), where qwen2.5:3b puts `getWeather` first and `getTime` second, lose `getTime` more often after any change to the catalogue. A description change is therefore measured on every router case, the evals' and their French counterparts, both arms interleaved call by call, never only on its own tool's cases.
+
+The shape of the call counts too. The reply engine always sends the live time and location as KNOWN FACTS; `toolSearchTool` and the bare evals send none. With no KNOWN FACTS block, qwen2.5:3b answers `none` to "trouve la facture PDF sur mon ordinateur" whatever `localFiles` says, and it is the prompt's `none` rule that decides it (the same prompt without that sentence picks a tool). With a time and location line, the request reaches `localFiles`.
+
+These descriptions against their earlier wording, arms interleaved call by call, on 62 router cases (27 English from the evals, 35 French), 15 requests for these three tools in French and English (bare, and with a time and location line), and nine requests where they do not belong:
+
+| Cases | qwen2.5:3b, 30 calls an arm: these / earlier | gemma4:e2b, 15 calls an arm: these / earlier |
+|---|---|---|
+| The 62 router cases | 85.1% / 84.1% (p = 0.11) | 79.6% / 80.0% (p = 0.57) |
+| The 15 requests, bare | 63.6% / 38.4% | 84.9% / 83.6% |
+| The 15 requests, with the line | 68.7% / 49.8% | 84.0% / 88.9% (p = 0.18) |
+| "tous les lundis matin, fais-moi un point sur la météo" → `setRoutine`, bare; with the line | 27 / 8; 19 / 2 of 30 | 0 / 0; 14 / 0 of 15 |
+| "every evening at 9, tell me what I ate that day" → `setRoutine`, bare; with the line | 30 / 14; 22 / 7 of 30 | 0 / 8; 2 / 12 of 15 |
+| "Jarvis, mets en place une routine quotidienne qui cherche sur le web et me résume l'actualité." → `setRoutine`, with the line | 4 / 2 of 30 | 1 / 15 of 15 |
+| "set up a daily routine that searches the web and sums up the news for me" → `setRoutine`, with the line | 3 / 21 of 30 | 15 / 15 of 15 |
+| "trouve la facture PDF sur mon ordinateur" → `localFiles`, bare; with the line | 0 / 0; 30 / 0 of 30 | 15 / 15; 15 / 15 of 15 |
+| "trouve-moi un article détaillé sur le programme Apollo" → `webSearch` + `fetchWebPage`, bare; with the line | 23 / 7; 30 / 28 of 30 | 15 / 15; 15 / 15 of 15 |
+| "quelle heure est-il à Tokyo ?" → `getTime`, bare | 7 / 24 of 30 | 15 / 15 of 15 |
+| Requests where these tools do not belong | 270 / 270 of 270 | 119 / 135 of 135 |
+
+The gains are where qwen2.5:3b misses these tools with the earlier wording; gemma4:e2b offers the files and the articles either way. The losses are requests whose routing moves with any change to the catalogue: a repeated request that names the web goes to `webSearch` and `fetchWebPage` (qwen2.5:3b in English, gemma4:e2b in French), on gemma4:e2b one that names the evening goes to `setReminder`, "cherche sur internet des tutos Python" also gets `fetchWebPage` (15 of 15, an extra tool within the cap), and one one-off reminder in 15 also gets `setRoutine`, which still asks before it creates anything.
 
 ### Interface
 
