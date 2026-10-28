@@ -2,12 +2,11 @@
 End-to-end eval — she reads the line that answers, not the first lines.
 
 A graph node reaches the prompt within a fixed budget of characters. A
-node past `SPLIT_THRESHOLD` is meant to split into smaller ones, but on the
-small tier the split guards refuse every split (it would lose about half
-the node), so the World root keeps everything she has looked up in one
-node that only grows. The search finds that node for any question its
-text answers; what decides whether the answer reaches her is which of its
-lines are shown.
+node holds up to `SPLIT_THRESHOLD` tokens, some twenty times that budget,
+before it splits into smaller ones, and more when its split keeps
+failing (on the small tier, a split that would lose facts is refused).
+The search finds such a node for any question its text answers; what
+decides whether the answer reaches her is which of its lines are shown.
 
 Each case seeds one large node of invented lookups, the answer deep inside
 it, and asks about that answer plainly. The subjects are invented, so no

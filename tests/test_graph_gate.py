@@ -156,11 +156,11 @@ def test_it_is_framed_as_the_world_and_not_as_him(tmp_path):
 
 # ── What of a large node reaches the prompt ───────────────────────────
 #
-# A node is shown within a fixed budget of characters. A node that never
-# splits (on the small tier the split guards refuse every split) grows far
-# past it, and the search matches its whole text, so the budget is spent
-# on the lines that name what was asked rather than on whichever lines
-# happen to come first.
+# A node is shown within a fixed budget of characters. A node holds up to
+# `SPLIT_THRESHOLD` tokens, twenty times that, before it splits (more when
+# its split keeps failing), and the search matches its whole text, so the
+# budget is spent on the lines that name what was asked rather than on
+# whichever lines happen to come first.
 
 
 def _large_node(answer_at=30):
@@ -238,16 +238,21 @@ def test_the_lines_shown_stay_within_the_budget(tmp_path):
 def test_a_matching_line_longer_than_the_budget_is_cut_not_passed_over(tmp_path):
     from src.jarvis.reply.engine import _GRAPH_PREVIEW_CHARS
 
+    # The line that answers is the longest; a weaker one that fits names
+    # only the Kestrel. The best line is cut to the budget rather than
+    # passed over for the weaker one.
     long_line = ("The Kestrel M3 workstation ships with 96 GB of unified memory, "
                  + "and a long list of ports, " * 20).strip()
     assert len(long_line) > _GRAPH_PREVIEW_CHARS
-    lines = _large_node().data.split("\n")
+    lines = [line for line in _large_node().data.split("\n") if "Kestrel" not in line]
     lines.insert(30, long_line)
+    lines.insert(10, "The Kestrel drone weighs 300 g.")
     node = _Node("World", "\n".join(lines))
 
     _, prompt = _turn(tmp_path, {"keywords": ["kestrel m3", "memory"]}, noeuds=[node])
 
     assert "96 GB of unified memory" in prompt
+    assert "Kestrel drone" not in prompt
     assert "amber gallery" not in prompt
 
 

@@ -41,7 +41,7 @@ KESTREL = "The Kestrel M3 is a compact workstation with 96 GB of unified memory.
 
 
 def _turn(tmp_path, plan, *, noeuds=None, petit=False, digest=None,
-          extracteur=None, graphe_casse=False):
+          extracteur=None, graphe_casse=False, chemin=("World",)):
     """One engine turn. Returns (system prompt, tools dispatched, output)."""
     from src.jarvis.memory.conversation import DialogueMemory
     from src.jarvis.reply.engine import run_reply_engine
@@ -67,7 +67,7 @@ def _turn(tmp_path, plan, *, noeuds=None, petit=False, digest=None,
 
     store = MagicMock()
     store.search_nodes.return_value = noeuds if noeuds is not None else []
-    store.get_ancestors.return_value = [_Node("World", "")]
+    store.get_ancestors.return_value = [_Node(nom, "") for nom in chemin]
 
     appels = []
 
@@ -176,6 +176,28 @@ def test_she_still_goes_out_for_the_half_she_does_not_have(tmp_path):
     prompt, _, _ = _turn(tmp_path, plan, noeuds=[_Node("Kestrel M3", KESTREL)])
 
     assert _plan_still_asks(prompt, "webSearch")
+
+
+def test_words_found_on_two_different_lines_do_not_cover_a_step(tmp_path):
+    """Each line is one fact. A line naming the machine and another naming
+    the price of something else do not say what the machine costs, so the
+    search for it still goes out."""
+    plan = ["webSearch query='Kestrel price'", "Reply to the user."]
+    node = _Node("World", KESTREL + "\nThe price of the Ardent 40 kettle is 30 pounds.")
+
+    prompt, _, _ = _turn(tmp_path, plan, noeuds=[node])
+
+    assert _plan_still_asks(prompt, "webSearch")
+
+
+def test_a_subject_named_by_its_node_covers_the_node_s_lines(tmp_path):
+    """A node's lines need not repeat its name: under a node called
+    Kestrel M3, a line about its memory is about the Kestrel's memory."""
+    node = _Node("Kestrel M3", "It ships with 96 GB of unified memory.")
+
+    prompt, _, _ = _turn(tmp_path, WEB, noeuds=[node], chemin=("World", "Kestrel M3"))
+
+    assert not _plan_still_asks(prompt, "webSearch")
 
 
 def test_a_single_content_word_never_covers_a_step(tmp_path):

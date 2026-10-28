@@ -121,35 +121,34 @@ def node_preview(data: str, words, budget: int) -> str:
     lines are no more likely than any others to be it. Lines are matched
     the way the search matches them (``fold_for_search``, a word anywhere in
     the line), so the line that made the node a hit is the line shown.
-    When no line holds a word (the node was found by its name or its
-    description), its first lines are shown.
+    When the best line alone is longer than the budget, it is cut to the
+    budget rather than passed over for a weaker one. When no line holds a
+    word (the node was found by its name or its description), the node's
+    first ``budget`` characters are shown.
     """
     if not data:
         return ""
     if len(data) <= budget:
         return data
     folded_words = {fold_for_search(w) for w in words if w and w.strip()}
-    lines = [line for line in data.split("\n") if line.strip()]
-    ranked = sorted(
-        ((sum(w in fold_for_search(line) for w in folded_words), i, line)
-         for i, line in enumerate(lines)),
-        key=lambda t: (-t[0], t[1]),
-    )
+    scored = []
+    for i, line in enumerate(line for line in data.split("\n") if line.strip()):
+        folded = fold_for_search(line)
+        scored.append((sum(w in folded for w in folded_words), i, line))
+    scored.sort(key=lambda t: (-t[0], t[1]))
     shown: list[str] = []
     used = 0
-    for score, _, line in ranked:
+    for score, _, line in scored:
         if score == 0:
             break
         cost = len(line) + (1 if shown else 0)
         if used + cost > budget:
+            if not shown:
+                return line[:budget]
             continue
         shown.append(line)
         used += cost
-    if not shown:
-        best_score, _, best = ranked[0] if ranked else (0, 0, "")
-        # A matching line longer than the budget is cut, not passed over.
-        return best[:budget] if best_score else data[:budget]
-    return "\n".join(shown)
+    return "\n".join(shown) if shown else data[:budget]
 
 
 # ── Configuration defaults ──────────────────────────────────────────────────
