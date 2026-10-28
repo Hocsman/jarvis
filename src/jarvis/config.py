@@ -422,8 +422,10 @@ class Settings:
     stop_commands: list
     stop_command_fuzzy_ratio: float
 
-    # City shown on the dashboard weather card (Open-Meteo geocoded).
-    # Empty auto-detects from local GeoIP when location is enabled.
+    # The user's home city (Open-Meteo geocoded): shown on the dashboard
+    # weather card, and getWeather's last resort before asking, including
+    # when a place the user named is not found. Empty auto-detects from local
+    # GeoIP when location is enabled.
     weather_city: str
 
     # Desktop UI choices (orb particle layer, etc.)
