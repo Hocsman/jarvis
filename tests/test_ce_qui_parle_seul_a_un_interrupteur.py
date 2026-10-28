@@ -6,11 +6,11 @@ a field in the settings window, with a comment explaining exactly why.
 This one had none: turning reminders off meant editing `config.json` by
 hand and restarting.
 
-`reminder_model` matters for a second reason. `reminders.spec.md` makes
-it the way to keep the sentence he dictated — "rappelle-moi d'appeler
-l'oncologue jeudi" — off the network, since that prompt carries his own
-life and the reminder chain deliberately skips the cloud-safe rewrite.
-A privacy control nobody can find is a privacy control nobody uses.
+`reminder_model` matters for a second reason. It is the pin of the
+reminder chain, which deliberately skips the cloud-safe rewrite: it keeps
+the goal judge and the journal on this machine wherever the chat runs,
+and reads the time there when the chat is at home too. A privacy control
+nobody can find is a privacy control nobody uses.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ def test_the_switch_for_what_speaks_on_its_own_is_reachable():
     assert "reminders_enabled" in cles
 
 
-def test_the_model_that_keeps_his_sentence_home_is_reachable():
+def test_the_pin_of_the_reminder_chain_is_reachable():
     cles = {m["key"] for m in _metadonnees()}
 
     assert "reminder_model" in cles

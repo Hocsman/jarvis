@@ -79,10 +79,13 @@ What the gate asks about before doing it, and how long a card waits.
 ### ⏰ Rappels
 
 The master switch for a subsystem that speaks unprompted, plus the model
-that reads the hour out of his sentence. Both belong here rather than in
-`config.json`: one is the only way to stop it, and the other is the only
-way to keep the sentence he dictated on his own machine or network, since the reminder
-chain deliberately skips the cloud-safe rewrite.
+of the reminder chain. Both belong here rather than in `config.json`:
+one is the only way to stop it, and the other is the pin that keeps the
+goal judge and the journal reader on his own machine or network wherever
+the chat runs, since the reminder chain deliberately skips the cloud-safe
+rewrite. With the chat at home it also reads the hour out of the
+sentence; with the chat in the cloud the chat model reads it, because the
+turn has already sent it the sentence. The field's description says both.
 
 What a reminder says and when is not settable here — that is one
 sentence about one promise, not a number that applies to all of them.

@@ -537,18 +537,20 @@ def _build_field_metadata() -> List[FieldMeta]:
     # A reminder speaks at a time he is not necessarily at the machine
     # for, so the master switch belongs somewhere he can find it —
     # `routines_enabled` next door has had one all along. `reminder_model`
-    # is here for a second reason: this prompt carries the sentence he
-    # dictated about his own life, and the reminder chain deliberately
-    # skips the cloud-safe rewrite, so pinning a local model is how he
-    # keeps it off the network. A privacy control nobody can find is a
+    # is here for a second reason: the reminder chain deliberately skips
+    # the cloud-safe rewrite, so pinning a local model is how the goal
+    # judge and the journal stay on this machine, and how the time is read
+    # here when the chat is too. A privacy control nobody can find is a
     # privacy control nobody uses.
     f("reminders_enabled", "Rappels",
       "Ce qu'elle te dit à l'heure dite. Coupé, rien ne part, "
       "et rien n'est perdu",
       "reminders", "bool")
     f("reminder_model", "Modèle des rappels",
-      "Lit l'heure dans ta phrase. Épingle un modèle local et ta phrase "
-      "reste sur ta machine ou ton réseau",
+      "Lit l'heure dans ta phrase quand le chat tourne sur ta machine ou "
+      "ton réseau. Avec un chat dans le cloud, c'est lui qui la lit : ta "
+      "phrase y est déjà partie. Épinglé, il garde aussi tes objectifs et "
+      "ton journal sur ta machine ou ton réseau",
       "reminders", "str")
     f("reminder_default_hour", "Heure par défaut",
       "Quand tu nommes un jour sans heure. Elle te le dit à voix haute "
