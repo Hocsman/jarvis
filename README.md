@@ -384,6 +384,18 @@ Whisper sometimes produces confident but false transcriptions during silence or 
 
 Both thresholds are exposed in the Settings window under *Whisper*.
 
+#### Names It Should Know
+Whisper tends to turn a rare name into a word it knows ("Bagneux" can come back "Bagnus"). Your `weather_city` is passed to Whisper as a hint on every transcription, and you can add other names (places, people, products) to `"whisper_vocabulary"`, also under *Whisper* in Settings:
+
+```json
+{
+  "weather_city": "Bagneux",
+  "whisper_vocabulary": ["Axendly", "Mon Rempart"]
+}
+```
+
+Keep the list short: each name also attracts words that sound like it. The wake word and its aliases are never used as hints, so this cannot make the assistant easier to wake by mistake. The hint applies to the assistant's listening, not to dictation, which has its own custom dictionary.
+
 </details>
 
 <details>

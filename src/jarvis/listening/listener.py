@@ -25,6 +25,7 @@ from ..utils.audio_lock import portaudio_lock
 from .wake_detection import is_wake_word_detected, extract_query_after_wake, is_stop_command
 from .transcript_buffer import TranscriptBuffer
 from .whisper_turbo import is_faster_whisper_turbo_supported
+from .vocabulary import is_the_hint_repeated, whisper_hint
 from .intent_judge import (
     IntentJudge,
     _is_low_power_mode_enabled,
@@ -2905,6 +2906,111 @@ class VoiceListener(threading.Thread):
             return 0.0
         return frames * frame_samples / rate
 
+    def _transcribe(self, audio) -> str:
+        """What was said, read with his names as a hint.
+
+        The hint may change how a word is spelled, never whether anything
+        was said: over noise Whisper writes the hint back, so a transcript
+        that is mostly the hint is read again without it.
+        """
+        hint = whisper_hint(self.cfg)
+        text = self._transcribe_once(audio, hint)
+        if is_the_hint_repeated(text, hint):
+            debug_log(f"transcript is the hint repeated, reading again without it: '{text[:60]}'", "voice")
+            text = self._transcribe_once(audio, None)
+        return text
+
+    def _transcribe_once(self, audio, hint: Optional[str]) -> str:
+        """One Whisper pass, through the confidence filters."""
+        if self._whisper_backend == "mlx":
+            # MLX Whisper transcription
+            with self.transcribe_lock:
+                result = mlx_whisper.transcribe(
+                    audio,
+                    path_or_hf_repo=self._mlx_model_repo,
+                    language=None,
+                    initial_prompt=hint,
+                )
+
+            # Capture Whisper's auto-detected language (ISO-639-1) so
+            # downstream tools can pick locale-appropriate resources.
+            detected = result.get("language")
+            if isinstance(detected, str) and detected:
+                self._last_detected_language = detected
+
+            # Filter segments by confidence (MLX Whisper returns segments with avg_logprob)
+            min_confidence = getattr(self.cfg, "whisper_min_confidence", 0.3)
+            if self.awaiting_spoken_answer():
+                # Same reasoning as `_filter_noisy_segments`.
+                min_confidence = 0.0
+            marginal_threshold = min_confidence / 3  # Show user-visible log for marginal confidence
+            no_speech_threshold = getattr(self.cfg, "whisper_no_speech_threshold", 0.5)
+            segments = result.get("segments", [])
+
+            if not segments:
+                # Fallback to full text if no segments
+                return result.get("text", "").strip()
+
+            filtered_texts = []
+            for seg in segments:
+                avg_logprob = seg.get("avg_logprob", 0)
+                no_speech_prob = seg.get("no_speech_prob", 0)
+
+                # Convert avg_logprob to confidence (typically -1 to 0, so add 1)
+                confidence = min(1.0, max(0.0, avg_logprob + 1.0))
+                seg_text = seg.get("text", "").strip()
+
+                # Hard filter: high no_speech_prob means no real speech regardless of logprob.
+                if is_whisper_hallucination(no_speech_prob, no_speech_threshold):
+                    debug_log(f"MLX segment filtered (no_speech_prob={no_speech_prob:.2f}): '{seg_text[:50]}'", "voice")
+                    continue
+
+                if (confidence < min_confidence
+                        and self._sounds_like_her_name(seg_text)):
+                    debug_log(
+                        f"MLX segment kept despite "
+                        f"confidence={confidence:.2f}: it carries her "
+                        f"name", "voice",
+                    )
+                    filtered_texts.append(seg.get("text", ""))
+                    continue
+
+                if confidence < min_confidence:
+                    if confidence >= marginal_threshold:
+                        # Marginal confidence - show in log viewer (not debug)
+                        print(f"🔇 Low confidence ({confidence:.2f}): \"{seg_text[:50]}...\"", flush=True)
+                    else:
+                        # Very low confidence - debug only
+                        debug_log(f"MLX segment filtered (confidence={confidence:.2f}): '{seg_text[:50]}'", "voice")
+                    continue
+
+                filtered_texts.append(seg.get("text", ""))
+
+            return " ".join(filtered_texts).strip()
+
+        # faster-whisper transcription
+        # CPU mode: skip timestamps and disable context carry-over for speed
+        cpu_mode = self._whisper_device == "cpu"
+        with self.transcribe_lock:
+            try:
+                segments, _info = self.model.transcribe(
+                    audio, language=None, vad_filter=False,
+                    condition_on_previous_text=not cpu_mode,
+                    without_timestamps=cpu_mode,
+                    hotwords=hint,
+                )
+            except TypeError:
+                segments, _info = self.model.transcribe(audio, language=None)
+            segments_list = list(segments)
+        # Capture the detected language (faster-whisper exposes it
+        # on the info object). Guard against older API variants
+        # where the attribute may be absent.
+        detected = getattr(_info, "language", None)
+        if isinstance(detected, str) and detected:
+            self._last_detected_language = detected
+        filtered_segments = self._filter_noisy_segments(segments_list)
+        return " ".join(seg.text for seg in filtered_segments).strip()
+
     def _finalize_utterance(self) -> None:
         """Process completed utterance through speech recognition."""
         if np is None or not self._utterance_frames:
@@ -2957,92 +3063,7 @@ class VoiceListener(threading.Thread):
 
         # Speech recognition with appropriate backend
         try:
-            if self._whisper_backend == "mlx":
-                # MLX Whisper transcription
-                with self.transcribe_lock:
-                    result = mlx_whisper.transcribe(
-                        audio,
-                        path_or_hf_repo=self._mlx_model_repo,
-                        language=None,
-                    )
-
-                # Capture Whisper's auto-detected language (ISO-639-1) so
-                # downstream tools can pick locale-appropriate resources.
-                detected = result.get("language")
-                if isinstance(detected, str) and detected:
-                    self._last_detected_language = detected
-
-                # Filter segments by confidence (MLX Whisper returns segments with avg_logprob)
-                min_confidence = getattr(self.cfg, "whisper_min_confidence", 0.3)
-                if self.awaiting_spoken_answer():
-                    # Same reasoning as the faster-whisper path above.
-                    min_confidence = 0.0
-                marginal_threshold = min_confidence / 3  # Show user-visible log for marginal confidence
-                no_speech_threshold = getattr(self.cfg, "whisper_no_speech_threshold", 0.5)
-                segments = result.get("segments", [])
-
-                if segments:
-                    filtered_texts = []
-                    for seg in segments:
-                        avg_logprob = seg.get("avg_logprob", 0)
-                        no_speech_prob = seg.get("no_speech_prob", 0)
-
-                        # Convert avg_logprob to confidence (typically -1 to 0, so add 1)
-                        confidence = min(1.0, max(0.0, avg_logprob + 1.0))
-                        seg_text = seg.get("text", "").strip()
-
-                        # Hard filter: high no_speech_prob means no real speech regardless of logprob.
-                        if is_whisper_hallucination(no_speech_prob, no_speech_threshold):
-                            debug_log(f"MLX segment filtered (no_speech_prob={no_speech_prob:.2f}): '{seg_text[:50]}'", "voice")
-                            continue
-
-                        if (confidence < min_confidence
-                                and self._sounds_like_her_name(seg_text)):
-                            debug_log(
-                                f"MLX segment kept despite "
-                                f"confidence={confidence:.2f}: it carries her "
-                                f"name", "voice",
-                            )
-                            filtered_texts.append(seg.get("text", ""))
-                            continue
-
-                        if confidence < min_confidence:
-                            if confidence >= marginal_threshold:
-                                # Marginal confidence - show in log viewer (not debug)
-                                print(f"🔇 Low confidence ({confidence:.2f}): \"{seg_text[:50]}...\"", flush=True)
-                            else:
-                                # Very low confidence - debug only
-                                debug_log(f"MLX segment filtered (confidence={confidence:.2f}): '{seg_text[:50]}'", "voice")
-                            continue
-
-                        filtered_texts.append(seg.get("text", ""))
-
-                    text = " ".join(filtered_texts).strip()
-                else:
-                    # Fallback to full text if no segments
-                    text = result.get("text", "").strip()
-            else:
-                # faster-whisper transcription
-                # CPU mode: skip timestamps and disable context carry-over for speed
-                cpu_mode = self._whisper_device == "cpu"
-                with self.transcribe_lock:
-                    try:
-                        segments, _info = self.model.transcribe(
-                            audio, language=None, vad_filter=False,
-                            condition_on_previous_text=not cpu_mode,
-                            without_timestamps=cpu_mode,
-                        )
-                    except TypeError:
-                        segments, _info = self.model.transcribe(audio, language=None)
-                    segments_list = list(segments)
-                # Capture the detected language (faster-whisper exposes it
-                # on the info object). Guard against older API variants
-                # where the attribute may be absent.
-                detected = getattr(_info, "language", None)
-                if isinstance(detected, str) and detected:
-                    self._last_detected_language = detected
-                filtered_segments = self._filter_noisy_segments(segments_list)
-                text = " ".join(seg.text for seg in filtered_segments).strip()
+            text = self._transcribe(audio)
         except Exception as e:
             debug_log(f"transcription error: {e}", "voice")
             if sys.platform == 'win32':
