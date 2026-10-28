@@ -4,6 +4,7 @@ All LLM calls are mocked to test the logic independently.
 """
 
 import json
+import math
 import re
 import sys
 import types
@@ -29,6 +30,8 @@ from src.jarvis.memory.graph_ops import (
     merge_node_data,
     consolidate_world_nodes,
     MergeResult,
+    _MERGE_GROWTH_SLACK,
+    _SPLIT_MIN_RETENTION,
 )
 
 
@@ -291,6 +294,89 @@ class TestFindBestNode:
 # ── auto_split_node ────────────────────────────────────────────────────
 
 
+# Answers to things he looked up, worded apart from one another the way
+# real lookups are, so that a line the split drops cannot pass for kept
+# by resembling a sibling it kept.
+_LOOKED_UP = [
+    "The Rio Cinema in Dalston offers discounted tickets on Monday evenings and runs a parent-and-baby screening on Thursday mornings.",
+    "CEX on Kensington High Street closes at 6pm on Sundays and buys back games consoles only with proof of identity.",
+    "Mildreds in Covent Garden takes bookings only for groups of six or more and keeps the rest of the room for walk-ins.",
+    "The 38 bus runs from Clapton Pond to Victoria through Islington, and its night service follows the same route every half hour.",
+    "Possessor (2020) is a science-fiction horror film written and directed by Brandon Cronenberg and starring Andrea Riseborough.",
+    "Hackney Central station is on the Mildmay line of the London Overground, two stops east of Dalston Kingsland.",
+    "Broadway Market runs every Saturday from 9am to 5pm, with the school playground hosting extra food stalls.",
+    "The Castle Climbing Centre in Stoke Newington occupies a former Victorian water pumping station designed to look like a castle.",
+    "Pophams Bakery in London Fields usually sells out of its maple bacon pastries by eleven o'clock at weekends.",
+    "The Hackney Empire's box office opens at 10am on weekdays and an hour before curtain on show days.",
+    "Clissold Leisure Centre's main pool is 25 metres long, and the learner pool next to it is kept a little warmer.",
+    "The Sony WH-1000XM6 headphones claim 30 hours of battery life with noise cancelling switched on.",
+    "The Framework Laptop 13 takes four expansion cards, each of which can be swapped for USB-C, HDMI or a microSD reader.",
+    "Unlocking a Lime electric bike in London costs one pound, followed by a per-minute charge for the ride itself.",
+    "The Arcola Theatre in Dalston offers pay-what-you-can tickets for Tuesday performances, released on the day.",
+    "Ridley Road Market is closed on Sundays, and most of its fruit and fish stalls pack up by late afternoon.",
+    "Yard Sale Pizza in Clapton delivers until half past ten in the evening and offers a vegan cheese on any pizza.",
+    "The London Fields Lido is heated all year round, and swimmers must book a lane slot online before arriving.",
+    "Kiln in Soho does not take reservations for groups under four and seats most diners along the open kitchen counter.",
+    "Brockwell Lido opens at 6:45am on weekdays for early lane swimming, with general sessions starting later.",
+    "The Pixel 9 is promised seven years of Android operating system and security updates from its launch.",
+    "Gail's Bakery on Stoke Newington Church Street opens at 7am and bakes its cinnamon buns on the premises.",
+    "Netil Market hosts street food stalls on Saturdays in a yard just off Westgate Street near London Fields.",
+    "The Lee Valley VeloPark track is 250 metres long, and taster sessions require no previous track experience.",
+    "The Geffrye Museum reopened as the Museum of the Home in 2021 after a long refurbishment of its almshouses.",
+    "Sutton House in Hackney is a Tudor house built in 1535 for Ralph Sadleir, a courtier of Henry VIII.",
+    "Columbia Road Flower Market trades on Sundays from 8am to 3pm, and prices drop sharply in the final hour.",
+    "The Prince Charles Cinema in Leicester Square runs sing-along screenings and all-night film marathons.",
+    "York Hall in Bethnal Green hosts professional boxing nights and also houses a Turkish bath in its basement.",
+    "E5 Bakehouse sells its sourdough from railway arches in London Fields and mills some of its own flour.",
+    "Hackney Marshes have more than sixty football pitches, which makes them one of the largest pitch sites in Europe.",
+    "Walthamstow Wetlands is free to enter, opens at 9:30am, and has a café inside the old engine house.",
+    "The Garden Museum in Lambeth is housed in the former church of St Mary-at-Lambeth, next to Lambeth Palace.",
+    "Leyton Orient play their home games at Brisbane Road, whose corners are filled with blocks of flats.",
+    "The Hackney Half Marathon takes place in May and finishes on the running track at the Queen Elizabeth Olympic Park.",
+    "Bao Borough serves a fried chicken bao on its weekend menu alongside a sweet potato fries side dish.",
+    "Old Spitalfields Market's antiques stalls trade on Thursdays, while the other days focus on fashion and food.",
+    "The Dalston Eastern Curve Garden opens at 11am on Wednesdays and holds pizza nights in the summer.",
+    "The Royal Inn on the Park has a beer garden facing Victoria Park and serves Sunday roasts until early evening.",
+    "St John at Hackney church hosts live concerts in its nave, which holds more than a thousand standing guests.",
+    "The Kindle Paperwhite released in 2024 has a seven-inch display and a battery said to last up to twelve weeks.",
+    "The Brompton C Line folding bike weighs about eleven kilograms and folds down in under twenty seconds.",
+    "Hackney Picturehouse members get two free tickets a year and a discount on food and drink at the bar.",
+    "The Pavilion Café in Victoria Park overlooks the boating lake and serves breakfast from 8am.",
+    "The British Library reading rooms need a free reader pass, which is issued after an interview at the desk.",
+    "Hackney Wick's Grow café is closed on Mondays and runs a vegan menu from a converted warehouse by the canal.",
+    "The Stoke Newington Literary Festival is held in the first week of June across several venues on Church Street.",
+    "Clapton Hart's back room can be booked free of charge for parties of up to forty people.",
+]
+
+# What a split may legitimately leave out: generic filler nobody asked
+# for, and lines whose subject is the assistant.
+_FILLER = [
+    "Staying hydrated is important for overall health.",
+    "It is a good idea to check opening hours before visiting a venue.",
+    "Getting enough sleep helps with concentration.",
+]
+_NARRATION = [
+    "The assistant recommended a walk along the canal.",
+    "The assistant could not open the PDF it was sent.",
+]
+
+
+def _stored(lines):
+    """The lines as a node stores them, each with its provenance suffix."""
+    return "\n".join(f"{line} · web · 2026-10-{1 + i % 28:02d}" for i, line in enumerate(lines))
+
+
+def _split_answer(*fact_groups):
+    """A split answer with one category per group of facts."""
+    return json.dumps({
+        "categories": [
+            {"name": f"Category {i}", "description": f"Group {i}", "facts": list(facts)}
+            for i, facts in enumerate(fact_groups, 1)
+        ],
+        "summary": "Places and things he looked up",
+    })
+
+
 @pytest.mark.unit
 class TestAutoSplitNode:
     """Tests for the auto-split logic."""
@@ -312,11 +398,13 @@ class TestAutoSplitNode:
 
         node = self._make_large_node(store)
         assert node.data_token_count > SPLIT_THRESHOLD
+        lines = node.data.split("\n")
+        half = len(lines) // 2
 
         mock_llm.return_value = json.dumps({
             "categories": [
-                {"name": "Category A", "description": "First category", "facts": ["Fact 1", "Fact 2"]},
-                {"name": "Category B", "description": "Second category", "facts": ["Fact 3", "Fact 4"]},
+                {"name": "Category A", "description": "First category", "facts": lines[:half]},
+                {"name": "Category B", "description": "Second category", "facts": lines[half:]},
             ],
             "summary": "A topic covering categories A and B"
         })
@@ -393,6 +481,207 @@ class TestAutoSplitNode:
 
         result = auto_split_node(store, node.id, "http://localhost", "model")
         assert result is False
+
+    # ── What the children must carry ──
+
+    def _make_world_node(self, store, lines):
+        node = store.create_node(
+            name="World", description="Things he looked up",
+            data=_stored(lines), parent_id="root",
+        )
+        assert node.data_token_count > SPLIT_THRESHOLD, "the test node is too small to split"
+        return node
+
+    def _assert_untouched(self, store, node):
+        assert store.get_children(node.id) == []
+        assert store.get_node(node.id).data == node.data
+
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_split_that_drops_half_the_facts_is_rejected(self, mock_llm, store):
+        node = self._make_world_node(store, _LOOKED_UP)
+        kept = _LOOKED_UP[: len(_LOOKED_UP) // 2]
+        mock_llm.return_value = _split_answer(kept[:12], kept[12:])
+
+        assert auto_split_node(store, node.id, None, "model") is False
+        self._assert_untouched(store, node)
+
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_good_split_that_drops_filler_and_narration_and_folds_a_duplicate_is_accepted(
+            self, mock_llm, store):
+        # The node holds one answer twice, in two close wordings, plus
+        # filler and narration. The split folds the pair into one line,
+        # leaves out the filler and the narration, hands every line back
+        # without its provenance suffix, and drops a full stop and a
+        # capital here and there, as models do.
+        duplicate = "Clissold Leisure Centre's main pool is 25 metres long, and the learner pool beside it is kept a little warmer."
+        node = self._make_world_node(store, _LOOKED_UP + [duplicate] + _FILLER + _NARRATION)
+        kept = [line.rstrip(".") if i % 3 == 0 else line for i, line in enumerate(_LOOKED_UP)]
+        kept[5] = kept[5].lower()
+        mock_llm.return_value = _split_answer(kept[:20], kept[20:])
+
+        assert auto_split_node(store, node.id, None, "model") is True
+        children = store.get_children(node.id)
+        assert len(children) == 2
+        assert sorted(line for c in children for line in c.data.split("\n")) == sorted(kept)
+        assert store.get_node(node.id).data == ""
+
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_split_keeping_exactly_the_floor_is_accepted_and_one_fewer_is_not(self, mock_llm, store):
+        floor = math.ceil(_SPLIT_MIN_RETENTION * len(_LOOKED_UP))
+
+        node = self._make_world_node(store, _LOOKED_UP)
+        mock_llm.return_value = _split_answer(_LOOKED_UP[:10], _LOOKED_UP[10:floor - 1])
+        assert auto_split_node(store, node.id, None, "model") is False
+        self._assert_untouched(store, node)
+
+        mock_llm.return_value = _split_answer(_LOOKED_UP[:10], _LOOKED_UP[10:floor])
+        assert auto_split_node(store, node.id, None, "model") is True
+
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_a_close_rewording_counts_as_carried_and_a_loose_one_does_not(self, mock_llm, store):
+        # One line short of the floor kept word for word; whether the split
+        # passes depends on how the last answer comes back.
+        floor = math.ceil(_SPLIT_MIN_RETENTION * len(_LOOKED_UP))
+        bao = next(line for line in _LOOKED_UP if line.startswith("Bao Borough"))
+        verbatim = [line for line in _LOOKED_UP if line != bao][: floor - 1]
+        close = "Bao Borough serves a fried chicken bao on its weekend menu, alongside a side dish of sweet potato fries."
+        loose = "At weekends Bao Borough has a fried chicken bao and sweet potato fries."
+
+        node = self._make_world_node(store, _LOOKED_UP)
+        mock_llm.return_value = _split_answer(verbatim[:10], verbatim[10:] + [loose])
+        assert auto_split_node(store, node.id, None, "model") is False
+        self._assert_untouched(store, node)
+
+        mock_llm.return_value = _split_answer(verbatim[:10], verbatim[10:] + [close])
+        assert auto_split_node(store, node.id, None, "model") is True
+
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_lines_that_differ_in_their_figures_are_not_carried_by_one_of_them(self, mock_llm, store):
+        # One line per performance, worded alike, each with its own date,
+        # time and price. Keeping one of them keeps none of the others.
+        performances = [
+            f"The Hackney Empire's pantomime on 2026-12-{day:02d} starts at {2 + day % 6}pm "
+            f"and tickets cost £{14 + day}."
+            for day in range(1, 25)
+        ]
+        kept = _LOOKED_UP + performances[:1]
+        assert len(kept) < _SPLIT_MIN_RETENTION * len(_LOOKED_UP + performances)
+        node = self._make_world_node(store, _LOOKED_UP + performances)
+        mock_llm.return_value = _split_answer(kept[:24], kept[24:])
+
+        assert auto_split_node(store, node.id, None, "model") is False
+        self._assert_untouched(store, node)
+
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_split_that_adds_lines_the_node_did_not_hold_is_rejected(self, mock_llm, store):
+        node = self._make_world_node(store, _LOOKED_UP)
+        invented = [
+            "The Earth revolves around the Sun.",
+            "London is the capital of England.",
+            "Bread is made from flour and water.",
+            "Rivers flow towards the sea.",
+        ][: _MERGE_GROWTH_SLACK + 1]
+        kept = _LOOKED_UP + invented
+        mock_llm.return_value = _split_answer(kept[:24], kept[24:])
+
+        assert auto_split_node(store, node.id, None, "model") is False
+        self._assert_untouched(store, node)
+
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_facts_packed_into_one_item_are_measured_and_written_one_per_line(self, mock_llm, store):
+        node = self._make_world_node(store, _LOOKED_UP)
+        mock_llm.return_value = _split_answer(["\n".join(_LOOKED_UP[:24])], _LOOKED_UP[24:])
+
+        assert auto_split_node(store, node.id, None, "model") is True
+        written = [line for c in store.get_children(node.id) for line in c.data.split("\n")]
+        assert sorted(written) == sorted(_LOOKED_UP)
+
+    @pytest.mark.parametrize("answer", [
+        pytest.param(lambda: {"categories": {"Venues": {"name": "Venues", "facts": _LOOKED_UP}}},
+                     id="categories-not-a-list"),
+        pytest.param(lambda: {"categories": ["Venues", {"name": "Things", "facts": _LOOKED_UP}]},
+                     id="category-not-an-object"),
+        pytest.param(lambda: {"categories": [{"name": "  ", "facts": _LOOKED_UP[:24]},
+                                             {"name": "Things", "facts": _LOOKED_UP[24:]}]},
+                     id="blank-name"),
+        pytest.param(lambda: {"categories": [{"name": ["Venues"], "facts": _LOOKED_UP[:24]},
+                                             {"name": "Things", "facts": _LOOKED_UP[24:]}]},
+                     id="name-not-a-string"),
+        pytest.param(lambda: {"categories": [{"name": "Venues", "facts": ["", "  "]},
+                                             {"name": "Things", "facts": _LOOKED_UP}]},
+                     id="only-blank-facts"),
+    ])
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_malformed_category_is_rejected(self, mock_llm, store, answer):
+        node = self._make_world_node(store, _LOOKED_UP)
+        mock_llm.return_value = json.dumps({**answer(), "summary": "Places he looked up"})
+
+        assert auto_split_node(store, node.id, None, "model") is False
+        self._assert_untouched(store, node)
+
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_a_summary_or_description_that_is_not_text_is_not_written(self, mock_llm, store):
+        node = self._make_world_node(store, _LOOKED_UP)
+        mock_llm.return_value = json.dumps({
+            "categories": [
+                {"name": "Venues", "description": None, "facts": _LOOKED_UP[:24]},
+                {"name": "Things", "description": ["shops"], "facts": _LOOKED_UP[24:]},
+            ],
+            "summary": None,
+        })
+
+        assert auto_split_node(store, node.id, None, "model") is True
+        assert store.get_node(node.id).description == node.description
+        for child in store.get_children(node.id):
+            assert child.description and child.name in child.description
+
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_split_with_facts_as_one_string_is_rejected(self, mock_llm, store):
+        node = self._make_world_node(store, _LOOKED_UP)
+        mock_llm.return_value = json.dumps({
+            "categories": [
+                {"name": "Venues", "description": "Venues", "facts": "\n".join(_LOOKED_UP[:24])},
+                {"name": "Things", "description": "Things", "facts": "\n".join(_LOOKED_UP[24:])},
+            ],
+            "summary": "Places and things he looked up",
+        })
+
+        assert auto_split_node(store, node.id, None, "model") is False
+        self._assert_untouched(store, node)
+
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_split_with_a_fact_that_is_not_a_string_is_rejected(self, mock_llm, store):
+        node = self._make_world_node(store, _LOOKED_UP)
+        mock_llm.return_value = _split_answer(
+            _LOOKED_UP[:24], _LOOKED_UP[24:] + [{"fact": "Netil Market is open on Saturdays."}],
+        )
+
+        assert auto_split_node(store, node.id, None, "model") is False
+        self._assert_untouched(store, node)
+
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_split_that_invents_a_figure_is_rejected(self, mock_llm, store):
+        node = self._make_world_node(store, _LOOKED_UP)
+        kept = [line.replace("25 metres", "33 metres") for line in _LOOKED_UP]
+        assert kept != _LOOKED_UP
+        mock_llm.return_value = _split_answer(kept[:24], kept[24:])
+
+        assert auto_split_node(store, node.id, None, "model") is False
+        self._assert_untouched(store, node)
+
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_split_that_hands_back_a_redaction_marker_for_a_real_value_is_rejected(
+            self, mock_llm, store):
+        # A remote chat model sees the node through the redacting backend,
+        # so the address reaches it as a marker. Written into a child, the
+        # address would be gone for good.
+        address = "The Arcola Theatre takes group bookings at groups@arcola.example."
+        node = self._make_world_node(store, _LOOKED_UP + [address])
+        kept = _LOOKED_UP + ["The Arcola Theatre takes group bookings at [REDACTED_EMAIL]."]
+        mock_llm.return_value = _split_answer(kept[:24], kept[24:])
+
+        assert auto_split_node(store, node.id, None, "model") is False
+        self._assert_untouched(store, node)
 
     def test_the_prompt_keeps_an_answer_however_well_known(self):
         """A split rewrites every fact of a node at once, so its pruning
