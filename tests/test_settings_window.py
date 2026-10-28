@@ -256,6 +256,29 @@ class TestKokoroFields:
         assert get_default_config()["tts_kokoro_lang_code"] == "f"
 
 
+class TestKyutaiFields:
+    """Kyutai has one setting, its voice, and the engine choice offers it."""
+
+    def _field(self, key):
+        for fm in FIELD_METADATA:
+            if fm.key == key:
+                return fm
+        return None
+
+    def test_kyutai_category_exposes_the_voice(self):
+        fm = self._field("tts_kyutai_voice")
+        assert fm is not None and fm.category == "kyutai" and fm.field_type == "str"
+        assert "kyutai" in {key for key, _ in CATEGORIES}
+
+    def test_the_engine_choice_offers_kyutai(self):
+        fm = self._field("tts_engine")
+        assert fm is not None
+        assert "kyutai" in [value for value, _ in fm.choices]
+
+    def test_the_voice_has_a_default_in_the_config(self):
+        assert get_default_config()["tts_kyutai_voice"]
+
+
 class TestMinimalConfigInvariant:
     """``_is_default_value`` decides whether a field is omitted from
     config.json. An emptied nullable provider field (reads back as None)

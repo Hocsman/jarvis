@@ -17,10 +17,10 @@ Publishing needs the standard library and debug logging only. No Qt and no deskt
 | Value | Meaning | Published by |
 |-------|---------|--------------|
 | `ASLEEP` | The daemon is not running or not ready | The holder when it is created; the desktop app while the daemon is down or a setup wizard is open |
-| `IDLE` | Awake, waiting for the wake word | The listener when it starts its loop and when a hot window ends; the reply engine when the stop tool dismisses the conversation; the listener whenever it stops the thinking tune (a reply is about to be spoken, or there is none); the daemon when a dictation ends |
+| `IDLE` | Awake, waiting for the wake word | The listener when it starts its loop, when a hot window ends and when a stop word silences her; the reply engine when the stop tool dismisses the conversation; the listener whenever it stops the thinking tune (a reply is about to be spoken, or there is none); the daemon when a dictation ends |
 | `LISTENING` | Collecting a query, or a hot window is open | The listener on hearing the wake word or a hot-window follow-up; the listening state manager when a collection starts and when a hot window opens |
 | `THINKING` | A query is with the reply engine | The listener when it dispatches a query |
-| `SPEAKING` | A speech engine is speaking | Each speech engine (Piper, Kokoro, Chatterbox) when speech starts |
+| `SPEAKING` | A speech engine is speaking | Each speech engine (Piper, Kokoro, Chatterbox, Kyutai) when speech starts |
 | `DICTATING` | Hold-to-dictate recording is active | The daemon's dictation-start callback |
 | `DICTATION_PROCESSING` | Captured dictation is being transcribed and pasted | The daemon's dictation-processing callback |
 

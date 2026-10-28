@@ -33,6 +33,11 @@ pydantic<2.14
 # with the newer CUDA torch builds Kokoro uses on recent GPUs. The engine
 # warns and stays silent when the package is missing; to use it, install it
 # by hand: pip install chatterbox-tts
+# Kyutai TTS is likewise optional and run from source only: moshi declares a
+# torch range older than the CUDA builds used here, so it is installed by hand
+# without its dependencies (see the README, which lists the ones it needs:
+# einops, safetensors, sentencepiece, sphn) and on a CUDA build of PyTorch.
+# The engine reports what is missing and stays silent.
 piper-tts>=1.3.0
 pygame>=2.1.0
 faiss-cpu>=1.7.4

@@ -647,6 +647,17 @@ class VoiceListener(threading.Thread):
             self._tune_player = None
             get_jarvis_state().set_state(JarvisState.IDLE)
 
+    def _silence_speech(self) -> None:
+        """Stop her talking on a spoken stop.
+
+        The engine drops the rest of the reply, and an interrupted reply is
+        unheard, so the completion callback that would end the speech never
+        fires. Nothing else takes the published state out of SPEAKING, so it
+        is published here (`state.spec.md`).
+        """
+        self.tts.interrupt()
+        get_jarvis_state().set_state(JarvisState.IDLE)
+
     def _is_thinking_tune_active(self) -> bool:
         """Check if thinking tune is currently active."""
         return self._tune_player is not None and self._tune_player.is_playing()
@@ -874,7 +885,7 @@ class VoiceListener(threading.Thread):
                 fuzzy_ratio=float(getattr(self.cfg, "stop_command_fuzzy_ratio", 0.8)),
             ):
                 debug_log(f"stop command detected during TTS: {text_lower} (energy: {utterance_energy:.4f})", "voice")
-                self.tts.interrupt()
+                self._silence_speech()
                 try:
                     while not self._audio_q.empty():
                         self._audio_q.get_nowait()
@@ -1061,7 +1072,7 @@ class VoiceListener(threading.Thread):
                 # If judge says stop command, interrupt TTS
                 if intent_judgment.stop and self.tts and self.tts.is_speaking():
                     debug_log(f"🛑 Intent judge detected stop command", "voice")
-                    self.tts.interrupt()
+                    self._silence_speech()
                     return
 
                 # If directed with query, process it

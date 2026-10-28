@@ -503,6 +503,21 @@ To have the voice follow the language of each reply, list a voice per language (
 - Multilingual; non-English voices need `espeak-ng` installed (`brew install espeak-ng` on macOS)
 - Model weights download once from Hugging Face (~330MB)
 
+**Kyutai** - the most natural voice (Kyutai TTS 1.6B, English and French), faster than real time on a recent NVIDIA GPU. Requires running from source, a CUDA build of PyTorch (the default `pip install torch` on Windows is CPU only: pick the command that matches your GPU on [pytorch.org](https://pytorch.org/get-started/locally/)), and installing `moshi` by hand: it declares an older `torch` than the CUDA builds used here, so it goes in without its dependencies (`pip check` then reports its declared pins, which is expected):
+```bash
+pip install einops safetensors sentencepiece "sphn>=0.1.4,<0.2.0"
+pip install --no-deps moshi==0.2.11
+```
+```json
+{ "tts_engine": "kyutai" }
+```
+- Needs an NVIDIA GPU (CUDA) and about 4 GB of free VRAM. There is no CPU mode.
+- The model (~4 GB) downloads once from Hugging Face on first use, and the first start-up takes tens of seconds while it warms up.
+- Each sentence is synthesised whole before it is played, so expect a few seconds before a sentence is heard, longer than with Kokoro.
+- The default voice is a French female voice. To pick another, browse the [voice list](https://huggingface.co/kyutai/tts-voices) and set `tts_kyutai_voice` to a name from it (for example `cml-tts/fr/577_394_000070-0001_enhanced.wav`), or to the path of a `.safetensors` voice file. A local path to anything else (a `.wav` recording, say) is refused rather than sent to Hugging Face.
+- Known limitation: only English and French text is read correctly. Any other language is read with the wrong sounds, and the voice follows `tts_kyutai_voice` alone, not `response_language`.
+- Credits: the model is by [Kyutai](https://kyutai.org) ([CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/)) and the default voice comes from the [CML-TTS](https://openslr.org/146/) dataset (CC-BY 4.0). Some voices in the list are non-commercial only: read the list's README before using one commercially.
+
 **Chatterbox** - AI voice with emotion control (requires running from source). Not installed by default: `chatterbox-tts` pins `torch==2.6.0`, which conflicts with the newer CUDA torch builds Kokoro uses on recent GPUs. To use it, install it by hand first:
 ```bash
 pip install chatterbox-tts
@@ -730,7 +745,7 @@ powershell -ExecutionPolicy Bypass -File scripts\run_windows.ps1
 bash scripts/run_linux.sh
 ```
 
-Running from source enables Chatterbox TTS (AI voice with emotion/cloning). Piper TTS works in both bundled and source modes.
+Running from source enables Chatterbox TTS (AI voice with emotion/cloning) and Kyutai TTS (the most natural voice, NVIDIA GPU). Piper TTS works in both bundled and source modes.
 
 </details>
 

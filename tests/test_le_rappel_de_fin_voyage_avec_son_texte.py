@@ -37,6 +37,7 @@ def _moteur(classe_nom):
     m.enabled = True
     m._completion_callback = None
     m._duration_callback = None
+    m._epoch = 0                  # the count of interruptions every engine reads
     return m
 
 
@@ -62,7 +63,7 @@ def _draine(moteur):
     return vus
 
 
-MOTEURS = ["KokoroTTS", "PiperTTS", "ChatterboxTTS"]
+MOTEURS = ["KokoroTTS", "PiperTTS", "ChatterboxTTS", "KyutaiTTS"]
 
 
 @pytest.mark.parametrize("nom", MOTEURS)

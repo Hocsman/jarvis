@@ -1682,6 +1682,35 @@ class TestTheListenerPublishesItsState:
         listener.state_manager.stop()
 
     @patch("builtins.print")
+    def test_a_stop_word_leaves_the_assistant_idle(self, _print):
+        """An interrupted reply is unheard, so the completion callback that
+        would end the speech never fires: whoever stops her publishes IDLE."""
+        from jarvis.state import JarvisState, get_jarvis_state
+
+        listener, tts = _create_listener(tts_speaking=True)
+        get_jarvis_state().set_state(JarvisState.SPEAKING)
+
+        listener._process_transcript("stop", utterance_energy=0.01)
+
+        tts.interrupt.assert_called_once()
+        assert get_jarvis_state().state == JarvisState.IDLE
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_a_stop_heard_by_the_intent_judge_leaves_the_assistant_idle(self, _print):
+        from jarvis.state import JarvisState, get_jarvis_state
+
+        listener, tts = _create_listener(tts_speaking=True)
+        _install_intent_judge(listener, _make_judgment(directed=False, stop=True))
+        get_jarvis_state().set_state(JarvisState.SPEAKING)
+
+        listener._process_transcript("that is enough talking from you now", utterance_energy=0.01)
+
+        tts.interrupt.assert_called_once()
+        assert get_jarvis_state().state == JarvisState.IDLE
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
     def test_a_query_with_no_reply_leaves_the_assistant_idle(self, _print):
         """Nothing will be spoken to move the state on, so the tune that was
         covering the wait stops and the assistant goes back to idle."""

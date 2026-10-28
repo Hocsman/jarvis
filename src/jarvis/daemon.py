@@ -1266,6 +1266,8 @@ def build_tts_engine(cfg):
         kokoro_voice=cfg.tts_kokoro_voice,
         kokoro_lang_code=cfg.tts_kokoro_lang_code,
         kokoro_speed=cfg.tts_kokoro_speed,
+        # Kyutai parameters
+        kyutai_voice=cfg.tts_kyutai_voice,
     )
 
 

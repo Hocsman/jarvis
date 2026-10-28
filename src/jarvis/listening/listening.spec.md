@@ -218,6 +218,7 @@ While TTS is playing, echo rejection and stop commands are handled with fast tex
 **Stop detection:**
 - Text-based: Check for "stop", "quiet", "shut up", etc.
 - Intent judge can also detect stop commands
+- However a stop is heard, the listener interrupts the engine, which drops the rest of the reply, and publishes IDLE: the interrupted reply is unheard, so its completion callback never fires and nothing else would take the published state out of SPEAKING (`state.spec.md`, `tts.spec.md` "Interrupting"). No hot window opens.
 
 **Echo handling:**
 - Transcripts during TTS are flagged with `is_during_tts=true`

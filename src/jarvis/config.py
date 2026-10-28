@@ -205,7 +205,7 @@ class Settings:
 
     # Text-to-Speech
     tts_enabled: bool
-    tts_engine: str  # "piper" (default), "kokoro", or "chatterbox"
+    tts_engine: str  # "piper" (default), "kokoro", "chatterbox", or "kyutai"
     tts_voice: str | None
     tts_rate: int | None  # Words per minute (WPM), 200=normal
     tts_chatterbox_device: str  # "cuda", "auto", or "cpu" for Chatterbox
@@ -226,6 +226,9 @@ class Settings:
     tts_kokoro_voice: str  # Voice id, e.g. "ff_siwis" (French)
     tts_kokoro_lang_code: str  # Kokoro language code, e.g. "f" (French)
     tts_kokoro_speed: float  # Speech speed multiplier (1.0 = normal)
+
+    # Kyutai TTS (most natural local voice; needs an NVIDIA GPU)
+    tts_kyutai_voice: str  # Name in the kyutai/tts-voices repository, or path of a .safetensors voice file
 
     # Voice Input & Audio
     voice_device: str | None
@@ -822,7 +825,7 @@ def get_default_config() -> Dict[str, Any]:
 
         # Text-to-Speech
         "tts_enabled": True,
-        "tts_engine": "piper",  # "piper" (default), "kokoro", or "chatterbox"
+        "tts_engine": "piper",  # "piper" (default), "kokoro", "chatterbox", or "kyutai"
         "tts_voice": None,
         "tts_rate": 200,  # Words per minute (WPM), 200=normal
         "tts_chatterbox_device": "cuda",  # "cuda" (recommended), "auto", or "cpu"
@@ -843,6 +846,9 @@ def get_default_config() -> Dict[str, Any]:
         "tts_kokoro_voice": "ff_siwis",  # French voice
         "tts_kokoro_lang_code": "f",  # French
         "tts_kokoro_speed": 1.0,  # Speech speed multiplier
+
+        # Kyutai TTS
+        "tts_kyutai_voice": "cml-tts/fr/577_394_000070-0001_enhanced.wav",  # French female voice
 
         # Voice Input & Audio
         "voice_device": None,
@@ -1166,7 +1172,7 @@ def load_settings() -> Settings:
     active_profiles = _ensure_list(merged.get("active_profiles"))
     tts_enabled = bool(merged.get("tts_enabled", True))
     tts_engine = str(merged.get("tts_engine", "piper")).lower()
-    if tts_engine not in ("piper", "chatterbox", "kokoro"):
+    if tts_engine not in ("piper", "chatterbox", "kokoro", "kyutai"):
         tts_engine = "piper"  # Default to piper if invalid value
     tts_voice_val = merged.get("tts_voice")
     tts_voice = None if tts_voice_val in (None, "", "null") else str(tts_voice_val)
@@ -1219,6 +1225,10 @@ def load_settings() -> Settings:
         tts_kokoro_speed = float(merged.get("tts_kokoro_speed", 1.0))
     except Exception:
         tts_kokoro_speed = 1.0
+    tts_kyutai_voice = (
+        str(merged.get("tts_kyutai_voice") or "").strip()
+        or "cml-tts/fr/577_394_000070-0001_enhanced.wav"
+    )
 
     voice_device_val = merged.get("voice_device")
     voice_device = None if voice_device_val in (None, "", "default", "system") else str(voice_device_val)
@@ -1468,6 +1478,7 @@ def load_settings() -> Settings:
         tts_kokoro_voice=tts_kokoro_voice,
         tts_kokoro_lang_code=tts_kokoro_lang_code,
         tts_kokoro_speed=tts_kokoro_speed,
+        tts_kyutai_voice=tts_kyutai_voice,
 
         # Voice Input & Audio
         voice_device=voice_device,

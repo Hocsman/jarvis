@@ -60,6 +60,7 @@ CATEGORIES = [
     ("tts", "🔊 Text-to-Speech"),
     ("piper", "🎵 Piper TTS"),
     ("kokoro", "🌸 Kokoro TTS"),
+    ("kyutai", "🎙️ Kyutai TTS"),
     ("chatterbox", "🎭 Chatterbox TTS"),
     ("voice_input", "🎤 Voice Input"),
     ("wake", "👂 Wake Word"),
@@ -274,6 +275,7 @@ def _build_field_metadata() -> List[FieldMeta]:
       "tts", "choice", choices=[
           ("piper", "Piper (Fast Neural)"),
           ("kokoro", "Kokoro (Ultra-Natural Neural)"),
+          ("kyutai", "Kyutai (Most Natural, NVIDIA GPU)"),
           ("chatterbox", "Chatterbox (Voice Cloning)"),
       ])
     f("tts_rate", "Speech Rate", "Words per minute (200 = normal)",
@@ -320,6 +322,13 @@ def _build_field_metadata() -> List[FieldMeta]:
       "kokoro", "str")
     f("tts_kokoro_speed", "Speed", "Speech speed scale (1.0 = normal)",
       "kokoro", "float", min_val=0.5, max_val=2.0, step=0.05)
+
+    # --- Kyutai TTS ---
+    f("tts_kyutai_voice", "Voice",
+      "Name of a voice in the kyutai/tts-voices repository (e.g. "
+      "cml-tts/fr/577_394_000070-0001_enhanced.wav) or the path of a "
+      ".safetensors voice file",
+      "kyutai", "str")
 
     # --- Chatterbox TTS ---
     f("tts_chatterbox_device", "Device",
