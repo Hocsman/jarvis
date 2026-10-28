@@ -2,7 +2,7 @@
 
 ## Why
 
-Everything she says aloud leaves through one of three engines in
+Everything she says aloud leaves through one of four engines in
 `tts.py`. The listener, the echo detector, the hot window and the
 reminder scheduler all lean on what those engines promise, and most of
 those promises are not visible in a signature: that a completion
@@ -21,12 +21,13 @@ voice).
 
 Synthesis is local. The text she speaks never leaves the machine. The
 only network traffic in this module is fetching a model the first time
-it is needed (a Piper voice, the Kokoro weights), and that request
-carries a file name, never speech.
+it is needed (a Piper voice, the Kokoro weights, the Kyutai model and
+the file of its voice), and that request carries a file name, never
+speech.
 
 ## Engines and selection
 
-`create_tts_engine(engine=...)` returns one of three engines. The name
+`create_tts_engine(engine=...)` returns one of four engines. The name
 is compared case-insensitively.
 
 | `tts_engine` | Class | What it is |
@@ -34,9 +35,10 @@ is compared case-insensitively.
 | `piper` (default) | `PiperTTS` | Light local neural voice, one `.onnx` model per voice, fetched on first use |
 | `kokoro` | `KokoroTTS` | Kokoro-82M, more natural, real time on CPU, multilingual through espeak-ng |
 | `chatterbox` | `ChatterboxTTS` | Heavy PyTorch voice with emotion control and cloning, runs from source only |
+| `kyutai` | `KyutaiTTS` | Kyutai TTS 1.6B (English and French), the most natural of the four, faster than real time on a recent NVIDIA GPU, runs from source only |
 
 Any other name yields Piper. The config layer lowercases `tts_engine` and
-falls back to `piper` for a value that is not one of the three, so the
+falls back to `piper` for a value that is not one of the four, so the
 factory only ever sees a valid name from the daemon.
 
 The daemon builds the engine from the settings in one function,
@@ -51,14 +53,14 @@ nothing: `speak` queues nothing, `start` starts nothing. Callers test
 
 ### The shared surface
 
-The three engines are interchangeable to the listener. Each exposes:
+The four engines are interchangeable to the listener. Each exposes:
 
 | Member | Meaning |
 |--------|---------|
 | `enabled` | Whether the engine speaks at all |
 | `start()` | Create the worker thread. Idempotent |
 | `stop()` | Interrupt, end the worker, wait up to two seconds for it |
-| `speak(text, completion_callback=None, duration_callback=None, language=None)` | Queue one item (see below). `language` is the language the user was heard in. Piper chooses its voice from it; Kokoro and Chatterbox accept it and ignore it |
+| `speak(text, completion_callback=None, duration_callback=None, language=None)` | Queue one item (see below). `language` is the language the user was heard in. Piper chooses its voice from it; Kokoro, Chatterbox and Kyutai accept it and ignore it |
 | `interrupt()` | Stop talking (see Interrupting) |
 | `is_speaking()` | Whether an item is being synthesised or played |
 | `get_last_spoken_text()` | The processed text of the item most recently started |
@@ -76,7 +78,13 @@ leaves the pipeline loaded and the error surfaces at speak time. A
 before the load finishes waits on the same lock. On Windows
 Kokoro first imports its package on the calling thread, because loading
 PyTorch, SciPy and OpenBLAS DLLs concurrently deadlocks the Windows
-loader. Chatterbox loads its model on `start`.
+loader. Chatterbox loads its model on `start`. Kyutai warms its model on
+a background thread named `kyutai-init`, ending with one throwaway
+synthesis whose audio is discarded: the first synthesis captures the CUDA
+graphs the model replays afterwards, which takes tens of seconds, so it is
+paid at startup rather than on the first reply. On Windows `start` first
+sets the compile switch (see "Kyutai") and imports the package on the
+calling thread, for the loader reason given for Kokoro.
 
 ## The queue
 
@@ -85,7 +93,8 @@ them one at a time. An item is `(text, completion_callback,
 duration_callback)`, and for Piper a fourth field, the language. The
 language belongs to the item, not to the engine: sentences of two
 replies in two languages can wait in the queue together, each spoken in
-its own voice.
+its own voice. Kyutai's fourth field is the count of interruptions at the
+moment the item was queued (see "Interrupting").
 
 **Text is processed when it is queued.** `_preprocess_for_speech`
 replaces links with a spoken description of the domain and strips
@@ -137,8 +146,8 @@ the engine calls it bare and speech never depends on it. Nothing in this
 module clears the state when speech ends; whoever owns the transitions
 does.
 
-**First sound.** Once an item's audio stream is running (Piper and
-Kokoro: after the output stream starts; Chatterbox: after playback
+**First sound.** Once an item's audio stream is running (Piper, Kokoro
+and Kyutai: after the output stream starts; Chatterbox: after playback
 begins), the engine calls `_sound_started()`, which marks the latency
 journal (`jarvis/latency.spec.md`). That is not where SPEAKING is
 published: SPEAKING goes out when an item starts being synthesised, before
@@ -168,6 +177,15 @@ talking, completely. The contract is the one `streaming.spec.md` states
 and safe to call repeatedly. `stop()` calls it. Chatterbox can only
 interrupt playback: the generation of one item is a single model call
 that cannot be cut short.
+
+Kyutai keeps the whole contract. `interrupt()` counts the interruption and
+every item carries the count it was queued under, so an item queued before
+the call is dropped, callbacks and end-of-reply marker included, when the
+worker reaches it, and one queued after is spoken. The count is compared
+again at every frame the model produces, so an item still being
+synthesised is abandoned within one frame of audio rather than run to its
+end, and an interruption that lands between the worker taking an item and
+starting it cannot be lost.
 
 ## What she owes the echo detector
 
@@ -206,7 +224,7 @@ can open it straight away.
 
 Each item is synthesised whole, then played. Piper and Kokoro play it
 through a `sounddevice.OutputStream` (mono; Piper in `int16` at the
-voice's own sample rate, Kokoro in `float32` at 24 kHz) in blocks of
+voice's own sample rate, Kokoro and Kyutai in `float32` at 24 kHz) in blocks of
 1024 frames so an abort lands quickly. Chatterbox writes a temporary WAV
 and plays it through the pygame mixer. Opening, starting, aborting and
 closing a stream all happen under `portaudio_lock`
@@ -349,13 +367,59 @@ coexist with the newer CUDA torch builds Kokoro uses on recent GPUs — so
 running the engine means installing it by hand; if its dependencies or
 model are missing it warns and every item is skipped.
 
+## Kyutai
+
+`KyutaiTTS` runs Kyutai TTS 1.6B (`kyutai/tts-1.6b-en_fr`) through the
+`moshi` package. It speaks English and French and reads the language from
+the text itself. Its voice comes from `tts_kyutai_voice` and nothing else:
+`response_language` does not reach it.
+
+**Voice.** The value is either a name in the `kyutai/tts-voices`
+repository (a recording with a precomputed embedding, for example
+`cml-tts/fr/577_394_000070-0001_enhanced.wav`), fetched on first use, or
+the path of a `.safetensors` embedding file, used as it is. A path that
+does not exist fails initialisation: a voice the user named is never
+replaced by another. The default is a French female voice.
+
+**Hardware.** The engine needs an NVIDIA GPU (CUDA). Without one,
+initialisation fails and the reason is kept in `_init_error`; each item
+prints it and speaks nothing. There is no CPU mode: a model of this size
+synthesises far slower than real time there.
+
+**Compilation.** `torch.compile` needs Triton, which has no Windows build.
+When Triton cannot be imported the engine sets `NO_TORCH_COMPILE=1`,
+unless the user already set it, before `moshi` is first imported, because
+the package reads the variable at import. The CUDA graphs stay on: with
+them the model runs faster than real time, without them several times
+slower, so the engine never sets `NO_CUDA_GRAPH`.
+
+**Synthesis.** One item is one model call: the text is prepared as a
+single-speaker script and conditioned on the voice, with the sampling
+temperature and guidance coefficient the model was released with (fixed,
+not settings). Frames are decoded to audio as the model produces them, and
+the first audible frame arrives about a second in. Like the other engines
+the item is played once all of it exists, so the exact duration is known
+before playback starts.
+
+**Failure.** Initialisation is attempted once and its outcome is kept for
+the life of the engine. A missing `moshi` package, a missing GPU, a model
+that fails to load, a voice that cannot be resolved: each fails
+initialisation with its reason, and nothing is said. A synthesis that
+raises, or produces no audio, fires no completion callback.
+
+**Installation.** `moshi` is not in `requirements.txt`: it declares a
+`torch` range older than the CUDA builds used here, so the README installs
+it by hand without its dependencies.
+
 ## Language
 
 Piper is the only engine whose voice follows a language. Which language,
 and which wins when the configured one and the one heard disagree, is
-decided under "Piper voices". Kokoro and Chatterbox accept the language
-`speak` is given and ignore it: Kokoro's voice and language are set by
-hand, and Chatterbox speaks English.
+decided under "Piper voices". Kokoro, Chatterbox and Kyutai accept the
+language `speak` is given and ignore it: Kokoro's voice and language are
+set by hand, Chatterbox speaks English, and Kyutai speaks the English or
+French it finds in the text, so a reply in another language is read with
+the wrong sounds.
 
 The voices only read what the model writes, and the voice is chosen from
 the language the engine expects, not from the text. The reply engine
@@ -367,14 +431,14 @@ model follows is up to the model. A model that obeys the English line
 writes English, and the voice mapped to the language the user spoke (or to
 `response_language`) then reads English text with that voice's accent.
 The voice map therefore helps only when the model writes in the mapped
-language.
+language. The line is not added for Kokoro or Kyutai.
 
 ## Configuration
 
 | Key | Applies to | Meaning |
 |-----|------------|---------|
 | `tts_enabled` | all | Whether she speaks |
-| `tts_engine` | all | `piper`, `kokoro` or `chatterbox` |
+| `tts_engine` | all | `piper`, `kokoro`, `chatterbox` or `kyutai` |
 | `tts_voice`, `tts_rate` | all | Interface compatibility; `tts_rate` also feeds the echo detector's timing estimate |
 | `response_language` | Piper | The language of every reply when set, and so the voice's; chooses the default voice when no model path is pinned |
 | `tts_piper_voices` | Piper | Language to voice (path or bare name), chosen per reply. A language of the built-in table may be keyed in any of its spellings; any other language is keyed by its ISO 639-1 code. A language it does not name speaks with the default voice |
@@ -384,6 +448,7 @@ language.
 | `tts_piper_noise_scale`, `tts_piper_noise_w` | Piper | Expressiveness and rhythm |
 | `tts_piper_sentence_silence` | Piper | Carried on the engine; synthesis does not apply it |
 | `tts_kokoro_voice`, `tts_kokoro_lang_code`, `tts_kokoro_speed` | Kokoro | Voice, language code, pace |
+| `tts_kyutai_voice` | Kyutai | A name in the `kyutai/tts-voices` repository, or the path of a `.safetensors` embedding file |
 | `tts_chatterbox_device`, `_audio_prompt`, `_exaggeration`, `_cfg_weight` | Chatterbox | Device, cloning sample, emotion, quality |
 
 ## Testing
@@ -436,3 +501,23 @@ language.
   `tts_piper_voices` is spoken in its voice when the daemon builds the
   engine, and `response_language` travels the same road.
 - Markdown and links are stripped before speech.
+- `kyutai` resolves to `KyutaiTTS` in any case, from the `tts_kyutai_voice`
+  setting, and the config layer keeps it as a valid `tts_engine`.
+- A Kyutai engine without a GPU, or without the `moshi` package, speaks
+  nothing, fires no completion callback, reports the reason, and does not
+  retry on the next item.
+- With Triton absent the compile switch is set before `moshi` is first
+  imported, a value the user set is left alone, and the CUDA graphs are
+  never switched off.
+- Kyutai's initialisation ends with one throwaway synthesis (audio
+  discarded, nothing queued or played).
+- A voice name is resolved through the model's voice repository, a
+  `.safetensors` path is used as it is, and a path that does not exist
+  fails initialisation.
+- Kyutai's audio is played at the codec's rate, the duration callback
+  gets its exact length before playback, and the completion callback
+  fires only after the audio played to its end.
+- A Kyutai interrupt drops the items queued before it without their
+  callbacks, speaks the ones queued after, and abandons a synthesis in
+  flight at its next frame.
+- Kyutai marks the first sound once its output stream is running.

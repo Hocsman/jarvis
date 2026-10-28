@@ -1734,6 +1734,420 @@ class KokoroTTS:
         return self._last_spoken_text
 
 
+# The voice Kyutai speaks with when none is named: a French female voice, a
+# name in the ``kyutai/tts-voices`` repository.
+KYUTAI_DEFAULT_VOICE = "cml-tts/fr/577_394_000070-0001_enhanced.wav"
+
+
+class _SynthesisCancelled(Exception):
+    """Raised inside the model's frame callback to abandon a synthesis."""
+
+
+class KyutaiTTS:
+    """TTS implementation using Kyutai TTS 1.6B (English and French).
+
+    The most natural of the local engines. It runs through the ``moshi``
+    package on an NVIDIA GPU, faster than real time once the CUDA graphs
+    the model replays have been captured (the warm-up pays for that at
+    startup). Model and voice download once from Hugging Face
+    (``kyutai/tts-1.6b-en_fr``, ``kyutai/tts-voices``).
+
+    Mirrors :class:`KokoroTTS` (queue, worker, playback, callbacks) with one
+    difference: every interruption is counted, and an item carries the count
+    it was queued under, so ``interrupt`` drops what was queued before it
+    and abandons a synthesis in flight at its next frame.
+    """
+
+    # A digit rather than a word: it has a reading in both languages.
+    _WARMUP_TEXT = "1."
+
+    # What the model was released with; settings of the model, not of Yuba.
+    _CODEBOOKS = 32
+    _TEMPERATURE = 0.6
+    _GUIDANCE = 2.0
+
+    def __init__(self, enabled: bool = True, voice: str = KYUTAI_DEFAULT_VOICE) -> None:
+        self.enabled = enabled
+        self.voice = (voice or "").strip() or KYUTAI_DEFAULT_VOICE
+
+        self._q: queue.Queue = queue.Queue()
+        self._thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+        self._is_speaking = threading.Event()
+        self._last_spoken_text: str = ""
+        self._completion_callback: Optional[Callable[[], None]] = None
+        self._duration_callback: Optional[Callable[[float], None]] = None
+        # Interruptions so far; an item is live while its count is current.
+        self._epoch = 0
+
+        # Model (lazy loaded).
+        self._model = None
+        self._voice_path: Optional[str] = None
+        self._sample_rate: int = 24000
+        self._initialized = False
+        self._init_lock = threading.Lock()
+        self._init_error: Optional[str] = None
+
+        # Audio stream for interruption.
+        self._audio_stream = None
+        self._audio_lock = threading.Lock()
+
+    @staticmethod
+    def _cuda_available() -> bool:
+        try:
+            import torch
+
+            return bool(torch.cuda.is_available())
+        except Exception:
+            return False
+
+    @staticmethod
+    def _triton_available() -> bool:
+        import importlib.util
+
+        try:
+            return importlib.util.find_spec("triton") is not None
+        except Exception:
+            return False
+
+    def _configure_environment(self) -> None:
+        """Switch ``torch.compile`` off where Triton is missing.
+
+        ``moshi`` reads ``NO_TORCH_COMPILE`` when it is first imported, so
+        this has to run before that import. A value the user set is theirs.
+        The CUDA graphs are never switched off: without them synthesis runs
+        several times slower than real time.
+        """
+        if "NO_TORCH_COMPILE" in os.environ:
+            return
+        if not self._triton_available():
+            os.environ["NO_TORCH_COMPILE"] = "1"
+            debug_log("Kyutai TTS: Triton not found, torch.compile switched off", "tts")
+
+    def _resolve_voice(self, model) -> str:
+        """The embedding file for ``self.voice``: a ``.safetensors`` path is
+        used as it is, any other value is a name in the voice repository."""
+        if self.voice.lower().endswith(".safetensors"):
+            path = Path(self.voice).expanduser()
+            if not path.is_file():
+                raise FileNotFoundError(f"Kyutai voice file not found: {path}")
+            return str(path)
+        return str(model.get_voice_path(self.voice))
+
+    def _load(self) -> None:
+        if not self._cuda_available():
+            self._init_error = "Kyutai TTS needs an NVIDIA GPU (CUDA), none was found"
+            return
+
+        self._configure_environment()
+        try:
+            from moshi.models.loaders import CheckpointInfo
+            from moshi.models.tts import DEFAULT_DSM_TTS_REPO, TTSModel
+        except ImportError as e:
+            self._init_error = f"moshi is not installed, see the README ({e})"
+            return
+
+        debug_log("Kyutai TTS loading model", "tts")
+        checkpoint = CheckpointInfo.from_hf_repo(DEFAULT_DSM_TTS_REPO)
+        model = TTSModel.from_checkpoint_info(
+            checkpoint, n_q=self._CODEBOOKS, temp=self._TEMPERATURE, device="cuda"
+        )
+        voice_path = self._resolve_voice(model)
+        self._model = model
+        self._voice_path = voice_path
+        self._sample_rate = int(model.mimi.sample_rate)
+        debug_log(f"Kyutai TTS model loaded, voice {self.voice}", "tts")
+
+        # The first synthesis captures the CUDA graphs and takes tens of
+        # seconds; pay for it here rather than on the first reply. The audio
+        # is discarded, and a failure leaves the model loaded: it surfaces
+        # at speak time, as without the warm-up.
+        try:
+            self._synthesise(self._WARMUP_TEXT, lambda: False)
+            debug_log("Kyutai TTS warm-up complete", "tts")
+        except Exception as e:
+            debug_log(f"Kyutai TTS warm-up failed: {e}", "tts")
+
+    def _ensure_initialized(self) -> bool:
+        """Load the model. Returns True if successful; the outcome, good or
+        bad, is kept for the life of the engine."""
+        if self._initialized:
+            return self._model is not None
+        if not self.enabled:
+            return False
+
+        with self._init_lock:
+            if self._initialized:
+                return self._model is not None
+            try:
+                self._load()
+            except Exception as e:
+                self._init_error = f"Failed to load Kyutai TTS: {e}"
+            if self._init_error:
+                debug_log(f"Kyutai TTS init failed: {self._init_error}", "tts")
+            self._initialized = True
+            return self._model is not None
+
+    def _synthesise(self, text: str, cancelled: Callable[[], bool]):
+        """The audio of ``text`` as float32 samples, or None when
+        ``cancelled`` turned true. Frames are decoded as the model produces
+        them; the first audible one arrives about a second in."""
+        import numpy as np
+
+        model = self._model
+        entries = model.prepare_script([text], padding_between=1)
+        conditions = model.make_condition_attributes([self._voice_path], cfg_coef=self._GUIDANCE)
+        chunks = []
+
+        def on_frame(frame):
+            if cancelled():
+                raise _SynthesisCancelled()
+            # Frames still carrying -1 are the model's lead-in, not audio.
+            if (frame != -1).all():
+                pcm = model.mimi.decode(frame[:, 1:, :]).cpu().numpy()
+                chunks.append(np.clip(pcm[0, 0], -1, 1).astype(np.float32))
+
+        try:
+            with model.mimi.streaming(1):
+                model.generate([entries], [conditions], on_frame=on_frame)
+        except _SynthesisCancelled:
+            return None
+        return np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)
+
+    def start(self) -> None:
+        if not self.enabled or self._thread is not None:
+            return
+
+        if sys.platform == "win32":
+            # Import the package on the calling thread so PyTorch's DLLs load
+            # one thread at a time: concurrent loading deadlocks the Windows
+            # loader. The compile switch comes first, the package reads it
+            # at import.
+            try:
+                self._configure_environment()
+                from moshi.models.tts import TTSModel  # noqa: F401
+            except Exception as e:
+                debug_log(f"Kyutai TTS pre-import: {e}", "tts")
+
+        # The first-use download + load + warm-up take a while, so they run
+        # in the background instead of blocking daemon startup. A speak
+        # arriving before they finish waits on the same lock.
+        threading.Thread(target=self._ensure_initialized, daemon=True,
+                         name="kyutai-init").start()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        if self._thread is None:
+            return
+        try:
+            self.interrupt()
+        except Exception:
+            pass
+        self._stop.set()
+        try:
+            self._q.put_nowait(("", None, None, self._epoch))
+        except Exception:
+            pass
+        self._thread.join(timeout=2.0)
+        self._thread = None
+        self._stop.clear()
+
+    def speak(self, text: str, completion_callback: Optional[Callable[[], None]] = None,
+              duration_callback: Optional[Callable[[float], None]] = None,
+              language: Optional[str] = None) -> None:
+        # One voice, whatever the language: accepted so the listener can hand
+        # every engine the same call, and ignored.
+        if not self.enabled:
+            return
+        if not text.strip() and completion_callback is None:
+            return
+        # Empty text with a callback is the end-of-reply marker: it speaks
+        # nothing and fires its callback once everything queued before it
+        # has been said.
+        if self._thread is None:
+            self.start()
+        # The callbacks travel with their text, and so does the count of
+        # interruptions: an item queued before an interrupt is dropped when
+        # the worker reaches it, one queued after is spoken.
+        processed_text = _preprocess_for_speech(text)
+        try:
+            self._q.put_nowait((processed_text, completion_callback, duration_callback, self._epoch))
+        except Exception:
+            pass
+
+    def interrupt(self) -> None:
+        """Stop current speech immediately and drop what is queued."""
+        self._epoch += 1
+        with self._audio_lock:
+            if self._audio_stream is not None:
+                try:
+                    with portaudio_lock:
+                        self._audio_stream.abort()
+                except Exception:
+                    pass
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                texte, _fin, _duree, epoch = self._q.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if epoch != self._epoch:
+                debug_log("Kyutai TTS dropped an item queued before an interrupt", "tts")
+                continue
+            if not texte:
+                if _fin is not None:
+                    try:
+                        _fin()
+                    except Exception as e:
+                        debug_log(f"TTS end-of-reply callback error: {e}", "tts")
+                continue
+            self._completion_callback = _fin
+            self._duration_callback = _duree
+            try:
+                self._speak_once(texte, epoch)
+            except Exception as e:
+                debug_log(f"Kyutai TTS error in _speak_once: {e}", "tts")
+                continue
+
+    def _speak_once(self, text: str, epoch: Optional[int] = None) -> None:
+        if epoch is None:
+            epoch = self._epoch
+
+        def cancelled() -> bool:
+            return self._epoch != epoch
+
+        self._is_speaking.set()
+        self._last_spoken_text = text
+        interrupted = False
+        # Spoken only once the audio has played to its end: every other way
+        # out (the engine that could not start, the synthesis that produced
+        # nothing, the exception below, an interruption) leaves the
+        # completion callback unfired, because that callback settles a
+        # reminder as said (`reminders.spec.md`).
+        spoken = False
+
+        self._notify_speaking_state(True)
+
+        try:
+            if not self._ensure_initialized():
+                if self._init_error:
+                    print(f"  ⚠️ Kyutai TTS: {self._init_error}", flush=True)
+                return
+
+            import sounddevice as sd
+
+            start_time = time.time()
+            debug_log(f"Kyutai TTS starting synthesis: {len(text.split())} words", "tts")
+
+            full_audio = self._synthesise(text, cancelled)
+            if full_audio is None or cancelled():
+                debug_log("Kyutai TTS synthesis abandoned", "tts")
+                return
+            if len(full_audio) == 0:
+                debug_log("Kyutai TTS: no audio generated", "tts")
+                return
+
+            exact_duration = len(full_audio) / self._sample_rate
+            debug_log(
+                f"Kyutai TTS synthesis complete: {exact_duration:.2f}s of audio "
+                f"in {time.time() - start_time:.2f}s",
+                "tts",
+            )
+
+            if self._duration_callback is not None:
+                try:
+                    self._duration_callback(exact_duration)
+                except Exception as e:
+                    debug_log(f"Kyutai TTS duration callback error: {e}", "tts")
+
+            # Stream playback in small blocks so interruption is responsive.
+            play_position = [0]
+            blocksize = 1024
+
+            def audio_callback(outdata, frames, time_info, status):
+                if cancelled():
+                    raise sd.CallbackAbort()
+                start = play_position[0]
+                end = start + frames
+                chunk = full_audio[start:end]
+                if len(chunk) < frames:
+                    outdata[:len(chunk), 0] = chunk
+                    outdata[len(chunk):, 0] = 0
+                    raise sd.CallbackStop()
+                else:
+                    outdata[:, 0] = chunk
+                play_position[0] = end
+
+            try:
+                with self._audio_lock:
+                    with portaudio_lock:
+                        self._audio_stream = sd.OutputStream(
+                            samplerate=self._sample_rate,
+                            channels=1,
+                            dtype='float32',
+                            blocksize=blocksize,
+                            callback=audio_callback,
+                        )
+                        self._audio_stream.start()
+
+                _sound_started()
+                while self._audio_stream is not None and self._audio_stream.active:
+                    if cancelled():
+                        interrupted = True
+                        with self._audio_lock:
+                            if self._audio_stream is not None:
+                                try:
+                                    with portaudio_lock:
+                                        self._audio_stream.abort()
+                                except Exception:
+                                    pass
+                        break
+                    time.sleep(0.05)
+            finally:
+                with self._audio_lock:
+                    if self._audio_stream is not None:
+                        try:
+                            with portaudio_lock:
+                                self._audio_stream.close()
+                        except Exception:
+                            pass
+                        self._audio_stream = None
+
+            spoken = not (interrupted or cancelled())
+            debug_log(
+                f"Kyutai TTS complete: actual={time.time() - start_time:.2f}s "
+                f"(audio={exact_duration:.2f}s), spoken={spoken}",
+                "tts",
+            )
+
+        except Exception as e:
+            debug_log(f"Kyutai TTS error: {e}", "tts")
+            print(f"  ⚠️ Kyutai TTS error: {e}", flush=True)
+        finally:
+            self._is_speaking.clear()
+            callback, self._completion_callback = self._completion_callback, None
+            if callback is not None and spoken:
+                try:
+                    callback()
+                except Exception as e:
+                    print(f"  ⚠️ Kyutai TTS completion callback error: {e}", flush=True)
+
+    def _notify_speaking_state(self, is_speaking: bool) -> None:
+        """Publish SPEAKING when speech starts."""
+        if is_speaking:
+            debug_log("setting state to SPEAKING (kyutai)", "tts")
+            get_jarvis_state().set_state(JarvisState.SPEAKING)
+
+    # Loopback guard helpers (same interface as the other engines).
+    def is_speaking(self) -> bool:
+        return self._is_speaking.is_set()
+
+    def get_last_spoken_text(self) -> str:
+        return self._last_spoken_text
+
+
 def create_tts_engine(
     engine: str = "piper",
     enabled: bool = True,
@@ -1762,6 +2176,8 @@ def create_tts_engine(
     kokoro_voice: str = "ff_siwis",
     kokoro_lang_code: str = "f",
     kokoro_speed: float = 1.0,
+    # Kyutai parameter: a name in the voice repository, or a .safetensors path.
+    kyutai_voice: str = KYUTAI_DEFAULT_VOICE,
 ):
     """Factory function to create the appropriate TTS engine.
 
@@ -1769,6 +2185,7 @@ def create_tts_engine(
     - "piper" (default): light neural TTS with auto-download, exact duration
     - "kokoro": more natural neural TTS (Kokoro-82M), real-time on CPU
     - "chatterbox": AI voice with emotion control (requires PyTorch)
+    - "kyutai": the most natural voice (Kyutai TTS 1.6B), needs an NVIDIA GPU
     """
     if engine.lower() == "chatterbox":
         return ChatterboxTTS(
@@ -1787,6 +2204,8 @@ def create_tts_engine(
             lang_code=kokoro_lang_code,
             speed=kokoro_speed,
         )
+    elif engine.lower() == "kyutai":
+        return KyutaiTTS(enabled=enabled, voice=kyutai_voice)
     else:
         # Default to Piper TTS
         return PiperTTS(

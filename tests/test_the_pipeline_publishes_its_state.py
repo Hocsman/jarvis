@@ -57,8 +57,17 @@ def _chatterbox():
     return ChatterboxTTS.__new__(ChatterboxTTS)
 
 
+def _kyutai():
+    from jarvis.output.tts import KyutaiTTS
+
+    return KyutaiTTS.__new__(KyutaiTTS)
+
+
 @pytest.mark.unit
-@pytest.mark.parametrize("make_engine", [_piper, _kokoro, _chatterbox], ids=["piper", "kokoro", "chatterbox"])
+@pytest.mark.parametrize(
+    "make_engine", [_piper, _kokoro, _chatterbox, _kyutai],
+    ids=["piper", "kokoro", "chatterbox", "kyutai"],
+)
 class TestSpeechEnginesPublishSpeaking:
     def test_the_state_becomes_speaking_when_speech_starts(self, make_engine):
         get_jarvis_state().set_state(JarvisState.THINKING)
