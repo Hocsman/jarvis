@@ -25,8 +25,8 @@ class TestThinkingAndTools:
 
     Switching ``gemma4:e2b``'s thinking mode off with ``think: false``
     also stops its native tool calls, so an assistant offered a tool
-    never calls it. Tool-free calls keep the flag, which measurably steadies
-    small-model extraction.
+    never calls it. Tool-free calls keep the flag, which measurably
+    steadies small-model extraction.
     """
 
     def _payload(self, mock_post):

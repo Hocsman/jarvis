@@ -1,8 +1,9 @@
 """The memory extractor never asks its model to think.
 
 `llm_thinking_enabled` is the chat model's setting. The extractor runs on
-its own model or the router's chain, often a small local model with no
-thinking mode, and such a model refuses a request that asks for one
+its own model or the router's chain, which can be a small local model
+with no thinking mode (``qwen2.5:3b``, say), and such a model refuses a
+request that asks for one
 (Ollama answers HTTP 400 "does not support thinking"). Passed through, the
 setting would leave every turn that needs memory without it.
 
