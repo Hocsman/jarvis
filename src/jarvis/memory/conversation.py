@@ -5,7 +5,7 @@ import time
 import threading
 from collections import OrderedDict
 from datetime import datetime, timezone
-from typing import Any, Iterator, Optional, List, Tuple, Union, Callable
+from typing import Any, Iterator, Optional, List, Sequence, Tuple, Union, Callable
 from .db import Database
 from ..llm import get_embedding_backend, get_llm_backend
 from ..debug import debug_log
@@ -751,6 +751,10 @@ class DialogueMemory:
         # Track the timestamp up to which messages have been saved to diary
         # Messages with timestamp <= this value have been processed
         self._last_saved_timestamp: float = 0.0
+        # A saved window the knowledge graph has not read yet: a stop cut its
+        # pass short before the extraction answered. (date_utc, source_app,
+        # tools_used), or None.
+        self._graph_owed: Optional[Tuple[str, str, List[str]]] = None
         self._lock = threading.RLock()  # Reentrant lock for thread safety
         # The one action waiting on the user's say-so, and the turn
         # counter that bounds how long a spoken answer stays valid. Held
@@ -1309,6 +1313,26 @@ class DialogueMemory:
             self._last_saved_timestamp = max(self._last_saved_timestamp, timestamp)
             self._cleanup_old_messages()
 
+    def owe_graph_pass(self, date_utc: str, source_app: str,
+                       tools_used: Optional[Sequence[str]]) -> None:
+        """Remember a saved window whose knowledge-graph pass a stop cut short
+        before it read the summary.
+
+        The window is already marked saved, so no later diary pass sees it
+        as pending, and the tools that vouched for its lookups are gone from
+        the pending window with it. Without this the shutdown pass that
+        follows would have nothing to learn from, and the next flush reads
+        the day's summary only if its own window looked something up.
+        """
+        with self._lock:
+            self._graph_owed = (date_utc, source_app, list(tools_used or []))
+
+    def take_owed_graph_pass(self) -> Optional[Tuple[str, str, List[str]]]:
+        """The window ``owe_graph_pass`` recorded, handed over once."""
+        with self._lock:
+            owed, self._graph_owed = self._graph_owed, None
+            return owed
+
     def _cleanup_old_messages(self) -> None:
         """Remove messages that are both saved and older than the recent window.
 
@@ -1706,6 +1730,99 @@ def search_conversation_memory_by_keywords(
     return contexts[:max_results]
 
 
+def _learn_from_the_day(
+    db: Database,
+    cfg,
+    *,
+    date_utc: str,
+    source_app: str,
+    tools_used: Optional[Sequence[str]],
+    deadline,
+    thinking: bool,
+):
+    """Run the knowledge-graph pass on one day's stored summary and say what
+    it learned. Returns the ``GraphUpdateResult``, or None when the day has
+    no summary."""
+    from .graph import GraphMemoryStore
+    from .graph_ops import update_graph_from_dialogue
+
+    existing = db.get_conversation_summary(date_utc, source_app)
+    summary_text = existing['summary'] if existing else None
+    if not summary_text:
+        return None
+
+    result = update_graph_from_dialogue(
+        store=GraphMemoryStore(db.db_path),
+        summary=summary_text,
+        cfg=cfg,
+        chat_model=cfg.llm_chat_model,
+        tools_used=tools_used,
+        deadline=deadline,
+        thinking=thinking,
+        date_utc=date_utc,
+    )
+    stored = result.stored
+    skipped = result.skipped
+    # Print whenever extraction produced anything, including all-duplicate
+    # flushes: the cumulative diary re-extracts the same facts on every
+    # flush, and a line that went silent on those would make the memory
+    # pipeline look as if it had stopped working.
+    if stored or skipped:
+        dup_suffix = f"{skipped} duplicate{'' if skipped == 1 else 's'} skipped"
+        if stored:
+            fact_count = f"{len(stored)} new fact{'' if len(stored) == 1 else 's'}"
+            tail = f" ({dup_suffix})" if skipped else ""
+            print(f"  🧠 Knowledge graph: learned {fact_count}{tail}", flush=True)
+            # Show each new fact with the node it landed in so the user can
+            # eyeball extraction/placement. Cap preview length per fact.
+            for fact, node_name in stored[:6]:
+                preview = fact.replace("\n", " ").strip()
+                if len(preview) > 90:
+                    preview = preview[:90].rstrip() + "…"
+                print(f"     · {preview} → {node_name}", flush=True)
+            if len(stored) > 6:
+                print(f"     · …and {len(stored) - 6} more", flush=True)
+        else:
+            print(f"  🧠 Knowledge graph: nothing new ({dup_suffix})", flush=True)
+    debug_log(
+        f"graph memory: stored {len(stored)} facts, {skipped} duplicates skipped",
+        "memory",
+    )
+    return result
+
+
+def settle_owed_graph_pass(
+    db: Database,
+    dialogue_memory: DialogueMemory,
+    cfg,
+    *,
+    timeout_sec: float,
+    thinking: bool = False,
+) -> None:
+    """Read the summary a stopped knowledge-graph pass left unread (see
+    ``DialogueMemory.owe_graph_pass``), inside ``timeout_sec``. Nothing to
+    do when no pass was cut short. Run by the shutdown pass, which nothing
+    stops."""
+    owed = dialogue_memory.take_owed_graph_pass()
+    if owed is None:
+        return
+    date_utc, source_app, tools_used = owed
+    debug_log(f"graph memory: reading the {date_utc} summary a stopped pass left", "memory")
+    try:
+        from .graph_ops import GraphDeadline
+
+        _learn_from_the_day(
+            db, cfg,
+            date_utc=date_utc,
+            source_app=source_app,
+            tools_used=tools_used,
+            deadline=GraphDeadline(timeout_sec),
+            thinking=thinking,
+        )
+    except Exception as e:
+        debug_log(f"graph memory update failed (non-fatal): {e}", "memory")
+
+
 def update_diary_from_dialogue_memory(
     db: Database,
     dialogue_memory: DialogueMemory,
@@ -1717,7 +1834,7 @@ def update_diary_from_dialogue_memory(
     force: bool = False,
     on_token: Optional[Callable[[str], None]] = None,
     thinking: bool = False,
-    graph_picker_model: Optional[str] = None,
+    stop: Optional[Callable[[], bool]] = None,
 ) -> Optional[int]:
     """
     Update the diary with pending interactions from dialogue memory.
@@ -1727,7 +1844,13 @@ def update_diary_from_dialogue_memory(
     won't be incorrectly marked as saved.
 
     Args:
+        timeout_sec: The pass's budget, from its start. The summary is asked
+            first, with all of it, and the knowledge-graph pass gets what
+            the summary (and its embedding) left.
         on_token: Optional callback for streaming tokens (for live UI updates)
+        stop: Says the daemon is going down. The graph pass asks nothing
+            more once it does, and a window it never read is left to
+            ``settle_owed_graph_pass``; the summary is not interrupted.
 
     Returns the summary ID if successful, None otherwise.
     """
@@ -1736,6 +1859,8 @@ def update_diary_from_dialogue_memory(
     if not force and not dialogue_memory.should_update_diary():
         debug_log("diary update skipped: should_update_diary=False and force=False", "memory")
         return None
+
+    started = time.monotonic()
 
     try:
         # Atomically capture pending chunks AND the snapshot timestamp.
@@ -1785,79 +1910,29 @@ def update_diary_from_dialogue_memory(
 
             # Graph memory (v2): extract facts and store in the node graph.
             # Non-blocking — if this fails, the diary update still succeeded.
-            # Uses a dedicated timeout (30s) rather than the diary chat timeout,
-            # so graph updates don't inflate the diary flush wall time.
+            # Inside what is left of the pass's budget, so the graph never
+            # makes the flush outlast it.
             try:
-                from .graph import GraphMemoryStore
-                from .graph_ops import update_graph_from_dialogue
+                from .graph_ops import GraphDeadline
 
-                graph_store = GraphMemoryStore(db.db_path)
-                # Retrieve the summary we just stored to use for extraction
                 today = datetime.now(timezone.utc).date().isoformat()
-                existing = db.get_conversation_summary(today, source_app)
-                summary_text = existing['summary'] if existing else None
-
-                if summary_text:
-                    # Use a shorter timeout for graph operations — extraction (30s),
-                    # placement (15s/fact), and split (45s) each have their own budgets
-                    # inside update_graph_from_dialogue.
-                    graph_timeout = min(timeout_sec, 30.0)
-                    result = update_graph_from_dialogue(
-                        store=graph_store,
-                        summary=summary_text,
-                        cfg=cfg,
-                        chat_model=cfg.llm_chat_model,
-                        # Captured with the chunks, above. The summary is
-                        # cumulative for the day, so it carries prose from
-                        # earlier windows too; what this vouches for is
-                        # that *this* flush had a lookup behind it.
-                        tools_used=tools_used,
-                        timeout_sec=graph_timeout,
-                        thinking=thinking,
-                        date_utc=today,
-                        picker_model=graph_picker_model,
-                    )
-                    stored = result.stored
-                    skipped = result.skipped
-                    # Print whenever extraction produced anything, including
-                    # all-duplicate flushes: the cumulative diary re-extracts
-                    # the same facts on every flush, and a line that went
-                    # silent on those would make the memory pipeline look as
-                    # if it had stopped working.
-                    if stored or skipped:
-                        dup_suffix = (
-                            f"{skipped} duplicate{'' if skipped == 1 else 's'} skipped"
-                        )
-                        if stored:
-                            fact_count = (
-                                f"{len(stored)} new fact"
-                                f"{'' if len(stored) == 1 else 's'}"
-                            )
-                            tail = f" ({dup_suffix})" if skipped else ""
-                            print(
-                                f"  🧠 Knowledge graph: learned {fact_count}{tail}",
-                                flush=True,
-                            )
-                            # Show each new fact with the node it landed in so
-                            # the user can eyeball extraction/placement. Cap
-                            # preview length per fact.
-                            for fact, node_name in stored[:6]:
-                                preview = fact.replace("\n", " ").strip()
-                                if len(preview) > 90:
-                                    preview = preview[:90].rstrip() + "…"
-                                print(f"     · {preview} → {node_name}", flush=True)
-                            if len(stored) > 6:
-                                print(f"     · …and {len(stored) - 6} more", flush=True)
-                        else:
-                            print(
-                                f"  🧠 Knowledge graph: nothing new ({dup_suffix})",
-                                flush=True,
-                            )
-                    debug_log(
-                        f"graph memory: stored {len(stored)} facts, "
-                        f"{skipped} duplicates skipped",
-                        "memory",
-                    )
+                result = _learn_from_the_day(
+                    db, cfg,
+                    date_utc=today,
+                    source_app=source_app,
+                    # Captured with the chunks, above. The summary is
+                    # cumulative for the day, so it carries prose from
+                    # earlier windows too; what this vouches for is that
+                    # *this* flush had a lookup behind it.
+                    tools_used=tools_used,
+                    deadline=GraphDeadline(
+                        timeout_sec - (time.monotonic() - started), stop=stop),
+                    thinking=thinking,
+                )
+                if result is not None and result.unread and stop is not None and stop():
+                    dialogue_memory.owe_graph_pass(today, source_app, tools_used)
+                    debug_log("graph memory: stopped before the summary was read, "
+                              "left to the shutdown pass", "memory")
             except Exception as e:
                 debug_log(f"graph memory update failed (non-fatal): {e}", "memory")
 

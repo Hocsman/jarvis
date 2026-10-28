@@ -211,22 +211,6 @@ class TestLLMPickBestChild:
         result = _llm_pick_best_child("fact", children, "http://localhost", "model")
         assert result is None
 
-    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
-    def test_uses_picker_model_when_provided(self, mock_llm, populated_store):
-        # Behaviour: picker_model overrides the chat model for this classification-
-        # shaped call, so placement runs on the small model without paging in the
-        # big chat model. When absent, the chat model is used (backwards-compatible).
-        children = populated_store.get_children("root")
-        mock_llm.return_value = "1"
-
-        _llm_pick_best_child(
-            "fact", children, "http://localhost", "big-chat", picker_model="small-judge"
-        )
-        assert mock_llm.call_args.kwargs["chat_model"] == "small-judge"
-
-        _llm_pick_best_child("fact", children, "http://localhost", "big-chat")
-        assert mock_llm.call_args.kwargs["chat_model"] == "big-chat"
-
 
 # ── find_best_node ─────────────────────────────────────────────────────
 
@@ -967,8 +951,64 @@ class TestMergeNodeData:
         assert result.success is False
 
     @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_a_redaction_marker_never_replaces_the_value_it_hid(self, mock_llm, store):
+        """A remote model sees the node through the redacting backend, so
+        an address on the node reaches it as [REDACTED_EMAIL] and comes
+        back that way. Written over the node, the address would be gone
+        for good."""
+        line = "Kensington CEX answers at shop.kensington@cex.co.uk."
+        node = store.create_node(name="Shops", description="d", data=line, parent_id="user")
+        mock_llm.return_value = json.dumps({"facts": [
+            "Kensington CEX answers at [REDACTED_EMAIL].",
+            "Kensington CEX closes at six on Sundays.",
+        ]})
+
+        result = merge_node_data(
+            store=store, node_id=node.id,
+            new_facts=["Kensington CEX closes at six on Sundays."],
+            cfg=None, chat_model="model",
+        )
+
+        assert result.success is False
+        assert store.get_node(node.id).data == line
+
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_a_marker_the_node_already_held_may_stay(self, mock_llm, store):
+        """Diary text is redacted before it is summarised, so a fact can
+        arrive with the marker already in it; keeping it loses nothing."""
+        line = "The venue takes bookings at [REDACTED_EMAIL]."
+        node = store.create_node(name="Venues", description="d", data=line, parent_id="user")
+        mock_llm.return_value = json.dumps({"facts": [line, "The venue opens at noon."]})
+
+        result = merge_node_data(
+            store=store, node_id=node.id, new_facts=["The venue opens at noon."],
+            cfg=None, chat_model="model",
+        )
+
+        assert result.success is True
+
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
+    def test_a_marker_already_on_the_node_does_not_cover_a_new_one(self, mock_llm, store):
+        data = (
+            "The venue takes bookings at [REDACTED_EMAIL].\n"
+            "Kensington CEX answers at shop.kensington@cex.co.uk."
+        )
+        node = store.create_node(name="Mixed", description="d", data=data, parent_id="user")
+        mock_llm.return_value = json.dumps({"facts": [
+            "The venue takes bookings at [REDACTED_EMAIL].",
+            "Kensington CEX answers at [REDACTED_EMAIL].",
+        ]})
+
+        result = merge_node_data(
+            store=store, node_id=node.id, new_facts=[], cfg=None, chat_model="model",
+        )
+
+        assert result.success is False
+        assert store.get_node(node.id).data == data
+
+    @patch("src.jarvis.memory.graph_ops.call_llm_direct")
     def test_incorporated_indices_tolerant_to_trailing_punctuation(self, mock_llm, store):
-        """Picker models routinely drop the trailing full stop when
+        """Models routinely drop the trailing full stop when
         rewriting facts ("X." → "X"). A strict normalise_fact match
         would then return `incorporated_indices=[]` even when the
         fact clearly landed, and the orchestrator would silently
@@ -977,7 +1017,7 @@ class TestMergeNodeData:
         node = store.create_node(
             name="T", description="d", data="Old.", parent_id="user",
         )
-        # Picker drops the trailing period from the new fact.
+        # The model drops the trailing period from the new fact.
         mock_llm.return_value = '{"facts": ["The user has a dog"]}'
 
         result = merge_node_data(
@@ -995,7 +1035,7 @@ class TestMergeNodeData:
 
     @patch("src.jarvis.memory.graph_ops.call_llm_direct")
     def test_prompt_body_matches_parsed_line_count(self, mock_llm, store):
-        """The CURRENT facts block sent to the picker must contain
+        """The CURRENT facts block sent to the merge must contain
         exactly the lines `_split_data_lines` produced — blank lines
         and whitespace-only lines stripped from both signals
         consistently. Locks the round-6 consolidation that made the
@@ -1053,7 +1093,7 @@ class TestMergeNodeData:
 @pytest.mark.unit
 class TestMergeSystemPromptInvariants:
     """Pin the rule set the merge prompt must teach. Behaviour against a
-    real picker model is covered by the merge_consolidation evals; this
+    real model is covered by the merge_consolidation evals; this
     catches a future edit that silently drops a rule from the system
     prompt's text. Each rule is referenced at least once below."""
 

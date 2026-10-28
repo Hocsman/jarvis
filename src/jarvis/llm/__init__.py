@@ -13,7 +13,7 @@ Two interchangeable entry points for the same functionality:
   and construct an :class:`OllamaBackend` internally.
 
 Other public names: :class:`OllamaBackend`, :class:`OpenAICompatibleBackend`,
-:class:`ToolsNotSupportedError` (raised when a model rejects native tool
+:class:`AnthropicBackend`, :class:`ToolsNotSupportedError` (raised when a model rejects native tool
 calling so the reply engine can fall back to text-based), and
 :func:`extract_text_from_response` (normalises content across known
 response shapes).
@@ -28,6 +28,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import requests  # noqa: F401  — re-exported for test patching, see module docstring
 
+from .anthropic_backend import AnthropicBackend
 from .backend import LLMBackend, ToolsNotSupportedError, strip_nonstandard_message_fields
 from .ollama import OllamaBackend, extract_text_from_response
 from .openai_compatible import OpenAICompatibleBackend
@@ -47,6 +48,7 @@ __all__ = [
     "LLMBackend",
     "OllamaBackend",
     "OpenAICompatibleBackend",
+    "AnthropicBackend",
     "ToolsNotSupportedError",
     "strip_nonstandard_message_fields",
     "get_llm_backend",

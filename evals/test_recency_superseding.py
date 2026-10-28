@@ -221,7 +221,7 @@ class TestGraphRecencySuperseding:
 
 @pytest.mark.eval
 class TestMergeSupersession:
-    """Exercises `merge_node_data` against a real picker model. When a new
+    """Exercises `merge_node_data` against a real model. When a new
     fact contradicts an existing line on the same node, the rewrite should
     drop the older line — not just append both. This is the behaviour the
     User node accumulates contradictions without."""
@@ -255,7 +255,6 @@ class TestMergeSupersession:
             new_facts=[new_line],
             cfg=mock_config,
             chat_model=JUDGE_MODEL,
-            timeout_sec=30.0,
         )
 
         updated = graph_store.get_node(node.id)

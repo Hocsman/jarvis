@@ -35,7 +35,7 @@ def _settings_from(tmp_path, monkeypatch, values: dict):
     return load_settings()
 
 
-_PINS = ("intent_judge_model", "tool_router_model", "planner_model")
+_PINS = ("intent_judge_model", "tool_router_model", "memory_extractor_model", "planner_model")
 
 
 def _config_locale(url: str) -> dict:
@@ -106,7 +106,7 @@ def test_a_remote_endpoint_still_rescues_a_stale_local_tag(tmp_path, monkeypatch
 
 def test_a_discarded_pin_is_announced(tmp_path, monkeypatch, capsys):
     """Nothing downstream shows the effective value: the settings window
-    reads the raw JSON off disk, and two of these three fields have no
+    reads the raw JSON off disk, and two of these four fields have no
     field there at all."""
     import src.jarvis.config as config
     monkeypatch.setattr(config, "is_ollama_reachable", lambda *args, **kwargs: False)
@@ -179,3 +179,30 @@ def test_is_local_endpoint_is_a_public_config_helper():
     assert config.is_local_endpoint("http://127.0.0.1:11434") is True
     assert config.is_local_endpoint("http://192.168.1.42:8000/v1") is True
     assert config.is_local_endpoint("https://openrouter.ai/api/v1") is False
+
+
+def test_a_pin_that_is_the_chat_model_is_not_announced_as_local(tmp_path, monkeypatch):
+    """A router pinned to the provider's own bare chat ID runs where the chat
+    model runs, on the provider. Announcing that it routes to local Ollama
+    would point whoever reads the log at the wrong server."""
+    import src.jarvis.config as config
+    import src.jarvis.debug as debug
+    monkeypatch.setattr(config, "is_ollama_reachable", lambda *args, **kwargs: True)
+    lines = []
+    monkeypatch.setattr(
+        debug, "debug_log",
+        lambda message, category="debug": lines.append((message, category)),
+    )
+
+    got = _settings_from(tmp_path, monkeypatch, {
+        "llm_provider": "openai_compatible",
+        "llm_base_url": "https://api.openai.com/v1",
+        "llm_chat_model": "gpt-4o-mini",
+        "tool_router_model": "gpt-4o-mini",
+    })
+
+    assert got.tool_router_model == "gpt-4o-mini"
+    assert not any(
+        "tool_router_model" in message and "Ollama" in message
+        for message, _category in lines
+    ), lines

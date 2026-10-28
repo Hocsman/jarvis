@@ -8,9 +8,10 @@ learning step reads (#19).
 The first two read a sentence the turn sends to the chat model anyway:
 `setReminder` and `setRoutine` are tools of the reply loop, and every
 reply ends on the chat model. So they are read where that model runs.
-With the chat off this machine, the chat model reads it on the reply's
-own backend; with the chat at home, the reminder chain and its pin do,
-by the rule below.
+With the chat off this machine (Anthropic, or an OpenAI-compatible
+server at a remote address), the chat model reads it where it lives;
+with the chat at home, the reminder chain and its pin do, by the rule
+below.
 
 The other two read what no single turn sends, and keep the chain and its
 pin wherever the chat runs. `get_llm_backend` alone picks the endpoint
@@ -19,10 +20,14 @@ it would carry a local tag, and the sentence with it, to the cloud, where
 the tag does not even exist. Hence the rule these tests hold, at the
 wire:
 
-- a pin means this machine, whatever the tag looks like;
+- behind a remote provider a pin means local Ollama, whatever the tag
+  looks like; behind a server on his own machine or network (LM Studio,
+  `llama-server`, a gateway) it runs on local Ollama when Ollama has
+  that tag, and on that server otherwise, where its ID lives;
 - with no pin, the model the chain resolved decides, as on the auxiliary
-  route: a bare tag on a remote provider runs on local Ollama, and a
-  namespaced model stays on the provider the user chose;
+  route: a bare tag on a remote provider runs on local Ollama, and the
+  chat model, however it is spelled, or a namespaced model stays on the
+  provider the user chose;
 - the name sent and the destination always come from the same model,
   however far down the chain it was found.
 """
@@ -30,23 +35,13 @@ wire:
 from __future__ import annotations
 
 import json
-from contextlib import contextmanager
 from types import SimpleNamespace
-from unittest.mock import patch
-from urllib.parse import urlparse
 
 import pytest
-import requests
 
 
-@pytest.fixture(autouse=True)
-def _backends_neufs():
-    """Backends are cached by endpoint; each test starts from none."""
-    from src.jarvis.llm import clear_backend_cache
-
-    clear_backend_cache()
-    yield
-    clear_backend_cache()
+# Backends and Ollama's tag list are cached; each test starts from none.
+pytestmark = pytest.mark.usefixtures("wire")
 
 
 def _cfg(**kw):
@@ -138,48 +133,6 @@ _HORS_DU_TOUR = {
 _CONTEXTES = {**_DU_TOUR, **_HORS_DU_TOUR}
 
 
-@contextmanager
-def _intercepte():
-    """Every request sent inside, as (url, body), sent nowhere: each one
-    times out."""
-    parties = []
-
-    def _capter(url, **kw):
-        parties.append((url, kw.get("json") or {}))
-        raise requests.exceptions.Timeout("intercepted")
-
-    def _session_post(self, url, **kw):
-        return _capter(url, **kw)
-
-    with patch("requests.post", _capter), \
-         patch.object(requests.Session, "post", _session_post):
-        yield parties
-
-
-def _envois(lire, cfg):
-    """Every request the context sends, as (url, body), sent nowhere.
-
-    A context that raised before anything reached the wire fails here
-    with what it raised, rather than later with only "sent nothing".
-    """
-    with _intercepte() as parties:
-        try:
-            lire(cfg)
-        except Exception as erreur:
-            # Every one of them reports a timeout its own way: raising
-            # `ExtractionFailed`, or answering quietly. Where the request
-            # went is all this file asks, unless it never left.
-            if not parties:
-                raise AssertionError(
-                    f"the context sent nothing at all: {erreur!r}") from erreur
-    return parties
-
-
-def _requetes(lire, cfg):
-    """Every request the context sends, as (url, model)."""
-    return [(url, corps.get("model")) for url, corps in _envois(lire, cfg)]
-
-
 def _ici(url):
     return url.startswith("http://127.0.0.1:11434")
 
@@ -195,6 +148,19 @@ def _chat_dans_le_cloud(**kw):
     )
     base.update(kw)
     return _cfg(**base)
+
+
+def _chat_capte(monkeypatch, classe):
+    """What reaches ``classe.chat``, under any wrapper, as (where, model,
+    messages); the call answers nothing."""
+    vus = []
+
+    def _chat(self, model, messages, **kw):
+        vus.append((self.base_url, model, messages))
+        return None
+
+    monkeypatch.setattr(classe, "chat", _chat)
+    return vus
 
 
 # ── What the pin buys ─────────────────────────────────────────────────
@@ -262,10 +228,10 @@ def test_it_does_not_touch_the_ordinary_backend():
 
 
 @pytest.mark.parametrize("lire", _HORS_DU_TOUR.values(), ids=_HORS_DU_TOUR.keys())
-def test_a_pinned_context_does_not_leave_the_machine(lire):
+def test_a_pinned_context_does_not_leave_the_machine(lire, wire):
     cfg = _cfg(reminder_model="gemma4:e2b", appris_model="gemma4:e2b")
 
-    parties = _requetes(lire, cfg)
+    parties = wire(lambda: lire(cfg))
 
     assert parties, "the context sent nothing at all"
     assert all(_ici(url) and model == "gemma4:e2b"
@@ -273,49 +239,49 @@ def test_a_pinned_context_does_not_leave_the_machine(lire):
 
 
 @pytest.mark.parametrize("lire", _HORS_DU_TOUR.values(), ids=_HORS_DU_TOUR.keys())
-def test_a_local_tag_reached_by_falling_back_stays_here(lire):
+def test_a_local_tag_reached_by_falling_back_stays_here(lire, wire):
     """No pin of its own; the chain lands on the router's bare tag."""
     cfg = _cfg(tool_router_model="qwen2.5:3b")
 
-    parties = _requetes(lire, cfg)
+    parties = wire(lambda: lire(cfg))
 
     assert parties, "the context sent nothing at all"
     assert all(_ici(url) and model == "qwen2.5:3b"
                for url, model in parties), parties
 
 
-def test_the_journal_honours_the_reminder_pin_it_falls_back_to():
+def test_the_journal_honours_the_reminder_pin_it_falls_back_to(wire):
     """`appris_model` empty, `reminder_model` a local tag, OpenRouter as
     the provider: the fortnight of diary stays here."""
     cfg = _cfg(reminder_model="qwen2.5:3b")
 
-    parties = _requetes(_lire_le_journal, cfg)
+    parties = wire(lambda: _lire_le_journal(cfg))
 
     assert parties, "the journal was not read at all"
     assert all(_ici(url) and model == "qwen2.5:3b"
                for url, model in parties), parties
 
 
-def test_the_reminder_pin_keeps_the_journal_here_whatever_its_shape():
+def test_the_reminder_pin_keeps_the_journal_here_whatever_its_shape(wire):
     """A pin is a pin for every context that falls back to it, slash or
-    not: the goal judge runs this tag here, so the journal must."""
+    not: the reminder context runs this tag here, so the journal must."""
     tag = "hf.co/bartowski/Qwen2.5-3B-Instruct-GGUF:Q4_K_M"
     cfg = _cfg(reminder_model=tag)
 
-    parties = _requetes(_lire_le_journal, cfg)
+    parties = wire(lambda: _lire_le_journal(cfg))
 
     assert parties, "the journal was not read at all"
     assert all(_ici(url) and model == tag for url, model in parties), parties
 
 
 @pytest.mark.parametrize("lire", _HORS_DU_TOUR.values(), ids=_HORS_DU_TOUR.keys())
-def test_a_namespaced_router_reached_by_falling_back_keeps_the_provider(lire):
+def test_a_namespaced_router_reached_by_falling_back_keeps_the_provider(lire, wire):
     """No pin, and the chain lands on a cloud ID: that model lives on the
     provider, and so does the request. Nothing is moved that was not
     asked to be."""
     cfg = _cfg(tool_router_model="openai/gpt-4o-mini")
 
-    parties = _requetes(lire, cfg)
+    parties = wire(lambda: lire(cfg))
 
     assert parties, "the context sent nothing at all"
     assert all(url.startswith("https://openrouter.ai/api/v1")
@@ -323,34 +289,194 @@ def test_a_namespaced_router_reached_by_falling_back_keeps_the_provider(lire):
                for url, model in parties), parties
 
 
-def test_the_journal_s_own_pin_wins_over_the_reminder_pin():
+def test_the_journal_s_own_pin_wins_over_the_reminder_pin(wire):
     cfg = _cfg(appris_model="gemma4:e2b", reminder_model="qwen2.5:3b")
 
-    parties = _requetes(_lire_le_journal, cfg)
+    parties = wire(lambda: _lire_le_journal(cfg))
 
     assert parties, "the journal was not read at all"
     assert all(_ici(url) and model == "gemma4:e2b"
                for url, model in parties), parties
 
 
-def test_the_journal_s_own_pin_keeps_it_here_whatever_its_shape():
+@pytest.mark.parametrize("lire", _HORS_DU_TOUR.values(), ids=_HORS_DU_TOUR.keys())
+def test_with_the_chat_in_the_cloud_the_pin_still_holds(lire, wire):
+    """The shape that moves #16 and #17 to the chat model leaves these
+    two where they were: on this machine, with the pinned model."""
+    cfg = _chat_dans_le_cloud()
+
+    parties = wire(lambda: lire(cfg))
+
+    assert parties, "the context sent nothing at all"
+    assert all(_ici(url) and model == "qwen2.5:3b"
+               for url, model in parties), parties
+
+
+def test_the_journal_s_own_pin_keeps_it_here_whatever_its_shape(wire):
     tag = "hf.co/bartowski/Qwen2.5-3B-Instruct-GGUF:Q4_K_M"
     cfg = _cfg(appris_model=tag)
 
-    parties = _requetes(_lire_le_journal, cfg)
+    parties = wire(lambda: _lire_le_journal(cfg))
 
     assert parties, "the journal was not read at all"
     assert all(_ici(url) and model == tag for url, model in parties), parties
 
 
+# ── A server on his own machine, and a cloud with bare IDs ────────────
+
+
+_LM_STUDIO = "http://localhost:1234/v1"
+
+
+@pytest.mark.parametrize("lire", _CONTEXTES.values(), ids=_CONTEXTES.keys())
+def test_a_pin_on_a_server_on_his_own_machine_runs_there(lire, wire):
+    """LM Studio on localhost is already this machine, and the pin is one
+    of its model IDs: Ollama does not have it, and moving the request
+    there would buy no privacy for a reading that fails."""
+    cfg = _cfg(llm_base_url=_LM_STUDIO, llm_chat_model="qwen3-32b-instruct",
+               reminder_model="qwen3-1.7b-instruct",
+               appris_model="qwen3-1.7b-instruct")
+
+    parties = wire(lambda: lire(cfg))
+
+    assert parties, "the context sent nothing at all"
+    assert all(url.startswith(_LM_STUDIO) and model == "qwen3-1.7b-instruct"
+               for url, model in parties), parties
+
+
+def test_the_journal_follows_the_reminder_pin_to_his_own_server(wire):
+    """`appris_model` empty, `reminder_model` pinned on LM Studio: the
+    journal runs where the reminder runs, which is that server."""
+    cfg = _cfg(llm_base_url=_LM_STUDIO, llm_chat_model="qwen3-32b-instruct",
+               reminder_model="qwen3-1.7b-instruct")
+
+    parties = wire(lambda: _lire_le_journal(cfg))
+
+    assert parties, "the journal was not read at all"
+    assert all(url.startswith(_LM_STUDIO) and model == "qwen3-1.7b-instruct"
+               for url, model in parties), parties
+
+
+def test_a_box_on_his_network_counts_as_his_own_server(wire):
+    """The host decides, as it does for the auxiliary pins."""
+    lan = "http://192.168.1.42:8000/v1"
+    cfg = _cfg(llm_base_url=lan, llm_chat_model="qwen3-32b-instruct",
+               reminder_model="qwen3-1.7b-instruct")
+
+    parties = wire(lambda: _lire_un_rappel(cfg))
+
+    assert parties, "the context sent nothing at all"
+    assert all(url.startswith(lan) and model == "qwen3-1.7b-instruct"
+               for url, model in parties), parties
+
+
+@pytest.mark.parametrize("lire", _CONTEXTES.values(), ids=_CONTEXTES.keys())
+def test_a_chain_ending_on_a_bare_cloud_chat_id_keeps_the_provider(lire, wire):
+    """api.openai.com names its models without a vendor slash. The chat
+    model lives on the provider whatever its spelling: Ollama does not
+    have `gpt-4o-mini`, and the chat already sends everything there."""
+    cfg = _cfg(llm_base_url="https://api.openai.com/v1",
+               llm_chat_model="gpt-4o-mini")
+
+    parties = wire(lambda: lire(cfg))
+
+    assert parties, "the context sent nothing at all"
+    assert all(url.startswith("https://api.openai.com/v1")
+               and model == "gpt-4o-mini" for url, model in parties), parties
+
+
 @pytest.mark.parametrize("lire", _HORS_DU_TOUR.values(), ids=_HORS_DU_TOUR.keys())
-def test_with_the_chat_in_the_cloud_the_pin_still_holds(lire):
-    """The shape that moves #16 and #17 to the chat model leaves these
-    two where they were: on this machine, with the pinned model."""
-    parties = _requetes(lire, _chat_dans_le_cloud())
+def test_a_bare_local_tag_still_stays_here_beside_a_bare_cloud_chat_id(lire, wire):
+    """Only the chat model's own name is read as the provider's: a router
+    pinned to a local tag still runs here."""
+    cfg = _cfg(llm_base_url="https://api.openai.com/v1",
+               llm_chat_model="gpt-4o-mini", tool_router_model="qwen2.5:3b")
+
+    parties = wire(lambda: lire(cfg))
 
     assert parties, "the context sent nothing at all"
     assert all(_ici(url) and model == "qwen2.5:3b"
+               for url, model in parties), parties
+
+
+@pytest.mark.parametrize("lire", _CONTEXTES.values(), ids=_CONTEXTES.keys())
+def test_a_pin_ollama_has_stays_on_ollama_beside_his_own_server(lire, wire):
+    """LM Studio for the chat, Ollama alongside it, and the pin one of
+    Ollama's tags: it runs where that tag lives."""
+    cfg = _cfg(llm_base_url=_LM_STUDIO, llm_chat_model="qwen3-32b-instruct",
+               reminder_model="qwen2.5:3b", appris_model="qwen2.5:3b")
+
+    parties = wire(lambda: lire(cfg), ollama_has=["qwen2.5:3b", "gemma4:e2b"])
+
+    assert parties, "the context sent nothing at all"
+    assert all(_ici(url) and model == "qwen2.5:3b"
+               for url, model in parties), parties
+
+
+@pytest.mark.parametrize("lire", _CONTEXTES.values(), ids=_CONTEXTES.keys())
+def test_a_router_tag_ollama_has_stays_on_ollama_beside_his_own_server(lire, wire):
+    """No pin of its own; the chain lands on the router's tag, which Ollama
+    lists. It runs there, as any auxiliary call naming it does."""
+    cfg = _cfg(llm_base_url=_LM_STUDIO, llm_chat_model="qwen3-32b-instruct",
+               tool_router_model="qwen2.5:3b")
+
+    parties = wire(lambda: lire(cfg), ollama_has=["qwen2.5:3b"])
+
+    assert parties, "the context sent nothing at all"
+    assert all(_ici(url) and model == "qwen2.5:3b"
+               for url, model in parties), parties
+
+
+def test_a_gateway_at_a_local_address_does_not_get_a_pin_ollama_has(wire):
+    """A gateway on localhost (LiteLLM, a tunnel) looks like his own server
+    and may forward anywhere. A pin Ollama has never needs to go there."""
+    gateway = "http://localhost:4000/v1"
+    cfg = _cfg(llm_base_url=gateway, llm_chat_model="gpt-4o-mini",
+               reminder_model="qwen2.5:3b")
+
+    parties = wire(lambda: _lire_un_rappel(cfg), ollama_has=["qwen2.5:3b"])
+
+    assert parties, "the context sent nothing at all"
+    assert all(_ici(url) and model == "qwen2.5:3b"
+               for url, model in parties), parties
+
+
+def test_a_pin_ollama_lacks_runs_on_his_own_server(wire):
+    """Ollama is up but has never heard of the LM Studio ID."""
+    cfg = _cfg(llm_base_url=_LM_STUDIO, llm_chat_model="qwen3-32b-instruct",
+               reminder_model="qwen3-1.7b-instruct")
+
+    parties = wire(lambda: _lire_un_rappel(cfg), ollama_has=["gemma4:e2b"])
+
+    assert parties, "the context sent nothing at all"
+    assert all(url.startswith(_LM_STUDIO) and model == "qwen3-1.7b-instruct"
+               for url, model in parties), parties
+
+
+def test_a_pin_without_a_tag_is_ollama_s_latest(wire):
+    """Ollama runs `llama3.2` as `llama3.2:latest`, so it has that pin."""
+    cfg = _cfg(llm_base_url=_LM_STUDIO, llm_chat_model="qwen3-32b-instruct",
+               reminder_model="llama3.2")
+
+    parties = wire(lambda: _lire_un_rappel(cfg), ollama_has=["llama3.2:latest"])
+
+    assert parties, "the context sent nothing at all"
+    assert all(_ici(url) and model == "llama3.2"
+               for url, model in parties), parties
+
+
+@pytest.mark.parametrize("lire", _CONTEXTES.values(), ids=_CONTEXTES.keys())
+def test_a_chat_model_inherited_from_ollama_still_runs_here(lire, wire):
+    """`llm_chat_model` left empty on a remote provider inherits the Ollama
+    chat model. That name is a local tag, not the provider's: a chain that
+    lands on it runs on local Ollama, as any bare tag does."""
+    cfg = _cfg(llm_chat_model="gemma4:e2b", ollama_chat_model="gemma4:e2b",
+               intent_judge_model="gemma4:e2b")
+
+    parties = wire(lambda: lire(cfg))
+
+    assert parties, "the context sent nothing at all"
+    assert all(_ici(url) and model == "gemma4:e2b"
                for url, model in parties), parties
 
 
@@ -358,13 +484,13 @@ def test_with_the_chat_in_the_cloud_the_pin_still_holds(lire):
 
 
 @pytest.mark.parametrize("lire", _DU_TOUR.values(), ids=_DU_TOUR.keys())
-def test_with_the_chat_in_the_cloud_the_chat_model_reads_it(lire):
+def test_with_the_chat_in_the_cloud_the_chat_model_reads_it(lire, wire):
     """The turn that calls `setReminder` or `setRoutine` sends this
     sentence to the chat model anyway. Read here as well, it would be
     kept no more private and read worse, so the pin does not apply."""
     cfg = _chat_dans_le_cloud()
 
-    parties = _requetes(lire, cfg)
+    parties = wire(lambda: lire(cfg))
 
     assert parties, "the context sent nothing at all"
     assert all(url.startswith("https://openrouter.ai/api/v1")
@@ -373,17 +499,25 @@ def test_with_the_chat_in_the_cloud_the_chat_model_reads_it(lire):
 
 
 @pytest.mark.parametrize("lire", _DU_TOUR.values(), ids=_DU_TOUR.keys())
-def test_a_cloud_reading_that_fails_is_said_and_not_tried_again(lire):
+def test_a_cloud_reading_that_fails_is_said_and_not_tried_again(lire, wire):
     """The chat model times out: one request, and a refusal she speaks.
     A second attempt on the small local model would be a reading wrong
     one time in two, not a safety net."""
     from src.jarvis.reminders.extract import ExtractionFailed
 
-    with _intercepte() as parties, pytest.raises(ExtractionFailed):
-        lire(_chat_dans_le_cloud())
+    refus = []
 
-    assert len(parties) == 1, [url for url, _ in parties]
-    assert not _ici(parties[0][0]), parties[0][0]
+    def _lire():
+        try:
+            lire(_chat_dans_le_cloud())
+        except ExtractionFailed as e:
+            refus.append(e)
+
+    parties = wire(_lire, ollama_has=["qwen2.5:3b"])
+
+    assert len(parties) == 1, parties
+    assert not _ici(parties[0][0]), parties
+    assert refus, "the failure was not reported"
 
 
 def test_with_the_chat_remote_and_no_chat_model_nothing_reads_the_time():
@@ -396,13 +530,13 @@ def test_with_the_chat_remote_and_no_chat_model_nothing_reads_the_time():
 
 
 @pytest.mark.parametrize("lire", _DU_TOUR.values(), ids=_DU_TOUR.keys())
-def test_a_cloud_chat_named_without_a_vendor_reads_where_it_replies(lire):
-    """`gpt-4o-mini` on api.openai.com has no slash. The reply goes there
-    by provider, and the reading follows the reply, not the tag's shape."""
+def test_a_cloud_chat_named_without_a_vendor_reads_where_it_replies(lire, wire):
+    """`gpt-4o-mini` on api.openai.com has no slash, and the pin is a
+    local tag: the reading follows the chat model, not the pin."""
     cfg = _cfg(llm_base_url="https://api.openai.com/v1",
                llm_chat_model="gpt-4o-mini", reminder_model="qwen2.5:3b")
 
-    parties = _requetes(lire, cfg)
+    parties = wire(lambda: lire(cfg))
 
     assert parties, "the context sent nothing at all"
     assert all(url.startswith("https://api.openai.com/v1")
@@ -410,45 +544,41 @@ def test_a_cloud_chat_named_without_a_vendor_reads_where_it_replies(lire):
                for url, model in parties), parties
 
 
-def test_the_cloud_reading_is_scrubbed_like_the_reply():
+@pytest.mark.parametrize("lire", _DU_TOUR.values(), ids=_DU_TOUR.keys())
+def test_with_anthropic_as_the_provider_the_chat_model_reads_it(lire, monkeypatch):
+    """Anthropic is always off this machine: the Claude chat model reads
+    the sentence on the reply's own provider, the local pin aside."""
+    from src.jarvis.config import ANTHROPIC_BASE_URL
+    from src.jarvis.llm.anthropic_backend import AnthropicBackend
+    from src.jarvis.reminders.extract import ExtractionFailed
+
+    vus = _chat_capte(monkeypatch, AnthropicBackend)
+    cfg = _cfg(llm_provider="anthropic", llm_base_url="",
+               llm_chat_model="claude-haiku-5-5",
+               tool_router_model="qwen2.5:3b", reminder_model="qwen2.5:3b")
+
+    with pytest.raises(ExtractionFailed):
+        lire(cfg)
+
+    assert [(ou, modele) for ou, modele, _ in vus] == [
+        (ANTHROPIC_BASE_URL, "claude-haiku-5-5")]
+
+
+def test_the_cloud_reading_is_scrubbed_like_the_reply(monkeypatch):
     """Same backend as the reply, so the same redaction: an address the
     chat model never saw does not reach it through the reminder."""
-    from src.jarvis.reminders.extract import extract_reminder_time
+    from src.jarvis.llm.openai_compatible import OpenAICompatibleBackend
+    from src.jarvis.reminders.extract import ExtractionFailed, extract_reminder_time
 
     adresse = "jean.dupont@exemple.fr"
+    vus = _chat_capte(monkeypatch, OpenAICompatibleBackend)
 
-    envoyes = _envois(
-        lambda cfg: extract_reminder_time(
-            cfg, f"rappelle-moi demain d'écrire à {adresse}"),
-        _chat_dans_le_cloud(),
-    )
+    with pytest.raises(ExtractionFailed):
+        extract_reminder_time(_chat_dans_le_cloud(),
+                              f"rappelle-moi demain d'écrire à {adresse}")
 
-    assert envoyes, "nothing was sent at all"
-    assert adresse not in json.dumps(envoyes, ensure_ascii=False)
-
-
-_SERVEURS_A_LA_MAISON = {
-    "LM Studio on this machine": "http://localhost:1234/v1",
-    "a box on the home network": "http://192.168.1.42:8000/v1",
-}
-
-
-@pytest.mark.parametrize("serveur", _SERVEURS_A_LA_MAISON.values(),
-                         ids=_SERVEURS_A_LA_MAISON.keys())
-@pytest.mark.parametrize("lire", _DU_TOUR.values(), ids=_DU_TOUR.keys())
-def test_with_an_openai_compatible_server_at_home_nothing_leaves_home(lire, serveur):
-    """A server on this machine or this network counts as home: the
-    chain and its pin, and no request to any other host."""
-    cfg = _cfg(llm_base_url=serveur, llm_chat_model="qwen2.5-7b-instruct",
-               reminder_model="qwen2.5:3b")
-
-    parties = _requetes(lire, cfg)
-
-    assert parties, "the context sent nothing at all"
-    assert all(urlparse(url).hostname in ("localhost", "127.0.0.1",
-                                          urlparse(serveur).hostname)
-               and model == "qwen2.5:3b"
-               for url, model in parties), parties
+    assert vus, "nothing was sent at all"
+    assert adresse not in json.dumps([m for _, _, m in vus], ensure_ascii=False)
 
 
 # ── Where the reply goes ──────────────────────────────────────────────
@@ -456,6 +586,7 @@ def test_with_an_openai_compatible_server_at_home_nothing_leaves_home(lire, serv
 _COTE_DE_LA_REPONSE = {
     "OpenRouter": (dict(), True),
     "a cloud provider spelt loosely": (dict(llm_provider=" OpenAI_Compatible "), True),
+    "Anthropic": (dict(llm_provider="anthropic", llm_base_url=""), True),
     "LM Studio on this machine": (dict(llm_base_url="http://localhost:1234/v1"), False),
     "a box on the home network": (dict(llm_base_url="http://192.168.1.42:8000/v1"), False),
     "no URL of its own, Ollama's then": (dict(llm_base_url=""), False),
@@ -467,6 +598,8 @@ _COTE_DE_LA_REPONSE = {
 def test_the_side_is_where_the_reply_goes(reglages, distant):
     """`chat_is_remote` and the reply's own backend agree, so a reading
     that follows the chat lands where the reply does."""
+    from urllib.parse import urlparse
+
     from src.jarvis.llm import chat_is_remote, get_llm_backend
 
     cfg = _cfg(**reglages)
@@ -489,11 +622,11 @@ def test_the_ollama_provider_counts_as_home_whatever_its_url():
 
 
 @pytest.mark.parametrize("lire", _CONTEXTES.values(), ids=_CONTEXTES.keys())
-def test_nothing_local_anywhere_keeps_the_chosen_provider(lire):
+def test_nothing_local_anywhere_keeps_the_chosen_provider(lire, wire):
     """Pinning nothing changes nothing: the chat model, where it runs."""
     cfg = _cfg()
 
-    parties = _requetes(lire, cfg)
+    parties = wire(lambda: lire(cfg))
 
     assert parties, "the context sent nothing at all"
     assert all(url.startswith("https://openrouter.ai/api/v1")
@@ -502,13 +635,13 @@ def test_nothing_local_anywhere_keeps_the_chosen_provider(lire):
 
 
 @pytest.mark.parametrize("lire", _CONTEXTES.values(), ids=_CONTEXTES.keys())
-def test_with_the_chat_at_home_the_pin_reads_it_here(lire):
+def test_with_the_chat_at_home_the_pin_reads_it_here(lire, wire):
     """An install with nothing in the cloud: all four on this machine,
     with the pinned model."""
     cfg = _cfg(llm_provider="ollama", llm_chat_model="gemma4:e2b",
                reminder_model="qwen2.5:3b")
 
-    parties = _requetes(lire, cfg)
+    parties = wire(lambda: lire(cfg))
 
     assert parties, "the context sent nothing at all"
     assert all(_ici(url) and model == "qwen2.5:3b"

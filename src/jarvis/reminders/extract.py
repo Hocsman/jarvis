@@ -92,7 +92,7 @@ _EXTRACT_SYSTEM = (
 
 
 def _reminder_pin(cfg) -> str:
-    """The pin, alone: what keeps the reminder chain on this machine."""
+    """The pin, alone: what keeps the reminder chain at home."""
     return str(getattr(cfg, "reminder_model", "") or "").strip()
 
 
@@ -101,10 +101,10 @@ def _resolve_reminder_model(cfg) -> str:
 
     A pin wins, and unlike most auxiliary models this one is not rescued
     by the cloud-safe filter: what the chain reads is the user's own
-    life, and a pin keeps it off the network whatever the tag looks like.
-    The goal judge and the journal reader ride it wherever the chat runs;
-    a time or a routine rides it only when the chat is at home
-    (``_reading_model``).
+    life, and a pin keeps it on his machine or his own server whatever
+    the tag looks like. The goal judge and the journal reader ride it
+    wherever the chat runs; a time or a routine rides it only when the
+    chat is at home (``_reading_model``).
     """
     for candidate in (
         _reminder_pin(cfg),
@@ -136,15 +136,19 @@ def _reading_model(cfg) -> str:
 def _reading(cfg):
     """The model of ``_reading_model`` and where it lives, decided once.
 
-    With the chat remote, the reply's own backend, redaction included, so
-    the reading reaches no host and no text the reply does not. Neither
-    side falls back to the other: a reading that fails is said out loud.
+    With the chat remote, wherever the chat model lives: the reply's own
+    provider and backend, redaction included, whatever the model's
+    spelling, so the reading reaches no remote host and no text the reply
+    does not. A chat model an empty ``llm_chat_model`` inherited from
+    ``ollama_chat_model`` is a local tag, and runs on local Ollama.
+    Neither side falls back to the other: a reading that fails is said
+    out loud.
     """
     model = _reading_model(cfg)
     if chat_is_remote(cfg):
         debug_log(f"🔓 sentence read by the chat model {model!r}: "
                   "the turn sends it there anyway", "llm")
-        return model, get_llm_backend(cfg)
+        return model, get_llm_backend(cfg, model=model)
     return model, get_private_backend(cfg, _reminder_pin(cfg), model)
 
 

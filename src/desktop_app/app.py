@@ -227,6 +227,8 @@ def _collect_runtime_status_snapshot(
         embedding_provider = str(
             getattr(cfg, "embedding_provider", "") or llm_provider or "unknown"
         )
+        if embedding_provider == "anthropic":
+            embedding_provider = "ollama"  # Anthropic serves no embeddings
         embedding_model = str(getattr(cfg, "embedding_model", "") or "unknown")
         low_power_mode = getattr(cfg, "low_power_mode", False) is True
         mcps = getattr(cfg, "mcps", {}) or {}
@@ -2989,8 +2991,8 @@ class JarvisSystemTray:
             show_diary_dialog: If True (and bundled), shows a dialog with live diary update progress.
             skip_diary_update: If True, skips the final shutdown diary LLM pass.
         """
-        # Timeout must be longer than SHUTDOWN_DIARY_TIMEOUT_SEC (45s) in daemon.py
-        # to allow the diary update LLM call to complete before force-killing
+        # Timeout must be longer than SHUTDOWN_DIARY_TIMEOUT_SEC (45s) in daemon.py,
+        # the final diary pass's budget, to let it complete before force-killing
         shutdown_wait_timeout_sec = 60
         diary_dialog = None
 
@@ -3328,15 +3330,18 @@ def _ollama_runtime_flags(cfg) -> tuple[bool, bool]:
       to start or verify.
     - ``chat_on_ollama`` — the chat model is an Ollama model, so the
       chat-model verification / unsupported-model checks apply. False when
-      chat runs on an OpenAI-compatible server (its model name is not in the
-      Ollama catalogue and would be wrongly flagged as unsupported).
+      chat runs on a remote provider (its model name is not in the Ollama
+      catalogue and would be wrongly flagged as unsupported).
+
+    Anthropic serves no embeddings, so a chat provider of ``anthropic``
+    still needs the server for them.
     """
     llm_provider = getattr(cfg, "llm_provider", "ollama") or "ollama"
     embed_provider = getattr(cfg, "embedding_provider", "") or llm_provider
     ollama_needed = not (
         llm_provider == "openai_compatible" and embed_provider == "openai_compatible"
     )
-    chat_on_ollama = llm_provider != "openai_compatible"
+    chat_on_ollama = llm_provider == "ollama"
     return ollama_needed, chat_on_ollama
 
 
@@ -3821,17 +3826,16 @@ def main() -> int:
                 splash.set_status("Models installed!")
                 app.processEvents()
             elif missing_models:
-                # Only embeddings run on Ollama (chat is remote), so the
-                # chat-model wizard does not apply. The embedding model is a
-                # fixed name; surface a clear, non-blocking instruction rather
-                # than silently degrading — memory search falls back to keyword
-                # matching until the model is pulled.
+                # Chat is remote, so the chat-model wizard does not apply.
+                # What runs on Ollama is the embedding model and any small
+                # role kept on a local tag; surface a clear, non-blocking
+                # instruction rather than silently degrading — memory search
+                # falls back to keyword matching and the small roles to their
+                # fallbacks until the models are pulled.
                 pull_cmd = "; ".join(f"ollama pull {m}" for m in missing_models)
-                print(
-                    f"⚠️ Ollama embedding model(s) not installed: {missing_models}. "
-                    f"Memory search will use keyword matching until you run: {pull_cmd}",
-                    flush=True,
-                )
+                print(f"⚠️ Ollama model(s) not installed: {', '.join(missing_models)}", flush=True)
+                print("   🧭 memory search and the small local roles fall back until you run:", flush=True)
+                print(f"   💻 {pull_cmd}", flush=True)
             else:
                 print("✅ All required models are installed", flush=True)
 

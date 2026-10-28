@@ -1,16 +1,21 @@
 """
 Tests for settings window metadata and config I/O logic.
 
-Tests verify the metadata registry, value extraction, and save/load behaviour
-without touching the GUI. Widget creation is tested via mock Qt objects where needed.
+Tests verify the metadata registry, value extraction, and save/load behaviour.
+Most run without the GUI, using mock Qt objects where needed; the save round
+trips open a real window on the offscreen Qt platform.
 """
 
 import json
+import os
+import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from desktop_app.settings_window import (
     FIELD_METADATA,
@@ -106,6 +111,31 @@ class TestFieldMetadata:
         assert field.field_type == "bool"
 
 
+class TestWhisperModelField:
+    """The settings window offers every Whisper model the setup wizard can
+    write, so a size picked in one is listed by the other."""
+
+    @staticmethod
+    def _field():
+        return next(fm for fm in FIELD_METADATA if fm.key == "whisper_model")
+
+    def test_every_wizard_option_is_offered(self):
+        from desktop_app.setup_wizard import WhisperSetupPage
+
+        offered = {value for value, _ in self._field().choices}
+        wizard = {
+            option[0]
+            for option in WhisperSetupPage.WHISPER_MODEL_OPTIONS
+            + WhisperSetupPage.WHISPER_MODEL_OPTIONS_EN
+        }
+        assert wizard <= offered, f"not offered by settings: {sorted(wizard - offered)}"
+
+    def test_labels_tell_every_model_apart(self):
+        """``tiny`` and ``tiny.en`` must not read the same in the dropdown."""
+        labels = [label for _, label in self._field().choices]
+        assert len(labels) == len(set(labels))
+
+
 class TestLLMProviderFields:
     """The settings UI must expose the provider-aware LLM config so a user
     can select an OpenAI-compatible backend without editing config.json by
@@ -148,11 +178,21 @@ class TestLLMProviderFields:
 
     def test_llm_provider_choices_match_config(self):
         """The provider dropdown offers exactly the values the config loader
-        accepts ('ollama', 'openai_compatible')."""
+        accepts."""
+        from jarvis.config import LLM_PROVIDERS
+
         fm = self._field("llm_provider")
         assert fm is not None and fm.field_type == "choice"
         values = {v for v, _ in (fm.choices or [])}
-        assert values == {"ollama", "openai_compatible"}
+        assert values == set(LLM_PROVIDERS)
+
+    def test_the_key_can_live_in_an_environment_variable(self):
+        """Naming the variable keeps the secret out of config.json; the
+        field holds a name, not a secret, so it is plain text."""
+        fm = self._field("llm_api_key_env")
+        assert fm is not None
+        assert fm.category == "llm_provider"
+        assert fm.field_type == "str"
 
     def test_embedding_provider_offers_inherit_option(self):
         """embedding_provider includes the empty 'same as chat provider'
@@ -381,6 +421,277 @@ class TestConfigSaveLogic:
             assert saved["tts_enabled"] is False
         finally:
             cfg_path.unlink(missing_ok=True)
+
+
+REMOTE_PINS = ["google/gemini-3.1-flash-lite", "claude-haiku-5-5"]
+
+NAMED_MIC = "MSI GV60"
+AUDIO_DEVICES = [
+    {"name": "Speakers (USB2.0)", "max_input_channels": 0},
+    {"name": f"Microphone ({NAMED_MIC})", "max_input_channels": 1},
+    {"name": "Microphone Array (Realtek)", "max_input_channels": 2},
+]
+
+
+class TestAWindowThatPinsNoPathUsesTheTestsOwnFile:
+    """The window binds ``default_config_path`` at import, so the sandbox has
+    to reach it without a patch: a test that opens the window and pins no
+    path reads and saves the file the config loader reads, never the
+    user's own."""
+
+    def test_a_save_lands_where_the_loader_reads(self, qapp):
+        import config_guard
+        from desktop_app import settings_window as sw
+        from jarvis.config import _save_json, default_config_path, load_config
+
+        path = default_config_path()
+        assert not config_guard.is_protected(path), path
+        flipped = not get_default_config()["low_power_mode"]
+        assert _save_json(path, {"intent_judge_model": REMOTE_PINS[0]})
+        window = sw.SettingsWindow()
+        window._widgets["low_power_mode"].setChecked(flipped)
+
+        with patch.object(sw, "QMessageBox"):
+            window._on_save()
+
+        config = load_config()
+        assert config["low_power_mode"] is flipped
+        assert config["intent_judge_model"] == REMOTE_PINS[0]
+
+
+def _a_value_not_in(fm: FieldMeta):
+    """A value the choice field does not list, of the type its default has."""
+    if isinstance(get_default_config()[fm.key], int):
+        return max(int(value) for value, _ in fm.choices) + 1
+    return "pinned-by-hand"
+
+
+class TestASaveKeepsWhatTheWindowDoesNotList:
+    """A value the window has no option for, such as a model served by a
+    remote provider, is written back exactly as it was read when any setting
+    is saved. Falling back to the first option would move a pin the user
+    never touched, without a word. A device index the window cannot show is
+    the exception: after a replug it can name another device."""
+
+    @pytest.fixture
+    def microphones(self, monkeypatch):
+        sd = MagicMock()
+        sd.query_devices.return_value = AUDIO_DEVICES
+        monkeypatch.setitem(sys.modules, "sounddevice", sd)
+        return sd
+
+    @pytest.fixture
+    def settings_file(self, qapp):
+        from jarvis.config import default_config_path
+
+        path = default_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @staticmethod
+    def _open(path: Path, values: dict):
+        from desktop_app import settings_window as sw
+
+        path.write_text(json.dumps(values), encoding="utf-8")
+        return sw.SettingsWindow()
+
+    @staticmethod
+    def _save(window, path: Path) -> dict:
+        from desktop_app import settings_window as sw
+
+        with patch.object(sw, "QMessageBox"):
+            window._on_save()
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    @pytest.mark.parametrize("pin", REMOTE_PINS)
+    def test_a_remote_judge_pin_survives_saving_another_setting(self, settings_file, pin):
+        window = self._open(settings_file, {"intent_judge_model": pin})
+        window._widgets["low_power_mode"].setChecked(True)
+
+        saved = self._save(window, settings_file)
+
+        assert saved["intent_judge_model"] == pin
+        assert saved["low_power_mode"] is True
+
+    @pytest.mark.parametrize("pin", REMOTE_PINS)
+    def test_the_window_shows_the_pin_it_keeps(self, settings_file, pin):
+        window = self._open(settings_file, {"intent_judge_model": pin})
+
+        assert window._widgets["intent_judge_model"].currentText() == pin
+
+    def test_every_model_key_keeps_a_remote_pin(self, settings_file):
+        pins = {
+            key: REMOTE_PINS[0]
+            for key in get_default_config()
+            if key.endswith("_model")
+        }
+
+        saved = self._save(self._open(settings_file, pins), settings_file)
+
+        assert {key: saved.get(key) for key in pins} == pins
+
+    def test_every_choice_field_keeps_a_value_it_does_not_list(self, settings_file):
+        unlisted = {
+            fm.key: _a_value_not_in(fm)
+            for fm in FIELD_METADATA
+            if fm.field_type == "choice"
+        }
+
+        saved = self._save(self._open(settings_file, unlisted), settings_file)
+
+        assert {key: saved.get(key) for key in unlisted} == unlisted
+
+    def test_an_unlisted_value_of_another_type_keeps_its_value(self, settings_file):
+        """A number in a text field stays that number, and a sample rate
+        written as a float is saved as the rate it names."""
+        odd = {}
+        for fm in FIELD_METADATA:
+            if fm.field_type != "choice":
+                continue
+            unlisted = _a_value_not_in(fm)
+            odd[fm.key] = float(unlisted) if isinstance(unlisted, int) else 3
+
+        saved = self._save(self._open(settings_file, odd), settings_file)
+
+        assert {key: saved.get(key) for key in odd} == odd
+
+    @pytest.mark.parametrize("empty", ["", None])
+    def test_an_empty_pin_is_never_kept_as_a_blank_option(self, settings_file, empty):
+        fm = next(fm for fm in FIELD_METADATA if fm.key == "intent_judge_model")
+        listed = [value for value, _ in fm.choices]
+        default = get_default_config()["intent_judge_model"]
+        window = self._open(settings_file, {"intent_judge_model": empty})
+        combo = window._widgets["intent_judge_model"]
+
+        saved = self._save(window, settings_file)
+
+        assert [combo.itemData(i) for i in range(combo.count())] == listed
+        assert saved.get("intent_judge_model", default) in listed
+
+    def test_a_listed_model_still_replaces_the_pin(self, settings_file):
+        from jarvis.config import SUPPORTED_CHAT_MODELS
+
+        default = get_default_config()["intent_judge_model"]
+        listed = next(model for model in SUPPORTED_CHAT_MODELS if model != default)
+        window = self._open(settings_file, {"intent_judge_model": REMOTE_PINS[0]})
+        combo = window._widgets["intent_judge_model"]
+        combo.setCurrentIndex(combo.findData(listed))
+
+        saved = self._save(window, settings_file)
+
+        assert saved["intent_judge_model"] == listed
+
+    def test_choosing_the_default_drops_the_pin(self, settings_file):
+        default = get_default_config()["intent_judge_model"]
+        window = self._open(settings_file, {"intent_judge_model": REMOTE_PINS[0]})
+        combo = window._widgets["intent_judge_model"]
+        combo.setCurrentIndex(combo.findData(default))
+
+        saved = self._save(window, settings_file)
+
+        assert "intent_judge_model" not in saved
+
+    def test_reset_drops_the_pin(self, settings_file):
+        from desktop_app import settings_window as sw
+
+        window = self._open(settings_file, {"intent_judge_model": REMOTE_PINS[0]})
+        with patch.object(
+            sw.QMessageBox, "question",
+            return_value=sw.QMessageBox.StandardButton.Yes,
+        ):
+            window._on_reset()
+
+        saved = self._save(window, settings_file)
+
+        assert "intent_judge_model" not in saved
+
+    @pytest.mark.parametrize("plugged_in", [True, False])
+    def test_a_microphone_set_by_name_survives_saving_another_setting(
+        self, settings_file, microphones, plugged_in,
+    ):
+        """The listener finds a microphone by name, and a name stays true
+        across a replug, so the window keeps one whether or not it is
+        plugged in when the window opens."""
+        if not plugged_in:
+            microphones.query_devices.return_value = [
+                dev for dev in AUDIO_DEVICES if NAMED_MIC not in dev["name"]
+            ]
+        window = self._open(settings_file, {"voice_device": NAMED_MIC})
+        window._widgets["low_power_mode"].setChecked(True)
+
+        saved = self._save(window, settings_file)
+
+        assert saved["voice_device"] == NAMED_MIC
+        assert saved["low_power_mode"] is True
+
+    def test_the_window_shows_the_name_apart_from_the_devices_it_lists(
+        self, settings_file, microphones,
+    ):
+        listed = [display for _, display in get_input_devices()]
+        window = self._open(settings_file, {"voice_device": NAMED_MIC})
+        combo = window._widgets["voice_device"]
+
+        assert NAMED_MIC in combo.currentText()
+        assert combo.currentText() not in listed
+
+    @pytest.mark.parametrize("index", ["7", 7, "0"])
+    def test_an_index_the_list_lacks_falls_back_to_system_default(
+        self, settings_file, microphones, index,
+    ):
+        """An index can name another device after a replug, so the window
+        does not keep one it cannot show. Device 0 is output-only."""
+        window = self._open(settings_file, {"voice_device": index})
+        combo = window._widgets["voice_device"]
+
+        assert combo.currentData() == ""
+        assert "voice_device" not in self._save(window, settings_file)
+
+    @pytest.mark.parametrize("index", ["1", 1, "01", "+1"])
+    def test_a_listed_index_is_selected_and_kept(self, settings_file, microphones, index):
+        """Any form the listener reads as that index selects it."""
+        shown = dict(get_input_devices())[str(int(index))]
+        window = self._open(settings_file, {"voice_device": index})
+        combo = window._widgets["voice_device"]
+
+        assert combo.currentText() == shown
+        assert int(self._save(window, settings_file)["voice_device"]) == int(index)
+
+    @pytest.mark.parametrize("default", ["default", "System", "  "])
+    def test_a_word_for_the_system_default_shows_as_system_default(
+        self, settings_file, microphones, default,
+    ):
+        """The listener reads these as the system default, so the window shows
+        System Default rather than a microphone of that name."""
+        window = self._open(settings_file, {"voice_device": default})
+        combo = window._widgets["voice_device"]
+
+        assert combo.currentData() == ""
+        assert combo.count() == len(get_input_devices())
+        assert "voice_device" not in self._save(window, settings_file)
+
+    @pytest.mark.parametrize("choice", ["2", ""])
+    def test_choosing_a_listed_option_replaces_the_name(
+        self, settings_file, microphones, choice,
+    ):
+        window = self._open(settings_file, {"voice_device": NAMED_MIC})
+        combo = window._widgets["voice_device"]
+        combo.setCurrentIndex(combo.findData(choice))
+
+        saved = self._save(window, settings_file)
+
+        assert saved.get("voice_device") == (choice or None)
+
+    def test_reset_drops_the_name(self, settings_file, microphones):
+        from desktop_app import settings_window as sw
+
+        window = self._open(settings_file, {"voice_device": NAMED_MIC})
+        with patch.object(
+            sw.QMessageBox, "question",
+            return_value=sw.QMessageBox.StandardButton.Yes,
+        ):
+            window._on_reset()
+
+        assert "voice_device" not in self._save(window, settings_file)
 
 
 class TestDefaultValueTypes:
