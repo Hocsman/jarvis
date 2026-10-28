@@ -12,21 +12,15 @@ leaves alone what is not the test's to stop.
 """
 
 import _thread
-import os
-import subprocess
-import sys
-import textwrap
 import threading
 import time
-import xml.etree.ElementTree as ET
-from pathlib import Path
 
 import pytest
 
+import inner_session
 import thread_guard
 
 
-TESTS_DIR = Path(__file__).resolve().parent
 GRACE = 5.0
 
 
@@ -224,28 +218,14 @@ def test_leaves_a_thread_that_winds_down_inside_the_grace():
 """
 
 
-def _run_inner_session(tmp_path: Path):
-    (tmp_path / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
-    (tmp_path / "conftest.py").write_text(textwrap.dedent(INNER_CONFTEST), encoding="utf-8")
-    (tmp_path / "test_inner.py").write_text(textwrap.dedent(INNER_TESTS), encoding="utf-8")
-    report = tmp_path / "report.xml"
-    env = {**os.environ, "PYTHONPATH": str(TESTS_DIR), "PYTHONDONTWRITEBYTECODE": "1"}
-    subprocess.run(
-        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-q",
-         f"--junitxml={report}", "test_inner.py"],
-        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120,
-    )
-    outcomes = {}
-    for case in ET.parse(report).getroot().iter("testcase"):
-        failures = [child for child in case if child.tag in ("error", "failure")]
-        outcomes[case.get("name")] = failures
-    return outcomes
-
-
 class TestTheGuardEndToEnd:
     @pytest.fixture(scope="class")
     def inner(self, tmp_path_factory):
-        return _run_inner_session(tmp_path_factory.mktemp("inner_session"))
+        return inner_session.run(
+            tmp_path_factory.mktemp("inner_session"),
+            conftest=INNER_CONFTEST,
+            tests=INNER_TESTS,
+        )
 
     def test_the_test_that_leaks_a_thread_fails(self, inner):
         assert inner["test_leaves_a_thread_running"], (
@@ -253,19 +233,21 @@ class TestTheGuardEndToEnd:
         )
 
     def test_the_failure_names_the_test_and_the_thread(self, inner):
-        failure = inner["test_leaves_a_thread_running"][0]
-        text = (failure.get("message") or "") + (failure.text or "")
+        text = inner["test_leaves_a_thread_running"]
         assert "test_inner.py::test_leaves_a_thread_running" in text
         assert "leaky-worker" in text
 
     def test_the_next_test_is_not_blamed_for_a_thread_it_did_not_start(self, inner):
-        assert inner["test_runs_right_after_the_leak_and_is_not_blamed_for_it"] == []
+        outcome = inner["test_runs_right_after_the_leak_and_is_not_blamed_for_it"]
+        assert outcome == "", outcome
 
     def test_a_test_that_joins_its_own_thread_passes(self, inner):
-        assert inner["test_joins_its_own_thread"] == []
+        outcome = inner["test_joins_its_own_thread"]
+        assert outcome == "", outcome
 
     def test_a_thread_that_winds_down_inside_the_grace_passes(self, inner):
-        assert inner["test_leaves_a_thread_that_winds_down_inside_the_grace"] == []
+        outcome = inner["test_leaves_a_thread_that_winds_down_inside_the_grace"]
+        assert outcome == "", outcome
 
 
 def test_the_guard_is_armed_for_every_test_in_this_suite(request):

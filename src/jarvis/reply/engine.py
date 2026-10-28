@@ -36,7 +36,7 @@ from ..llm import (
 def chat_with_messages(cfg, messages, *, timeout_sec=30.0, extra_options=None,
                        tools=None, thinking=False, on_token=None):
     """Local indirection: route the engine's chat call through the active
-    backend (Ollama or OpenAI-compatible, per ``cfg.llm_provider``) so the
+    backend (Ollama, OpenAI-compatible or Anthropic, per ``cfg.llm_provider``) so the
     runtime swap is transparent to the rest of the engine.
 
     Kept as a module-level function so tests can patch this single symbol
@@ -396,6 +396,21 @@ def resolve_tool_router_model(cfg) -> str:
         if candidate:
             return candidate
     return ""
+
+
+def resolve_memory_extractor_model(cfg) -> str:
+    """Pick the LLM model that reads a query for the memory lookup.
+
+    Resolution order: explicit `memory_extractor_model` → the tool router's
+    chain (`resolve_tool_router_model`). Left empty, the extractor rides
+    the router's warm small model; named, it gets a model of its own,
+    because the time window in "what did I say last Thursday?" is the part
+    a small model misreads and a wrong window filters the right memory out.
+    """
+    return (
+        str(getattr(cfg, "memory_extractor_model", "") or "").strip()
+        or resolve_tool_router_model(cfg)
+    )
 
 
 _TEXT_TOOL_SYNTAX_MARKER: str = "\nExact tool-call syntax"
@@ -1735,10 +1750,11 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 debug_log("memory extractor served from hot-window cache", "memory")
             else:
                 _stage("memory")
+                _extractor_model = resolve_memory_extractor_model(cfg)
+                debug_log(f"memory extractor model: {_extractor_model}", "memory")
                 search_params = extract_search_params_for_memory(
-                    _extractor_query, cfg, resolve_tool_router_model(cfg),
+                    _extractor_query, cfg, _extractor_model,
                     timeout_sec=router_timeout_sec(cfg),
-                    thinking=getattr(cfg, 'llm_thinking_enabled', False),
                     context_hint=context_hint,
                 )
                 # Don't cache a failed extraction. `None` means the pass

@@ -47,7 +47,7 @@ from conftest import requires_judge_llm
 from helpers import JUDGE_MODEL, MockConfig
 
 from jarvis.memory.graph import BRANCH_WORLD, SPLIT_THRESHOLD
-from jarvis.memory.graph_ops import auto_split_node
+from jarvis.memory.graph_ops import GraphDeadline, auto_split_node
 from jarvis.reply.prompts import ModelSize, detect_model_size
 
 
@@ -245,7 +245,8 @@ def split_node(store, cfg, chat_model, seed, timeout_sec=120.0):
     """
     node = store.update_node(BRANCH_WORLD, data=node_data(seed))
     assert node.data_token_count > SPLIT_THRESHOLD, "the eval node is too small to split"
-    ok = auto_split_node(store, BRANCH_WORLD, cfg, chat_model, timeout_sec=timeout_sec)
+    ok = auto_split_node(store, BRANCH_WORLD, cfg, chat_model,
+                         deadline=GraphDeadline(timeout_sec))
     children = store.get_children(BRANCH_WORLD)
     return ok, "\n".join(c.data for c in children)
 

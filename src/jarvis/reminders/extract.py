@@ -101,7 +101,8 @@ def _resolve_reminder_model(cfg) -> str:
 
     A pin wins, and unlike most auxiliary models this one is not rescued
     by the cloud-safe filter — the sentence it reads is the user's own
-    life, and a pin keeps it off the network whatever the tag looks like.
+    life, and a pin keeps it on his machine or his own server whatever
+    the tag looks like.
     """
     for candidate in (
         _reminder_pin(cfg),

@@ -99,8 +99,8 @@ silence** — ce modèle contenait `fast_model`, recopié d'une vraie config
 sans vérifier que quoi que ce soit le lisait. Rien ne l'aurait signalé.
 
 Les clés de modèles que le code reconnaît sont `llm_chat_model`,
-`intent_judge_model`, `tool_router_model`, `planner_model`,
-`appris_model`, `confirmation_model`, `reminder_model`,
+`intent_judge_model`, `tool_router_model`, `memory_extractor_model`,
+`planner_model`, `appris_model`, `confirmation_model`, `reminder_model`,
 `embedding_model`, `ollama_chat_model`, `ollama_embed_model` et
 `whisper_model`. Celles qu'on ne met pas retombent sur leurs valeurs par
 défaut.

@@ -6,22 +6,29 @@ Keeps graph.py as a pure data store (SQLite only). This module handles:
 - Best-node traversal (greedy descent from a fixed branch root)
 - Auto-split when a node exceeds the token threshold
 
-All LLM calls go through the auxiliary dispatcher (a bare picker model tag
-on a remote provider runs on local Ollama); the local ``call_llm_direct``
-wrapper is the single intercept point tests patch.
+All LLM calls run on the chat model the caller hands in and go through the
+auxiliary dispatcher (a bare model tag on a remote provider runs on local
+Ollama); the local ``call_llm_direct`` wrapper is the single intercept point
+tests patch. Every call is made through ``_ask``, inside the pass's
+``GraphDeadline``.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import threading
+import time
+from collections import Counter
 from dataclasses import dataclass, field
-from typing import Iterator, NamedTuple, Optional, Sequence
+from typing import Callable, Iterator, NamedTuple, Optional, Sequence
 
 from rapidfuzz import fuzz
 
+from ..config import get_default_config
 from ..debug import debug_log
 from ..llm import get_auxiliary_backend
+from ..utils.redact import redaction_placeholders
 from .provenance import (
     SOURCE_UNKNOWN,
     fact_line,
@@ -45,6 +52,7 @@ from .graph import (
     MAX_TRAVERSAL_DEPTH,
     MemoryNode,
     SPLIT_THRESHOLD,
+    fact_key,
     normalise_fact,
 )
 
@@ -53,14 +61,119 @@ def call_llm_direct(*, cfg, chat_model, system_prompt, user_content,
                     timeout_sec=10.0, thinking=False, num_ctx=4096,
                     temperature=None):
     """Local indirection: route graph-ops LLM calls through the auxiliary
-    dispatcher, so a bare picker model tag on a remote provider runs on
-    local Ollama instead of dying on its HTTP 400. Tests patch this single
+    dispatcher, so a bare model tag on a remote provider runs on local
+    Ollama instead of dying on its HTTP 400. Tests patch this single
     symbol to intercept every LLM round-trip in this module."""
     return get_auxiliary_backend(cfg, chat_model).direct(
         chat_model, system_prompt, user_content,
         timeout_sec=timeout_sec, thinking=thinking,
         num_ctx=num_ctx, temperature=temperature,
     )
+
+
+# ── The pass's deadline ───────────────────────────────────────────────
+
+
+def _chat_timeout_sec(cfg) -> float:
+    """How long one answer from the chat model may take: the user's own
+    figure, the one the reply is held to."""
+    timeout = getattr(cfg, "llm_chat_timeout_sec", None)
+    return float(timeout or get_default_config()["llm_chat_timeout_sec"])
+
+
+class GraphDeadline:
+    """When one graph pass has to be over.
+
+    The calls of a pass share it: each is handed what is left, so a slow
+    chat model gets as long as the pass can give rather than a figure sized
+    for a faster one, and none is waited on past it. Once it is spent, or
+    once ``stop`` says the daemon is going down, nothing more is asked and
+    the pass finishes on the paths that need no model: a fact stays where
+    the descent got to, a node takes a plain append, a split waits for the
+    next flush. A fact once extracted is filed less well, never lost; a
+    summary the extraction never read is reported ``unread`` so the caller
+    can give it another pass.
+    """
+
+    def __init__(self, seconds: float, *, stop: Optional[Callable[[], bool]] = None,
+                 clock: Callable[[], float] = time.monotonic):
+        self._clock = clock
+        self._end = clock() + max(0.0, float(seconds))
+        self._stop = stop
+        self._turned_away = False
+
+    @property
+    def turned_away(self) -> bool:
+        """Whether a call has gone unasked or been left behind for want of
+        time. Never reset: a deadline does not come back."""
+        return self._turned_away
+
+    def _stopped(self) -> bool:
+        return self._stop is not None and bool(self._stop())
+
+    def remaining(self) -> float:
+        if self._stopped():
+            return 0.0
+        return max(0.0, self._end - self._clock())
+
+    def spent(self) -> bool:
+        """True once nothing more may be asked. Said once per pass, not once
+        per call it turns away."""
+        if self.remaining() > 0:
+            return False
+        if not self._turned_away:
+            self._turned_away = True
+            why = "a stop was requested" if self._stopped() else "its deadline passed"
+            debug_log(f"graph pass: {why}, nothing more is asked of the model", "memory")
+        return True
+
+
+def _deadline_or_one_chat_timeout(deadline: Optional[GraphDeadline], cfg) -> GraphDeadline:
+    return deadline if deadline is not None else GraphDeadline(_chat_timeout_sec(cfg))
+
+
+# How often a call in flight is checked against the deadline and the stop
+# request: the most a stop waits before the call is left behind.
+_WAIT_SLICE_SEC = 0.2
+
+
+def _ask(deadline: GraphDeadline, what: str, **call) -> Optional[str]:
+    """One model call inside the pass, handed what the deadline has left.
+
+    Waited on here rather than trusted to the HTTP timeout, which bounds
+    the gap between two bytes, not the call: a provider that keeps the
+    connection open would otherwise hold the pass, and shutdown with it. A
+    call left behind runs out on its own thread, and nothing it brings back
+    is read. ``None`` when not asked, left behind or unanswered, which every
+    caller already reads as no answer.
+    """
+    if deadline.spent():
+        return None
+    budget = deadline.remaining()
+    outcome: dict = {}
+
+    def run():
+        try:
+            outcome["answer"] = call_llm_direct(timeout_sec=budget, **call)
+        except Exception as e:
+            outcome["error"] = e
+
+    worker = threading.Thread(target=run, name=f"graph {what}", daemon=True)
+    worker.start()
+    while worker.is_alive():
+        worker.join(min(_WAIT_SLICE_SEC, deadline.remaining()))
+        if worker.is_alive() and deadline.spent():
+            debug_log(f"{what}: left behind, {call['chat_model']} had not answered", "memory")
+            return None
+    if "error" in outcome:
+        raise outcome["error"]
+    answer = outcome.get("answer")
+    if not answer:
+        # Logged apart from what a caller parses as a refusal (the picker's
+        # NONE): a timeout, an error or an empty reply all land here.
+        debug_log(f"{what}: no answer from {call['chat_model']} "
+                  f"(handed {budget:.0f}s)", "memory")
+    return answer
 
 
 # How close a rewritten line must be to a claim we know the source of.
@@ -73,6 +186,16 @@ _REWRITE_MATCH = 85
 
 
 _DIGITS = re.compile(r"\d+")
+
+
+def _redaction_markers(lines) -> Counter:
+    """How many of each redaction marker ``lines`` carry.
+
+    Counted rather than merely detected: a node that already held one
+    marker must not cover a second one the rewrite put where a real value
+    stood.
+    """
+    return Counter(m for line in lines for m in redaction_placeholders(line))
 
 
 def _numbers_are_grounded(cleaned, inputs) -> bool:
@@ -169,7 +292,7 @@ def extract_graph_memories(
     cfg,
     chat_model: str,
     tools_used: Optional[Sequence[str]],
-    timeout_sec: float = 30.0,
+    deadline: Optional[GraphDeadline] = None,
     thinking: bool = False,
     date_utc: Optional[str] = None,
 ) -> list[str]:
@@ -192,6 +315,8 @@ def extract_graph_memories(
             filtering afterwards would still pay for the call and would
             leave the decision to the same judgement that fails on a
             confidently invented statistic. See ``provenance.spec.md``.
+        deadline: The pass this extraction opens; one chat-model timeout
+            from now when it runs on its own.
         date_utc: Optional date string (YYYY-MM-DD) for the diary entry.
             Included as a date prefix on each fact for temporal context.
     """
@@ -297,18 +422,18 @@ def extract_graph_memories(
     # small models flake on the banned-form list (sometimes obeying,
     # sometimes drifting back into meta-narrative or stale-snapshot
     # extraction); temperature=0 lets the prompt do its job consistently.
-    response = call_llm_direct(
+    response = _ask(
+        _deadline_or_one_chat_timeout(deadline, cfg),
+        "graph memory extraction",
         cfg=cfg,
         chat_model=chat_model,
         system_prompt=system_prompt,
         user_content=user_content,
-        timeout_sec=timeout_sec,
         thinking=thinking,
         temperature=0.0,
     )
 
     if not response:
-        debug_log("graph memory extraction: LLM returned no response", "memory")
         return []
 
     debug_log(f"graph memory extraction: got response ({len(response)} chars)", "memory")
@@ -353,13 +478,14 @@ def _llm_pick_best_child(
     children: list[MemoryNode],
     cfg,
     chat_model: str,
-    timeout_sec: float = 15.0,
-    thinking: bool = False,
-    picker_model: Optional[str] = None,
+    deadline: Optional[GraphDeadline] = None,
 ) -> Optional[str]:
-    """Ask the LLM which child node best fits a memory fragment.
+    """Ask the chat model which child node best fits a memory fragment.
 
-    Returns the chosen child's id, or None if none fit well.
+    Returns the chosen child's id, or None if none fit well. The model is
+    never asked to think: the answer is one number, asked again at every
+    level of every fact inside the pass's one deadline, and time spent
+    thinking leaves facts at the branch root.
     """
     if not children:
         return None
@@ -380,20 +506,17 @@ def _llm_pick_best_child(
         f"Categories:\n{options_text}"
     )
 
-    # Picker is a one-digit classification — reuse the small picker_model
-    # when the caller provides one (resolved from intent_judge_model → chat_model).
-    # Falls back to the chat model when no small model is configured.
-    effective_model = picker_model or chat_model
-    response = call_llm_direct(
+    response = _ask(
+        _deadline_or_one_chat_timeout(deadline, cfg),
+        "graph picker",
         cfg=cfg,
-        chat_model=effective_model,
+        chat_model=chat_model,
         system_prompt=system_prompt,
         user_content=user_content,
-        timeout_sec=timeout_sec,
-        thinking=thinking,
     )
 
     if not response:
+        # The fact stays at this level, as on NONE.
         return None
 
     response = response.strip().upper()
@@ -416,9 +539,7 @@ def find_best_node(
     cfg,
     chat_model: str,
     branch_root_id: str,
-    timeout_sec: float = 15.0,
-    thinking: bool = False,
-    picker_model: Optional[str] = None,
+    deadline: Optional[GraphDeadline] = None,
 ) -> str:
     """Find the best node, inside one fixed branch, to store a memory fragment.
 
@@ -430,8 +551,12 @@ def find_best_node(
     respected: a World fact can never end up in another branch because a
     node there happened to be accessed recently.
 
+    The whole descent shares one deadline (one chat-model timeout from now
+    when none is given): once it is spent, the walk stops where it is.
+
     Returns the id of the best node.
     """
+    deadline = _deadline_or_one_chat_timeout(deadline, cfg)
     debug_log(
         f"graph traversal: placing '{fragment[:60]}...' "
         f"(branch={branch_root_id})",
@@ -449,11 +574,14 @@ def find_best_node(
         debug_log(f"graph traversal: depth {depth}, choosing from {[c.name for c in children]}", "memory")
         best = _llm_pick_best_child(
             fragment, children, cfg, chat_model,
-            timeout_sec=timeout_sec, thinking=thinking, picker_model=picker_model,
+            deadline=deadline,
         )
         if best is None:
-            debug_log(f"graph traversal: no children fit at depth {depth}, stopping", "memory")
-            break  # None of the children fit — write to current node
+            if deadline.turned_away:
+                debug_log(f"graph traversal: out of time at depth {depth}, stopping", "memory")
+            else:
+                debug_log(f"graph traversal: no children fit at depth {depth}, stopping", "memory")
+            break  # Write to the current node
         matched = store.get_node(best)
         name = matched.name if matched else best[:8]
         debug_log(f"graph traversal: descended into '{name}'", "memory")
@@ -559,7 +687,7 @@ def _extract_facts_object(response: str) -> Optional[dict]:
             parsed = None
         if isinstance(parsed, dict) and isinstance(parsed.get("facts"), list):
             return parsed
-    # O(n) over the response: at most one `{` per character. Picker
+    # O(n) over the response: at most one `{` per character. Merge
     # responses are bounded (single rewrite, T=0), so this stays cheap.
     for match in re.finditer(r"\{", response):
         try:
@@ -577,9 +705,7 @@ def merge_node_data(
     new_facts: list[str],
     cfg,
     chat_model: str,
-    timeout_sec: float = 20.0,
-    thinking: bool = False,
-    picker_model: Optional[str] = None,
+    deadline: Optional[GraphDeadline] = None,
     node: Optional[MemoryNode] = None,
 ) -> MergeResult:
     """Merge ``new_facts`` into ``node_id``'s data via one LLM rewrite.
@@ -610,6 +736,11 @@ def merge_node_data(
 
     Pass ``node`` if the caller has already fetched it; saves a
     redundant SQLite read on the orchestrator's hot path.
+
+    Like the picker, the rewrite runs on the chat model and never asks it
+    to think: the whole node has to come back inside the pass's deadline
+    (one chat-model timeout from now when none is given), and a rewrite
+    that runs out of time drops every new fact to plain append.
     """
     if node is None:
         node = store.get_node(node_id)
@@ -645,14 +776,13 @@ def merge_node_data(
             f"consolidate / dedupe / prune only):\n{existing}"
         )
 
-    effective_model = picker_model or chat_model
-    response = call_llm_direct(
+    response = _ask(
+        _deadline_or_one_chat_timeout(deadline, cfg),
+        "merge",
         cfg=cfg,
-        chat_model=effective_model,
+        chat_model=chat_model,
         system_prompt=_MERGE_SYSTEM_PROMPT,
         user_content=user_content,
-        timeout_sec=timeout_sec,
-        thinking=thinking,
         temperature=0.0,
     )
 
@@ -701,9 +831,24 @@ def merge_node_data(
         )
         return MergeResult(success=False)
 
+    # A remote model sees the node through the redacting backend, so an
+    # address or a long number on it comes back as a marker. Written
+    # over the node, the value it hid would be gone for good. A marker
+    # the inputs already carried (redacted diary text) may stay; one
+    # more than they carried stands for a value.
+    if _redaction_markers(cleaned) - _redaction_markers(
+        list(existing_lines) + list(sanitised_new)
+    ):
+        debug_log(
+            "merge: rejected rewrite — it carries a redaction marker where "
+            "the node held a real value",
+            "memory",
+        )
+        return MergeResult(success=False)
+
     # Identify which of the new facts actually survived the rewrite.
     # Uses the dedupe primitive's Unicode folding plus a tolerant
-    # trailing-punctuation strip — picker models routinely rephrase
+    # trailing-punctuation strip — models routinely rephrase
     # facts by dropping the trailing full stop ("X." → "X"), and a
     # strict `normalise_fact` match would then under-report every
     # batched flush as "0 stored". A new fact missing from the
@@ -780,7 +925,7 @@ def auto_split_node(
     node_id: str,
     cfg,
     chat_model: str,
-    timeout_sec: float = 45.0,
+    deadline: Optional[GraphDeadline] = None,
     thinking: bool = False,
 ) -> bool:
     """Split a node whose data exceeds SPLIT_THRESHOLD into child nodes.
@@ -790,6 +935,9 @@ def auto_split_node(
     assistant: an answer the user asked for stays however well known
     (graph.spec.md, Auto-Split). The parent node's data is cleared and its
     description updated to a summary.
+    Asked inside the pass's deadline (one chat-model timeout from now when
+    none is given); a split that gets no answer is retried by the next
+    flush that finds the node still too large.
 
     Returns True if the split succeeded.
     """
@@ -805,17 +953,17 @@ def auto_split_node(
         f"Facts to organise:\n{node.data}"
     )
 
-    response = call_llm_direct(
+    response = _ask(
+        _deadline_or_one_chat_timeout(deadline, cfg),
+        "auto-split",
         cfg=cfg,
         chat_model=chat_model,
         system_prompt=_SPLIT_SYSTEM_PROMPT,
         user_content=user_content,
-        timeout_sec=timeout_sec,
         thinking=thinking,
     )
 
     if not response:
-        debug_log("auto-split: LLM returned no response", "memory")
         return False
 
     # Parse JSON from response
@@ -869,15 +1017,32 @@ class GraphUpdateResult(NamedTuple):
     """Result of a graph update pass.
 
     ``stored`` lists newly-appended facts so the CLI can show *what* was
-    learned. ``skipped`` counts facts the picker routed to a node that
-    already contained them. It lets callers print a status line on every
-    flush, even when the cumulative diary re-extraction produces only
-    duplicates, so the "knowledge graph: learned N facts" log does not
-    go silent.
+    learned. ``skipped`` counts facts the World branch already held. It
+    lets callers print a status line on every flush, even when the
+    cumulative diary re-extraction produces only duplicates, so the
+    "knowledge graph: learned N facts" log does not go silent.
+    ``unread`` says the deadline was spent before the extraction
+    answered, so the summary was never read: nothing was learned, and
+    not because there was nothing to learn.
     """
 
     stored: "list[tuple[str, str]]"
     skipped: int
+    unread: bool = False
+
+
+def _fact_homes(store: GraphMemoryStore, branch_root_id: str) -> dict[str, str]:
+    """Every fact a branch holds, by ``fact_key``, with the name of the node
+    it is on. One read of the subtree, no model."""
+    homes: dict[str, str] = {}
+    for node_id, lines in _walk_branch_nodes(store, branch_root_id):
+        node = store.get_node(node_id)
+        name = node.name if node else node_id[:8]
+        for line in lines:
+            key = fact_key(line)
+            if key:
+                homes.setdefault(key, name)
+    return homes
 
 
 def update_graph_from_dialogue(
@@ -886,100 +1051,102 @@ def update_graph_from_dialogue(
     cfg,
     chat_model: str,
     tools_used: Optional[Sequence[str]],
-    timeout_sec: float = 30.0,
+    deadline: Optional[GraphDeadline] = None,
     thinking: bool = False,
     date_utc: Optional[str] = None,
-    picker_model: Optional[str] = None,
 ) -> GraphUpdateResult:
     """End-to-end: extract memories from a summary, place each in the best
     node, and trigger auto-split if needed.
 
     Args:
+        deadline: When the whole pass has to be over, shared by every call
+            in it (see ``GraphDeadline``). One chat-model timeout from now
+            when none is given.
         date_utc: Optional date string (YYYY-MM-DD) for the diary entry.
             Passed to extraction to help distinguish daily events from enduring facts.
 
     Returns a ``GraphUpdateResult`` with a ``stored`` list of
-    ``(fact, node_name)`` tuples for each newly-appended fact and a
-    ``skipped`` count of duplicates the picker landed on. Callers read
-    ``result.stored`` / ``result.skipped`` (or destructure the tuple);
-    the result is not a list.
+    ``(fact, node_name)`` tuples for each newly-appended fact, a
+    ``skipped`` count of facts the World branch already held, and
+    ``unread`` when the deadline was spent before the summary was read.
+    Callers read the fields by name; the result is not a list.
     """
+    deadline = _deadline_or_one_chat_timeout(deadline, cfg)
+
     # Step 1: Extract discrete branch-tagged facts from the summary
     facts = extract_graph_memories(
         summary=summary,
         cfg=cfg,
         chat_model=chat_model,
         tools_used=tools_used,
-        timeout_sec=timeout_sec,
+        deadline=deadline,
         thinking=thinking,
         date_utc=date_utc,
     )
 
     if not facts:
+        if deadline.turned_away:
+            # Not an empty answer: the summary was never read. The caller
+            # can tell the two apart through ``unread``.
+            debug_log("graph update: the summary was not read, the pass had no time left", "memory")
+            return GraphUpdateResult(stored=[], skipped=0, unread=True)
         debug_log("graph update: no facts extracted from summary", "memory")
         return GraphUpdateResult(stored=[], skipped=0)
 
     debug_log(f"graph update: placing {len(facts)} facts into knowledge graph", "memory")
 
-    # Step 2: Place — resolve the destination node for every fact up
-    # front, applying the cheap exact-match dedupe fast-path along the
-    # way. Then group surviving facts by node so the merge step below
-    # rewrites each node at most once per flush instead of once per
-    # fact. Without batching, a 5-fact flush against a populated User
-    # node fires 5 small-model rewrites of the same `data`; with
-    # batching, it's one rewrite that incorporates all five.
-    pending: list[tuple[str, str]] = []  # (fact, node_id)
-    seen_keys_per_node: dict[str, set[str]] = {}
+    # Step 2: Exact-match dedupe (fast-path, no LLM) against every line the
+    # World branch already holds, before anything is placed. The daily
+    # summary is cumulative, so each flush extracts again what earlier
+    # flushes filed; sent down the picker first, those facts would spend
+    # the pass's deadline and leave the new ones to land at the root.
+    # Re-extractions are not fresh learning: they are not reported as
+    # stored and do not touch the access score, but they are counted so
+    # callers can log "nothing new (N duplicates skipped)".
+    known = _fact_homes(store, BRANCH_WORLD)
+    fresh: list[str] = []
+    seen: set[str] = set()
     skipped = 0
     for fact in facts:
-        try:
-            node_id = find_best_node(
-                store=store,
-                fragment=fact,
-                cfg=cfg,
-                chat_model=chat_model,
-                timeout_sec=15.0,
-                thinking=thinking,
-                picker_model=picker_model,
-                branch_root_id=BRANCH_WORLD,
-            )
-        except Exception as e:
-            debug_log(f"graph update: traversal failed for '{fact[:50]}...' — {e}", "memory")
-            continue
-
-        # Exact-match dedupe (fast-path, no LLM): skip facts already
-        # stored verbatim on the chosen node. Cumulative daily summaries
-        # re-extract the same facts on every flush; the SQL-only check
-        # short-circuits the merge LLM call for the most common no-op
-        # case. Re-extractions are not fresh learning — we don't report
-        # them as newly stored and we don't touch the access score.
-        # Skips are still counted so callers can log "nothing new (N
-        # duplicates skipped)" on all-duplicate flushes.
-        if store.node_contains_fact(node_id, fact):
-            target = store.get_node(node_id)
-            target_name = target.name if target else node_id[:8]
+        key = fact_key(fact)
+        if key and key in known:
             skipped += 1
             debug_log(
-                f"graph update: skipped duplicate '{fact[:50]}...' → "
-                f"'{target_name}'",
+                f"graph update: skipped duplicate '{fact[:50]}...' → '{known[key]}'",
                 "memory",
             )
             continue
-
-        # Within a single flush, two extractor outputs that fold to the
-        # same key should also dedupe against each other before reaching
-        # the merge step.
-        key = normalise_fact(fact)
-        node_keys = seen_keys_per_node.setdefault(node_id, set())
-        if key and key in node_keys:
+        # Two extractor outputs that fold to the same key are one fact.
+        if key and key in seen:
             debug_log(
                 f"graph update: skipped intra-flush duplicate '{fact[:50]}...'",
                 "memory",
             )
             continue
         if key:
-            node_keys.add(key)
+            seen.add(key)
+        fresh.append(fact)
 
+    # Step 3: Place — resolve the destination node for every new fact up
+    # front, then group them by node so the merge step below rewrites
+    # each node at most once per flush instead of once per fact. Without
+    # batching, a 5-fact flush against a populated node fires 5 rewrites
+    # of the same `data`; with batching, it's one rewrite that
+    # incorporates all five.
+    pending: list[tuple[str, str]] = []  # (fact, node_id)
+    for fact in fresh:
+        try:
+            node_id = find_best_node(
+                store=store,
+                fragment=fact,
+                cfg=cfg,
+                chat_model=chat_model,
+                branch_root_id=BRANCH_WORLD,
+                deadline=deadline,
+            )
+        except Exception as e:
+            debug_log(f"graph update: traversal failed for '{fact[:50]}...' — {e}", "memory")
+            continue
         pending.append((fact, node_id))
 
     if not pending:
@@ -1011,7 +1178,7 @@ def update_graph_from_dialogue(
         sources.update(_source_index(
             fact_line(f, source, date_utc) for f in node_facts))
 
-        # Step 3: Merge — combine the existing node data with all
+        # Step 4: Merge — combine the existing node data with all
         # queued new facts in a single LLM rewrite. Subsumes
         # supersession (contradictions drop the old line),
         # near-duplicate dedupe (different wordings collapse), and
@@ -1033,9 +1200,7 @@ def update_graph_from_dialogue(
                 new_facts=node_facts,
                 cfg=cfg,
                 chat_model=chat_model,
-                timeout_sec=20.0,
-                thinking=thinking,
-                picker_model=picker_model,
+                deadline=deadline,
                 node=node,
             )
         except Exception as e:
@@ -1089,7 +1254,7 @@ def update_graph_from_dialogue(
 
         store.touch_node(node_id)
 
-        # Step 4: Auto-split if the node has grown too large.
+        # Step 5: Auto-split if the node has grown too large.
         refreshed = store.get_node(node_id)
         if refreshed is not None and refreshed.data_token_count > SPLIT_THRESHOLD:
             debug_log(
@@ -1102,7 +1267,7 @@ def update_graph_from_dialogue(
                     node_id=node_id,
                     cfg=cfg,
                     chat_model=chat_model,
-                    timeout_sec=45.0,
+                    deadline=deadline,
                     thinking=thinking,
                 )
             except Exception as e:
@@ -1120,9 +1285,6 @@ def consolidate_all_populated_nodes(
     store: GraphMemoryStore,
     cfg,
     chat_model: str,
-    timeout_sec: float = 20.0,
-    thinking: bool = False,
-    picker_model: Optional[str] = None,
 ) -> "Iterator[tuple[str, int, int]]":
     """One-shot self-consolidation across every populated node.
 
@@ -1141,6 +1303,10 @@ def consolidate_all_populated_nodes(
     can surface per-node feedback in real time on graphs with many
     nodes. Fail-open: a node that fails to merge is left untouched
     and reported with ``lines_after == lines_before``.
+
+    Each node gets one chat-model timeout of its own. The sweep is asked
+    for and streams its progress, so it is bounded per node rather than as
+    a whole.
     """
     # Snapshot all nodes up front so a rewrite mid-walk doesn't
     # cause us to revisit or skip nodes.
@@ -1156,9 +1322,6 @@ def consolidate_all_populated_nodes(
                 new_facts=[],
                 cfg=cfg,
                 chat_model=chat_model,
-                timeout_sec=timeout_sec,
-                thinking=thinking,
-                picker_model=picker_model,
                 node=node,
             )
         except Exception as e:

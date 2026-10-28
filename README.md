@@ -168,7 +168,7 @@ Jarvis starts listening automatically — just say "Jarvis" and talk!
 - **Smart Tool Selection** - Embedding-based relevance filtering picks only the tools needed per query — add unlimited MCP tools without performance degradation
 - **Built-in Tools** - Screenshot OCR, web search (DuckDuckGo → Brave → Wikipedia fallback chain with auto-fetch), weather, time & timezones, file access, nutrition tracking, location awareness, remembering things you ask it to, handing a project to Claude Code (and stopping it), plus a tool-discovery escape hatch the agent uses to widen its own toolset mid-reply
 - **Memory You Can Read** - Say "remember that…" or correct a mistake, and it goes into two plain Markdown files you can open, edit, and back up. Nothing is written by inference: only what you actually said, dated and attributed, and a correction strikes the old line through instead of erasing it
-- **Reminders That Survive a Restart** - "Remind me in twenty minutes to take the dish out", "on Thursday, remind me to call the accountant". Says the time back so you can catch a misheard day in the same turn, in any language. A laptop shut through the due time still gets told — late, and saying how late. See and cancel them in the Memory Viewer, and switch the whole thing off under **⚙️ Settings → ⏰ Rappels**. Set `reminder_model` to a local model there if you want the sentence you dictated kept off the network
+- **Reminders That Survive a Restart** - "Remind me in twenty minutes to take the dish out", "on Thursday, remind me to call the accountant". Says the time back so you can catch a misheard day in the same turn, in any language. A laptop shut through the due time still gets told — late, and saying how late. See and cancel them in the Memory Viewer, and switch the whole thing off under **⚙️ Settings → ⏰ Rappels**. Set `reminder_model` to a local model there if you want the sentence you dictated kept on your own machine or network: an Ollama tag runs on Ollama, and with LM Studio or `llama-server` as your provider, one of its model IDs runs there
 - **It Proposes, You Decide** - Ask what it has noticed about you and it reads your own diary for things you never said outright, then writes each one as a question in `yuba/appris.md`. Nothing there is a belief: no reply ever reads that file, and a proposal sitting in it for six months changes nothing. Tick a box and it moves into your profile marked `confirmé`; cross a line out and it is never offered again. You can rewrite the sentence before agreeing to it, which is the point: what gets saved is your wording, not its guess. Only ever runs when you ask, never on a schedule and never while you sleep. There is an Appris tab in the Memory Viewer too, where a click lands straight away instead of waiting for your next question
 - **Goals It Keeps Track Of** - "I'm preparing for an interview at Datadog, done when I have their answer." It goes into `yuba/objectifs.md`, another plain file you own, and one line per open goal sits in its context so it recognises the subject when it comes up weeks later. Progress is whatever you tell it, dated and attributed to you; it never writes down what it inferred on its own. It can say a goal *might* be finished and ask, and it cannot say it *is*. Closing one is your word, never its conclusion. A goal is something it remembers and brings up, not something it runs: no schedule, no tools, nothing happens unattended. See them in the Objectifs tab
 - **Routines That Run While You Sleep** - "Every morning at 7, summarise my mail." Creating one asks your permission first, because it is a standing grant rather than a single action, and she reads the tool names back so you can narrow them on the spot. Each routine gets its own envelope of tools, written in a Markdown file you own: it can only ever read, only inside that envelope, and only tools you already let it run freely. Delete the block and the routine is suspended; an empty tool list means nothing, never everything. Every morning writes a dated page in `yuba/journal/`, including what it was stopped from reaching and why, and a routine that produces nothing several runs running stops itself and says so. Stop one by asking, or from the Routines tab
@@ -257,7 +257,7 @@ The task and whatever files Claude Code reads go to Anthropic, under your Claude
 </details>
 
 <details>
-<summary><strong>LLM Provider (Ollama or OpenAI-compatible)</strong></summary>
+<summary><strong>LLM Provider (Ollama, OpenAI-compatible or Anthropic)</strong></summary>
 
 By default Jarvis runs everything locally through [Ollama](https://ollama.com): no API keys, nothing leaves your machine. If you already run an OpenAI-compatible server (**LM Studio**, **oMLX**, **llama.cpp**'s `llama-server`, **vLLM**, **LocalAI**, …) you can point Jarvis at it instead. Your data still only travels to the servers you control.
 
@@ -286,6 +286,23 @@ Pick the provider in the Setup Wizard's first step, or under **⚙️ Settings �
 ```
 
 Leave `embedding_provider` empty to use the same provider as chat. When no embedding model is available, memory search degrades gracefully to keyword search.
+
+**Anthropic (Claude API, remote).** `llm_provider: "anthropic"` talks to Anthropic's own API directly with your key, one intermediary fewer than a router like OpenRouter. Unlike everything above, **your conversations then leave your machine** for Anthropic's servers. Set it under **⚙️ Settings → 🔌 LLM Provider** (the Setup Wizard does not offer it):
+
+```json
+{
+  "llm_provider": "anthropic",
+  "llm_api_key_env": "YUBA_ANTHROPIC_KEY",
+  "llm_chat_model": "claude-haiku-5-5",
+  "intent_judge_model": "claude-haiku-5-5"
+}
+```
+
+- `llm_api_key_env`: the name of an environment variable holding your key, so the key never sits in `config.json`. Use a name of your own: if you also hand projects to Claude Code, an `ANTHROPIC_API_KEY` variable would make Claude Code bill the API instead of your subscription.
+- Model names are Claude model IDs (`claude-haiku-5-5`, `claude-sonnet-5-5`, …). Any other name (`qwen2.5:3b`) runs on your local Ollama, so you can keep the small roles local; startup tells you which `ollama pull` they need.
+- Switching provider leaves the key fields shared: an Anthropic key is never sent to another provider, and another provider's key is never sent to Anthropic. Jarvis says so and sends nothing until the right key is set.
+- Embeddings stay on Ollama: Anthropic has none.
+- Reasoning is off for every role unless you turn on its thinking setting (Chat Thinking Mode, Intent Judge Thinking Mode).
 
 </details>
 
@@ -347,6 +364,7 @@ The settings are under **⚙️ Settings → 🔧 Advanced**:
 | Small | `small.en` | `small` | ~465 MB | ~2 GB | ~4x |
 | **Medium** | `medium.en` | `medium` | ~1.5 GB | ~5 GB | ~2x |
 | Large V3 Turbo | - | `large-v3-turbo` | ~1.5 GB | ~6 GB | ~8x |
+| Large V3 | - | `large-v3` | ~3 GB | ~10 GB | 1x |
 
 Speed is relative to the original large model. [Source](https://github.com/openai/whisper)
 
@@ -372,7 +390,7 @@ Both thresholds are exposed in the Settings window under *Whisper*.
 
 **LLM Intent Judge** - Jarvis uses `gemma4:e2b` for intelligent voice intent classification (echo detection, query extraction, stop commands). This model is automatically installed alongside your chosen chat model during setup. The intent judge cannot be disabled but gracefully falls back to simpler text matching if Ollama is unavailable.
 
-**Tool Router** - When `"tool_selection_strategy": "llm"` (the default), Jarvis asks a small LLM to pick which tools are relevant for each query, shrinking the tool catalogue the chat model sees. By default this routing call reuses the intent-judge model: it's already warm and small enough not to stall the turn. Override with `"tool_router_model": "<name>"` to dedicate a different model to routing. The routing call (and the memory-lookup call that rides the same model) stops waiting after `"tool_router_timeout_sec"` (15 s by default) of silence from the server, and routing then falls back to keyword matching for that turn, so a provider that goes quiet cannot hold the reply for minutes. Lower it if your router model normally answers in a second or two, but keep it above about three times the slower of the two calls, because the memory lookup shares it. Raise it if you pin a large local model for routing, or turn on low-power mode (which skips the warm-up, so the first call has to load the model). Other strategies: `"keyword"` (fast, no LLM), `"embedding"` (nomic-embed-text), `"all"` (no filtering).
+**Tool Router** - When `"tool_selection_strategy": "llm"` (the default), Jarvis asks a small LLM to pick which tools are relevant for each query, shrinking the tool catalogue the chat model sees. By default this routing call reuses the intent-judge model: it's already warm and small enough not to stall the turn. Override with `"tool_router_model": "<name>"` to dedicate a different model to routing. The memory lookup, which reads each question for keywords and dates ("last Thursday"), rides the same model unless `"memory_extractor_model"` names its own (also under **⚙️ Settings → 🧠 Memory & Dialogue**). Small models misread dates, so a stronger model helps there; a name your provider serves (`vendor/model`, or a Claude model ID on Anthropic) sends the question to it. The routing call (and the memory lookup) stops waiting after `"tool_router_timeout_sec"` (15 s by default) of silence from the server, and routing then falls back to keyword matching for that turn, so a provider that goes quiet cannot hold the reply for minutes. Lower it if your router model normally answers in a second or two, but keep it above about three times the slower of the two calls, because the memory lookup shares it. Raise it if you pin a large local model for routing, or turn on low-power mode (which skips the warm-up, so the first call has to load the model). Other strategies: `"keyword"` (fast, no LLM), `"embedding"` (nomic-embed-text), `"all"` (no filtering).
 
 **Task-list Planner** - Before the agentic loop, Jarvis runs a short planning pass that decomposes multi-step queries into an ordered list of sub-tasks. For small models (`gemma4:e2b` class), each planned step is directly resolved to a concrete tool call without relying on the chat model to re-plan turn-by-turn. This significantly improves multi-step reliability. Config options:
 
@@ -668,7 +686,7 @@ Get API key at [composio.dev](https://composio.dev)
 
 **First startup takes a bit** - Jarvis pre-warms the Whisper, chat, and intent-judge models before announcing "Listening!" so the first engagement feels instant. This adds a few seconds on cold start and is bounded at 60 s. If Ollama is slow, Jarvis will start listening anyway and load the models on demand. Enable **Low Power Mode** in Settings to skip LLM startup warmup.
 
-**First startup downloads the speech model** - On the very first launch Jarvis downloads the Whisper model (up to ~1.5 GB depending on the chosen size) and shows progress lines (`⬇️ Downloading … X/Y MB · rate`) in the log. A slow connection keeps printing progress as long as data flows. An interrupted download resumes where it stopped on the next launch.
+**First startup downloads the speech model** - On the very first launch Jarvis downloads the Whisper model (up to ~3 GB depending on the chosen size) and shows progress lines (`⬇️ Downloading … X/Y MB · rate`) in the log. A slow connection keeps printing progress as long as data flows. An interrupted download resumes where it stopped on the next launch.
 
 **Jarvis doesn't hear me** - Check microphone permissions, speak clearly after "Jarvis"
 
@@ -765,7 +783,8 @@ provider can't run out the voice-assistant latency budget.
 - **Local storage** - Everything in `~/.local/share/jarvis`
 - **No record of what it read** - The action log has no column for tool output, structurally. A log that kept results would accumulate the contents of every page fetched and every file opened, somewhere you read casually
 - **No record of what you said in the timing log** - The latency journal has no free-text column either: durations, counts and model names only
-- **One exception, off by default** - Handing a project to Claude Code sends the task and the code it reads to Anthropic. Nothing reaches it until you name a projects folder (`claude_code_projects_dir`)
+- **A cloud model only if you pick one** - With the default Ollama nothing leaves your machine. Choosing a hosted provider (an OpenAI-compatible endpoint such as OpenRouter, or Anthropic) sends your conversations there, after auto-redaction; small roles you pin to a local model stay local
+- **Claude Code, off by default** - Handing a project to Claude Code sends the task and the code it reads to Anthropic. Nothing reaches it until you name a projects folder (`claude_code_projects_dir`)
 - **Permissions are yours to set** - `~/.local/share/jarvis/yuba/outils.md` lists your own tools by name, in three sections you move lines between. Written once, never rewritten. A tool that appears later falls back to the risk it declares, so a read runs and anything else asks
 
 ## License

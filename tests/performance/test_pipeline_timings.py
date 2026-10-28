@@ -86,6 +86,7 @@ def _make_cfg():
     # MockConfig doesn't set this attribute, and the engine's default varies.
     cfg.tool_selection_strategy = "llm"
     cfg.tool_router_model = ""  # fall through the router chain
+    cfg.memory_extractor_model = ""  # the extractor rides that chain
     return cfg
 
 
@@ -172,7 +173,8 @@ def test_pipeline_timings_by_context():
       1. The tool router, if it fires, must be cheaper than a main chat
          turn on p50 — it's a classification call on the warm small model.
       2. Enrichment extractor, if it fires, must run on the router chain
-         (same model as the router).
+         (same model as the router) while `memory_extractor_model` is
+         empty, as it is here.
     """
     from jarvis.memory.db import Database
     from jarvis.memory.conversation import DialogueMemory

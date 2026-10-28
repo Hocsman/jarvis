@@ -85,6 +85,12 @@ def normalise_fact(text: str) -> str:
     return _WS_RE.sub(" ", folded.strip())
 
 
+def fact_key(line: str) -> str:
+    """What two lines must share to be the same fact: the claim without its
+    provenance suffix, under ``normalise_fact`` folding."""
+    return normalise_fact(fact_text(line))
+
+
 def fold_for_search(text: str) -> str:
     """Strip diacritics and case so a search matches across spellings.
 
@@ -655,13 +661,10 @@ class GraphMemoryStore:
         # append a copy once per flush, for ever. It also lets a fact
         # written before provenance existed dedupe against its own
         # re-extraction. See ``provenance.spec.md``.
-        target = normalise_fact(fact_text(fact))
+        target = fact_key(fact)
         if not target:
             return False
-        for line in node.data.split("\n"):
-            if normalise_fact(fact_text(line)) == target:
-                return True
-        return False
+        return any(fact_key(line) == target for line in node.data.split("\n"))
 
     def append_to_node(self, node_id: str, text: str) -> bool:
         """Append text to a node's data field.
