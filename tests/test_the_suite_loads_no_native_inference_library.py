@@ -20,19 +20,14 @@ import dataclasses
 import importlib
 import importlib.machinery
 import importlib.util
-import os
-import subprocess
 import sys
-import textwrap
 import types
-import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-TESTS_DIR = Path(__file__).resolve().parent
-SRC_DIR = TESTS_DIR.parent / "src"
+import inner_session
 
 
 def test_the_guard_is_armed_for_every_test_in_this_suite(request):
@@ -182,43 +177,15 @@ def test_speaking_through_a_mock_voice_loads_no_inference_runtime(monkeypatch):
 """
 
 
-def _run_inner_session(tmp_path: Path):
-    (tmp_path / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
-    (tmp_path / "conftest.py").write_text(textwrap.dedent(INNER_CONFTEST), encoding="utf-8")
-    (tmp_path / "test_inner.py").write_text(textwrap.dedent(INNER_TESTS), encoding="utf-8")
-    report = tmp_path / "report.xml"
-    env = {
-        **os.environ,
-        "PYTHONPATH": os.pathsep.join([str(TESTS_DIR), str(SRC_DIR)]),
-        "PYTHONDONTWRITEBYTECODE": "1",
-    }
-    session = subprocess.run(
-        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-q",
-         f"--junitxml={report}", "test_inner.py"],
-        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=180,
-    )
-    # A session that could not start (a conftest that fails to import, a crash
-    # while loading) writes no report. Say what the process said instead of
-    # failing later on a missing file.
-    assert report.exists(), (
-        f"the inner pytest session wrote no report (exit code {session.returncode})\n"
-        f"--- stdout ---\n{session.stdout}\n--- stderr ---\n{session.stderr}"
-    )
-    outcomes = {}
-    for case in ET.parse(report).getroot().iter("testcase"):
-        failures = [child for child in case if child.tag in ("error", "failure")]
-        outcomes[case.get("name")] = "\n".join(
-            (failure.get("message") or "") + (failure.text or "") for failure in failures
-        )
-    return outcomes
-
-
 class TestTheGuardEndToEnd:
     @pytest.fixture(scope="class")
     def inner(self, tmp_path_factory):
-        return _run_inner_session(tmp_path_factory.mktemp("inner_session"))
+        return inner_session.run(
+            tmp_path_factory.mktemp("inner_session"),
+            conftest=INNER_CONFTEST,
+            tests=INNER_TESTS,
+        )
 
     def test_speaking_through_a_mock_voice_loads_no_inference_runtime(self, inner):
-        name = "test_speaking_through_a_mock_voice_loads_no_inference_runtime"
-        assert name in inner, f"the inner session reported {sorted(inner)}, not {name}"
-        assert inner[name] == "", inner[name]
+        outcome = inner["test_speaking_through_a_mock_voice_loads_no_inference_runtime"]
+        assert outcome == "", outcome

@@ -255,7 +255,6 @@ class TestMergeSupersession:
             new_facts=[new_line],
             cfg=mock_config,
             chat_model=JUDGE_MODEL,
-            timeout_sec=30.0,
         )
 
         updated = graph_store.get_node(node.id)

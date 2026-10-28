@@ -10,7 +10,7 @@ files the fact at the branch root where nothing will look for it.
 Each test lets only the chat model answer: a call sent anywhere else gets
 nothing back, so a fact placed or merged by another model never reaches
 the Cinema node. Neither call asks the model to think: a picker or merge
-that did would spend its short fixed budget thinking and get nothing back.
+that did would spend the pass's deadline thinking and get nothing back.
 
 See src/jarvis/memory/graph.spec.md, "Traverse" and "Merge", and
 docs/llm_contexts.md, #11 and #11b.
