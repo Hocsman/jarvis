@@ -1726,7 +1726,11 @@ class JarvisSystemTray:
         # bundled mode only the dashboard needs one (see _submit_dashboard_bundled).
         self.dashboard_window = None
         self._dashboard_submit_fn = None
-        self._daemon_stop_expected = False
+        # True for the whole of stop_daemon. The stop keeps the event loop
+        # turning while it waits for the diary, so clicks, the status timer
+        # and the thread's finished signal all arrive during it; while this
+        # is set none of them starts, stops or marks the daemon down.
+        self._daemon_stopping = False
 
         self._wire_chat_signals()
 
@@ -2034,6 +2038,13 @@ class JarvisSystemTray:
         from desktop_app.setup_wizard import SetupWizard
         from PyQt6.QtWidgets import QWizard
 
+        # The wizard stops and restarts the daemon around itself; with a
+        # stop already in progress its restart would fight that stop. The
+        # tray entry is disabled meanwhile, this covers any other caller.
+        if self._daemon_stopping:
+            debug_log("setup wizard refused: a stop is in progress", "desktop")
+            return
+
         # Remember if daemon was running before wizard
         was_listening = self.is_listening
 
@@ -2061,6 +2072,19 @@ class JarvisSystemTray:
 
         dialog = SettingsWindow()
         result = dialog.exec()
+
+        # Saved while a stop is in progress (Settings stays reachable during
+        # it, from the tray and from the dashboard's gear): she is going
+        # down anyway and reads the new settings at her next start.
+        if result == QDialog.DialogCode.Accepted and self._daemon_stopping:
+            debug_log("settings saved during a stop: no restart offered", "desktop")
+            note = QMessageBox()
+            note.setIcon(QMessageBox.Icon.Information)
+            note.setWindowTitle("⏳ Stopping")
+            note.setText("Settings saved. Jarvis is stopping; they apply the next time she starts.")
+            note.setStyleSheet(JARVIS_THEME_STYLESHEET)
+            note.exec()
+            return
 
         # If settings were saved and daemon is running, offer to restart
         if result == QDialog.DialogCode.Accepted and self.is_listening:
@@ -2676,6 +2700,29 @@ class JarvisSystemTray:
 
         self.tray_icon.setIcon(icon)
 
+    def _refresh_daemon_actions(self) -> None:
+        """Bring the tray's daemon entries and status line in line with the
+        daemon: listening, stopped, or a stop in progress.
+
+        During a stop the toggle says so and, like the quick stop and the
+        setup wizard, cannot be clicked: each would start or stop her
+        inside the stop.
+        """
+        stopping = self._daemon_stopping
+        if stopping:
+            self.toggle_action.setText("⏳ Stopping…")
+            self.status_action.setText("🟠 Status: Stopping…")
+        elif self.is_listening:
+            self.toggle_action.setText("⏸️ Stop Listening")
+            self.status_action.setText("🟢 Status: Listening")
+        else:
+            self.toggle_action.setText("▶️ Start Listening")
+            self.status_action.setText("⚪ Status: Stopped")
+        self.toggle_action.setEnabled(not stopping)
+        self.quick_stop_action.setEnabled(self.is_listening and not stopping)
+        self.setup_wizard_action.setEnabled(not stopping)
+        self.update_icon()
+
     def toggle_listening(self) -> None:
         """Toggle the Jarvis daemon on/off."""
         if self.is_listening:
@@ -2692,7 +2739,11 @@ class JarvisSystemTray:
 
     def start_daemon(self) -> None:
         """Start the Jarvis daemon."""
-        self._daemon_stop_expected = False
+        # A daemon started inside a stop is one that stop then kills
+        # (subprocess) or forgets while it runs (bundled).
+        if self._daemon_stopping:
+            debug_log("start refused: a stop is in progress", "desktop")
+            return
         self._set_chat_daemon_status("starting")
         try:
             if self.is_bundled:
@@ -2874,11 +2925,7 @@ class JarvisSystemTray:
                 self.log_signals.new_log.emit("🚀 Jarvis daemon started\n")
 
             self.is_listening = True
-            self.toggle_action.setText("⏸️ Stop Listening")
-            if hasattr(self, "quick_stop_action"):
-                self.quick_stop_action.setEnabled(True)
-            self.status_action.setText("🟢 Status: Listening")
-            self.update_icon()
+            self._refresh_daemon_actions()
             self._set_chat_daemon_status("running")
 
             # The log viewer is a debug surface, available on demand via
@@ -2912,19 +2959,19 @@ class JarvisSystemTray:
             )
 
     def _on_daemon_finished(self) -> None:
-        """Called when daemon thread finishes."""
+        """Called when the daemon thread ends without a stop asking it to.
+
+        During a stop the thread ending is what the stop waits for, and the
+        stop does the rest.
+        """
+        if self._daemon_stopping:
+            return
         if self.is_listening:
-            status = "stopped" if self._daemon_stop_expected else "crashed"
             self.is_listening = False
             self._clear_chat_hooks()
-            self.toggle_action.setText("▶️ Start Listening")
-            if hasattr(self, "quick_stop_action"):
-                self.quick_stop_action.setEnabled(False)
-            self.status_action.setText("⚪ Status: Stopped")
-            self.update_icon()
+            self._refresh_daemon_actions()
             self.daemon_thread = None
-            self._set_chat_daemon_status(status)
-            self._daemon_stop_expected = False
+            self._set_chat_daemon_status("crashed")
             # Reset face to asleep so it doesn't look ready while daemon is down
             get_jarvis_state().set_state(JarvisState.ASLEEP)
 
@@ -2989,10 +3036,18 @@ class JarvisSystemTray:
     ) -> None:
         """Stop the Jarvis daemon.
 
+        One stop at a time: the wait below turns the event loop, so a click
+        can ask for another stop or a start while it runs, and both are
+        refused until it returns.
+
         Args:
             show_diary_dialog: If True (and bundled), shows a dialog with live diary update progress.
             skip_diary_update: If True, skips the final shutdown diary LLM pass.
         """
+        if self._daemon_stopping:
+            debug_log("stop refused: a stop is already in progress", "desktop")
+            return
+
         # Timeout must be longer than SHUTDOWN_DIARY_TIMEOUT_SEC (45s) in daemon.py,
         # the final diary pass's budget, to let it complete before force-killing
         shutdown_wait_timeout_sec = 60
@@ -3006,8 +3061,9 @@ class JarvisSystemTray:
             "desktop",
         )
 
+        self._daemon_stopping = True
         try:
-            self._daemon_stop_expected = True
+            self._refresh_daemon_actions()
             self._set_chat_daemon_status("stopping")
             if self.is_bundled and self.daemon_thread:
                 # When running in a QThread, use the stop flag for graceful shutdown
@@ -3234,14 +3290,10 @@ class JarvisSystemTray:
                 self.daemon_process = None
                 self._clear_chat_hooks()
 
-            self._daemon_stop_expected = False
             self.is_listening = False
-            self.toggle_action.setText("▶️ Start Listening")
-            if hasattr(self, "quick_stop_action"):
-                self.quick_stop_action.setEnabled(False)
-            self.status_action.setText("⚪ Status: Stopped")
-            self.update_icon()
             self._set_chat_daemon_status("stopped")
+            # Reset face to asleep so it doesn't look ready while daemon is down
+            get_jarvis_state().set_state(JarvisState.ASLEEP)
 
             self.tray_icon.showMessage(
                 "Jarvis Stopped",
@@ -3254,16 +3306,20 @@ class JarvisSystemTray:
             debug_log("daemon stopped from desktop app", "desktop")
 
         except Exception as e:
-            self._daemon_stop_expected = False
             debug_log(f"failed to stop daemon: {e}", "desktop")
             self.log_signals.new_log.emit(f"❌ Failed to stop: {str(e)}\n")
         finally:
+            self._daemon_stopping = False
+            self._refresh_daemon_actions()
             # Ensure dialog is closed
             if diary_dialog:
                 diary_dialog.close()
 
     def check_daemon_status(self) -> None:
         """Check if the daemon process/thread is still running."""
+        # A daemon that ends during a stop is the stop's to report.
+        if self._daemon_stopping:
+            return
         if self.is_bundled and self.daemon_thread:
             # Check if QThread is still running
             if self.daemon_thread.isFinished() and self.is_listening:
@@ -3285,11 +3341,7 @@ class JarvisSystemTray:
                 self._clear_chat_hooks()
                 if self.is_listening:
                     self.is_listening = False
-                    self.toggle_action.setText("▶️ Start Listening")
-                    if hasattr(self, "quick_stop_action"):
-                        self.quick_stop_action.setEnabled(False)
-                    self.status_action.setText("⚪ Status: Stopped")
-                    self.update_icon()
+                    self._refresh_daemon_actions()
                     self._set_chat_daemon_status("crashed")
 
                     self.tray_icon.showMessage(

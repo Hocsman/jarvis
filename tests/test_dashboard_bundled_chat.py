@@ -186,7 +186,7 @@ def tray(qapp, monkeypatch):
     t.is_listening = False
     t.daemon_process = None
     t.daemon_thread = None
-    t._daemon_stop_expected = False
+    t._daemon_stopping = False
     t.chat_window = None
     t.dashboard_window = None
     t._chat_submit_fn = None
@@ -198,6 +198,7 @@ def tray(qapp, monkeypatch):
     t.tray_icon = MagicMock()
     t.toggle_action = MagicMock()
     t.quick_stop_action = MagicMock()
+    t.setup_wizard_action = MagicMock()
     t.status_action = MagicMock()
     t._confirm_signals = MagicMock()
     t.update_icon = lambda: None
