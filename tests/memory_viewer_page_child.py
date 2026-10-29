@@ -5,11 +5,13 @@
 so the real web view and the page it installs, with ``start_server``
 replaced: the real memory server never starts. One window is told the
 server failed and shows its error page. Another is pointed at a server
-this script runs on loopback, serving pages it wrote itself, and from
-there a link and a redirect try to reach another loopback address the
-guard does not name: refused, they load nothing, and followed they would
-still stay on this machine. Every remote address is a decision asked of
-the page without loading anything, so nothing leaves the machine.
+this script runs on 127.0.0.1, serving pages it wrote itself. From there
+a link, a redirect, a frame and two new windows try to reach 127.0.0.2,
+a loopback address the guard does not name, where a second server counts
+every request it receives: refused, they reach it never, and let through
+they would still stay on this machine. Every remote address is a decision
+asked of the page without loading anything, and Chromium is given no
+proxy, so nothing leaves the machine.
 
 The name keeps it out of the suite's collection.
 """
@@ -29,11 +31,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from PyQt6.QtWebEngineWidgets import QWebEngineView  # noqa: E402,F401  (before the QApplication)
 from PyQt6.QtCore import QUrl  # noqa: E402
+from PyQt6.QtNetwork import QNetworkProxy, QNetworkProxyFactory  # noqa: E402
 from PyQt6.QtWebEngineCore import QWebEnginePage  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 # Chromium aborts the process when the application has no program name.
 app = QApplication(["memory-viewer-page-child"])
+
+# Chromium takes its proxy from Qt, and Qt from the system. Windows asks
+# for discovery by default, which sends a DHCP query and a DNS lookup for
+# "wpad" on the first load, loopback included. With no proxy there is none.
+QNetworkProxyFactory.setUseSystemConfiguration(False)
+QNetworkProxy.setApplicationProxy(QNetworkProxy(QNetworkProxy.ProxyType.NoProxy))
 
 import desktop_app.app as app_mod  # noqa: E402
 
@@ -42,12 +51,13 @@ app_mod.debug_log = lambda message, category="debug": logged.append(message)
 
 
 def refused():
+    """The guard's refusal lines among everything the app logged."""
     return [line for line in logged if "navigation refused" in line]
 
 
 def drain(until, timeout):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         app.processEvents()
         if until():
             return True
@@ -63,7 +73,7 @@ def run_js(page, script, timeout=5.0):
     return result[0] if result else None
 
 
-def load(window):
+def show(window):
     """Show the window and wait for the page its ``showEvent`` loads."""
     loads = []
     window.web_view.loadFinished.connect(loads.append)
@@ -73,35 +83,17 @@ def load(window):
     return bool(loads and loads[-1])
 
 
-# Loopback addresses outside the guard's list: a refusal loads nothing,
-# and a navigation the guard let through would still stay on this machine.
-FOREIGN_HOST = "127.0.0.2"
-
-workdir = Path(tempfile.mkdtemp(prefix="memory-viewer-page-"))
-(workdir / "index.html").write_text(
-    "<html><head><title>the viewer's own page</title></head><body></body></html>",
-    encoding="utf-8",
-)
-(workdir / "second.html").write_text(
-    "<html><head><title>another page of the viewer</title></head><body></body></html>",
-    encoding="utf-8",
-)
-local_file = workdir / "local.html"
-local_file.write_text("<html><body>a file on disk</body></html>", encoding="utf-8")
+def load(view, url):
+    loads = []
+    finished = loads.append
+    view.loadFinished.connect(finished)
+    view.setUrl(url)
+    drain(lambda: loads, 10.0)
+    view.loadFinished.disconnect(finished)
+    return bool(loads and loads[-1])
 
 
-class _Handler(http.server.SimpleHTTPRequestHandler):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, directory=str(workdir), **kwargs)
-
-    def do_GET(self):
-        if self.path == "/redirect":
-            self.send_response(302)
-            self.send_header("Location", f"http://{FOREIGN_HOST}:{port}/index.html")
-            self.end_headers()
-            return
-        super().do_GET()
-
+class _Quiet(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
@@ -113,22 +105,85 @@ class _Server(http.server.ThreadingHTTPServer):
         self.server_name, self.server_port = "localhost", self.server_address[1]
 
 
-server = _Server(("127.0.0.1", 0), _Handler)
-port = server.server_address[1]
-threading.Thread(target=server.serve_forever, daemon=True).start()
+def serve(host, handler):
+    server = _Server((host, 0), handler)
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+    return server
+
+
+FOREIGN_HOST = "127.0.0.2"
+INDEX_TITLE = "the viewer's own page"
+SECOND_TITLE = "another page of the viewer"
+
+# What reaches the host off the list. Each attempt asks for a path of its own.
+foreign_requests = []
+
+
+class _Counter(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        foreign_requests.append(self.path)
+        body = b"<html><head><title>a page off the list</title></head></html>"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+workdir = Path(tempfile.mkdtemp(prefix="memory-viewer-page-"))
+
+
+class _Viewer(_Quiet):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=str(workdir), **kwargs)
+
+    def do_GET(self):
+        if self.path == "/redirect":
+            self.send_response(302)
+            self.send_header("Location", f"{foreign}/from-a-redirect")
+            self.end_headers()
+            return
+        super().do_GET()
+
+
+viewer_server = serve("127.0.0.1", _Viewer)
+port = viewer_server.server_address[1]
+try:
+    foreign_server = serve(FOREIGN_HOST, _Counter)
+    foreign = f"http://{FOREIGN_HOST}:{foreign_server.server_address[1]}"
+except OSError:
+    # macOS gives its loopback interface 127.0.0.1 alone.
+    foreign_server = None
+    foreign = f"http://{FOREIGN_HOST}:{port}"
+
+(workdir / "index.html").write_text(
+    f"<html><head><title>{INDEX_TITLE}</title></head><body></body></html>", encoding="utf-8"
+)
+(workdir / "second.html").write_text(
+    f"<html><head><title>{SECOND_TITLE}</title></head><body></body></html>", encoding="utf-8"
+)
+(workdir / "framed.html").write_text(
+    f"<html><body><iframe src='{foreign}/from-a-frame'></iframe></body></html>", encoding="utf-8"
+)
+local_file = workdir / "local.html"
+local_file.write_text("<html><body>a file on disk</body></html>", encoding="utf-8")
 
 report = {"foreign_host": FOREIGN_HOST}
 
 # The server fails: the window shows its error page, a data: document.
 failed = app_mod.MemoryViewerWindow()
 failed.start_server = lambda: False
-loaded = load(failed)
+loaded = show(failed)
 report["error_page"] = {
     "loaded": loaded,
     "scheme": failed.web_view.url().scheme(),
     "heading": run_js(failed.web_view.page(), "document.querySelector('h1').textContent"),
     "refused": refused(),
 }
+failed.close()
 
 # The server runs: the window shows what it serves on loopback.
 del logged[:]
@@ -137,57 +192,87 @@ served.start_server = lambda: True
 served.MEMORY_VIEWER_PORT = port
 view = served.web_view
 page = view.page()
-loaded = load(served)
+loaded = show(served)
 report["served"] = {
     "loaded": loaded,
     "host": view.url().host(),
     "on_the_servers_port": view.url().port() == port,
-    "title": page.title(),
+    "shows_its_page": page.title() == INDEX_TITLE,
     "refused": refused(),
 }
 
 
-def click_link(href):
+def click_link(href, target=""):
     return run_js(
         page,
         "const a = document.createElement('a');"
-        f"a.href = {json.dumps(href)};"
+        f"a.href = {json.dumps(href)}; a.target = {json.dumps(target)};"
         "document.body.appendChild(a); a.click(); true",
     )
+
+
+def nothing_moved(since):
+    """Wait out a navigation the guard might have let through: it would
+    move the view, or reach the host off the list within milliseconds."""
+    drain(lambda: view.url() != since or foreign_requests, 0.5)
+    return view.url() == since
 
 
 # A link to another page of the server opens it. The title can change
 # before the view's address does, so the wait is for both.
 second = QUrl(f"http://127.0.0.1:{port}/second.html")
 clicked = click_link(second.toString())
-drain(lambda: view.url() == second and page.title() == "another page of the viewer", 10.0)
-report["loopback_link"] = {
+drain(lambda: view.url() == second and page.title() == SECOND_TITLE, 10.0)
+report["server_link"] = {
     "clicked": clicked is True,
-    "shown": view.url() == second,
-    "title": page.title(),
+    "shown": view.url() == second and page.title() == SECOND_TITLE,
     "refused": refused(),
 }
 
-# A link to a host off the list. A refusal is logged the moment the page is
-# asked; a navigation let through would change the shown address instead.
+# A link to the host off the list: refused the moment the page is asked.
 del logged[:]
-shown = view.url()
-clicked = click_link(f"http://{FOREIGN_HOST}:{port}/index.html")
-drain(lambda: refused() or view.url() != shown, 5.0)
-drain(lambda: view.url() != shown, 1.0)
+shown, title = view.url(), page.title()
+clicked = click_link(f"{foreign}/from-a-link")
+drain(lambda: refused() or view.url() != shown or foreign_requests, 5.0)
 report["foreign_link"] = {
     "clicked": clicked is True,
     "refused": refused(),
-    "stayed": view.url() == shown,
-    "title": page.title(),
+    "stayed": nothing_moved(shown) and page.title() == title,
 }
 
-# The server answers with a redirect to a host off the list.
+# The server answers with a redirect to the host off the list.
 del logged[:]
 view.setUrl(QUrl(f"http://localhost:{port}/redirect"))
-drain(lambda: refused() or view.url().host() == FOREIGN_HOST, 10.0)
-drain(lambda: view.url().host() == FOREIGN_HOST, 1.0)
+drain(lambda: refused() or view.url().host() == FOREIGN_HOST or foreign_requests, 10.0)
+drain(lambda: view.url().host() == FOREIGN_HOST or foreign_requests, 0.5)
 report["foreign_redirect"] = {"refused": refused(), "host": view.url().host()}
+
+# A page of the server frames the host off the list.
+del logged[:]
+loaded = load(view, QUrl(f"http://localhost:{port}/framed.html"))
+drain(lambda: refused() or foreign_requests, 5.0)
+drain(lambda: foreign_requests, 0.5)
+report["foreign_frame"] = {
+    "loaded": loaded,
+    "refused": refused(),
+    "frame_shows": run_js(
+        page,
+        "(() => { try { return document.querySelector('iframe').contentWindow.location.href; }"
+        " catch (e) { return 'a page of another origin'; } })()",
+    ),
+}
+
+# A link and a script that open a new window, to the host off the list.
+del logged[:]
+shown = view.url()
+clicked = click_link(f"{foreign}/from-a-new-tab", target="_blank")
+opened = run_js(page, f"window.open({json.dumps(foreign + '/from-window-open')}); true")
+report["new_window"] = {
+    "asked": clicked is True and opened is True,
+    "stayed": nothing_moved(shown),
+}
+
+report["foreign_requests"] = list(foreign_requests) if foreign_server else None
 
 # The page's answer for each address, asked directly. Nothing is loaded.
 link = QWebEnginePage.NavigationType.NavigationTypeLinkClicked
@@ -196,18 +281,18 @@ local = {
     "a path on 127.0.0.1": QUrl("http://127.0.0.1:5050/api/graph/node/3"),
     "the IPv6 loopback": QUrl("http://[::1]:5050/"),
     "about:blank": QUrl("about:blank"),
-    "the error page": QUrl("data:text/html;charset=UTF-8,<h1>Connection Failed</h1>"),
+    "a data: document": QUrl("data:text/html;charset=UTF-8,<h1>x</h1>"),
 }
-foreign = {
+outside = {
     "a remote page": QUrl("https://example.invalid/"),
     "a font CDN": QUrl("https://fonts.googleapis.com/css2"),
     "a LAN address": QUrl("http://192.168.1.5/"),
-    "a local file": QUrl.fromLocalFile(str(local_file)),
+    "a file path with no host": QUrl.fromLocalFile(str(local_file)),
     "a host named after localhost": QUrl("http://localhost.example.invalid/"),
     "a remote host behind loopback credentials": QUrl("http://127.0.0.1@example.invalid/"),
     "a loopback address the guard does not name": QUrl(f"http://{FOREIGN_HOST}:5050/"),
 }
-addresses = {**local, **foreign}
+addresses = {**local, **outside}
 report["main_frame"] = {name: page.acceptNavigationRequest(url, link, True) for name, url in addresses.items()}
 report["sub_frame"] = {name: page.acceptNavigationRequest(url, link, False) for name, url in addresses.items()}
 
@@ -229,7 +314,8 @@ page.acceptNavigationRequest(
 report["refusal_logged"] = refused()
 
 print("REPORT:" + json.dumps(report), flush=True)
-failed.close()
 served.close()
-server.shutdown()
+viewer_server.shutdown()
+if foreign_server:
+    foreign_server.shutdown()
 app.processEvents()
