@@ -108,17 +108,22 @@ run_js(
 drain(lambda: asked, 5.0)
 report["asked_from_own_page"] = list(asked)
 
-# A link to another page, clicked inside the dashboard. A page that loads
-# answers in well under a second here; the wait covers a slow machine.
-run_js(
+# A link to another page, clicked inside the dashboard. A refusal is logged
+# the moment the page is asked. A page that loads instead changes the URL,
+# then calls the bridge, which the second wait gives time to arrive.
+del logged[:]
+clicked = run_js(
     page,
     "const a = document.createElement('a');"
     f"a.href = {json.dumps(foreign_url.toString())};"
     "document.body.appendChild(a); a.click(); true",
 )
-drain(lambda: len(asked) > 1 or not shows_index(), 4.0)
-drain(lambda: len(asked) > 1, 1.0)
+drain(lambda: logged or len(asked) > 1 or not shows_index(), 4.0)
+if not logged:
+    drain(lambda: len(asked) > 1, 1.0)
 report["after_link"] = {
+    "clicked": clicked is True,
+    "refused": list(logged),
     "url_is_index": shows_index(),
     "asked": list(asked),
     "settings_opened": bool(settings_opened),
@@ -129,7 +134,9 @@ link = QWebEnginePage.NavigationType.NavigationTypeLinkClicked
 addresses = {
     "own index": index_url,
     "own index with a fragment": QUrl(index_url.toString() + "#chat"),
+    "own index with a query": QUrl(index_url.toString() + "?v=1"),
     "about:blank": QUrl("about:blank"),
+    "a sibling of the index": QUrl.fromLocalFile(str(index.with_name("other.html"))),
     "another local file": foreign_url,
     "a remote page": QUrl("https://example.invalid/"),
     "the memory viewer's loopback": QUrl("http://127.0.0.1:5050/"),

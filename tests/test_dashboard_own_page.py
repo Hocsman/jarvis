@@ -3,9 +3,9 @@
 The view is handed the bridge over ``QWebChannel``, and Qt gives the
 channel's transport to whatever document the view shows. A foreign page
 there could call ``submitQuery``, which drives the daemon and its tools,
-or ``openSettings``. So the view navigates to the dashboard's own ``index.html`` alone (Qt's
-internal ``about:`` states aside), in every frame, and a link or file
-dropped on it opens nothing.
+or ``openSettings``. So the view navigates to the dashboard's own
+``index.html`` alone (Qt's internal ``about:`` states aside), in every
+frame, and a link or file dropped on it opens nothing.
 
 QtWebEngine is built in a process of its own (``dashboard_page_child.py``):
 Chromium aborts the process when the QApplication has no program name,
@@ -33,8 +33,11 @@ pytestmark = pytest.mark.unit
 TESTS_DIR = Path(__file__).resolve().parent
 CHILD = TESTS_DIR / "dashboard_page_child.py"
 
-FOREIGN = ("another local file", "a remote page", "the memory viewer's loopback", "a data document")
-OWN = ("own index", "own index with a fragment", "about:blank")
+FOREIGN = (
+    "a sibling of the index", "another local file", "a remote page",
+    "the memory viewer's loopback", "a data document",
+)
+OWN = ("own index", "own index with a fragment", "own index with a query", "about:blank")
 
 
 @pytest.fixture(scope="module")
@@ -85,7 +88,13 @@ class TestItsOwnPage:
 
 class TestNoOtherPage:
 
+    @pytest.mark.parametrize("frame", ["main_frame", "sub_frame"])
+    def test_every_address_asked_is_checked(self, report, frame):
+        assert set(report[frame]) == set(OWN) | set(FOREIGN)
+
     def test_a_link_to_another_page_opens_nothing(self, report):
+        assert report["after_link"]["clicked"]
+        assert len(report["after_link"]["refused"]) == 1
         assert report["after_link"]["url_is_index"]
         assert report["after_link"]["asked"] == ["from the dashboard"]
         assert report["after_link"]["settings_opened"] is False

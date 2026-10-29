@@ -36,8 +36,8 @@ def _is_own_page(url: QUrl, index: Path) -> bool:
 
     ``about:`` carries Qt's internal page states. Anything else must be the
     index file itself; a query or a fragment leaves the document the same.
-    The paths are compared as the platform compares them (without regard
-    to case on Windows).
+    The paths are compared after ``os.path.normcase``, which ignores case
+    on Windows only.
     """
     if (url.scheme() or "").lower() == "about":
         return True
@@ -54,9 +54,8 @@ class _DashboardPage(QWebEnginePage):
     channel's transport to whatever document the view shows: a foreign
     page reached by a link, a redirect or a dropped file could call
     ``submitQuery`` and drive the daemon and its tools, or call
-    ``openSettings``. So every
-    navigation, in any frame, is refused unless it lands on ``index.html``,
-    and a drop never navigates.
+    ``openSettings``. So every navigation, in any frame, is refused unless
+    it lands on ``index.html``, and a drop never navigates.
     """
 
     def __init__(self, index: Path, parent=None) -> None:
