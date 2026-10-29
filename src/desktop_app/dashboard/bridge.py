@@ -131,12 +131,14 @@ class DashboardBridge(QObject):
     def __init__(
         self,
         submit_fn: Optional[Callable[[str], None]] = None,
+        open_settings: Optional[Callable[[], None]] = None,
         weather_city: Optional[str] = None,
         cfg: Optional[Any] = None,
         parent: Optional[QObject] = None,
     ) -> None:
         super().__init__(parent)
         self._submit_fn = submit_fn
+        self._open_settings = open_settings
         self._last_state: Optional[str] = None
         self._chat_pending: bool = False
 
@@ -258,6 +260,15 @@ class DashboardBridge(QObject):
         else:
             # Standalone preview without a daemon.
             self.replyReceived.emit("(aperçu — pas de daemon connecté)")
+
+    @pyqtSlot()
+    def openSettings(self) -> None:
+        """The page's gear was clicked. The settings window is modal, so it
+        opens once this call has returned, not inside it."""
+        if self._open_settings is None:
+            return
+        debug_log("dashboard gear: opening the settings window", "desktop")
+        QTimer.singleShot(0, self._open_settings)
 
     @pyqtSlot()
     def ready(self) -> None:

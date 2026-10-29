@@ -133,3 +133,65 @@ class TestStats:
 # unit-tested here because instantiating QWebEngineView under headless
 # pytest is unstable; the parse + delegate path is verified manually via
 # the standalone round-trip and exercised live in the app.
+
+
+class TestTheGearOpensTheSettings:
+    """The gear in the page's top bar opens the settings window, as the
+    tray's action does (``desktop_app.spec.md``, "Dashboard")."""
+
+    @pytest.mark.unit
+    def test_the_settings_open_once_the_pages_call_has_returned(self, _qapp) -> None:
+        from desktop_app.dashboard.bridge import DashboardBridge
+
+        opened = []
+        b = DashboardBridge(open_settings=lambda: opened.append(True))
+
+        b.openSettings()
+        assert opened == []      # a modal window is not opened inside the page's call
+        _qapp.processEvents()
+
+        assert opened == [True]
+
+    @pytest.mark.unit
+    def test_with_no_host_to_open_them_the_gear_does_nothing(self, _qapp) -> None:
+        b = _make_bridge()
+
+        b.openSettings()
+        _qapp.processEvents()
+
+    @pytest.mark.unit
+    def test_the_gear_in_the_page_asks_for_them(self) -> None:
+        import re
+        from pathlib import Path
+
+        page = (Path(__file__).resolve().parent.parent / "src" / "desktop_app"
+                / "dashboard" / "index.html").read_text(encoding="utf-8")
+
+        assert re.search(r'<[^>]*id="settings-gear"', page)
+        assert re.search(r'getElementById\("settings-gear"\)\.(?:onclick|addEventListener)', page)
+        assert "jarvis.openSettings()" in page
+
+    @pytest.mark.unit
+    def test_the_tray_hands_the_dashboard_its_settings_window(self, monkeypatch) -> None:
+        from types import SimpleNamespace
+
+        from desktop_app import app, dashboard_window
+
+        made = {}
+
+        class Window:
+            def __init__(self, **kwargs):
+                made.update(kwargs)
+
+            def show(self): pass
+            def raise_(self): pass
+            def activateWindow(self): pass
+
+        monkeypatch.setattr(app, "_dashboard_available", lambda: True)
+        monkeypatch.setattr(dashboard_window, "DashboardWindow", Window)
+        tray = SimpleNamespace(dashboard_window=None, _dashboard_submit_fn=None,
+                               show_settings=lambda: None)
+
+        app.JarvisSystemTray.show_dashboard(tray)
+
+        assert made["open_settings"] is tray.show_settings
