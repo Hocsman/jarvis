@@ -33,11 +33,14 @@ import random
 import time as _time
 from typing import Optional, List, Tuple
 from enum import Enum
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QApplication
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QApplication, QStackedWidget
 from PyQt6.QtGui import QPainter, QPen, QColor, QBrush, QPainterPath, QLinearGradient, QRadialGradient
-from PyQt6.QtCore import Qt, QTimer, QPointF
+from PyQt6.QtCore import Qt, QTimer, QPointF, QEvent
 
+from jarvis.debug import debug_log
 from jarvis.state import JarvisState, get_jarvis_state
+
+from desktop_app.talking_face import TalkingFaceView
 
 
 class Expression(Enum):
@@ -939,9 +942,13 @@ class LowPolyFaceWidget(QWidget):
 
 
 class FaceWindow(QWidget):
-    """A standalone window containing the Jarvis face."""
+    """A standalone window showing her talking face while a renderer draws
+    one, and the drawn face otherwise (``desktop_app.spec.md``, "Face")."""
 
-    def __init__(self, parent=None):
+    # Sixty reads a second: each frame of her face shows within a refresh of its moment.
+    FRAME_INTERVAL_MS = 16
+
+    def __init__(self, parent=None, read_frame=None):
         super().__init__(parent)
         self.setWindowTitle("🤖 Jarvis")
         self.setMinimumSize(320, 420)
@@ -960,9 +967,19 @@ class FaceWindow(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
 
-        # Face widget
+        # The drawn face, and her talking face in its place while frames come
         self.face = LowPolyFaceWidget()
-        layout.addWidget(self.face)
+        self.talking_face = TalkingFaceView(read_frame)
+        self._faces = QStackedWidget()
+        self._faces.addWidget(self.face)
+        self._faces.addWidget(self.talking_face)
+        layout.addWidget(self._faces)
+
+        # Frames are read only while the window is on screen: each read tells
+        # the renderer someone is watching, and that costs the GPU.
+        self._frame_timer = QTimer(self)
+        self._frame_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._frame_timer.timeout.connect(self._show_the_face_due)
 
         # Position on the right side of the screen
         self._position_on_right()
@@ -987,4 +1004,33 @@ class FaceWindow(QWidget):
     def set_expression(self, expression: Expression):
         """Set the face expression."""
         self.face.set_expression(expression)
+
+    def _show_the_face_due(self) -> None:
+        current = self.talking_face if self.talking_face.poll() else self.face
+        if self._faces.currentWidget() is not current:
+            self._faces.setCurrentWidget(current)
+            debug_log("face window: her talking face shown" if current is self.talking_face
+                      else "face window: no frame for a second, the drawn face shown", "desktop")
+
+    def _watch(self, on_screen: bool) -> None:
+        if on_screen and not self._frame_timer.isActive():
+            self._frame_timer.start(self.FRAME_INTERVAL_MS)
+            self._show_the_face_due()
+        elif not on_screen and self._frame_timer.isActive():
+            self._frame_timer.stop()
+            self.talking_face.forget()
+            self._faces.setCurrentWidget(self.face)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._watch(not self.isMinimized())
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        self._watch(False)
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.WindowStateChange:
+            self._watch(self.isVisible() and not self.isMinimized())
 

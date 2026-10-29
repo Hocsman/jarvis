@@ -11,8 +11,9 @@ together.
 
 This file covers the renderer: the process that draws the face, what it is
 fed, what it publishes, the model files it needs, and how it fails. Kyutai
-feeds it (`output/tts.spec.md`, "Kyutai") and a front end shows it; each of
-them states its side in its own spec.
+feeds it (`output/tts.spec.md`, "Kyutai") and a front end shows it (the
+desktop app's face window, `desktop_app.spec.md`, "Face"); each of them
+states its side in its own spec.
 
 ## Privacy
 
@@ -192,6 +193,11 @@ changed from the original says so at its top.
   gaze, which the motion model is conditioned on, are measured from Ditto's
   203-point landmarks. The models that measure the portrait are released once
   it is measured.
+- **Not every model file is free for every use.** The face detector and the
+  106-point landmark model (`det_10g.onnx`, `2d106det.onnx`) come from
+  InsightFace, which releases its pretrained models for non-commercial
+  research only. The README says so where it tells the user how to turn the
+  face on.
 - **Framing.** Ditto animates a square around the face. The renderer publishes
   that square as it is, so everything on screen moves with the head, and never
   pastes it back into the still portrait, where hair and background outside the
@@ -288,6 +294,8 @@ is checked by hand.
   says why without the path; the renderer started with its portrait and
   framing and handed to the voice; the settings' defaults.
 - `tests/test_kyutai_face.py`: Kyutai's side (`output/tts.spec.md`).
+- `tests/test_face_window.py`: the front end's side (`desktop_app.spec.md`,
+  "Face").
 - `scripts/check_talking_face.py`, by hand on a machine with the GPU, the
   packages and the weights: the real renderer fed a WAV the way a speech engine
   feeds it, read the way a front end reads it, and how late each frame was.

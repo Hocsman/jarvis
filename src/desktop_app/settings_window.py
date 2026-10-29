@@ -61,6 +61,7 @@ CATEGORIES = [
     ("piper", "🎵 Piper TTS"),
     ("kokoro", "🌸 Kokoro TTS"),
     ("kyutai", "🎙️ Kyutai TTS"),
+    ("face", "👤 Visage"),
     ("chatterbox", "🎭 Chatterbox TTS"),
     ("voice_input", "🎤 Voice Input"),
     ("wake", "👂 Wake Word"),
@@ -329,6 +330,25 @@ def _build_field_metadata() -> List[FieldMeta]:
       "cml-tts/fr/577_394_000070-0001_enhanced.wav) or the path of a "
       ".safetensors voice file",
       "kyutai", "str")
+
+    # --- Visage ---
+    #
+    # Turning the face on fetches about 2.2 GB of model files the first time,
+    # and the portrait is a picture of a face: both belong where he sees them.
+    f("face_enabled", "Visage parlant",
+      "Anime le portrait avec sa voix, dans la fenêtre du visage (👤 Show Face). "
+      "Demande la voix Kyutai, une carte NVIDIA et une installation depuis les "
+      "sources. Au premier lancement, environ 2,2 Go de modèles sont téléchargés "
+      "depuis Hugging Face ; ensuite tout tourne sur cette machine",
+      "face", "bool")
+    f("face_portrait_path", "Portrait",
+      "Chemin d'une image fixe d'un seul visage, vu de face. Elle reste sur cette "
+      "machine",
+      "face", "str")
+    f("face_framing", "Cadrage",
+      "Ce que la fenêtre montre du portrait animé",
+      "face", "choice",
+      choices=[("head", "Toute la tête"), ("face", "Visage rapproché")])
 
     # --- Chatterbox TTS ---
     f("tts_chatterbox_device", "Device",

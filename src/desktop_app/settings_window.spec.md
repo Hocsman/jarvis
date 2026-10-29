@@ -57,21 +57,26 @@ The settings window uses a sidebar navigation pattern: a fixed-width `QListWidge
 4. Piper TTS
 5. Kokoro TTS
 6. Kyutai TTS
-7. Chatterbox TTS
-8. Voice Input (includes microphone device selection)
-9. Wake Word
-10. Speech Recognition (Whisper)
-11. Voice Activity Detection
-12. Timing & Windows
-13. Memory & Dialogue
-14. Location
-15. Features (includes web search, Wikipedia fallback, low-power mode, startup tune, the startup update check, and dictation toggles)
-16. 🙋 Permissions
-17. ⏰ Rappels
-18. 🌅 Routines
-19. 🛠️ Projets
-20. MCP Servers
-21. Advanced
+7. 👤 Visage
+8. Chatterbox TTS
+9. Voice Input (includes microphone device selection)
+10. Wake Word
+11. Speech Recognition (Whisper)
+12. Voice Activity Detection
+13. Timing & Windows
+14. Memory & Dialogue
+15. Location
+16. Features (includes web search, Wikipedia fallback, low-power mode, startup tune, the startup update check, and dictation toggles)
+17. 🙋 Permissions
+18. ⏰ Rappels
+19. 🌅 Routines
+20. 🛠️ Projets
+21. MCP Servers
+22. Advanced
+
+### 👤 Visage
+
+The three settings of the talking face (`src/jarvis/output/face/face.spec.md`, "Configuration"): the switch, the portrait and the framing, which offers the two framings the renderer knows. They belong here and not only in `config.json` because the switch is what fetches about 2.2 GB of model files the first time listening starts with it on, and the portrait is a picture of a face: the user should see both. The switch's description says what it costs and what it needs (the Kyutai voice, an NVIDIA GPU, a source install), and the portrait's that the image stays on this machine. Like every setting, they apply when listening restarts. The face itself is shown in the face window (`desktop_app.spec.md`, "Face").
 
 ### 🙋 Permissions
 
