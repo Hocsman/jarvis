@@ -1236,12 +1236,29 @@ def _apply_latency_retention(db, cfg) -> None:
         debug_log(f"startup latency journal retention skipped: {e}", "jarvis")
 
 
-def build_tts_engine(cfg):
+def start_face(cfg):
+    """The talking face's renderer, started, when the settings ask for one and
+    the speech engine is Kyutai, the one engine that feeds it; otherwise None
+    (`output/face/face.spec.md`, "Off unless asked for")."""
+    if not (cfg.face_enabled and cfg.face_portrait_path and cfg.tts_engine.lower() == "kyutai"):
+        if cfg.face_enabled:
+            debug_log("face enabled but not started: it needs a portrait and the Kyutai voice", "face")
+        return None
+    from .output.face.client import FaceRenderer
+
+    print("🎭 Starting the talking face...", flush=True)
+    face = FaceRenderer(cfg.face_portrait_path, cfg.face_framing)
+    face.start()
+    return face
+
+
+def build_tts_engine(cfg, face=None):
     """The speech engine the settings ask for, not yet started.
 
     One place carries every ``tts_*`` setting (and ``response_language``,
     which picks the Piper voice) to the engine, so a setting that is read,
     shown in the settings window and then not passed on cannot go unnoticed.
+    ``face`` is the talking face's renderer, which Kyutai feeds.
     """
     return create_tts_engine(
         engine=cfg.tts_engine,
@@ -1268,6 +1285,7 @@ def build_tts_engine(cfg):
         kokoro_speed=cfg.tts_kokoro_speed,
         # Kyutai parameters
         kyutai_voice=cfg.tts_kyutai_voice,
+        face=face,
     )
 
 
@@ -1465,7 +1483,8 @@ def main() -> None:
 
     # Initialize TTS
     print(f"🔊 Initializing TTS engine ({cfg.tts_engine})...", flush=True)
-    tts = build_tts_engine(cfg)
+    face = start_face(cfg)
+    tts = build_tts_engine(cfg, face=face)
     if tts.enabled:
         tts.start()
         print("✓ TTS engine started", flush=True)
@@ -1732,6 +1751,8 @@ def main() -> None:
 
         if tts is not None:
             tts.stop()
+        if face is not None:
+            face.stop()
 
         # Tear down persistent MCP sessions so subprocess-launched
         # children (e.g. chrome-devtools-mcp's Chrome) close cleanly.

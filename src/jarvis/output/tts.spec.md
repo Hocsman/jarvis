@@ -64,6 +64,7 @@ The four engines are interchangeable to the listener. Each exposes:
 | `interrupt()` | Stop talking (see Interrupting) |
 | `is_speaking()` | Whether an item is being synthesised or played |
 | `get_last_spoken_text()` | The processed text of the item most recently started |
+| `voice_delay()` | How much later than usual her voice will be heard: the talking face's delay while a face is ready and watched (Kyutai, see "The face"), otherwise 0 |
 
 `speak` starts the worker if nobody has. Calling `start` on Piper loads
 the voice on the calling thread (downloading it if absent) so the wait
@@ -229,7 +230,9 @@ the stream of the item it is playing; so the items prepared while the
 interrupted one played are never heard. It drops an end-of-reply marker
 whose count is stale in the same way, and that is where a stop word usually
 finds the marker: the worker has handed it over while the last sentence
-still plays.
+still plays. With a face attached, `interrupt()` also cuts the face at that
+instant (`face/face.spec.md`, "Interrupting"), so her lips stop with her
+voice.
 
 ## What she owes the echo detector
 
@@ -250,7 +253,9 @@ engine owes the listener four things:
    words of the whole reply over the tail's length) is then applied to those
    chunks too, which moves its window ahead of the speech, and an utterance
    of four words or fewer is judged by that window alone;
-4. the completion callback, which is what opens the hot window.
+4. the completion callback, which is what opens the hot window;
+5. `voice_delay()`, which the listener adds to the start of her speech it
+   records, because a watched face holds her voice back by its delay.
 
 Where no exact duration is known the detector estimates from `tts_rate`
 (words per minute). Piper, Kokoro, Chatterbox and Kyutai ignore `tts_rate`
@@ -491,6 +496,30 @@ item whose synthesis fails after playback began stops where its audio
 ends and fires no completion callback. `get_last_spoken_text()` names the
 item whose playback began last.
 
+**The face.** Kyutai is the engine a talking face follows
+(`face/face.spec.md`). The daemon hands it the face's renderer when it builds
+it (`create_tts_engine(face=...)`; the other engines take none). An item is
+drawn on the face when, at the moment its first quarter second of audio is in
+hand, the renderer is ready and someone is watching it; otherwise it plays as
+above, at once, and the face costs her nothing.
+
+- An item drawn on the face is scheduled to be heard at the later of two
+  moments: the renderer's delay from then, and the end of the previous item
+  drawn on the face plus 0.2 s. Only the first sentence of a reply waits for
+  the face; the next ones keep their spacing.
+- Its audio is handed to the renderer as it is synthesised, each piece
+  stamped with the moment it will be heard.
+- The player plays it at that moment. Its stream starts with silence when it
+  opens early, timed from when the sound card says the first sample will
+  leave the speakers, and the first sound is marked when the moment comes,
+  not when the stream opens.
+- When synthesis falls behind playback the voice waits for its audio as it
+  does without a face, and her lips run ahead of it by as much for the rest
+  of that item; the debug log counts it.
+- `voice_delay()` is the renderer's delay while it is ready and watched, and
+  0 otherwise. A renderer that failed is not ready, so it never holds her
+  voice back.
+
 **Failure.** Initialisation is attempted once and its outcome is kept for
 the life of the engine. A `moshi` package (or one of its dependencies) that
 cannot be imported, a missing GPU or CUDA build, a model that fails to
@@ -574,6 +603,12 @@ language. The line is not added for Kokoro or Kyutai.
   an unlisted one gets the fallback.
 - Each engine marks the first sound once its audio stream is running, and
   not when SPEAKING is published.
+- Kyutai and a talking face (`tests/test_kyutai_face.py`): with no face, a
+  face not ready or nobody watching, she speaks at once and nothing is handed
+  over; otherwise her audio reaches the face stamped with when it is heard,
+  the voice waits for that moment, the first sound is marked then, the
+  sentences of a reply keep their spacing, `voice_delay()` follows the face,
+  a stop cuts the face, and the factory hands the face to Kyutai only.
 - Kokoro's initialisation ends with one throwaway synthesis (audio
   discarded, nothing queued or played), and a warm-up failure leaves the
   pipeline loaded rather than failing init.

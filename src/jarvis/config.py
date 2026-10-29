@@ -230,6 +230,11 @@ class Settings:
     # Kyutai TTS (most natural local voice; needs an NVIDIA GPU)
     tts_kyutai_voice: str  # Name in the kyutai/tts-voices repository, or path of a .safetensors voice file
 
+    # Talking face: a portrait whose lips follow Kyutai's voice (output/face/face.spec.md)
+    face_enabled: bool
+    face_portrait_path: str  # A still image of one face seen from the front
+    face_framing: str  # "head" (the whole head) or "face" (closer)
+
     # Voice Input & Audio
     voice_device: str | None
     sample_rate: int
@@ -850,6 +855,11 @@ def get_default_config() -> Dict[str, Any]:
         # Kyutai TTS
         "tts_kyutai_voice": "cml-tts/fr/577_394_000070-0001_enhanced.wav",  # French female voice
 
+        # Talking face
+        "face_enabled": False,
+        "face_portrait_path": "",
+        "face_framing": "head",
+
         # Voice Input & Audio
         "voice_device": None,
         "sample_rate": 16000,
@@ -1229,6 +1239,11 @@ def load_settings() -> Settings:
         str(merged.get("tts_kyutai_voice") or "").strip()
         or "cml-tts/fr/577_394_000070-0001_enhanced.wav"
     )
+    face_enabled = _as_bool(merged.get("face_enabled", False))
+    face_portrait_path = str(merged.get("face_portrait_path") or "").strip()
+    face_framing = str(merged.get("face_framing") or "head").strip().lower()
+    if face_framing not in ("head", "face"):
+        face_framing = "head"
 
     voice_device_val = merged.get("voice_device")
     voice_device = None if voice_device_val in (None, "", "default", "system") else str(voice_device_val)
@@ -1479,6 +1494,9 @@ def load_settings() -> Settings:
         tts_kokoro_lang_code=tts_kokoro_lang_code,
         tts_kokoro_speed=tts_kokoro_speed,
         tts_kyutai_voice=tts_kyutai_voice,
+        face_enabled=face_enabled,
+        face_portrait_path=face_portrait_path,
+        face_framing=face_framing,
 
         # Voice Input & Audio
         voice_device=voice_device,

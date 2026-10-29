@@ -819,3 +819,29 @@ class TestRightmostEchoBoundarySalvage:
         # No echo prefix at all — no salvage needed; caller keeps the text as-is.
         result = detector.salvage_after_echo_tail(heard)
         assert result is None
+
+
+class TestAVoiceHeldBack:
+    """See listening.spec.md, "During TTS": her words are timed from when she
+    was handed the reply plus the voice's delay (a talking face holds it back)."""
+
+    WORDS = ("alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike "
+             "november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu")
+
+    def _echo_of_her_first_words_heard_late(self, start_delay):
+        detector = EchoDetector(echo_tolerance=0.3)
+        detector.track_tts_start(self.WORDS, start_delay=start_delay)
+        return detector.should_reject_as_echo(
+            heard_text="alpha bravo charlie",
+            current_energy=0.01,
+            is_during_tts=True,
+            tts_rate=150.0,
+            utterance_start_time=time.time() + 4.0,
+        )
+
+    def test_a_short_echo_of_her_first_words_is_caught_when_her_voice_was_held_back(self):
+        assert self._echo_of_her_first_words_heard_late(start_delay=4.0) is True
+
+    def test_without_the_delay_the_same_echo_falls_outside_her_words(self):
+        assert self._echo_of_her_first_words_heard_late(start_delay=0.0) is False
+

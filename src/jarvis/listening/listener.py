@@ -711,8 +711,10 @@ class VoiceListener(threading.Thread):
             if self._recent_audio_energy:
                 baseline_energy = sum(self._recent_audio_energy) / len(self._recent_audio_energy)
 
+            # A talking face holds her voice back: her words come that much later.
+            start_delay = 0.0 if continues else self.tts.voice_delay()
             self.echo_detector.track_tts_start(tts_text, baseline_energy,
-                                               continues=continues)
+                                               continues=continues, start_delay=start_delay)
 
     def activate_hot_window(self) -> None:
         """Activate hot window after TTS completion."""

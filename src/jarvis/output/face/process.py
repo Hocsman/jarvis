@@ -62,13 +62,15 @@ class Renderer:
     """Feeds Ditto from the timeline and publishes what it draws.
 
     ``stream`` is Ditto's (``ditto/stream.py``) once set up with ``on_frame``,
-    ``frames`` a ``FrameWriter``. Everything here is plain logic: ``build``
-    loads the model.
+    ``frames`` a ``FrameWriter``, ``on_event(**event)`` where the events for
+    the handle go. Everything here is plain logic: ``build`` loads the model.
     """
 
-    def __init__(self, stream, frames, delay: float = tl.DELAY) -> None:
+    def __init__(self, stream, frames, delay: float = tl.DELAY, on_event=None) -> None:
         self.stream = stream
         self.frames = frames
+        self.on_event = on_event or (lambda **event: None)
+        self.watched = False
         self.lock = threading.Lock()
         self.timeline = tl.Timeline()
         self.feeder = tl.Feeder(self.timeline, delay)
@@ -162,6 +164,10 @@ class Renderer:
         """One turn of the feeding loop; returns how long to sleep."""
         self.frames.beat(now)
         watched = self.frames.viewer_age(now) < WATCH_SECONDS
+        if watched != self.watched:
+            # The speech engine holds her voice back for the face only while someone watches.
+            self.watched = watched
+            self.on_event(event="watched", value=watched)
         was_feeding = self.feeder.next_start is not None
         with self.lock:
             step = self.feeder.step(now, watched)
@@ -229,6 +235,7 @@ def main(argv: Optional[list] = None) -> int:
         _check_packages()
         renderer = Renderer.build(portrait, args.framing)
         renderer.warm_up()
+        renderer.on_event = say
     except Exception as e:
         say(event="failed", reason=str(e) or type(e).__name__)
         return 1

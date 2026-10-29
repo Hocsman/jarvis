@@ -197,6 +197,22 @@ class TestFeeding:
         assert len(renderer.stream.chunks) == 2
 
 
+class TestTellingTheHandle:
+    def test_the_handle_hears_when_someone_starts_and_stops_watching(self, reader):
+        events = []
+        renderer = process.Renderer(FakeStream(), FrameWriter(), on_event=lambda **e: events.append(e))
+        try:
+            now = time.perf_counter()
+            _watch(renderer, reader, now)
+            renderer.tick(now)
+            renderer.tick(now + 0.05)
+            renderer.tick(now + process.WATCH_SECONDS + 1.0)
+        finally:
+            renderer.close()
+
+        assert events == [{"event": "watched", "value": True}, {"event": "watched", "value": False}]
+
+
 class TestStartingUp:
     def _events(self, capsys):
         return [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.strip()]

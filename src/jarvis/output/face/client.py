@@ -46,6 +46,7 @@ class FaceRenderer:
         self._lock = threading.Lock()
         self._done = threading.Event()
         self._ready = False
+        self._watched = False
         self._stopping = False
         self._writing_since: Optional[float] = None
         self.delay: Optional[float] = None
@@ -99,6 +100,10 @@ class FaceRenderer:
         """True between the renderer's ``ready`` line and the first failure."""
         return self._ready and self.failure is None
 
+    def watched(self) -> bool:
+        """True while the face is ready and someone is watching it."""
+        return self._watched and self.ready()
+
     # -- what the speech engine hands over ----------------------------------
     def send_audio(self, heard_at: float, samples, rate: int) -> None:
         """Hand over mono samples at ``rate`` whose first is heard at ``heard_at``.
@@ -130,7 +135,6 @@ class FaceRenderer:
             self.failure = reason
             self._ready = False
         debug_log(f"face: off for this session, {reason}", "face")
-        print(f"  ⚠️ Face: {reason}", flush=True)
         if self._proc is not None and self._proc.poll() is None:
             try:
                 self._proc.kill()
@@ -138,6 +142,10 @@ class FaceRenderer:
                 pass
         self._outbox.put(None)
         self._done.set()
+        try:
+            print(f"  ⚠️ Face: {reason}", flush=True)
+        except Exception:
+            pass   # a console that cannot show it must not keep the face half-alive
 
     def _watch(self) -> None:
         """A renderer that stops reading is dead: nothing else would notice."""
@@ -180,6 +188,9 @@ class FaceRenderer:
                     self.delay = float(event.get("delay", 0.0))
                     self._ready = self.failure is None
                     debug_log(f"face: renderer ready, delay {self.delay:.2f}s", "face")
+                elif event.get("event") == "watched":
+                    self._watched = bool(event.get("value"))
+                    debug_log(f"face: {'watched' if self._watched else 'nobody watching'}", "face")
                 elif event.get("event") == "failed":
                     self._fail(str(event.get("reason") or "the renderer failed"))
         finally:
