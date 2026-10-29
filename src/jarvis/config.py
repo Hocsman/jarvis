@@ -255,6 +255,7 @@ class Settings:
     whisper_no_speech_threshold: float
     whisper_min_audio_duration: float
     whisper_min_word_length: int
+    whisper_vocabulary: list[str]  # His names, given to Whisper as a hint with weather_city
 
     # Voice Activity Detection (VAD)
     vad_enabled: bool
@@ -875,6 +876,7 @@ def get_default_config() -> Dict[str, Any]:
         "whisper_no_speech_threshold": 0.5,  # Hard cutoff: reject segments where no_speech_prob >= this
         "whisper_min_audio_duration": 0.15,
         "whisper_min_word_length": 1,
+        "whisper_vocabulary": [],  # Names Whisper should spell his way; weather_city is added on its own
 
         # Voice Activity Detection (VAD)
         "vad_enabled": True,
@@ -1415,6 +1417,10 @@ def load_settings() -> Settings:
     whisper_no_speech_threshold = float(merged.get("whisper_no_speech_threshold", 0.5))
     whisper_min_audio_duration = float(merged.get("whisper_min_audio_duration", 0.3))
     whisper_min_word_length = int(merged.get("whisper_min_word_length", 2))
+    raw_vocabulary = merged.get("whisper_vocabulary", [])
+    whisper_vocabulary = [
+        str(name).strip() for name in raw_vocabulary if str(name).strip()
+    ] if isinstance(raw_vocabulary, list) else []
     llm_chat_timeout_sec = float(merged.get("llm_chat_timeout_sec", 180.0))
     llm_tools_timeout_sec = float(merged.get("llm_tools_timeout_sec", 300.0))
     tool_router_timeout_sec = min(max(float(merged.get("tool_router_timeout_sec", 15.0)), 1.0), 120.0)
@@ -1505,6 +1511,7 @@ def load_settings() -> Settings:
         whisper_no_speech_threshold=whisper_no_speech_threshold,
         whisper_min_audio_duration=whisper_min_audio_duration,
         whisper_min_word_length=whisper_min_word_length,
+        whisper_vocabulary=whisper_vocabulary,
 
         # Voice Activity Detection (VAD)
         vad_enabled=vad_enabled,

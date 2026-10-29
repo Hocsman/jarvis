@@ -932,3 +932,15 @@ class TestMCPConfigSaveLogic:
             assert "mcps" not in saved
         finally:
             cfg_path.unlink(missing_ok=True)
+
+
+class TestWhisperVocabularyField:
+    """The names Whisper should spell his way are listed under Whisper,
+    one per row, like the dictation dictionary."""
+
+    def test_listed_under_whisper_as_a_list(self):
+        fm = next((fm for fm in FIELD_METADATA if fm.key == "whisper_vocabulary"), None)
+
+        assert fm is not None
+        assert fm.category == "whisper"
+        assert fm.field_type == "list"

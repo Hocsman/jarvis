@@ -148,6 +148,10 @@ The `whisper_model` dropdown lists every model in `SUPPORTED_WHISPER_MODELS`
 slider from, so a size picked in either one is listed by the other. An
 English-only id (`.en`) reads as its size name followed by "(English only)".
 
+`whisper_vocabulary` is a list field, one name per row: the names Whisper is
+given as a hint alongside `weather_city` (`listening.spec.md`, "The names he
+uses").
+
 ### Features
 
 The Features category exposes user-facing runtime toggles that do not need a
