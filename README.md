@@ -385,6 +385,8 @@ Whisper sometimes produces confident but false transcriptions during silence or 
 
 Both thresholds are exposed in the Settings window under *Whisper*.
 
+What gets past them, typically the closing line of a video ("Thank you.", "See you in the next video") in a language nobody in the room speaks, is left to the intent judge: when it says a phrase is not speech, the assistant does not answer it, even just after a reply when it is otherwise waiting for your follow-up.
+
 </details>
 
 <details>

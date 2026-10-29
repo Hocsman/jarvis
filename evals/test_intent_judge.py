@@ -622,9 +622,78 @@ MULTI_SEGMENT_TEST_CASES = [
 ]
 
 
+@dataclass
+class NotSpeechCase:
+    """Right after her reply, the current segment is either text Whisper made
+    out of silence or words he said. Shaped like ``MultiSegmentTestCase`` so
+    the same runner takes it: the hot window is open, no wake word."""
+    name: str
+    segments: list
+    last_tts_text: str
+    expected_noise: bool
+    in_hot_window: bool = True
+    wake_timestamp: Optional[float] = None
+    aliases: Optional[List[str]] = None
+
+
+_FR_ASKED = "Tu peux m'indiquer la météo pour demain ?"
+_FR_REPLY = "Pour demain, le ciel sera dégagé, entre 6 et 15 degrés. Prévoyez une petite laine, Monsieur."
+_EN_ASKED = "what's the weather like tomorrow"
+_EN_REPLY = "Tomorrow will be clear, between 6 and 15 degrees. Bring a jumper."
+
+
+def _after(asked, reply, current):
+    return [(asked, False), (reply, True), (current, False)]
+
+
+# Field trace 2026-10-29: each of the French-side phantoms below was heard in
+# the hot window after a French reply, and answered. Whisper's inventions on
+# silence are the closing lines of videos and subtitle credits, in whatever
+# language its training data paired with silence, which is why the cases
+# cross languages both ways.
+NOT_SPEECH_TEST_CASES = [
+    NotSpeechCase("russian_outro_after_french", _after(_FR_ASKED, _FR_REPLY, "Продолжение следует..."),
+                  _FR_REPLY, expected_noise=True),
+    NotSpeechCase("japanese_outro_after_french",
+                  _after(_FR_ASKED, _FR_REPLY, "ご視聴ありがとうございました"),
+                  _FR_REPLY, expected_noise=True),
+    NotSpeechCase("lone_english_thanks_after_french", _after(_FR_ASKED, _FR_REPLY, "Thank you."),
+                  _FR_REPLY, expected_noise=True),
+    NotSpeechCase("french_subtitle_credit_after_english",
+                  _after(_EN_ASKED, _EN_REPLY, "Sous-titres réalisés par la communauté d'Amara.org"),
+                  _EN_REPLY, expected_noise=True),
+    NotSpeechCase("german_subtitle_credit_after_english",
+                  _after(_EN_ASKED, _EN_REPLY, "Untertitel im Auftrag des ZDF, 2017"),
+                  _EN_REPLY, expected_noise=True),
+    NotSpeechCase("video_outro_after_english",
+                  _after(_EN_ASKED, _EN_REPLY, "Thanks for watching, see you in the next video!"),
+                  _EN_REPLY, expected_noise=True),
+    # His words: short, thankful, off-topic or odd, they are still speech.
+    NotSpeechCase("french_follow_up", _after(_FR_ASKED, _FR_REPLY, "Et pour après-demain ?"),
+                  _FR_REPLY, expected_noise=False),
+    NotSpeechCase("french_thanks", _after(_FR_ASKED, _FR_REPLY, "Merci beaucoup, c'est parfait."),
+                  _FR_REPLY, expected_noise=False),
+    NotSpeechCase("french_odd_remark", _after(_FR_ASKED, _FR_REPLY, "Ah, je crois que tu as bugué là, non ?"),
+                  _FR_REPLY, expected_noise=False),
+    NotSpeechCase("english_follow_up", _after(_EN_ASKED, _EN_REPLY, "and what about the weekend?"),
+                  _EN_REPLY, expected_noise=False),
+    NotSpeechCase("english_thanks", _after(_EN_ASKED, _EN_REPLY, "thank you, that's really helpful"),
+                  _EN_REPLY, expected_noise=False),
+    NotSpeechCase("english_pushback", _after(_EN_ASKED, _EN_REPLY, "don't you already know that?"),
+                  _EN_REPLY, expected_noise=False),
+]
+
+
 # Cases known to fail with the small model on the current prompt.
 # Track regressions / future prompt improvements here.
-KNOWN_FAILING_CASES: set = set()
+KNOWN_FAILING_CASES: set = {
+    # gemma4:e2b calls subtitle credits noise but not the closing lines of a
+    # video: 0 of 4 on each, where Claude Haiku 5.5 got 4 of 4 (2026-10-29).
+    "russian_outro_after_french",
+    "japanese_outro_after_french",
+    "lone_english_thanks_after_french",
+    "video_outro_after_english",
+}
 
 
 # =============================================================================
@@ -918,6 +987,42 @@ class TestIntentJudgeMultiSegment:
                     f"Expected query to NOT contain '{needle}', "
                     f"got '{result.query}'. Reasoning: {result.reasoning}"
                 )
+
+
+class TestIntentJudgeKnowsSilenceFromSpeech:
+    """In the hot window the listener answers everything the judge does not
+    call noise, so the verdict that matters is ``noise``: set on Whisper's
+    inventions, never on his words."""
+
+    @pytest.mark.parametrize("case", NOT_SPEECH_TEST_CASES, ids=lambda c: c.name)
+    def test_not_speech_case(self, case: NotSpeechCase):
+        _skip_if_not_intent_judge_phase()
+        if not is_intent_judge_available():
+            pytest.skip("Intent judge model (gemma4) not available")
+
+        if case.name in KNOWN_FAILING_CASES:
+            pytest.xfail(f"Known issue: {case.name} needs prompt improvement")
+
+        result = run_intent_judge_multi_segment(case)
+
+        if result is None:
+            pytest.fail("Intent judge returned None")
+
+        print(f"\nTest Case: {case.name} | current: \"{case.segments[-1][0]}\"")
+        print(f"Result: noise={result.noise}, directed={result.directed}, query='{result.query}'")
+        print(f"Reasoning: {result.reasoning}")
+
+        if case.expected_noise:
+            assert result.noise and not result.directed, (
+                f"Expected noise (not directed), got noise={result.noise}, "
+                f"directed={result.directed}. Reasoning: {result.reasoning}"
+            )
+        else:
+            # Whether he is directed in the hot window is the other evals'
+            # question; the overrides keep his words either way, unless noise.
+            assert not result.noise, (
+                f"Expected his speech, got noise=True. Reasoning: {result.reasoning}"
+            )
 
 
 class TestProcessedSegmentFiltering:
