@@ -1167,8 +1167,12 @@ class TestReasoningModelHandling:
         """String booleans ('false', 'true') must not evaluate to Python's bool('false') == True."""
         judge = IntentJudge()
         judgment = judge._parse_response(
-            '{"directed": "false", "query": "", "stop": "false", "confidence": "high", "reasoning": "test"}'
+            '{"directed": "false", "query": "", "stop": "false", "noise": "false", "confidence": "high", "reasoning": "test"}'
         )
         assert judgment is not None
         assert judgment.directed is False
         assert judgment.stop is False
+        assert judgment.noise is False
+        assert judge._parse_response(
+            '{"directed": "false", "noise": "yes", "confidence": "high"}'
+        ).noise is True

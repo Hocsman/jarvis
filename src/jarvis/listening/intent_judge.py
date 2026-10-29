@@ -158,6 +158,8 @@ class IntentJudge:
     1. Whether speech is directed at the assistant
     2. What the actual query is (excluding echo, pre-wake-word chatter, filler)
     3. Whether this is a stop command
+    4. Whether the current segment is not speech at all (text Whisper made
+       out of silence)
 
     Uses a small model (gemma4) for better accuracy compared to
     the simpler intent_validator.

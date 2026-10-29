@@ -17,7 +17,7 @@ import pytest
 
 from conftest import _created_listeners
 from jarvis.listening.state_manager import StateManager, ListeningState
-from jarvis.listening.intent_judge import IntentJudgment
+from jarvis.listening.intent_judge import IntentJudge, IntentJudgment
 
 
 # ---------------------------------------------------------------------------
@@ -1128,6 +1128,7 @@ class TestWhatWhisperMakesOfSilence:
     @patch("builtins.print")
     def test_a_phrase_nobody_said_is_not_answered(self, _print):
         listener = self._in_the_window("Pour demain, le ciel sera dégagé, Monsieur.")
+        listener.cfg.tune_enabled = True
         _install_intent_judge(listener, _make_judgment(
             directed=False, confidence="high", noise=True,
             reasoning="subtitle line produced from silence"))
@@ -1141,8 +1142,9 @@ class TestWhatWhisperMakesOfSilence:
     @patch("builtins.print")
     def test_nor_when_the_judge_also_speaks_of_her_echo(self, _print):
         """The echo override: "thank you." carries words she did not say, and
-        with no ambient baseline the energy test fails open, so only the
-        noise verdict stands between it and a reply."""
+        its energy clears the bar over the ambient floor recorded when she
+        started speaking, so only the noise verdict stands between it and a
+        reply."""
         listener = self._in_the_window("Je reste à votre disposition, Monsieur.")
         _install_intent_judge(listener, _make_judgment(
             directed=False, confidence="high", noise=True,
@@ -1160,7 +1162,7 @@ class TestWhatWhisperMakesOfSilence:
         listener = self._in_the_window("Je reste à votre disposition, Monsieur.")
         _install_intent_judge(listener, _make_judgment(
             directed=False, confidence="high", noise=False,
-            reasoning="hallucination on silence; the other segment is echo"))
+            reasoning="his words; the other segment is echo"))
 
         listener._process_transcript("thank you.", utterance_energy=0.01)
 
@@ -1192,6 +1194,48 @@ class TestWhatWhisperMakesOfSilence:
         listener._process_transcript("et après-demain ?", utterance_energy=0.01)
 
         assert _accepted_query(listener) == "et après-demain ?"
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_the_phantom_is_no_context_for_what_he_says_next(self, _print):
+        listener = self._in_the_window("Pour demain, le ciel sera dégagé, Monsieur.")
+
+        def hear(text):
+            # What the audio loop does before handing the text over.
+            now = time.time()
+            listener._transcript_buffer.add(text, now - 1.0, now, 0.01)
+            listener._process_transcript(text, utterance_energy=0.01)
+
+        _install_intent_judge(listener, _make_judgment(
+            directed=False, confidence="high", noise=True,
+            reasoning="subtitle line produced from silence"))
+        hear("ご視聴ありがとうございました")
+
+        judge = _install_intent_judge(listener, _make_judgment(
+            directed=True, query="et après-demain ?", confidence="high"))
+        hear("et après-demain ?")
+
+        shown = IntentJudge()._build_user_prompt(**{
+            k: v for k, v in judge.judge.call_args.kwargs.items()
+            if k in ("segments", "wake_timestamp", "last_tts_text",
+                     "last_tts_finish_time", "in_hot_window", "current_text")})
+        assert "ご視聴" not in shown
+        assert "et après-demain" in shown
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_a_wake_word_outside_the_window_is_still_his(self, _print):
+        """Outside the hot window the judge only runs on a wake word or while
+        she speaks. A doubtful verdict there still falls through to the wake
+        word, whatever it says about noise."""
+        listener, _ = _create_listener(echo_tolerance=0.02, hot_window_seconds=3.0)
+        _install_intent_judge(listener, _make_judgment(
+            directed=False, confidence="medium", noise=True,
+            reasoning="unsure"))
+
+        listener._process_transcript("jarvis what time is it", utterance_energy=0.01)
+
+        assert "what time is it" in _accepted_query(listener)
         listener.state_manager.stop()
 
 
