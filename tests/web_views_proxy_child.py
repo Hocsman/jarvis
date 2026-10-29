@@ -5,7 +5,9 @@ line it prints, then reads the net log Chromium wrote. The script takes
 the step the tray takes at start-up, before any window, then builds the
 real ``DashboardWindow`` and the real ``MemoryViewerWindow``, with the
 memory server replaced by one this script runs on 127.0.0.1, and waits
-for both pages.
+for both pages. The memory viewer's HTTP load is the one that goes
+through Chromium's proxy resolution; the dashboard's ``file:`` and
+``qrc:`` loads never do, so its page shows only that it still renders.
 
 Chromium follows the system's proxy configuration unless Qt is given
 another. On Windows that is the system's own setting, whose default asks
@@ -80,6 +82,7 @@ script_server = serve(_ProxyScript)
 os.environ["auto_proxy"] = f"http://127.0.0.1:{script_server.server_address[1]}/wpad.dat"
 
 from PyQt6.QtWebEngineWidgets import QWebEngineView  # noqa: E402,F401  (before the QApplication)
+from PyQt6.QtNetwork import QNetworkProxy, QNetworkProxyFactory  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 # Chromium aborts the process when the application has no program name.
@@ -92,6 +95,12 @@ jarvis.config.load_settings = lambda *args, **kwargs: None
 
 import desktop_app.app as app_mod  # noqa: E402
 import desktop_app.dashboard_window as dashboard_window  # noqa: E402
+
+# Qt follows the system, as a new process does wherever Qt is built to.
+# Setting it asks the system nothing; an application proxy turns it off,
+# so it goes on last.
+QNetworkProxy.setApplicationProxy(QNetworkProxy())
+QNetworkProxyFactory.setUseSystemConfiguration(True)
 
 # The step the tray takes at start-up, before it builds any window.
 app_mod._give_qt_no_proxy()

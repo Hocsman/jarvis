@@ -12,10 +12,13 @@ QtWebEngine is built in a process of its own (``web_views_proxy_child.py``):
 Chromium aborts the process when the QApplication has no program name,
 which the suite's shared one may lack, and an abort here would end the
 whole run. The child takes the tray's start-up step, loads the real
-dashboard and the real memory viewer, and Chromium writes its net log of
-both: the proxy configuration it was given, every proxy lookup it ran,
-every name it asked a resolver for. The tray's own order is checked here,
-in the suite's process, without a web view.
+dashboard and the real memory viewer, and Chromium writes its net log:
+the proxy configuration it was given, every proxy lookup it ran, every
+name it asked a resolver for. The memory viewer's HTTP load is what puts
+these in the log: the dashboard's ``file:`` and ``qrc:`` loads never reach
+Chromium's proxy resolution, so its half shows only that the page still
+renders with no proxy. The tray's own order is checked here, in the
+suite's process, without a web view.
 """
 
 from __future__ import annotations
@@ -42,6 +45,9 @@ NET_LOG = "netlog.json"
 
 
 def _tail(text):
+    # A timeout's output is bytes on POSIX, whatever ``text`` asked for.
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", "replace")
     return (text or "")[-3000:]
 
 
@@ -155,6 +161,7 @@ class TestNoProxyLookup:
         })
         assert lookups == []
 
+    @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Chromium reads auto_proxy on Linux alone")
     def test_the_systems_proxy_script_is_never_fetched(self, report):
         assert report["proxy_script_requests"] == []
 
@@ -170,15 +177,26 @@ def _follow_the_system():
     QNetworkProxyFactory.setUseSystemConfiguration(True)
 
 
+def _qt_proxy():
+    """Whether Qt follows the system, and its application proxy's type
+    when it does not. Reading the proxy while Qt follows the system asks
+    the system for one (WinHTTP's discovery on Windows), so it is not read."""
+    if QNetworkProxyFactory.usesSystemConfiguration():
+        return True, None
+    return False, QNetworkProxy.applicationProxy().type()
+
+
 @pytest.fixture
 def qt_proxy_restored(qapp):
     """Qt's proxy and the app's quit rule, as the suite had them."""
     uses_system = QNetworkProxyFactory.usesSystemConfiguration()
-    proxy = QNetworkProxy.applicationProxy()
+    proxy = None if uses_system else QNetworkProxy.applicationProxy()
     quits = qapp.quitOnLastWindowClosed()
     yield
-    QNetworkProxy.setApplicationProxy(proxy)
-    QNetworkProxyFactory.setUseSystemConfiguration(uses_system)
+    if uses_system:
+        _follow_the_system()
+    else:
+        QNetworkProxy.setApplicationProxy(proxy)
     qapp.setQuitOnLastWindowClosed(quits)
 
 
@@ -186,13 +204,15 @@ class TestTheTray:
 
     def test_qt_has_no_proxy_before_the_trays_first_window(self, qt_proxy_restored, monkeypatch):
         _follow_the_system()
-        assert QNetworkProxyFactory.usesSystemConfiguration()
+        assert _qt_proxy() == (True, None)
         seen = []
 
         def first_window(*args, **kwargs):
-            seen.append((QNetworkProxyFactory.usesSystemConfiguration(), QNetworkProxy.applicationProxy().type()))
+            seen.append(_qt_proxy())
             raise _FirstWindow
 
+        # The windows the constructor builds first. One built for real here
+        # with a web view in it would abort the suite (see the module docstring).
         for window in ("LogViewerWindow", "MemoryViewerWindow", "FaceWindow"):
             monkeypatch.setattr(app_mod, window, first_window)
         # It kills every process whose command line names the daemon.
