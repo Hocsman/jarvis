@@ -7,14 +7,17 @@ replaced: the real memory server never starts. One window is told the
 server failed and shows its error page; another fails with markup in its
 error, which the page must show as text. A third, given the port of a
 server this script runs on 127.0.0.1 serving pages it wrote itself, is
-pointed at that server. From there a link, a redirect, a frame and two
-new windows try to reach 127.0.0.2, a loopback address the guard does not
-name, and a link tries another service on 127.0.0.1, on another port. A
-server on each of those two counts every request it receives: refused,
-the attempts never reach it, and let through they would still stay on
-this machine. A frame and a link try a ``data:`` document. Every remote
-address is a decision asked of the page without loading anything, and
-Chromium is given no proxy, so nothing leaves the machine.
+pointed at that server, while another program listens on ``[::1]`` at
+the same port, where ``localhost`` would lead first. From there a link, a
+redirect, a frame and two new windows try to reach 127.0.0.2, a loopback
+address the guard does not name, a link tries another service on
+127.0.0.1, on another port, and a link tries ``localhost`` on the
+viewer's port. A server on each of those three counts every request it
+receives: refused, the attempts never reach it, and let through they
+would still stay on this machine. A frame and a link try a ``data:``
+document. Every remote address is a decision asked of the page without
+loading anything, and Chromium is given no proxy, so nothing leaves the
+machine.
 
 The name keeps it out of the suite's collection.
 """
@@ -22,6 +25,7 @@ The name keeps it out of the suite's collection.
 import http.server
 import json
 import os
+import socket
 import socketserver
 import sys
 import tempfile
@@ -108,8 +112,12 @@ class _Server(http.server.ThreadingHTTPServer):
         self.server_name, self.server_port = "localhost", self.server_address[1]
 
 
-def serve(host, handler):
-    server = _Server((host, 0), handler)
+class _Server6(_Server):
+    address_family = socket.AF_INET6
+
+
+def serve(host, handler, port=0, server_class=_Server):
+    server = server_class((host, port), handler)
     threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
     return server
 
@@ -119,10 +127,12 @@ INDEX_TITLE = "the viewer's own page"
 SECOND_TITLE = "another page of the viewer"
 ERROR_MARKUP = "<b id='injected'>markup in an error</b>"
 
-# What reaches the host off the list, and another service on 127.0.0.1.
-# Each attempt asks for a path of its own.
+# What reaches the host off the list, another service on 127.0.0.1, and
+# a program on [::1] at the viewer's port. Each attempt asks for a path
+# of its own.
 foreign_requests = []
 service_requests = []
+impostor_requests = []
 
 
 def counting(requests):
@@ -171,6 +181,13 @@ except OSError:
     # macOS gives its loopback interface 127.0.0.1 alone.
     foreign_server = None
     foreign = f"http://{FOREIGN_HOST}:{port}"
+try:
+    # Another program on the IPv6 loopback, at the viewer's own port: the
+    # address Chromium tries first for localhost.
+    impostor_server = serve("::1", counting(impostor_requests), port=port, server_class=_Server6)
+except OSError:
+    # A machine or container with no IPv6 loopback.
+    impostor_server = None
 
 (workdir / "index.html").write_text(
     f"<html><head><title>{INDEX_TITLE}</title></head><body></body></html>", encoding="utf-8"
@@ -190,7 +207,11 @@ local_file.write_text("<html><body>a file on disk</body></html>", encoding="utf-
 file_on_localhost = QUrl.fromLocalFile(str(local_file))
 file_on_localhost.setHost("localhost")
 
-report = {"foreign_host": FOREIGN_HOST, "service_port": service_port}
+report = {
+    "foreign_host": FOREIGN_HOST,
+    "service_port": service_port,
+    "server_host": viewer_server.server_address[0],
+}
 
 # The server fails: the window shows its error page, a data: document.
 failed = app_mod.MemoryViewerWindow()
@@ -222,7 +243,8 @@ report["error_with_markup"] = {
 broken.close()
 
 
-# The server runs: the window, given its port, shows what it serves on loopback.
+# The server runs: the window, given its port, shows what it serves, not
+# the program on [::1] at the same port.
 class _OnTheServersPort(app_mod.MemoryViewerWindow):
     MEMORY_VIEWER_PORT = port
 
@@ -255,7 +277,7 @@ def click_link(href, target=""):
 def nothing_moved(since):
     """Wait out a navigation the guard might have let through: it would
     move the view, or reach a counting server within milliseconds."""
-    drain(lambda: view.url() != since or foreign_requests or service_requests, 0.5)
+    drain(lambda: view.url() != since or foreign_requests or service_requests or impostor_requests, 0.5)
     return view.url() == since
 
 
@@ -292,6 +314,18 @@ report["service_link"] = {
     "stayed": nothing_moved(shown) and page.title() == title,
 }
 
+# A link to localhost on the viewer's port, which Chromium tries on [::1]
+# first, where the viewer never listens.
+del logged[:]
+shown, title = view.url(), page.title()
+clicked = click_link(f"http://localhost:{port}/from-a-localhost-link")
+drain(lambda: refused() or view.url() != shown or impostor_requests, 5.0)
+report["localhost_link"] = {
+    "clicked": clicked is True,
+    "refused": refused(),
+    "stayed": nothing_moved(shown) and page.title() == title,
+}
+
 # A link that moves the main frame to a data: document. Chromium refuses
 # a navigation the page starts there before the guard is asked.
 shown, title = view.url(), page.title()
@@ -300,14 +334,14 @@ report["data_link"] = {"clicked": clicked is True, "stayed": nothing_moved(shown
 
 # The server answers with a redirect to the host off the list.
 del logged[:]
-view.setUrl(QUrl(f"http://localhost:{port}/redirect"))
+view.setUrl(QUrl(f"http://127.0.0.1:{port}/redirect"))
 drain(lambda: refused() or view.url().host() == FOREIGN_HOST or foreign_requests, 10.0)
 drain(lambda: view.url().host() == FOREIGN_HOST or foreign_requests, 0.5)
 report["foreign_redirect"] = {"refused": refused(), "host": view.url().host()}
 
 # A page of the server frames the host off the list.
 del logged[:]
-loaded = load(view, QUrl(f"http://localhost:{port}/framed.html"))
+loaded = load(view, QUrl(f"http://127.0.0.1:{port}/framed.html"))
 drain(lambda: refused() or foreign_requests, 5.0)
 drain(lambda: foreign_requests, 0.5)
 FRAME_SHOWS = (
@@ -318,7 +352,7 @@ report["foreign_frame"] = {"loaded": loaded, "refused": refused(), "frame_shows"
 
 # A page of the server frames a data: document, which only the main frame takes.
 del logged[:]
-loaded = load(view, QUrl(f"http://localhost:{port}/framed-data.html"))
+loaded = load(view, QUrl(f"http://127.0.0.1:{port}/framed-data.html"))
 drain(lambda: refused(), 5.0)
 report["data_frame"] = {"loaded": loaded, "refused": refused(), "frame_shows": run_js(page, FRAME_SHOWS)}
 
@@ -334,13 +368,13 @@ report["new_window"] = {
 
 report["foreign_requests"] = list(foreign_requests) if foreign_server else None
 report["service_requests"] = list(service_requests)
+report["impostor_requests"] = list(impostor_requests) if impostor_server else None
 
 # The page's answer for each address, asked directly. Nothing is loaded.
 link = QWebEnginePage.NavigationType.NavigationTypeLinkClicked
 local = {
-    "the viewer's server": QUrl(f"http://localhost:{port}/"),
-    "a path on 127.0.0.1": QUrl(f"http://127.0.0.1:{port}/api/graph/node/3"),
-    "the IPv6 loopback": QUrl(f"http://[::1]:{port}/"),
+    "the viewer's server": QUrl(f"http://127.0.0.1:{port}/"),
+    "a path on the viewer's server": QUrl(f"http://127.0.0.1:{port}/api/graph/node/3"),
     "about:blank": QUrl("about:blank"),
 }
 error_page = QUrl("data:text/html;charset=UTF-8,<h1>x</h1>")
@@ -353,11 +387,13 @@ outside = {
     "a host named after localhost": QUrl("http://localhost.example.invalid/"),
     "a remote host behind loopback credentials": QUrl("http://127.0.0.1@example.invalid/"),
     "a loopback address the guard does not name": QUrl(f"http://{FOREIGN_HOST}:{port}/"),
+    "localhost on the viewer's port": QUrl(f"http://localhost:{port}/"),
+    "the IPv6 loopback on the viewer's port": QUrl(f"http://[::1]:{port}/"),
     "the local Ollama server": QUrl("http://localhost:11434/"),
     "another service on 127.0.0.1": QUrl(f"http://127.0.0.1:{service_port}/"),
-    "a loopback name with no port": QUrl("http://localhost/"),
-    "https on the viewer's port": QUrl(f"https://localhost:{port}/"),
-    "ftp on loopback": QUrl("ftp://127.0.0.1/"),
+    "127.0.0.1 with no port": QUrl("http://127.0.0.1/"),
+    "https on the viewer's port": QUrl(f"https://127.0.0.1:{port}/"),
+    "ftp on the viewer's port": QUrl(f"ftp://127.0.0.1:{port}/"),
 }
 addresses = {**local, "a data: document": error_page, **outside}
 report["main_frame"] = {name: page.acceptNavigationRequest(url, link, True) for name, url in addresses.items()}
@@ -387,4 +423,6 @@ viewer_server.shutdown()
 service_server.shutdown()
 if foreign_server:
     foreign_server.shutdown()
+if impostor_server:
+    impostor_server.shutdown()
 app.processEvents()

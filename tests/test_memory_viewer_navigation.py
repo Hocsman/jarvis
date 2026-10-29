@@ -2,15 +2,16 @@
 
 The page the viewer shows holds the launch token, and the embedded view
 must never become a way for the machine to reach a remote host or
-another service on it. So the page the window installs accepts a
-navigation, in any frame, only to ``http`` on a host named ``localhost``
-/ ``127.0.0.1`` / ``::1`` and on the viewer's own port, which the window
-hands it, or to any ``about:`` address (Qt's internal states). A
-``data:`` address passes in the main frame alone: it is the
-self-contained document ``setHtml`` loads, which carries the error page,
-and that page shows its message as text. A page cannot move the main
-frame to a ``data:`` document: Chromium refuses that before the guard is
-asked. The page refuses every other
+another service on it. The window loads the viewer by the address its
+server binds, ``127.0.0.1``, not ``localhost``, which Chromium tries on
+``::1`` first, where the viewer never listens. The page the window
+installs accepts a navigation, in any frame, only to ``http`` on
+``127.0.0.1`` and the viewer's own port, which the window hands it, or to
+any ``about:`` address (Qt's internal states). A ``data:`` address passes
+in the main frame alone: it is the self-contained document ``setHtml``
+loads, which carries the error page, and that page shows its message as
+text. A page cannot move the main frame to a ``data:`` document: Chromium
+refuses that before the guard is asked. The page refuses every other
 navigation and logs the refusal with the address's scheme, host and port
 alone. A link or a script that opens a new window opens nothing: the
 view creates no window (``desktop_app.spec.md``, "Memory Viewer").
@@ -23,10 +24,10 @@ replaced, so the real memory server never starts, and reports what the
 window showed and what its page decided. Nothing it loads leaves the
 machine: the error pages, pages the child serves itself on 127.0.0.1, and
 the attempts to reach 127.0.0.2, a loopback address the guard does not
-name, or another service on 127.0.0.1, where two more servers count what
-reaches them. Every remote address is a decision asked of the page, which
-loads nothing, and Chromium is given no proxy, so it looks for none on
-the network.
+name, another service on 127.0.0.1, or a program on ``[::1]`` at the
+viewer's port, where three more servers count what reaches them. Every
+remote address is a decision asked of the page, which loads nothing, and
+Chromium is given no proxy, so it looks for none on the network.
 """
 
 from __future__ import annotations
@@ -46,15 +47,15 @@ pytestmark = pytest.mark.unit
 TESTS_DIR = Path(__file__).resolve().parent
 CHILD = TESTS_DIR / "memory_viewer_page_child.py"
 
-LOOPBACK_NAMES = ("localhost", "127.0.0.1", "::1")
-LOCAL = ("the viewer's server", "a path on 127.0.0.1", "the IPv6 loopback", "about:blank")
+LOCAL = ("the viewer's server", "a path on the viewer's server", "about:blank")
 MAIN_FRAME_ONLY = ("a data: document",)
 FOREIGN = (
     "a remote page", "a font CDN", "a LAN address", "a file path with no host",
     "a file on localhost", "a host named after localhost",
     "a remote host behind loopback credentials", "a loopback address the guard does not name",
-    "the local Ollama server", "another service on 127.0.0.1", "a loopback name with no port",
-    "https on the viewer's port", "ftp on loopback",
+    "localhost on the viewer's port", "the IPv6 loopback on the viewer's port",
+    "the local Ollama server", "another service on 127.0.0.1", "127.0.0.1 with no port",
+    "https on the viewer's port", "ftp on the viewer's port",
 )
 
 
@@ -122,7 +123,7 @@ class TestLocalPages:
     def test_the_servers_page_shows_when_it_runs(self, report):
         shown = report["served"]
         assert shown["loaded"]
-        assert shown["host"] in LOOPBACK_NAMES
+        assert shown["host"] == report["server_host"]
         assert shown["on_the_servers_port"]
         assert shown["shows_its_page"]
         assert shown["refused"] == []
@@ -178,6 +179,18 @@ class TestNoOtherPage:
 
     def test_nothing_reaches_another_service_on_loopback(self, report):
         assert report["service_requests"] == []
+
+    def test_a_link_to_localhost_on_the_viewers_port_opens_nothing(self, report):
+        followed = report["localhost_link"]
+        assert followed["clicked"]
+        (line,) = followed["refused"]
+        assert "localhost" in line
+        assert followed["stayed"]
+
+    def test_nothing_reaches_a_program_on_the_ipv6_loopback_at_the_viewers_port(self, report):
+        if report["impostor_requests"] is None:
+            pytest.skip("the IPv6 loopback cannot be listened on here")
+        assert report["impostor_requests"] == []
 
     def test_a_redirect_to_a_host_off_the_list_is_refused(self, report):
         redirected = report["foreign_redirect"]

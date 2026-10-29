@@ -134,9 +134,8 @@ def _guard(is_main_frame):
 def test_the_viewers_server_and_internal_urls_pass_the_guard(is_main_frame):
     passes = _guard(is_main_frame)
 
-    assert passes("http://localhost:{port}/")
+    assert passes("http://127.0.0.1:{port}/")
     assert passes("http://127.0.0.1:{port}/api/graph/node/3")
-    assert passes("http://[::1]:{port}/")
     assert passes("about:blank")
 
 
@@ -159,8 +158,10 @@ def test_other_urls_are_refused_by_the_guard(is_main_frame):
     assert not passes("http://192.168.1.5/")
     assert not passes("file:///etc/passwd")
     assert not passes("file://localhost/etc/passwd")
+    assert not passes("http://localhost:{port}/")
+    assert not passes("http://[::1]:{port}/")
     assert not passes("http://localhost:11434/")
-    assert not passes("http://localhost/")
-    assert not passes("http://localhost:{default}/")
+    assert not passes("http://127.0.0.1/")
+    assert not passes("http://127.0.0.1:{default}/")
     assert not passes("https://127.0.0.1:{port}/")
     assert not passes("ftp://127.0.0.1:{port}/")
