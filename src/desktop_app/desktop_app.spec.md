@@ -122,6 +122,17 @@ A Claude Code report (`delegation_done`) reaches the dashboard on either route a
 
 Nothing on this route logs the query text: the `start` event carries the redacted query, and the debug lines name no message.
 
+**Controls.** Every control on the page is a `<button>`, and each one either acts or is disabled in the markup: nothing points and does nothing. A disabled button is dimmed, keeps the default cursor, and reads as unavailable to assistive technology.
+
+| Control | What it does |
+|---------|--------------|
+| ⚙️ (top bar) | Opens the settings (see Settings above) |
+| ⟳ on Stats Système | Calls `refreshStats`: a reading now instead of at the next 2-second tick |
+| ⟳ on Météo | Calls `refreshWeather`, which fetches the weather again. It starts disabled and stays so unless the bridge's constant `weatherAvailable` is true (location on and a city known), since with no weather to fetch the slot does nothing |
+| ⌨️ | Puts the cursor in the message field; it never reaches the bridge |
+| 🗑️ Effacer | Empties the transcript on the page and nothing else. The dialogue memory belongs to the daemon and voice shares it, so a click here never touches it: the page leaves a line in the emptied transcript saying that only the display was cleared and that Yuba still follows the conversation |
+| 📷, 🎙️, ⬇️ Exporter | Disabled: there is no camera, no mic button and no export behind them. The 🎙️ tooltip points to the wake word, which is how she is spoken to |
+
 ### Orb
 
 `src/desktop_app/orb/` renders an icosphere whose colour, intensity and surface motion follow the assistant's state (`OrbState`: IDLE deep blue `#1a3a5c`, LISTENING cyan `#00d4ff`, THINKING amber `#ff9500`, SPEAKING warm white `#e8f4ff`, plus a transient ERROR overlay in red `#ff3838`), eased through `StateController` with a 250 ms minimum cubic transition; the ERROR overlay fades over 800 ms and returns on its own to the state that was active before it. It draws with QPainter at 60 FPS: a stack of four halos, the shaded body, the wireframe displaced by two octaves of deterministic pseudo-noise so the surface breathes, a red and a blue rim in the active states, particles orbiting on the clock (`ui.orb_particles_enabled`), and a key-light highlight.

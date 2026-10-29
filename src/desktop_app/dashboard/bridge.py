@@ -1,7 +1,9 @@
 """Python<->JS bridge for the HUD dashboard.
 
 Exposed to the page over ``QWebChannel`` as ``window.jarvis``. The page
-calls slots (``submitQuery``, ``openSettings``, ``ready``) and listens to signals (``statsUpdated``,
+calls slots (``submitQuery``, ``openSettings``, ``refreshStats``,
+``refreshWeather``, ``ready``), reads one constant property
+(``weatherAvailable``) and listens to signals (``statsUpdated``,
 ``stateChanged``, ``weatherUpdated``, ``replyReceived`` …). Complex
 payloads cross as JSON strings to keep the channel marshalling trivial.
 
@@ -21,7 +23,7 @@ from __future__ import annotations
 import json
 from typing import Any, Callable, Optional
 
-from PyQt6.QtCore import QObject, QTimer, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import QObject, QTimer, pyqtProperty, pyqtSignal, pyqtSlot
 
 from jarvis.debug import debug_log
 from jarvis.state import get_jarvis_state
@@ -270,6 +272,24 @@ class DashboardBridge(QObject):
             return
         debug_log("dashboard gear: opening the settings window", "desktop")
         QTimer.singleShot(0, self._open_settings)
+
+    @pyqtSlot()
+    def refreshStats(self) -> None:
+        """The page's ⟳ on the stats card: a reading now, not at the next tick."""
+        self._emit_stats()
+
+    @pyqtSlot()
+    def refreshWeather(self) -> None:
+        """The page's ⟳ on the weather card. With no weather to fetch this
+        does nothing; the page keeps that button disabled then."""
+        debug_log(f"dashboard weather refresh (available={self.weatherAvailable})", "desktop")
+        self._fetch_weather_async()
+
+    @pyqtProperty(bool, constant=True)
+    def weatherAvailable(self) -> bool:
+        """Whether there is weather to fetch: location on and a city known.
+        Settled when the bridge is built, so the page reads it once."""
+        return bool(self._weather_city and self._location_enabled)
 
     @pyqtSlot()
     def ready(self) -> None:
