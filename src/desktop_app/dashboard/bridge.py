@@ -1,7 +1,7 @@
 """Python<->JS bridge for the HUD dashboard.
 
 Exposed to the page over ``QWebChannel`` as ``window.jarvis``. The page
-calls slots (``submitQuery``) and listens to signals (``statsUpdated``,
+calls slots (``submitQuery``, ``openSettings``, ``ready``) and listens to signals (``statsUpdated``,
 ``stateChanged``, ``weatherUpdated``, ``replyReceived`` …). Complex
 payloads cross as JSON strings to keep the channel marshalling trivial.
 
@@ -12,7 +12,8 @@ The bridge owns two timers:
 
 Chat is wired by the host (the tray): it sets ``submit_fn`` to the
 daemon submission callable and calls ``deliver_reply`` / ``deliver_busy``
-when the daemon answers, which re-emit as signals to the page.
+when the daemon answers, which re-emit as signals to the page. It also
+hands over ``open_settings``, the settings window the page's gear opens.
 """
 
 from __future__ import annotations

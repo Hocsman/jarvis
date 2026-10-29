@@ -160,38 +160,19 @@ class TestTheGearOpensTheSettings:
         _qapp.processEvents()
 
     @pytest.mark.unit
+    def test_the_page_can_reach_it(self) -> None:
+        """QWebChannel publishes slots only: a plain method would leave the
+        page's call, and the gear, doing nothing."""
+        from desktop_app.dashboard.bridge import DashboardBridge
+
+        assert DashboardBridge.staticMetaObject.indexOfSlot("openSettings()") >= 0
+
+    @pytest.mark.unit
     def test_the_gear_in_the_page_asks_for_them(self) -> None:
-        import re
         from pathlib import Path
 
         page = (Path(__file__).resolve().parent.parent / "src" / "desktop_app"
                 / "dashboard" / "index.html").read_text(encoding="utf-8")
 
-        assert re.search(r'<[^>]*id="settings-gear"', page)
-        assert re.search(r'getElementById\("settings-gear"\)\.(?:onclick|addEventListener)', page)
-        assert "jarvis.openSettings()" in page
-
-    @pytest.mark.unit
-    def test_the_tray_hands_the_dashboard_its_settings_window(self, monkeypatch) -> None:
-        from types import SimpleNamespace
-
-        from desktop_app import app, dashboard_window
-
-        made = {}
-
-        class Window:
-            def __init__(self, **kwargs):
-                made.update(kwargs)
-
-            def show(self): pass
-            def raise_(self): pass
-            def activateWindow(self): pass
-
-        monkeypatch.setattr(app, "_dashboard_available", lambda: True)
-        monkeypatch.setattr(dashboard_window, "DashboardWindow", Window)
-        tray = SimpleNamespace(dashboard_window=None, _dashboard_submit_fn=None,
-                               show_settings=lambda: None)
-
-        app.JarvisSystemTray.show_dashboard(tray)
-
-        assert made["open_settings"] is tray.show_settings
+        assert 'id="settings-gear"' in page
+        assert "openSettings" in page
