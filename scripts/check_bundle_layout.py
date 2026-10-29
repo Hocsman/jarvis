@@ -40,9 +40,11 @@ RUNTIME_SUFFIXES = frozenset({
 # Kinds of file that never need to reach the build. Code is collected by
 # PyInstaller's import analysis, ``.ico`` files are embedded in the executable
 # by ``icon=`` at build time and never opened afterwards, and ``.spec.md`` /
-# ``CLAUDE.md`` are documentation for developers.
+# ``CLAUDE.md`` are documentation for developers. A ``LICENSE`` under src/ is
+# the licence of vendored source (Ditto, under ``jarvis/output/face/ditto``),
+# which runs from a source install only and travels with that source.
 NOT_DATA_SUFFIXES = frozenset({".py", ".pyc", ".pyo", ".ico"})
-NOT_DATA_NAMES = frozenset({"CLAUDE.md"})
+NOT_DATA_NAMES = frozenset({"CLAUDE.md", "LICENSE"})
 NOT_DATA_ENDINGS = (".spec.md",)
 
 

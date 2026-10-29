@@ -44,6 +44,7 @@ def _project(tmp_path: Path) -> Path:
     _touch(src / "pkg" / "module.py")
     _touch(src / "pkg" / "pkg.spec.md")
     _touch(src / "pkg" / "CLAUDE.md")
+    _touch(src / "pkg" / "vendored" / "LICENSE", "licence of vendored source")
     _touch(src / "pkg" / "__pycache__" / "module.cpython-311.pyc")
     _touch(src / "pkg" / "assets" / "icon.ico")
     _touch(src / "pkg" / ".DS_Store")
@@ -98,6 +99,7 @@ class TestRuntimeDataFiles:
             "pkg/module.py",
             "pkg/pkg.spec.md",
             "pkg/CLAUDE.md",
+            "pkg/vendored/LICENSE",
             "pkg/assets/icon.ico",
             "pkg/.DS_Store",
         ):

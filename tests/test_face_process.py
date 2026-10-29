@@ -1,0 +1,219 @@
+"""The talking-face renderer's logic (`src/jarvis/output/face/face.spec.md`, "The
+process", "Watching and resting", "Interrupting", "Failure").
+
+Ditto is faked: these tests drive the renderer with a real timeline and a real
+shared-memory writer, and stand in for the model's frames themselves.
+"""
+
+import io
+import json
+import time
+
+import numpy as np
+import pytest
+
+from jarvis.output.face import process
+from jarvis.output.face import timeline as tl
+from jarvis.output.face.client import HEADER, MSG_AUDIO, MSG_CUT, MSG_QUIT
+from jarvis.output.face.frames import HEIGHT, WIDTH, FrameReader, FrameWriter
+
+
+class FakeStream:
+    """Ditto, as far as the renderer can tell: chunks in, frames out on request."""
+
+    def __init__(self):
+        self.chunks = []
+        self.worker_exception = None
+        self.stopped = False
+
+    def run_chunk(self, audio):
+        self.chunks.append(audio)
+
+    def stop(self):
+        self.stopped = True
+
+
+def _picture(value):
+    return np.full((HEIGHT, WIDTH, 3), value, np.uint8)
+
+
+def _message(kind, at=0.0, rate=0, samples=None):
+    payload = b"" if samples is None else np.asarray(samples, "<f4").tobytes()
+    return HEADER.pack(kind, at, rate, len(payload)) + payload
+
+
+@pytest.fixture
+def renderer():
+    r = process.Renderer(FakeStream(), FrameWriter())
+    yield r
+    r.close()
+
+
+@pytest.fixture
+def reader():
+    r = FrameReader()
+    yield r
+    r.close()
+
+
+def _watch(renderer, reader, now):
+    """A front end reading at ``now``: the renderer then counts as watched."""
+    renderer.frames.beat(now)
+    reader.read(now)
+
+
+def _shown(renderer, reader, at):
+    renderer.frames.beat(at)
+    frame = reader.read(at)
+    return None if frame is None else int(frame.pixels[0, 0, 0])
+
+
+class TestListening:
+    def test_audio_lands_on_the_timeline_at_the_time_it_will_be_heard(self, renderer):
+        t = 1000.0
+        renderer.listen(io.BytesIO(_message(MSG_AUDIO, t, tl.RATE, np.ones(tl.RATE)) + _message(MSG_QUIT)))
+
+        assert renderer.timeline.read(t, tl.RATE).all()
+        assert not renderer.timeline.read(t - 1.0, tl.RATE).any()
+
+    def test_a_cut_silences_the_timeline_and_starts_a_new_generation(self, renderer):
+        t = 1000.0
+        before = renderer.generation
+        renderer.listen(io.BytesIO(_message(MSG_AUDIO, t, tl.RATE, np.ones(2 * tl.RATE))
+                                   + _message(MSG_CUT, t + 1.0) + _message(MSG_QUIT)))
+
+        assert renderer.generation == before + 1
+        assert renderer.timeline.read(t, tl.RATE).all()
+        assert not renderer.timeline.read(t + 1.0, tl.RATE).any()
+
+    @pytest.mark.parametrize("ending", [
+        _message(MSG_QUIT),
+        b"",                                                         # the daemon closed the pipe
+        _message(MSG_AUDIO, 1.0, tl.RATE, np.ones(100))[:-7],        # it died mid-message
+        HEADER.pack(9, 0.0, 0, 3) + b"abc" + b"\x01\x02",            # a header cut short
+    ])
+    def test_the_renderer_stops_when_the_daemon_stops_talking(self, renderer, ending):
+        renderer.listen(io.BytesIO(ending))
+
+        assert renderer.quit.is_set()
+
+    def test_audio_it_cannot_lay_is_skipped_not_fatal(self, renderer):
+        t = 1000.0
+        renderer.listen(io.BytesIO(_message(MSG_AUDIO, t, 0, np.ones(10))
+                                   + _message(MSG_AUDIO, t, tl.RATE, np.ones(tl.RATE)) + _message(MSG_QUIT)))
+
+        assert renderer.timeline.read(t, tl.RATE).all()
+
+
+class TestPublishing:
+    def test_frames_ditto_hands_back_are_published_at_their_stamps(self, renderer, reader):
+        now = time.perf_counter()
+        _watch(renderer, reader, now)
+        renderer.tick(now)
+        first = renderer.due[0].stamp
+
+        for value in range(tl.CHUNK_FRAMES):
+            renderer.on_frame(_picture(value + 1))
+
+        assert len(renderer.stream.chunks) == 1 and len(renderer.stream.chunks[0]) == tl.CHUNK_SAMPLES
+        assert _shown(renderer, reader, first) == 1
+        assert _shown(renderer, reader, first + 1 / tl.FPS) == 2
+
+    def test_warm_up_frames_are_never_shown(self, renderer, reader):
+        now = time.perf_counter()
+        renderer._feed(now + 1.0, publish=False)
+
+        renderer.on_frame(_picture(9))
+
+        assert _shown(renderer, reader, now + 2.0) is None
+
+    def test_frames_still_inside_ditto_when_the_face_rests_are_never_shown(self, renderer, reader):
+        now = time.perf_counter()
+        _watch(renderer, reader, now)
+        renderer.tick(now)
+        stamp = renderer.due[0].stamp
+
+        renderer.tick(now + process.WATCH_SECONDS + 1.0)   # nobody has read since: the face rests
+        renderer.on_frame(_picture(9))
+
+        assert renderer.feeder.next_start is None
+        assert _shown(renderer, reader, stamp + 0.01) is None
+
+    def test_frames_drawn_before_a_cut_and_stamped_after_it_are_not_shown(self, renderer, reader):
+        now = time.perf_counter()
+        _watch(renderer, reader, now)
+        renderer.tick(now)
+        stamps = [due.stamp for due in renderer.due]
+        renderer.listen(io.BytesIO(_message(MSG_CUT, stamps[2]) + _message(MSG_QUIT)))
+
+        for value in range(tl.CHUNK_FRAMES):
+            renderer.on_frame(_picture(value + 1))
+
+        assert _shown(renderer, reader, stamps[-1] + 0.01) == 2
+
+    def test_frames_published_after_their_moment_are_counted_and_reported_at_the_rest(self, renderer, reader, capsys):
+        now = time.perf_counter()
+        renderer._feed(now - 5.0, publish=True)
+        for _ in range(tl.CHUNK_FRAMES):
+            renderer.on_frame(_picture(1))
+
+        renderer.tick(now)   # nobody watches: the face rests
+
+        assert f"{tl.CHUNK_FRAMES} frames after their moment" in capsys.readouterr().err
+
+
+class TestFeeding:
+    def test_nothing_is_fed_while_no_one_watches(self, renderer):
+        now = time.perf_counter()
+        for i in range(20):
+            renderer.tick(now + i * 0.05)
+
+        assert renderer.stream.chunks == []
+
+    def test_a_chunk_is_skipped_while_ditto_owes_a_frame_already_due(self, renderer, reader):
+        now = time.perf_counter()
+        _watch(renderer, reader, now)
+        renderer.tick(now)
+        start = renderer.feeder.next_start
+        late = renderer.due[0].stamp + 2 / tl.FPS   # the first frame fed is still inside Ditto
+        _watch(renderer, reader, late)
+
+        renderer.tick(late)
+
+        assert len(renderer.stream.chunks) == 1
+        assert renderer.feeder.next_start is not None and renderer.feeder.next_start > start
+
+    def test_feeding_goes_on_while_ditto_keeps_up(self, renderer, reader):
+        now = time.perf_counter()
+        _watch(renderer, reader, now)
+        renderer.tick(now)
+        for _ in range(tl.CHUNK_FRAMES):
+            renderer.on_frame(_picture(1))
+        start = renderer.feeder.next_start
+        _watch(renderer, reader, renderer.feeder.due(start))
+
+        renderer.tick(renderer.feeder.due(start))
+
+        assert len(renderer.stream.chunks) == 2
+
+
+class TestStartingUp:
+    def _events(self, capsys):
+        return [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.strip()]
+
+    def test_no_portrait_is_a_failure_with_its_reason(self, monkeypatch, capsys):
+        monkeypatch.delenv(process.PORTRAIT_ENV, raising=False)
+
+        assert process.main([]) == 1
+        assert self._events(capsys) == [{"event": "failed", "reason": "no portrait was named"}]
+
+    def test_a_missing_package_is_a_failure_with_its_reason(self, monkeypatch, capsys):
+        monkeypatch.setenv(process.PORTRAIT_ENV, "portrait.png")
+
+        def missing():
+            raise RuntimeError("tensorrt-cu12 is not installed")
+
+        monkeypatch.setattr(process, "_check_packages", missing)
+
+        assert process.main([]) == 1
+        assert self._events(capsys) == [{"event": "failed", "reason": "tensorrt-cu12 is not installed"}]
