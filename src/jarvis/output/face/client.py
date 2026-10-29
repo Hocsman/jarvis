@@ -7,6 +7,7 @@ never blocks it, and any failure turns the face off for the session.
 """
 
 import json
+import math
 import os
 import queue
 import struct
@@ -25,6 +26,7 @@ from ...debug import debug_log
 HEADER = struct.Struct("<BdII")
 MSG_AUDIO, MSG_CUT, MSG_QUIT = 1, 2, 3
 PORTRAIT_ENV = "JARVIS_FACE_PORTRAIT"   # read by process.py
+MAX_DELAY = 2.0   # a renderer announcing more would hold her voice back too long
 
 
 class FaceRenderer:
@@ -185,7 +187,14 @@ class FaceRenderer:
                     debug_log(f"face renderer: {line}", "face")
                     continue
                 if event.get("event") == "ready":
-                    self.delay = float(event.get("delay", 0.0))
+                    try:
+                        delay = float(event.get("delay"))
+                    except (TypeError, ValueError):
+                        delay = float("nan")
+                    if not (math.isfinite(delay) and 0.0 <= delay <= MAX_DELAY):
+                        self._fail(f"the renderer announced an impossible delay ({event.get('delay')!r})")
+                        continue
+                    self.delay = delay
                     self._ready = self.failure is None
                     debug_log(f"face: renderer ready, delay {self.delay:.2f}s", "face")
                 elif event.get("event") == "watched":

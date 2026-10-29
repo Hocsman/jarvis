@@ -164,7 +164,8 @@ clears the state when speech ends; whoever owns the transitions does.
 
 **First sound.** Once an item's audio stream is running (Piper, Kokoro
 and Kyutai: after the output stream starts; Chatterbox: after playback
-begins), the engine calls `_sound_started()`, which marks the latency
+begins; a Kyutai item drawn on the talking face: when it is heard, see
+"Kyutai"), the engine calls `_sound_started()`, which marks the latency
 journal (`jarvis/latency.spec.md`). That is not where SPEAKING is
 published: SPEAKING goes out when an item starts being synthesised, before
 anything is audible, so marking there would understate the wait by the
@@ -239,7 +240,7 @@ voice.
 The engines do not own the echo reference. The listener records what was
 said with `track_tts_start`, accumulating the sentences of one reply
 (`streaming.spec.md`, "The constraint that shapes everything"). The
-engine owes the listener four things:
+engine owes the listener five things:
 
 1. `is_speaking()`, which gates stop-word and echo handling while she
    talks;
@@ -500,25 +501,40 @@ item whose playback began last.
 (`face/face.spec.md`). The daemon hands it the face's renderer when it builds
 it (`create_tts_engine(face=...)`; the other engines take none). An item is
 drawn on the face when, at the moment its first quarter second of audio is in
-hand, the renderer is ready and someone is watching it; otherwise it plays as
-above, at once, and the face costs her nothing.
+hand, someone is watching the face (a face that failed is not watched) and no
+item played without the face is still to be heard: the face would otherwise
+be told a moment her voice cannot keep. Any other item plays as above, at
+once, and the face costs her nothing. A viewer who arrives in the middle of a
+reply sees her lips from the first sentence that becomes ready once what she
+said without them has been heard.
 
 - An item drawn on the face is scheduled to be heard at the later of two
   moments: the renderer's delay from then, and the end of the previous item
-  drawn on the face plus 0.2 s. Only the first sentence of a reply waits for
-  the face; the next ones keep their spacing.
+  drawn on the face, with whatever its voice waited, plus a gap. The gap is
+  at least 0.2 s, and at least what the player takes to close one stream,
+  open the next and have it heard (0.15 s plus the sound card's latency); a
+  stream that starts late anyway widens it by as much, up to 0.3 s more, for
+  the rest of the session. A sentence that is ready early enough keeps that
+  spacing from the one before; one that is ready later waits for the face's
+  delay, as the first of a reply does.
 - Its audio is handed to the renderer as it is synthesised, each piece
   stamped with the moment it will be heard.
 - The player plays it at that moment. Its stream starts with silence when it
   opens early, timed from when the sound card says the first sample will
-  leave the speakers, and the first sound is marked when the moment comes,
-  not when the stream opens.
+  leave the speakers, or from the stream's own latency when the card says
+  nothing. The first sound is marked when she is heard, not when the stream
+  opens. A stream that starts late moves the rest of the item, and the items
+  scheduled after it, by as much.
 - When synthesis falls behind playback the voice waits for its audio as it
-  does without a face, and her lips run ahead of it by as much for the rest
-  of that item; the debug log counts it.
-- `voice_delay()` is the renderer's delay while it is ready and watched, and
-  0 otherwise. A renderer that failed is not ready, so it never holds her
-  voice back.
+  does without a face, and the pieces handed over after the wait are stamped
+  later by as much. A stretch that reaches the face less than its delay
+  before it is heard comes too late to be drawn: there the mouth stays closed
+  until synthesis is ahead again. The debug log counts how far the voice ran
+  behind its moment.
+- A stop resets the schedule: the next reply waits for the face's delay
+  only, not for what the stop cut.
+- `voice_delay()` is the renderer's delay while it is watched, and 0
+  otherwise, so a renderer that failed never holds her voice back.
 
 **Failure.** Initialisation is attempted once and its outcome is kept for
 the life of the engine. A `moshi` package (or one of its dependencies) that
@@ -601,14 +617,21 @@ language. The line is not added for Kokoro or Kyutai.
   there is nothing to fall back to.
 - Each listed language gets a voice trained for it, in any spelling, and
   an unlisted one gets the fallback.
-- Each engine marks the first sound once its audio stream is running, and
-  not when SPEAKING is published.
+- Each engine marks the first sound once its audio stream is running (a
+  Kyutai item drawn on the talking face: when it is heard), and not when
+  SPEAKING is published.
 - Kyutai and a talking face (`tests/test_kyutai_face.py`): with no face, a
   face not ready or nobody watching, she speaks at once and nothing is handed
   over; otherwise her audio reaches the face stamped with when it is heard,
-  the voice waits for that moment, the first sound is marked then, the
-  sentences of a reply keep their spacing, `voice_delay()` follows the face,
-  a stop cuts the face, and the factory hands the face to Kyutai only.
+  an item shorter than the first stretch included, the voice waits for that
+  moment, the first sound is marked then, the sentences of a reply keep their
+  spacing, pieces handed over after the voice waited are stamped later by as
+  much, the gap covers the sound card's latency and learns from a late start,
+  nothing is drawn while an item played without the face is ahead, a
+  face nobody watches any more is not drawn from the next item, the item after
+  a synthesis that failed midway follows what was said, a stop cuts the face
+  and resets the schedule, `voice_delay()` follows the face, and the factory
+  hands the face to Kyutai only.
 - Kokoro's initialisation ends with one throwaway synthesis (audio
   discarded, nothing queued or played), and a warm-up failure leaves the
   pipeline loaded rather than failing init.

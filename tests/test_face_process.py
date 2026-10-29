@@ -223,6 +223,28 @@ class TestStartingUp:
         assert process.main([]) == 1
         assert self._events(capsys) == [{"event": "failed", "reason": "no portrait was named"}]
 
+    def test_once_ready_the_renderer_tells_the_handle_who_watches(self, monkeypatch, capsys):
+        monkeypatch.setenv(process.PORTRAIT_ENV, "portrait.png")
+        monkeypatch.setattr(process, "_check_packages", lambda: None)
+        built = process.Renderer(FakeStream(), FrameWriter())
+        monkeypatch.setattr(process.Renderer, "build", classmethod(lambda cls, portrait, framing: built))
+        monkeypatch.setattr(process.Renderer, "warm_up", lambda self: None)
+
+        def run(self):
+            now = time.perf_counter()
+            viewer = FrameReader()
+            self.frames.beat(now)
+            viewer.read(now)
+            viewer.close()
+            self.tick(now)
+
+        monkeypatch.setattr(process.Renderer, "run", run)
+        monkeypatch.setattr(process.sys, "stdin", io.TextIOWrapper(io.BytesIO(b"")))
+
+        assert process.main([]) == 0
+        assert self._events(capsys) == [{"event": "ready", "delay": tl.DELAY},
+                                        {"event": "watched", "value": True}]
+
     def test_a_missing_package_is_a_failure_with_its_reason(self, monkeypatch, capsys):
         monkeypatch.setenv(process.PORTRAIT_ENV, "portrait.png")
 

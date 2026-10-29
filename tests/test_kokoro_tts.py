@@ -30,7 +30,7 @@ class TestKokoroInterface:
     def test_has_same_interface_as_other_engines(self):
         tts = KokoroTTS(enabled=False)
         for name in ("start", "stop", "speak", "interrupt", "is_speaking",
-                     "get_last_spoken_text"):
+                     "get_last_spoken_text", "voice_delay"):
             assert callable(getattr(tts, name)), f"missing {name}"
 
     def test_disabled_is_a_no_op(self):

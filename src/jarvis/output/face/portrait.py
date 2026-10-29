@@ -26,7 +26,8 @@ def load(path: str) -> np.ndarray:
     try:
         data = np.fromfile(str(Path(path).expanduser()), np.uint8)   # cv2.imread cannot open every Windows path
     except OSError as e:
-        raise UnreadablePortrait(f"the portrait cannot be read: {e}") from e
+        # The reason without the path: it ends up in logs a user may share.
+        raise UnreadablePortrait(f"the portrait cannot be read ({e.strerror or type(e).__name__})") from e
     import cv2
 
     bgr = cv2.imdecode(data, cv2.IMREAD_COLOR) if data.size else None

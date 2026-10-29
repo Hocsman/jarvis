@@ -24,9 +24,10 @@ class TestPortrait:
         middle = wide[pad + ramp:pad + 300 - ramp, pad + ramp:pad + 200 - ramp]
         np.testing.assert_array_equal(middle, img[ramp:300 - ramp, ramp:200 - ramp])
 
-    def test_a_missing_file_is_refused(self, tmp_path):
-        with pytest.raises(portrait.UnreadablePortrait):
+    def test_a_missing_file_is_refused_without_its_path_in_the_reason(self, tmp_path):
+        with pytest.raises(portrait.UnreadablePortrait) as refused:
             portrait.load(str(tmp_path / "nowhere.png"))
+        assert "nowhere" not in str(refused.value)
 
     def test_a_file_that_is_not_an_image_is_refused(self, tmp_path):
         pytest.importorskip("cv2")

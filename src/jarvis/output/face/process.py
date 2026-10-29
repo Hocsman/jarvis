@@ -4,7 +4,7 @@ usage: JARVIS_FACE_PORTRAIT=PATH python -m jarvis.output.face.process [--framing
 
 The portrait comes in the environment, which only this user can read, rather
 than on the command line, which every user can. The renderer reports on stdout,
-one JSON object per line (``ready`` or ``failed``), reads audio, cuts and quit
+one JSON object per line (``ready``, ``watched`` or ``failed``), reads audio, cuts and quit
 from stdin (see ``client.HEADER``), and publishes frames to shared memory
 (``frames.py``). Everything else goes to stderr, which its handle logs.
 """
@@ -87,11 +87,12 @@ class Renderer:
         from .ditto.stream import Stream
         from .frames import FrameWriter
 
+        # The portrait first: a portrait that cannot be read costs no download.
+        rgb = portraits.load(portrait)
         root = weights.models_dir()
         if weights.missing(root):
             _log("fetching the face's model files")
             weights.fetch(root)
-        rgb = portraits.load(portrait)
         warp_engine, decoder_engine = engines.ensure_engines(root)
         warp, decode = engines.warp_and_decode(warp_engine, decoder_engine)
         stream = Stream(str(root / weights.CONFIG), str(root / weights.DATA_ROOT))

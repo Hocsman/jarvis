@@ -32,10 +32,13 @@ them states its side in its own spec.
 
 `face_enabled` is false by default. The daemon starts a renderer when it
 starts, and only when `face_enabled` is true, `face_portrait_path` names a
-file and the speech engine is Kyutai, the one engine that feeds a face. It
-hands the renderer to the engine and stops it when it shuts down. Otherwise
-no renderer is started, nothing is fetched, and the GPU does no work for a
-face.
+file that exists, and the voice is on and is Kyutai, the one engine that
+feeds a face. It hands the renderer to the engine and stops it when it shuts
+down. Otherwise no renderer is started, nothing is fetched, and the GPU does
+no work for a face; when the face was enabled, a console line says which
+condition kept it off, without the portrait's path. The renderer reads the
+portrait before anything else, so a portrait it cannot read costs no
+download.
 
 ## Hardware and installation
 
@@ -62,7 +65,8 @@ and never the voice.
   (float32 samples, their sample rate, and the time the first of them will be
   heard), a cut (see Interrupting) and quit.
 - **From the renderer**, on its stdout, comes one JSON object per line:
-  `ready` with the renderer's delay once it can draw, `watched` whenever
+  `ready` with the renderer's delay once it can draw (a delay that is not a
+  number between 0 and 2 s turns the face off), `watched` whenever
   someone starts or stops watching the face, or `failed` with a reason.
   Everything else it prints goes to its stderr, which the handle logs.
 - **`FaceRenderer` never raises to its caller and never blocks it.** Sending
@@ -268,20 +272,21 @@ is checked by hand.
   fed while no one watches, `watched` reported as it changes, `failed` with
   its reason.
 - `tests/test_face_client.py`: the renderer process faked; `ready`,
-  `watched` and `failed`, a child that dies, cannot start or ignores quit, the packaged app
+  `watched` and `failed`, an impossible delay refused, a child that dies, cannot start or ignores quit, the packaged app
   refused, the portrait in the environment and not the command line, messages
   in order, what cannot be sent dropped, a line that is not an event, a caller
   never blocked by a child that stops reading.
 - `tests/test_face_pickle.py`: the configuration unpickler admits numpy arrays
   and refuses anything else without running it.
 - `tests/test_face_files.py`: the portrait widened around the original pixels
-  and refused when unreadable (the image cases need OpenCV and are skipped
+  and refused when unreadable, without its path in the reason (the image cases need OpenCV and are skipped
   without it); weights fetched only when missing, without a token, and never
   put in place when their digest does not match; an engine key that changes
   with the GPU, TensorRT and the weights; engines built once, then found.
-- `tests/test_face_daemon.py`: no renderer unless the face is enabled, a
-  portrait is named and the voice is Kyutai; the renderer started with its
-  portrait and framing and handed to the voice; the settings' defaults.
+- `tests/test_face_daemon.py`: no renderer unless the face is enabled, its
+  portrait exists and the voice is on and is Kyutai, and a console line that
+  says why without the path; the renderer started with its portrait and
+  framing and handed to the voice; the settings' defaults.
 - `tests/test_kyutai_face.py`: Kyutai's side (`output/tts.spec.md`).
 - `scripts/check_talking_face.py`, by hand on a machine with the GPU, the
   packages and the weights: the real renderer fed a WAV the way a speech engine
