@@ -535,14 +535,14 @@
 
   // Clearing empties this page and nothing else. The dialogue memory is the
   // daemon's and voice shares it, so Yuba still follows the conversation,
-  // and the line left in the emptied transcript says so.
+  // and the line left in the emptied transcript says so. A reply still being
+  // written stays below that line rather than restarting mid-sentence.
   function clearTranscript() {
-    clearStream();
-    msgs.replaceChildren();
     const note = document.createElement("div");
     note.className = "msg note";
     note.textContent = "Seul l'affichage est effacé : Yuba garde le fil de la conversation.";
-    msgs.appendChild(note);
+    msgs.replaceChildren(note);
+    if (streamEl) msgs.appendChild(streamEl);
   }
 
   // ── Bridge (QWebChannel) ───────────────────────────────────────

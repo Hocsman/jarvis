@@ -1,8 +1,10 @@
-"""Tests for the dashboard Python<->JS bridge.
+"""Tests for the dashboard Python<->JS bridge and the page it drives.
 
 The bridge exposes chat (submitQuery + reply/echo/busy signals), live
-system stats, and a JarvisState->orb mapping to the HUD page. These
-tests exercise the Python side directly (no web view needed).
+system stats, the weather, the settings and a JarvisState->orb mapping to
+the HUD page. These tests exercise the Python side directly, and read the
+page's markup, stylesheet and script as text to check how its controls
+are wired; no web view is built.
 """
 
 from __future__ import annotations
@@ -177,10 +179,7 @@ class TestTheGearOpensTheSettings:
 
     @pytest.mark.unit
     def test_the_gear_in_the_page_asks_for_them(self) -> None:
-        from pathlib import Path
-
-        page = (Path(__file__).resolve().parent.parent / "src" / "desktop_app"
-                / "dashboard" / "index.html").read_text(encoding="utf-8")
+        page = _PAGE.read_text(encoding="utf-8")
 
         assert 'id="settings-gear"' in page
         assert "openSettings" in page
@@ -192,7 +191,12 @@ def _page_style() -> str:
 
 
 def _page_script() -> str:
-    return re.search(r"<script>(.*?)</script>", _PAGE.read_text(encoding="utf-8"), re.S).group(1)
+    """The page's inline script without its comments, so a line left only
+    in a comment is not read as code. ``//`` after a colon or a quote is
+    kept, as in a URL."""
+    script = re.search(r"<script>(.*?)</script>", _PAGE.read_text(encoding="utf-8"), re.S).group(1)
+    script = re.sub(r"/\*.*?\*/", "", script, flags=re.S)
+    return re.sub(r"(?<![:\"'])//[^\n]*", "", script)
 
 
 def _page_elements() -> list:
@@ -211,7 +215,11 @@ def _page_elements() -> list:
 
 
 def _pointer_classes() -> set:
-    """The classes the stylesheet gives a pointing hand: what looks clickable."""
+    """The classes the stylesheet gives a pointing hand: what looks clickable.
+
+    Reads rules whose selector is one bare class (``.ctl``), the only shape
+    the page gives ``cursor: pointer``; a compound or descendant selector
+    would not be seen."""
     classes = set()
     for selectors, body in re.findall(r"([^{}]+)\{([^{}]*)\}", _page_style()):
         if re.search(r"cursor:\s*pointer", body):
@@ -228,16 +236,28 @@ def _clickable_elements() -> list:
             if pointer & set((attrs.get("class") or "").split())]
 
 
-def _ids_the_script_binds() -> set:
-    """Ids whose element the script gives a click handler, directly or
-    through the constant it holds the element in."""
+def _ids_the_script_writes(member: str) -> set:
+    """Ids whose element the script writes ``member`` on, directly or
+    through the ``const`` it holds the element in. The page reaches its
+    elements with ``getElementById("…")`` in double quotes, and that is
+    the only form read here."""
     script = _page_script()
-    click = r'\s*\.\s*(?:onclick\s*=|addEventListener\(\s*"click")'
-    ids = set(re.findall(r'getElementById\("([\w-]+)"\)' + click, script))
+    ids = set(re.findall(r'getElementById\("([\w-]+)"\)' + member, script))
     for var, element_id in re.findall(r'const\s+(\w+)\s*=\s*document\.getElementById\("([\w-]+)"\)', script):
-        if re.search(rf"\b{var}" + click, script):
+        if re.search(rf"\b{var}" + member, script):
             ids.add(element_id)
     return ids
+
+
+def _ids_the_script_binds() -> set:
+    """Ids whose element the script gives a click handler."""
+    return _ids_the_script_writes(r'\s*\.\s*(?:onclick\s*=|addEventListener\(\s*"click")')
+
+
+def _ids_the_script_can_enable() -> set:
+    """Ids whose ``disabled`` the script sets at run time, so a button
+    disabled in the markup may still be clicked."""
+    return _ids_the_script_writes(r"\s*\.\s*disabled\s*=")
 
 
 def _js_function_body(script: str, name: str) -> str:
@@ -270,11 +290,16 @@ class TestNothingOnThePageLooksClickableAndDoesNothing:
 
     @pytest.mark.unit
     def test_every_button_acts_or_is_disabled(self) -> None:
+        """Only a button disabled in the markup and never enabled by the
+        script may have no handler."""
         buttons = [attrs for tag, attrs in _page_elements() if tag == "button"]
         bound = _ids_the_script_binds()
+        can_enable = _ids_the_script_can_enable()
         assert buttons
 
-        dead = [attrs for attrs in buttons if "disabled" not in attrs and attrs.get("id") not in bound]
+        dead = [attrs for attrs in buttons
+                if attrs.get("id") not in bound
+                and ("disabled" not in attrs or attrs.get("id") in can_enable)]
 
         assert dead == []
 
@@ -331,6 +356,69 @@ class TestTheRefreshButtons:
         assert weather and json.loads(weather[-1])["loc"] == "Lyon"
 
     @pytest.mark.unit
+    def test_a_refresh_while_the_weather_is_on_its_way_fetches_nothing_more(self, _qapp, monkeypatch) -> None:
+        import threading
+
+        from desktop_app.dashboard import bridge as bridge_module
+
+        asked, release = [], threading.Event()
+
+        def slow_fetch(city, language="en"):
+            asked.append(city)
+            release.wait(2)
+            return {"temp": 12, "loc": city}
+
+        monkeypatch.setattr(bridge_module, "fetch_weather_summary", slow_fetch)
+        b = bridge_module.DashboardBridge(weather_city="Lyon", cfg=SimpleNamespace(location_enabled=True))
+        weather = []
+        b.weatherUpdated.connect(weather.append)
+
+        b.refreshWeather()
+        b.refreshWeather()
+        release.set()
+        _wait_for(lambda: weather, _qapp)
+
+        assert asked == ["Lyon"]
+
+    @pytest.mark.unit
+    def test_once_the_weather_has_come_a_refresh_fetches_it_again(self, _qapp, monkeypatch) -> None:
+        from desktop_app.dashboard import bridge as bridge_module
+
+        asked = []
+        monkeypatch.setattr(bridge_module, "fetch_weather_summary",
+                            lambda city, language="en": asked.append(city) or {"loc": city})
+        b = bridge_module.DashboardBridge(weather_city="Lyon", cfg=SimpleNamespace(location_enabled=True))
+        weather = []
+        b.weatherUpdated.connect(weather.append)
+
+        b.refreshWeather()
+        _wait_for(lambda: weather, _qapp)
+        b.refreshWeather()
+        _wait_for(lambda: len(weather) == 2, _qapp)
+
+        assert asked == ["Lyon", "Lyon"]
+
+    @pytest.mark.unit
+    def test_a_failed_fetch_does_not_block_the_next_one(self, _qapp, monkeypatch) -> None:
+        from desktop_app.dashboard import bridge as bridge_module
+
+        asked = []
+
+        def failing_fetch(city, language="en"):
+            asked.append(city)
+            raise OSError("network down")
+
+        monkeypatch.setattr(bridge_module, "fetch_weather_summary", failing_fetch)
+        b = bridge_module.DashboardBridge(weather_city="Lyon", cfg=SimpleNamespace(location_enabled=True))
+
+        b.refreshWeather()
+        _wait_for(lambda: asked, _qapp)
+        # Refresh until one gets through: the failed fetch must not hold the next one back.
+        _wait_for(lambda: b.refreshWeather() or len(asked) >= 2, _qapp)
+
+        assert asked[:2] == ["Lyon", "Lyon"]
+
+    @pytest.mark.unit
     def test_with_location_off_refreshing_the_weather_fetches_nothing(self, _qapp, monkeypatch) -> None:
         from desktop_app.dashboard import bridge as bridge_module
 
@@ -368,7 +456,7 @@ class TestClearingTheTranscript:
     the daemon's and voice shares it (``desktop_app.spec.md``, "Dashboard")."""
 
     @pytest.mark.unit
-    def test_the_clear_button_clears_the_transcript(self) -> None:
+    def test_the_clear_button_is_wired_to_clearing_the_transcript(self) -> None:
         assert re.search(r'getElementById\("clear-transcript"\)\.onclick\s*=\s*clearTranscript\b',
                          _page_script())
 
