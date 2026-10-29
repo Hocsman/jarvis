@@ -214,6 +214,26 @@ class TestIntentJudge:
         assert result.stop is False
         assert result.confidence == "high"
 
+    def test_parse_response_reads_a_noise_verdict(self):
+        """The judge can say the segment is not speech at all."""
+        judge = IntentJudge()
+        response = ('{"directed": false, "query": "", "stop": false, "noise": true, '
+                    '"confidence": "high", "reasoning": "subtitle line from silence"}')
+        result = judge._parse_response(response)
+
+        assert result is not None
+        assert result.noise is True
+        assert result.directed is False
+
+    def test_parse_response_without_noise_is_speech(self):
+        """A model that leaves the field out has not called anything noise."""
+        judge = IntentJudge()
+        response = '{"directed": false, "query": "", "stop": false, "confidence": "high", "reasoning": "x"}'
+        result = judge._parse_response(response)
+
+        assert result is not None
+        assert result.noise is False
+
     def test_parse_response_with_extra_text(self):
         """Parses response with extra text around JSON."""
         judge = IntentJudge()
@@ -1147,8 +1167,12 @@ class TestReasoningModelHandling:
         """String booleans ('false', 'true') must not evaluate to Python's bool('false') == True."""
         judge = IntentJudge()
         judgment = judge._parse_response(
-            '{"directed": "false", "query": "", "stop": "false", "confidence": "high", "reasoning": "test"}'
+            '{"directed": "false", "query": "", "stop": "false", "noise": "false", "confidence": "high", "reasoning": "test"}'
         )
         assert judgment is not None
         assert judgment.directed is False
         assert judgment.stop is False
+        assert judgment.noise is False
+        assert judge._parse_response(
+            '{"directed": "false", "noise": "yes", "confidence": "high"}'
+        ).noise is True

@@ -128,6 +128,7 @@ class IntentJudgment:
     stop: bool               # Is this a stop command?
     confidence: str          # "high", "medium", or "low"
     reasoning: str           # Brief explanation for debugging
+    noise: bool = False      # Not speech at all: text Whisper made out of silence
     raw_response: str = ""   # Raw LLM response for debugging
 
 
@@ -157,6 +158,8 @@ class IntentJudge:
     1. Whether speech is directed at the assistant
     2. What the actual query is (excluding echo, pre-wake-word chatter, filler)
     3. Whether this is a stop command
+    4. Whether the current segment is not speech at all (text Whisper made
+       out of silence)
 
     Uses a small model (gemma4) for better accuracy compared to
     the simpler intent_validator.
@@ -183,7 +186,7 @@ WAKE WORD MODE:
 - Query must be answerable alone (without the transcript). When resolving to a sub-item ("pro model", "the red one"), also include the parent noun/brand from earlier segments — "pro model" alone is not self-contained; "iPhone pro model" is.
 
 HOT WINDOW MODE (no wake word needed):
-- User IS DIRECTED (directed=true) — always. This overrides any "topic-less question" heuristic above; follow-ups like "tell me more" are directed in hot window.
+- User IS DIRECTED (directed=true) — always, unless the current segment is not speech (see NOT SPEECH). This overrides any "topic-less question" heuristic above; follow-ups like "tell me more" are directed in hot window.
 - Extract from segments WITHOUT "(during TTS)" marker
 - Question or statement both valid
 
@@ -197,6 +200,11 @@ TRANSCRIPT NOISE:
 - When such a segment sits between a real question and an imperative wake-word call, treat it as noise and still re-issue the original question (see the Mount Everest + chatter + "answer that" example below).
 - Within the extracted query string, fix obvious ASR slips quietly (tense, fused words, homophones) so the query is answerable; do NOT rewrite content or change the user's intent.
 
+NOT SPEECH:
+- Whisper invents text out of silence, breath or room noise: mostly the closing lines of videos and subtitle credits ("thanks for watching", "see you in the next video", "subtitles by ...", a lone "thank you"), in any language, often one nobody in the transcript is speaking.
+- When the CURRENT segment is such an invention rather than words someone said -> noise=true, directed=false, query="". This holds in hot window mode too: the follow-up rule is about the user, and this is not the user.
+- Words a person said are never noise, however short, thankful, off-topic or oddly phrased. When in doubt, noise=false.
+
 STOP DETECTION:
 - "stop", "quiet" (standalone or short command) -> directed=true, stop=true, query=""
 
@@ -205,7 +213,7 @@ NOT DIRECTED:
 - Wake word used only as a narrative mention ("I told my friend about {name}") -> directed=false
 
 Output JSON only:
-{{"directed": true/false, "query": "...", "stop": true/false, "confidence": "high/medium/low", "reasoning": "brief"}}
+{{"directed": true/false, "query": "...", "stop": true/false, "noise": true/false, "confidence": "high/medium/low", "reasoning": "brief"}}
 
 Examples:
 - "Jarvis what time is it" -> {{"directed": true, "query": "what time is it", "stop": false, "confidence": "high", "reasoning": "wake word + question"}}
@@ -219,6 +227,7 @@ Examples:
 - Previous "How tall is Mount Everest" + Noise "some unrelated chatter" + Current "Jarvis answer that" -> {{"directed": true, "query": "how tall is Mount Everest", "stop": false, "confidence": "high", "reasoning": "imperative -> re-issue prior QUESTION; ignore the chatter segment, re-issue the original question even when noise sits between"}}
 - Previous "What's the capital of Portugal" + Current "Jarvis go ahead and answer" -> {{"directed": true, "query": "what is the capital of Portugal", "stop": false, "confidence": "high", "reasoning": "multi-word imperative ('go ahead and answer') is the same pattern as 'answer that' -> re-issue prior question; do NOT pass the imperative through literally"}}
 - Hot window, user says "I think absurdism is better" -> {{"directed": true, "query": "I think absurdism is better", "stop": false, "confidence": "high", "reasoning": "user statement in hot window"}}
+- Hot window after an English reply, Current "Sottotitoli creati dalla comunità Amara.org" -> {{"directed": false, "query": "", "stop": false, "noise": true, "confidence": "high", "reasoning": "subtitle credit Whisper made out of silence, not speech"}}
 - "(during TTS)" segments only -> {{"directed": false, "query": "", "stop": false, "confidence": "high", "reasoning": "only echo"}}
 - "stop" -> {{"directed": true, "query": "", "stop": true, "confidence": "high", "reasoning": "stop command"}}
 - No wake word, not hot window -> {{"directed": false, "query": "", "stop": false, "confidence": "high", "reasoning": "no wake word"}}'''
@@ -390,6 +399,7 @@ Examples:
                 stop=_parse_bool(data.get("stop"), default=False),
                 confidence=str(data.get("confidence", "low")).lower(),
                 reasoning=str(data.get("reasoning", "")),
+                noise=_parse_bool(data.get("noise"), default=False),
                 raw_response=response_text,
             )
         except (json.JSONDecodeError, KeyError, AttributeError) as e:

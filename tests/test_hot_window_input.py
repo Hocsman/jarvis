@@ -17,7 +17,7 @@ import pytest
 
 from conftest import _created_listeners
 from jarvis.listening.state_manager import StateManager, ListeningState
-from jarvis.listening.intent_judge import IntentJudgment
+from jarvis.listening.intent_judge import IntentJudge, IntentJudgment
 
 
 # ---------------------------------------------------------------------------
@@ -75,11 +75,12 @@ def _create_listener(**kwargs):
     return listener, mock_tts
 
 
-def _make_judgment(directed=True, query="", stop=False, confidence="high", reasoning="test"):
+def _make_judgment(directed=True, query="", stop=False, confidence="high", reasoning="test",
+                   noise=False):
     """Build an IntentJudgment."""
     return IntentJudgment(
         directed=directed, query=query, stop=stop,
-        confidence=confidence, reasoning=reasoning,
+        confidence=confidence, reasoning=reasoning, noise=noise,
     )
 
 
@@ -1099,6 +1100,142 @@ class TestEchoRejectionInHotWindow:
 
         # Non-echo speech in hot window is accepted via override
         assert _accepted_query(listener) == "did you see the game last night"
+        listener.state_manager.stop()
+
+
+# ---------------------------------------------------------------------------
+# Tests: What Whisper makes of silence is nobody's speech
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+class TestWhatWhisperMakesOfSilence:
+    """Whisper turns silence and room noise into the closing lines of videos:
+    "Thank you.", "ご視聴ありがとうございました", "Продолжение следует...".
+    The judge says so with ``noise``, and no hot-window override may answer it.
+
+    Field trace (2026-10-29): the judge called each of these a hallucination,
+    the overrides answered them anyway, and she replied in English, then
+    about Russian and Japanese, to a man speaking French.
+    """
+
+    def _in_the_window(self, reply):
+        listener, _ = _create_listener(echo_tolerance=0.02, hot_window_seconds=3.0)
+        listener.echo_detector.track_tts_start(reply)
+        _simulate_tts_finish(listener)
+        _wait_for_hot_window_active(listener)
+        return listener
+
+    @patch("builtins.print")
+    def test_a_phrase_nobody_said_is_not_answered(self, _print):
+        listener = self._in_the_window("Pour demain, le ciel sera dégagé, Monsieur.")
+        listener.cfg.tune_enabled = True
+        _install_intent_judge(listener, _make_judgment(
+            directed=False, confidence="high", noise=True,
+            reasoning="subtitle line produced from silence"))
+
+        listener._process_transcript("продолжение следует...", utterance_energy=0.01)
+
+        assert _accepted_query(listener) == ""
+        assert not _is_beeping(listener)
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_nor_when_the_judge_also_speaks_of_her_echo(self, _print):
+        """The echo override: "thank you." carries words she did not say, and
+        its energy clears the bar over the ambient floor recorded when she
+        started speaking, so only the noise verdict stands between it and a
+        reply."""
+        listener = self._in_the_window("Je reste à votre disposition, Monsieur.")
+        _install_intent_judge(listener, _make_judgment(
+            directed=False, confidence="high", noise=True,
+            reasoning="hallucination on silence; the other segment is echo"))
+
+        listener._process_transcript("thank you.", utterance_energy=0.01)
+
+        assert _accepted_query(listener) == ""
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_the_same_words_said_by_him_are_still_answered(self, _print):
+        """The same utterance and the same echo reasoning, judged speech: the
+        barge-in override still takes it."""
+        listener = self._in_the_window("Je reste à votre disposition, Monsieur.")
+        _install_intent_judge(listener, _make_judgment(
+            directed=False, confidence="high", noise=False,
+            reasoning="his words; the other segment is echo"))
+
+        listener._process_transcript("thank you.", utterance_energy=0.01)
+
+        assert _accepted_query(listener) == "thank you."
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_a_judge_that_also_says_directed_is_believed(self, _print):
+        """A verdict that contradicts itself falls to his side."""
+        listener = self._in_the_window("Pour demain, le ciel sera dégagé, Monsieur.")
+        _install_intent_judge(listener, _make_judgment(
+            directed=True, query="merci", confidence="high", noise=True))
+
+        listener._process_transcript("merci", utterance_energy=0.01)
+
+        assert _accepted_query(listener) == "merci"
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_a_phantom_does_not_cost_him_his_follow_up(self, _print):
+        listener = self._in_the_window("Pour demain, le ciel sera dégagé, Monsieur.")
+        _install_intent_judge(listener, _make_judgment(
+            directed=False, confidence="high", noise=True,
+            reasoning="subtitle line produced from silence"))
+        listener._process_transcript("ご視聴ありがとうございました", utterance_energy=0.01)
+
+        _install_intent_judge(listener, _make_judgment(
+            directed=True, query="et après-demain ?", confidence="high"))
+        listener._process_transcript("et après-demain ?", utterance_energy=0.01)
+
+        assert _accepted_query(listener) == "et après-demain ?"
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_the_phantom_is_no_context_for_what_he_says_next(self, _print):
+        listener = self._in_the_window("Pour demain, le ciel sera dégagé, Monsieur.")
+
+        def hear(text):
+            # What the audio loop does before handing the text over.
+            now = time.time()
+            listener._transcript_buffer.add(text, now - 1.0, now, 0.01)
+            listener._process_transcript(text, utterance_energy=0.01)
+
+        _install_intent_judge(listener, _make_judgment(
+            directed=False, confidence="high", noise=True,
+            reasoning="subtitle line produced from silence"))
+        hear("ご視聴ありがとうございました")
+
+        judge = _install_intent_judge(listener, _make_judgment(
+            directed=True, query="et après-demain ?", confidence="high"))
+        hear("et après-demain ?")
+
+        shown = IntentJudge()._build_user_prompt(**{
+            k: v for k, v in judge.judge.call_args.kwargs.items()
+            if k in ("segments", "wake_timestamp", "last_tts_text",
+                     "last_tts_finish_time", "in_hot_window", "current_text")})
+        assert "ご視聴" not in shown
+        assert "et après-demain" in shown
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_a_wake_word_outside_the_window_is_still_his(self, _print):
+        """Outside the hot window the judge only runs on a wake word or while
+        she speaks. A doubtful verdict there still falls through to the wake
+        word, whatever it says about noise."""
+        listener, _ = _create_listener(echo_tolerance=0.02, hot_window_seconds=3.0)
+        _install_intent_judge(listener, _make_judgment(
+            directed=False, confidence="medium", noise=True,
+            reasoning="unsure"))
+
+        listener._process_transcript("jarvis what time is it", utterance_energy=0.01)
+
+        assert "what time is it" in _accepted_query(listener)
         listener.state_manager.stop()
 
 

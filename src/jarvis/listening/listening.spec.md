@@ -199,7 +199,7 @@ After TTS finishes, allow wake-word-free follow-up.
 
 **Duration:** Configurable (default: 3 seconds)
 
-**Behaviour:** Speech first passes through an early fuzzy echo check (rapidfuzz `partial_ratio`, threshold 70, with word-count guard to avoid catching mixed echo+speech). Pure echo is silently rejected **without calling the intent judge** — this keeps echo rejection instant and prevents it from blocking the audio loop. The hot window timer is **not** reset on echo rejection. Non-echo speech is sent to the intent judge, but if the judge rejects it, the rejection is overridden — all non-echo speech in the hot window is accepted as a follow-up query.
+**Behaviour:** Speech first passes through an early fuzzy echo check (rapidfuzz `partial_ratio`, threshold 70, with word-count guard to avoid catching mixed echo+speech). Pure echo is silently rejected **without calling the intent judge** — this keeps echo rejection instant and prevents it from blocking the audio loop. The hot window timer is **not** reset on echo rejection. Non-echo speech is sent to the intent judge, and if the judge rejects it with high confidence, the rejection is overridden: non-echo speech in the hot window is accepted as a follow-up query. A rejection at medium or low confidence falls through to the wake-word check, which a follow-up does not pass. Speech, not text: a segment the judge calls noise is not speech, and nothing overrides that verdict (see "Text Whisper Makes Out of Silence").
 
 **Mixed echo+speech handling:** When Whisper merges TTS echo and user speech into one chunk (e.g. mic picks up TTS then user speaks), the word-count guard detects the extra content and lets it through to the intent judge. The judge extracts the user's actual query from the mixed transcript. Post-judge echo checks also use the word-count guard and verify the judge's extracted query isn't itself echo before rejecting.
 
@@ -268,7 +268,7 @@ This enables Jarvis to **chime into ongoing conversations** between people. When
 
 **Multi-topic disambiguation.** Real buffers often contain interleaved threads from ambient chatter — e.g. a sports conversation running alongside a purchase discussion. When the wake-word segment uses a vague reference or a topic-less question ("what's the price", "how much does it cost"), the judge must pick the thread whose subject fits the question's grammar (a purchasable thing for "price", a release for "when did it come out") and ignore unrelated threads. When resolving to a sub-item ("pro model", "the red one"), the query must include the parent noun/brand so it remains answerable without the transcript. The grammar-matching behaviour lives entirely in the judge's system prompt (no runtime code branch) and is exercised by the `buried_target_*` eval cases in `evals/test_intent_judge.py` — if the small model regresses on this behaviour, those evals catch it.
 
-**Hot-window override.** In hot-window mode the user is always treated as directed; the topic-less / vague-reference heuristics above are subordinate. Short follow-ups like "tell me more", "and?", or "what else" stay directed rather than being rejected as undirected chatter, because the hot window only opens after a completed Jarvis exchange.
+**Hot-window override.** In hot-window mode the user is always treated as directed; the topic-less / vague-reference heuristics above are subordinate. Short follow-ups like "tell me more", "and?", or "what else" stay directed rather than being rejected as undirected chatter, because the hot window only opens after a completed Jarvis exchange. The rule is about the user, so it does not cover a segment that is not speech at all.
 
 **Declarative statements addressed to the wake word.** Segments where the user shares information, feelings, or an action with the assistant — e.g. "Jarvis, I just ate a burger from McDonald's", "I'm feeling a bit tired today, Jarvis", "my flight got cancelled, Jarvis" — are directed and must be extracted verbatim (wake word removed) as the query. The wake word can appear at the start, middle, or end of the segment; position does not affect directedness. The judge must not reject these as "not a command or question": any segment where the wake word is used to address the assistant (as opposed to a narrative mention like "I told my friend about Jarvis") is directed, regardless of sentence mood.
 
@@ -282,6 +282,20 @@ This enables Jarvis to **chime into ongoing conversations** between people. When
 ```
 
 The intent judge synthesizes: `"what do you think about the weather tomorrow for the picnic"`
+
+### Text Whisper Makes Out of Silence
+
+Whisper turns silence, breath and room noise into text: mostly the closing lines of videos and subtitle credits ("Thank you.", "ご視聴ありがとうございました", "Продолжение следует...", "Sous-titres réalisés par la communauté d'Amara.org"), often in a language nobody in the room speaks. The confidence filters below catch some of it, not all.
+
+The judge's verdict carries `noise`: true when the current segment is such an invention rather than words someone said, and then it is not directed. Words a person said are never noise, however short, thankful, odd or misheard; in doubt the judge says false, and a model that leaves the field out has said false.
+
+- **In the hot window nothing overrides it.** A not-directed verdict with `noise` on an utterance that could be a hot-window follow-up is final: the listener marks the segment processed, so the judge never sees it again as context, prints `🔇 Heard (not speech)`, stops the thinking beep and returns. No hot-window override runs (non-echo speech, an echo verdict with words she did not say and a voice, the grace after the window), because they exist to keep his words, and a hallucination produces words nobody said that the energy test can still take for a voice while she is speaking.
+- **Outside it the verdict changes nothing.** The judge only runs there on a wake word or while she speaks, and Whisper does not invent her name, so a doubtful verdict still falls through to the text wake-word check as any other.
+- **His side wins a contradiction.** A verdict that says both `noise` and directed is treated as directed.
+- **The window stays open.** Like an echo, a noise verdict does not touch the hot window, so his real follow-up after it is still a follow-up.
+- **Fails open.** With no verdict (judge unavailable) or a model that never sets `noise`, the hot window behaves as without it.
+
+How well it works is the judge model's: a small local model can miss what a larger one catches, and a miss is answered as before. `evals/test_intent_judge.py` holds the inventions and the real follow-ups it is measured on (`TestIntentJudgeKnowsSilenceFromSpeech` on the suite's small model, `EVAL_INTENT_JUDGE_ARMS` on any), and `docs/llm_contexts.md` the measurement.
 
 ### Input Format
 
@@ -304,6 +318,7 @@ Current state: wake_word_mode
   "directed": true,
   "query": "what do you think about the weather tomorrow for the picnic",
   "stop": false,
+  "noise": false,
   "confidence": "high",
   "reasoning": "synthesized context from conversation about weather and picnic"
 }
@@ -334,6 +349,11 @@ The fuzzy check acts as a fast, reliable safety net. The intent judge provides d
    speaking, by the same `energy_spike_threshold` the detector already
    applies to this question in the post-TTS cooldown. Either test alone
    was fooled — text by a hallucination, energy by a door slamming.
+
+   Both together are still fooled by a hallucination while she speaks,
+   since her own voice clears the energy bar. That one the judge names:
+   a verdict that calls the utterance noise is never overridden (see "Text
+   Whisper Makes Out of Silence").
 
    Fails open: with no TTS text to compare against, everything is the user's.
    The energy half fails open twice over — no baseline, or an energy of
@@ -446,6 +466,8 @@ If wake detected OR in hot window:
     → Fuzzy echo check (partial_ratio ≥ 70 = echo → reject + reset timer)
     → Send buffer + context to Intent Judge
     ↓
+If judge rejects and says noise, in hot window:
+    → Not speech: mark processed, ignore, hot window untouched
 If judge.directed and judge.query:
     → Verify wake word present (wake word mode) or non-echo (hot window)
     → Dispatch query to Reply Engine

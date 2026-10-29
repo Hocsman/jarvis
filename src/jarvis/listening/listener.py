@@ -1076,6 +1076,21 @@ class VoiceListener(threading.Thread):
                     self._silence_speech()
                     return
 
+                # In the hot window, text Whisper made out of silence is
+                # nobody's speech. The overrides below exist to keep his
+                # words, so none of them may answer it, and it is no context
+                # for what he says next. A verdict that also says directed
+                # falls to his side. Outside the window the judge only runs
+                # on a wake word or while she speaks, and Whisper does not
+                # invent her name, so the paths below keep the verdict.
+                if intent_judgment.noise and not intent_judgment.directed and could_be_hot_window:
+                    debug_log(f"🔇 Not speech (judge): \"{text_lower}\"", "voice")
+                    self._transcript_buffer.mark_segment_processed(text_lower)
+                    print(f"  🔇 Heard (not speech): \"{text_lower[:50]}"
+                          f"{'...' if len(text_lower) > 50 else ''}\"", flush=True)
+                    self._stop_thinking_tune()
+                    return
+
                 # If directed with query, process it
                 if intent_judgment.directed and intent_judgment.query:
                     # In wake word mode, verify the wake word is actually present
