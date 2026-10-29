@@ -197,6 +197,22 @@ class TestFeeding:
         assert len(renderer.stream.chunks) == 2
 
 
+class TestTellingTheHandle:
+    def test_the_handle_hears_when_someone_starts_and_stops_watching(self, reader):
+        events = []
+        renderer = process.Renderer(FakeStream(), FrameWriter(), on_event=lambda **e: events.append(e))
+        try:
+            now = time.perf_counter()
+            _watch(renderer, reader, now)
+            renderer.tick(now)
+            renderer.tick(now + 0.05)
+            renderer.tick(now + process.WATCH_SECONDS + 1.0)
+        finally:
+            renderer.close()
+
+        assert events == [{"event": "watched", "value": True}, {"event": "watched", "value": False}]
+
+
 class TestStartingUp:
     def _events(self, capsys):
         return [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.strip()]
@@ -206,6 +222,28 @@ class TestStartingUp:
 
         assert process.main([]) == 1
         assert self._events(capsys) == [{"event": "failed", "reason": "no portrait was named"}]
+
+    def test_once_ready_the_renderer_tells_the_handle_who_watches(self, monkeypatch, capsys):
+        monkeypatch.setenv(process.PORTRAIT_ENV, "portrait.png")
+        monkeypatch.setattr(process, "_check_packages", lambda: None)
+        built = process.Renderer(FakeStream(), FrameWriter())
+        monkeypatch.setattr(process.Renderer, "build", classmethod(lambda cls, portrait, framing: built))
+        monkeypatch.setattr(process.Renderer, "warm_up", lambda self: None)
+
+        def run(self):
+            now = time.perf_counter()
+            viewer = FrameReader()
+            self.frames.beat(now)
+            viewer.read(now)
+            viewer.close()
+            self.tick(now)
+
+        monkeypatch.setattr(process.Renderer, "run", run)
+        monkeypatch.setattr(process.sys, "stdin", io.TextIOWrapper(io.BytesIO(b"")))
+
+        assert process.main([]) == 0
+        assert self._events(capsys) == [{"event": "ready", "delay": tl.DELAY},
+                                        {"event": "watched", "value": True}]
 
     def test_a_missing_package_is_a_failure_with_its_reason(self, monkeypatch, capsys):
         monkeypatch.setenv(process.PORTRAIT_ENV, "portrait.png")

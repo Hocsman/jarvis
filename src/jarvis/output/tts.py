@@ -794,6 +794,10 @@ class ChatterboxTTS:
     def is_speaking(self) -> bool:
         return self._is_speaking.is_set()
 
+    def voice_delay(self) -> float:
+        """No face follows this engine, so nothing holds her voice back."""
+        return 0.0
+
     def get_last_spoken_text(self) -> str:
         return self._last_spoken_text
 
@@ -1346,6 +1350,10 @@ class PiperTTS:
     def is_speaking(self) -> bool:
         return self._is_speaking.is_set()
 
+    def voice_delay(self) -> float:
+        """No face follows this engine, so nothing holds her voice back."""
+        return 0.0
+
     def get_last_spoken_text(self) -> str:
         return self._last_spoken_text
 
@@ -1796,6 +1804,10 @@ class KokoroTTS:
     def is_speaking(self) -> bool:
         return self._is_speaking.is_set()
 
+    def voice_delay(self) -> float:
+        """No face follows this engine, so nothing holds her voice back."""
+        return 0.0
+
     def get_last_spoken_text(self) -> str:
         return self._last_spoken_text
 
@@ -1836,11 +1848,14 @@ class _Utterance:
 
     The worker adds the audio as the model produces it; the player's stream
     takes it from the other end. The thread that synthesises writes
-    ``samples``, ``failed`` and the queue; the player reads them.
+    ``samples``, ``failed``, ``heard_at`` and the queue; the player reads them.
+    The player's stream writes ``lag``, which the worker reads when it hands
+    audio to the talking face.
     """
 
     def __init__(self, text: str, completion: Optional[Callable[[], None]],
-                 epoch: int, prebuffer_samples: int) -> None:
+                 epoch: int, prebuffer_samples: int,
+                 on_ready: Optional[Callable[["_Utterance"], Optional[Callable[[Any, int], None]]]] = None) -> None:
         self.text = text
         self.completion = completion
         self.epoch = epoch
@@ -1850,16 +1865,45 @@ class _Utterance:
         self.failed = False             # synthesis raised after it began
         self.consumed = False           # the stream has taken the last sample
         self._prebuffer = prebuffer_samples
+        # The talking face: ``on_ready(item)`` is called once, as the first stretch
+        # is in hand, and returns ``hand_over(chunk, offset)`` for an item drawn on
+        # the face, or None.
+        self._on_ready = on_ready
+        self.heard_at: Optional[float] = None   # when its first sample is heard, for an item drawn on the face
+        self.lag = 0.0                  # how much later than that the voice runs: waits for audio, a late start
+        self.undrawn = False            # played without the face while a face is attached
+        self._before_ready: Optional[list] = []   # what was produced before ``on_ready`` ran
+        self._hand_over: Optional[Callable[[Any, int], None]] = None
 
     def add(self, chunk) -> None:
+        offset = self.samples
         self.chunks.put(chunk)
         self.samples += len(chunk)
+        if self._before_ready is not None:
+            self._before_ready.append(chunk)
+        if self._hand_over is not None:
+            self._hand_over(chunk, offset)
         if self.samples >= self._prebuffer:
-            self.ready.set()
+            self._become_ready()
 
     def close(self) -> None:
         """Synthesis is over, however it ended."""
         self.chunks.put(None)
+        self._become_ready()
+        # Nothing more to hand over, and the hand-over holds the item.
+        self._hand_over = None
+
+    def _become_ready(self) -> None:
+        if self.ready.is_set():
+            return
+        hand_over = self._on_ready(self) if self._on_ready is not None else None
+        if hand_over is not None:
+            offset = 0
+            for chunk in self._before_ready:
+                hand_over(chunk, offset)
+                offset += len(chunk)
+            self._hand_over = hand_over
+        self._before_ready = None
         self.ready.set()
 
 
@@ -1895,14 +1939,31 @@ class KyutaiTTS:
     # produces slowly does not stutter the first words.
     _PREBUFFER_SECONDS = 0.25
 
+    # Between two sentences drawn on the talking face: at least this, and at
+    # least the time the player takes to close one stream, open the next and
+    # have its first sample heard (the restart plus the sound card's latency).
+    _FACE_GAP_SECONDS = 0.2
+    _FACE_RESTART_SECONDS = 0.15
+
     # What the model was released with; settings of the model, not of Yuba.
     _CODEBOOKS = 32
     _TEMPERATURE = 0.6
     _GUIDANCE = 2.0
 
-    def __init__(self, enabled: bool = True, voice: str = KYUTAI_DEFAULT_VOICE) -> None:
+    def __init__(self, enabled: bool = True, voice: str = KYUTAI_DEFAULT_VOICE, face=None) -> None:
         self.enabled = enabled
         self.voice = (voice or "").strip() or KYUTAI_DEFAULT_VOICE
+        # The talking face's renderer (`face/face.spec.md`), or None. The last item
+        # drawn on it, which the next one follows, and the items played without it
+        # that the player has not finished: no item is drawn while one is ahead.
+        self._face = face
+        self._face_lock = threading.Lock()
+        self._face_last: Optional["_Utterance"] = None
+        self._undrawn = 0
+        # The latency of the last stream the player opened, and what a stream that
+        # started late anyway has taught the gap since.
+        self._output_latency = 0.0
+        self._face_gap_learnt = 0.0
 
         self._q: queue.Queue = queue.Queue()
         self._thread: Optional[threading.Thread] = None
@@ -2182,6 +2243,52 @@ class KyutaiTTS:
                         self._audio_stream.abort()
                 except Exception:
                     pass
+        if self._face is not None:
+            # Her lips stop with her voice.
+            self._face.cut(time.perf_counter())
+            with self._face_lock:
+                self._face_last = None
+
+    def voice_delay(self) -> float:
+        """How much later than usual her voice will be heard: the face's delay
+        while it is watched (which implies ready)."""
+        face = self._face
+        if face is not None and face.watched():
+            return float(face.delay)
+        return 0.0
+
+    def face_gap(self) -> float:
+        """The silence between two sentences drawn on the face."""
+        return max(self._FACE_GAP_SECONDS, self._FACE_RESTART_SECONDS + self._output_latency) + self._face_gap_learnt
+
+    def _draw_on_face(self, utterance: "_Utterance") -> Optional[Callable[[Any, int], None]]:
+        """At the moment its first stretch is in hand, decide whether an item is
+        drawn on the face and when it is heard; returns what hands its audio to
+        the face, or None. Runs on the worker, before the player may take the
+        item up."""
+        face = self._face
+        if face is None:
+            return None
+        rate = self._sample_rate
+        with self._face_lock:
+            if self._epoch != utterance.epoch or self._undrawn or not face.watched():
+                # Played at once; the items after it wait for it to be heard
+                # before they can be drawn, or the face would run ahead of her.
+                utterance.undrawn = True
+                self._undrawn += 1
+                return None
+            heard_at = time.perf_counter() + float(face.delay)
+            last = self._face_last
+            if last is not None:
+                heard_at = max(heard_at, last.heard_at + last.lag + last.samples / rate + self.face_gap())
+            utterance.heard_at = heard_at
+            self._face_last = utterance
+        debug_log(f"Kyutai TTS item drawn on the face, heard in {heard_at - time.perf_counter():.2f}s", "tts")
+
+        def hand_over(chunk, offset: int) -> None:
+            if self._epoch == utterance.epoch:
+                face.send_audio(heard_at + utterance.lag + offset / rate, chunk, rate)
+        return hand_over
 
     def _begin(self) -> None:
         """An item has been taken up: the engine is speaking until it has been
@@ -2257,7 +2364,8 @@ class KyutaiTTS:
             started = time.time()
             debug_log(f"Kyutai TTS starting synthesis: {len(text.split())} words", "tts")
             utterance = _Utterance(text, completion, epoch,
-                                   int(self._PREBUFFER_SECONDS * self._sample_rate))
+                                   int(self._PREBUFFER_SECONDS * self._sample_rate),
+                                   on_ready=self._draw_on_face)
             self._ensure_player()
             self._play_q.put(utterance)
             handed_over = True
@@ -2348,11 +2456,34 @@ class KyutaiTTS:
             blocksize = 1024
             leftover = [np.zeros(0, dtype=np.float32)]
             underruns = [0]
+            rate = self._sample_rate
+            # An item drawn on the face starts at its moment: silence until then,
+            # counted from when the first sample of the stream leaves the speakers.
+            silence = [None if utterance.heard_at is not None else 0]
+            stream_latency = [0.0]   # the stream's own estimate, when the callback has none
+            late = [0.0]
 
             def audio_callback(outdata, frames, time_info, status):
                 if cancelled():
                     raise sd.CallbackAbort()
                 filled = 0
+                if silence[0] is None:
+                    try:
+                        latency = time_info.outputBufferDacTime - time_info.currentTime
+                    except Exception:
+                        latency = -1.0
+                    if not 0.0 < latency < 1.0:
+                        latency = stream_latency[0]
+                    wait = utterance.heard_at - (time.perf_counter() + latency)
+                    silence[0] = max(0, int(round(wait * rate)))
+                    if wait < 0:
+                        # Started late: the rest of the item, and the next, follow.
+                        late[0] = -wait
+                        utterance.lag += -wait
+                if silence[0]:
+                    filled = min(frames, silence[0])
+                    outdata[:filled, 0] = 0
+                    silence[0] -= filled
                 while filled < frames:
                     if len(leftover[0]) == 0:
                         if utterance.consumed:
@@ -2361,6 +2492,8 @@ class KyutaiTTS:
                             piece = utterance.chunks.get_nowait()
                         except queue.Empty:
                             underruns[0] += 1  # synthesis is behind: play silence
+                            if utterance.heard_at is not None:
+                                utterance.lag += (frames - filled) / rate
                             break
                         if piece is None:
                             utterance.consumed = True
@@ -2385,9 +2518,17 @@ class KyutaiTTS:
                             blocksize=blocksize,
                             callback=audio_callback,
                         )
+                        stream_latency[0] = float(getattr(self._audio_stream, "latency", 0.0) or 0.0)
+                        self._output_latency = stream_latency[0]
                         self._audio_stream.start()
 
-                _sound_started()
+                # The first sound is marked when she is heard: at once, or for an item
+                # drawn on the face at its moment, even when the stream ran out before it.
+                while (utterance.heard_at is not None and not cancelled()
+                       and time.perf_counter() < utterance.heard_at + utterance.lag):
+                    time.sleep(0.01)
+                if not cancelled():
+                    _sound_started()
                 while self._audio_stream is not None and self._audio_stream.active:
                     if cancelled():
                         interrupted = True
@@ -2399,7 +2540,8 @@ class KyutaiTTS:
                                 except Exception:
                                     pass
                         break
-                    time.sleep(0.05)
+                    # Polled closely for an item drawn on the face: the next one is due right after it.
+                    time.sleep(0.01 if utterance.heard_at is not None else 0.05)
             finally:
                 with self._audio_lock:
                     if self._audio_stream is not None:
@@ -2412,9 +2554,14 @@ class KyutaiTTS:
 
             spoken = utterance.consumed and not (
                 interrupted or cancelled() or utterance.failed)
+            if late[0] > 0:
+                # The gap did not cover this machine's restart: widen it for good.
+                self._face_gap_learnt = min(0.3, self._face_gap_learnt + late[0] + 0.02)
             debug_log(
                 f"Kyutai TTS played: {time.time() - started:.2f}s, spoken={spoken}, "
-                f"underruns={underruns[0]}",
+                f"underruns={underruns[0]}"
+                + (f", started {late[0]:.2f}s late for the face" if late[0] else "")
+                + (f", voice behind its face moment by {utterance.lag:.2f}s" if utterance.lag else ""),
                 "tts",
             )
 
@@ -2423,6 +2570,9 @@ class KyutaiTTS:
             print(f"  ⚠️ Kyutai TTS error: {e}", flush=True)
         finally:
             self._end()
+            if utterance.undrawn:
+                with self._face_lock:
+                    self._undrawn -= 1
             if spoken and utterance.completion is not None:
                 try:
                     utterance.completion()
@@ -2473,6 +2623,8 @@ def create_tts_engine(
     kokoro_speed: float = 1.0,
     # Kyutai parameter: a name in the voice repository, or a .safetensors path.
     kyutai_voice: str = KYUTAI_DEFAULT_VOICE,
+    # The talking face's renderer, which Kyutai alone feeds.
+    face=None,
 ):
     """Factory function to create the appropriate TTS engine.
 
@@ -2500,7 +2652,7 @@ def create_tts_engine(
             speed=kokoro_speed,
         )
     elif engine.lower() == "kyutai":
-        return KyutaiTTS(enabled=enabled, voice=kyutai_voice)
+        return KyutaiTTS(enabled=enabled, voice=kyutai_voice, face=face)
     else:
         # Default to Piper TTS
         return PiperTTS(

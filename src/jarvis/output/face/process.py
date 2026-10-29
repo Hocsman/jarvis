@@ -4,7 +4,7 @@ usage: JARVIS_FACE_PORTRAIT=PATH python -m jarvis.output.face.process [--framing
 
 The portrait comes in the environment, which only this user can read, rather
 than on the command line, which every user can. The renderer reports on stdout,
-one JSON object per line (``ready`` or ``failed``), reads audio, cuts and quit
+one JSON object per line (``ready``, ``watched`` or ``failed``), reads audio, cuts and quit
 from stdin (see ``client.HEADER``), and publishes frames to shared memory
 (``frames.py``). Everything else goes to stderr, which its handle logs.
 """
@@ -62,13 +62,15 @@ class Renderer:
     """Feeds Ditto from the timeline and publishes what it draws.
 
     ``stream`` is Ditto's (``ditto/stream.py``) once set up with ``on_frame``,
-    ``frames`` a ``FrameWriter``. Everything here is plain logic: ``build``
-    loads the model.
+    ``frames`` a ``FrameWriter``, ``on_event(**event)`` where the events for
+    the handle go. Everything here is plain logic: ``build`` loads the model.
     """
 
-    def __init__(self, stream, frames, delay: float = tl.DELAY) -> None:
+    def __init__(self, stream, frames, delay: float = tl.DELAY, on_event=None) -> None:
         self.stream = stream
         self.frames = frames
+        self.on_event = on_event or (lambda **event: None)
+        self.watched = False
         self.lock = threading.Lock()
         self.timeline = tl.Timeline()
         self.feeder = tl.Feeder(self.timeline, delay)
@@ -85,11 +87,12 @@ class Renderer:
         from .ditto.stream import Stream
         from .frames import FrameWriter
 
+        # The portrait first: a portrait that cannot be read costs no download.
+        rgb = portraits.load(portrait)
         root = weights.models_dir()
         if weights.missing(root):
             _log("fetching the face's model files")
             weights.fetch(root)
-        rgb = portraits.load(portrait)
         warp_engine, decoder_engine = engines.ensure_engines(root)
         warp, decode = engines.warp_and_decode(warp_engine, decoder_engine)
         stream = Stream(str(root / weights.CONFIG), str(root / weights.DATA_ROOT))
@@ -162,6 +165,10 @@ class Renderer:
         """One turn of the feeding loop; returns how long to sleep."""
         self.frames.beat(now)
         watched = self.frames.viewer_age(now) < WATCH_SECONDS
+        if watched != self.watched:
+            # The speech engine holds her voice back for the face only while someone watches.
+            self.watched = watched
+            self.on_event(event="watched", value=watched)
         was_feeding = self.feeder.next_start is not None
         with self.lock:
             step = self.feeder.step(now, watched)
@@ -229,6 +236,7 @@ def main(argv: Optional[list] = None) -> int:
         _check_packages()
         renderer = Renderer.build(portrait, args.framing)
         renderer.warm_up()
+        renderer.on_event = say
     except Exception as e:
         say(event="failed", reason=str(e) or type(e).__name__)
         return 1

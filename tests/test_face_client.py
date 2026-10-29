@@ -202,6 +202,42 @@ class TestStartingAndStopping:
         assert _wait(r.ready)
 
 
+class TestWatching:
+    def test_the_handle_follows_whether_someone_watches(self, made):
+        r = made("""
+            say(event="ready", delay=0.75)
+            say(event="watched", value=True)
+            for _ in messages():
+                pass
+        """)
+
+        assert _wait(r.watched)
+
+    def test_nobody_watches_a_face_that_failed(self, made):
+        r = made("""
+            say(event="ready", delay=0.75)
+            say(event="watched", value=True)
+            time.sleep(0.5)
+            say(event="failed", reason="no GPU")
+        """)
+
+        assert _wait(r.watched)
+        assert _wait(lambda: r.failure is not None)
+        assert not r.watched()
+
+    @pytest.mark.parametrize("delay", ["NaN", "Infinity", "5.0", "-1", '"soon"'])
+    def test_an_impossible_delay_turns_the_face_off_rather_than_hold_her_voice(self, made, delay):
+        r = made(f"""
+            print('{{"event": "ready", "delay": {delay}}}', flush=True)
+            for _ in messages():
+                pass
+        """)
+
+        assert _wait(lambda: r.failure is not None)
+        assert "delay" in r.failure
+        assert not r.ready()
+
+
 class TestNeverRaising:
     def test_what_cannot_be_sent_is_dropped_without_raising(self, made):
         r = made("""

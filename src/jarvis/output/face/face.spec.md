@@ -10,9 +10,9 @@ speakers, so a front end that shows frames on time shows lips and voice
 together.
 
 This file covers the renderer: the process that draws the face, what it is
-fed, what it publishes, the model files it needs, and how it fails. A speech
-engine feeds it and a front end shows it; each of them states its side in its
-own spec.
+fed, what it publishes, the model files it needs, and how it fails. Kyutai
+feeds it (`output/tts.spec.md`, "Kyutai") and a front end shows it; each of
+them states its side in its own spec.
 
 ## Privacy
 
@@ -27,6 +27,18 @@ own spec.
   `digital-avatar/ditto-talkinghead`, when the renderer starts and finds them
   missing. The request names files and carries nothing of the user's: no
   Hugging Face token is sent, even when one is saved on the machine.
+
+## Off unless asked for
+
+`face_enabled` is false by default. The daemon starts a renderer when it
+starts, and only when `face_enabled` is true, `face_portrait_path` names a
+file that exists, and the voice is on and is Kyutai, the one engine that
+feeds a face. It hands the renderer to the engine and stops it when it shuts
+down. Otherwise no renderer is started, nothing is fetched, and the GPU does
+no work for a face; when the face was enabled, a console line says which
+condition kept it off, without the portrait's path. The renderer reads the
+portrait before anything else, so a portrait it cannot read costs no
+download.
 
 ## Hardware and installation
 
@@ -53,9 +65,10 @@ and never the voice.
   (float32 samples, their sample rate, and the time the first of them will be
   heard), a cut (see Interrupting) and quit.
 - **From the renderer**, on its stdout, comes one JSON object per line:
-  `ready` with the renderer's delay once it can draw, or `failed` with a
-  reason. Everything else it prints goes to its stderr, which the handle
-  logs.
+  `ready` with the renderer's delay once it can draw (a delay that is not a
+  number between 0 and 2 s turns the face off), `watched` whenever
+  someone starts or stops watching the face, or `failed` with a reason.
+  Everything else it prints goes to its stderr, which the handle logs.
 - **`FaceRenderer` never raises to its caller and never blocks it.** Sending
   is a write to a pipe from a worker thread fed by an unbounded queue, so a
   renderer that stops reading costs memory, not time, until it is declared
@@ -119,6 +132,9 @@ The face costs the GPU nothing while no one can see it.
   work. A viewer who arrives while she speaks sees her from the next chunk
   that can still be drawn on time.
 - Frames still inside Ditto when it rests are never published.
+- The renderer tells its handle each time that changes (`watched`), and
+  Kyutai holds her voice back for the face only while someone watches:
+  with nobody watching she speaks at once.
 
 ## Interrupting
 
@@ -226,6 +242,14 @@ falls due rather than queue it behind, so the face catches up with the voice
 instead of trailing it. It counts the frames it published after their stamp
 and the chunks it skipped, and logs both when it rests.
 
+## Configuration
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `face_enabled` | `false` | Start the renderer with the daemon (Kyutai only) |
+| `face_portrait_path` | `""` | The portrait to animate: a still image of one face seen from the front |
+| `face_framing` | `head` | `head` shows the whole head, `face` frames the face closer |
+
 ## Testing
 
 The suite loads neither ONNX Runtime nor the GPU (`tests/native_guard.py`), so
@@ -245,19 +269,25 @@ is checked by hand.
   cut and the end of the daemon, frames published at their stamps, warm-up
   frames and frames left inside Ditto at a rest never shown, frames after a
   cut refused, late frames counted, a chunk skipped while Ditto owes a frame already due, nothing
-  fed while no one watches, `failed` with its reason.
-- `tests/test_face_client.py`: the renderer process faked; `ready` and
-  `failed`, a child that dies, cannot start or ignores quit, the packaged app
+  fed while no one watches, `watched` reported as it changes, `failed` with
+  its reason.
+- `tests/test_face_client.py`: the renderer process faked; `ready`,
+  `watched` and `failed`, an impossible delay refused, a child that dies, cannot start or ignores quit, the packaged app
   refused, the portrait in the environment and not the command line, messages
   in order, what cannot be sent dropped, a line that is not an event, a caller
   never blocked by a child that stops reading.
 - `tests/test_face_pickle.py`: the configuration unpickler admits numpy arrays
   and refuses anything else without running it.
 - `tests/test_face_files.py`: the portrait widened around the original pixels
-  and refused when unreadable (the image cases need OpenCV and are skipped
+  and refused when unreadable, without its path in the reason (the image cases need OpenCV and are skipped
   without it); weights fetched only when missing, without a token, and never
   put in place when their digest does not match; an engine key that changes
   with the GPU, TensorRT and the weights; engines built once, then found.
+- `tests/test_face_daemon.py`: no renderer unless the face is enabled, its
+  portrait exists and the voice is on and is Kyutai, and a console line that
+  says why without the path; the renderer started with its portrait and
+  framing and handed to the voice; the settings' defaults.
+- `tests/test_kyutai_face.py`: Kyutai's side (`output/tts.spec.md`).
 - `scripts/check_talking_face.py`, by hand on a machine with the GPU, the
   packages and the weights: the real renderer fed a WAV the way a speech engine
   feeds it, read the way a front end reads it, and how late each frame was.

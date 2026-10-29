@@ -7,6 +7,7 @@ never blocks it, and any failure turns the face off for the session.
 """
 
 import json
+import math
 import os
 import queue
 import struct
@@ -25,6 +26,7 @@ from ...debug import debug_log
 HEADER = struct.Struct("<BdII")
 MSG_AUDIO, MSG_CUT, MSG_QUIT = 1, 2, 3
 PORTRAIT_ENV = "JARVIS_FACE_PORTRAIT"   # read by process.py
+MAX_DELAY = 2.0   # a renderer announcing more would hold her voice back too long
 
 
 class FaceRenderer:
@@ -46,6 +48,7 @@ class FaceRenderer:
         self._lock = threading.Lock()
         self._done = threading.Event()
         self._ready = False
+        self._watched = False
         self._stopping = False
         self._writing_since: Optional[float] = None
         self.delay: Optional[float] = None
@@ -99,6 +102,10 @@ class FaceRenderer:
         """True between the renderer's ``ready`` line and the first failure."""
         return self._ready and self.failure is None
 
+    def watched(self) -> bool:
+        """True while the face is ready and someone is watching it."""
+        return self._watched and self.ready()
+
     # -- what the speech engine hands over ----------------------------------
     def send_audio(self, heard_at: float, samples, rate: int) -> None:
         """Hand over mono samples at ``rate`` whose first is heard at ``heard_at``.
@@ -130,7 +137,6 @@ class FaceRenderer:
             self.failure = reason
             self._ready = False
         debug_log(f"face: off for this session, {reason}", "face")
-        print(f"  ⚠️ Face: {reason}", flush=True)
         if self._proc is not None and self._proc.poll() is None:
             try:
                 self._proc.kill()
@@ -138,6 +144,10 @@ class FaceRenderer:
                 pass
         self._outbox.put(None)
         self._done.set()
+        try:
+            print(f"  ⚠️ Face: {reason}", flush=True)
+        except Exception:
+            pass   # a console that cannot show it must not keep the face half-alive
 
     def _watch(self) -> None:
         """A renderer that stops reading is dead: nothing else would notice."""
@@ -177,9 +187,19 @@ class FaceRenderer:
                     debug_log(f"face renderer: {line}", "face")
                     continue
                 if event.get("event") == "ready":
-                    self.delay = float(event.get("delay", 0.0))
+                    try:
+                        delay = float(event.get("delay"))
+                    except (TypeError, ValueError):
+                        delay = float("nan")
+                    if not (math.isfinite(delay) and 0.0 <= delay <= MAX_DELAY):
+                        self._fail(f"the renderer announced an impossible delay ({event.get('delay')!r})")
+                        continue
+                    self.delay = delay
                     self._ready = self.failure is None
                     debug_log(f"face: renderer ready, delay {self.delay:.2f}s", "face")
+                elif event.get("event") == "watched":
+                    self._watched = bool(event.get("value"))
+                    debug_log(f"face: {'watched' if self._watched else 'nobody watching'}", "face")
                 elif event.get("event") == "failed":
                     self._fail(str(event.get("reason") or "the renderer failed"))
         finally:

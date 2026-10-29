@@ -54,7 +54,7 @@ class EchoDetector:
     
     def track_tts_start(self, tts_text: str, baseline_energy: float = 0.0045,
                         exact_duration: Optional[float] = None,
-                        continues: bool = False) -> None:
+                        continues: bool = False, start_delay: float = 0.0) -> None:
         """
         Track when TTS starts speaking.
 
@@ -78,12 +78,15 @@ class EchoDetector:
                 timed from when she began speaking, and pushing that
                 forward on each chunk would let a late echo look like
                 fresh speech.
+            start_delay: How much later than usual her voice will be heard
+                (a talking face holds it back by its delay). Her words are
+                timed from that much later.
         """
         if continues and self._last_tts_text:
             self._last_tts_text = (
                 self._last_tts_text + " " + tts_text.lower().strip()).strip()
         else:
-            self._tts_start_time = time.time()
+            self._tts_start_time = time.time() + start_delay
             self._last_tts_text = tts_text.lower().strip()
         self._tts_energy_baseline = baseline_energy
         self._tts_exact_duration = exact_duration

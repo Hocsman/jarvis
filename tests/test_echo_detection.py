@@ -819,3 +819,67 @@ class TestRightmostEchoBoundarySalvage:
         # No echo prefix at all — no salvage needed; caller keeps the text as-is.
         result = detector.salvage_after_echo_tail(heard)
         assert result is None
+
+
+class TestAVoiceHeldBack:
+    """See listening.spec.md, "During TTS": her words are timed from when she
+    was handed the reply plus the voice's delay (a talking face holds it back)."""
+
+    WORDS = ("alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike "
+             "november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu")
+
+    def _echo_of_her_first_words_heard_late(self, start_delay):
+        detector = EchoDetector(echo_tolerance=0.3)
+        detector.track_tts_start(self.WORDS, start_delay=start_delay)
+        return detector.should_reject_as_echo(
+            heard_text="alpha bravo charlie",
+            current_energy=0.01,
+            is_during_tts=True,
+            tts_rate=150.0,
+            utterance_start_time=time.time() + 4.0,
+        )
+
+    def test_a_short_echo_of_her_first_words_is_caught_when_her_voice_was_held_back(self):
+        assert self._echo_of_her_first_words_heard_late(start_delay=4.0) is True
+
+    def test_without_the_delay_the_same_echo_falls_outside_her_words(self):
+        assert self._echo_of_her_first_words_heard_late(start_delay=0.0) is False
+
+
+class TestTheListenerPassesTheVoiceDelay:
+    """See listening.spec.md, "During TTS": the listener adds the speech
+    engine's voice_delay() to the start of her speech it records."""
+
+    def _listener(self, delay):
+        from types import SimpleNamespace
+
+        from jarvis.listening.listener import VoiceListener
+
+        tts = SimpleNamespace(enabled=True, voice_delay=lambda: delay)
+        listener = SimpleNamespace(tts=tts, echo_detector=EchoDetector(echo_tolerance=0.3),
+                                   _recent_audio_energy=[])
+        return listener, VoiceListener.track_tts_start
+
+    def test_an_echo_of_her_first_words_heard_after_the_face_delay_is_caught(self):
+        listener, track = self._listener(4.0)
+
+        track(listener, TestAVoiceHeldBack.WORDS)
+
+        assert listener.echo_detector.should_reject_as_echo(
+            heard_text="alpha bravo charlie", current_energy=0.01, is_during_tts=True,
+            tts_rate=150.0, utterance_start_time=time.time() + 4.0) is True
+
+    def test_a_later_sentence_of_the_same_reply_does_not_move_her_start(self):
+        listener, track = self._listener(4.0)
+        track(listener, "alpha bravo charlie")
+        first = listener.echo_detector.should_reject_as_echo(
+            heard_text="alpha bravo charlie", current_energy=0.01, is_during_tts=True,
+            tts_rate=150.0, utterance_start_time=time.time() + 4.0)
+
+        track(listener, "delta echo foxtrot", continues=True)
+
+        assert first is True
+        assert listener.echo_detector.should_reject_as_echo(
+            heard_text="alpha bravo charlie", current_energy=0.01, is_during_tts=True,
+            tts_rate=150.0, utterance_start_time=time.time() + 4.0) is True
+
