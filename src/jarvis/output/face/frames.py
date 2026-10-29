@@ -163,7 +163,8 @@ class FrameReader:
         self._next_try = now + _RETRY_SECONDS
         try:
             shm = shared_memory.SharedMemory(name=self._name or segment_name())
-        except (FileNotFoundError, OSError):
+        except (OSError, ValueError):
+            # ValueError: an empty segment cannot be mapped (POSIX).
             return False
         if sys.platform != "win32":
             # Python 3.12 would unlink the renderer's segment when this process exits.

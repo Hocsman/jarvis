@@ -279,6 +279,66 @@ class TestKyutaiFields:
         assert get_default_config()["tts_kyutai_voice"]
 
 
+class TestTheFacePage:
+    """The talking face's three settings have a page of their own, next to
+    the Kyutai voice that feeds the face (``settings_window.spec.md``,
+    "👤 Visage")."""
+
+    @staticmethod
+    def _field(key):
+        return next((fm for fm in FIELD_METADATA if fm.key == key), None)
+
+    def test_the_page_follows_the_kyutai_voice(self):
+        keys = [key for key, _ in CATEGORIES]
+
+        assert keys.index("face") == keys.index("kyutai") + 1
+
+    @pytest.mark.parametrize("key, field_type", [
+        ("face_enabled", "bool"), ("face_portrait_path", "str"), ("face_framing", "choice"),
+    ])
+    def test_each_face_setting_is_on_the_page(self, key, field_type):
+        fm = self._field(key)
+
+        assert fm is not None and fm.category == "face" and fm.field_type == field_type
+
+    def test_the_framings_offered_are_the_ones_the_renderer_draws(self):
+        from jarvis.output.face.process import CROP
+
+        offered = [value for value, _ in self._field("face_framing").choices]
+
+        assert sorted(offered) == sorted(CROP)
+
+    def test_every_framing_offered_is_one_the_settings_keep(self, tmp_path, monkeypatch):
+        from jarvis.config import load_settings
+
+        offered = [value for value, _ in self._field("face_framing").choices]
+        assert get_default_config()["face_framing"] in offered
+        path = tmp_path / "config.json"
+        monkeypatch.setenv("JARVIS_CONFIG_PATH", str(path))
+        for value in offered:
+            path.write_text(json.dumps({"face_framing": value}), encoding="utf-8")
+            assert load_settings().face_framing == value
+
+    def test_turning_the_face_on_writes_the_switch_and_the_portrait(self, qapp):
+        from desktop_app import settings_window as sw
+        from jarvis.config import default_config_path
+
+        path = default_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
+        window = sw.SettingsWindow()
+        window._widgets["face_enabled"].setChecked(True)
+        window._widgets["face_portrait_path"].setText("portrait.png")
+
+        with patch.object(sw, "QMessageBox"):
+            window._on_save()
+
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        assert saved["face_enabled"] is True
+        assert saved["face_portrait_path"] == "portrait.png"
+        assert "face_framing" not in saved     # left at its default, so not written
+
+
 class TestMinimalConfigInvariant:
     """``_is_default_value`` decides whether a field is omitted from
     config.json. An emptied nullable provider field (reads back as None)

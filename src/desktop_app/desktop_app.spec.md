@@ -21,7 +21,8 @@ src/desktop_app/
 ├── splash_screen.py     # Animated startup splash
 ├── setup_wizard.py      # First-run setup wizard
 ├── settings_window.py   # Auto-generated settings UI from config metadata
-├── face_widget.py       # Animated face that follows the assistant's state
+├── face_widget.py       # The face window: the drawn face, or her talking face (see Face below)
+├── talking_face.py      # Her talking face's frames, read from jarvis and painted
 ├── orb/                 # State-driven orb window and widget (see Orb below)
 ├── themes.py            # Qt stylesheets and color palette
 ├── diary_dialog.py      # End-of-session diary update dialog
@@ -96,7 +97,7 @@ The central controller that manages:
 |--------|---------|
 | **LogViewerWindow** | Real-time log output from the daemon, with "Report Issue" button |
 | **MemoryViewerWindow** | Web-based memory browser (Flask server) |
-| **FaceWindow** | Animated face that follows the assistant's state (idle, listening, thinking, speaking, dictating) |
+| **FaceWindow** | Her talking face while a renderer draws one, and otherwise an animated face that follows the assistant's state (idle, listening, thinking, speaking, dictating); see Face below |
 | **SettingsWindow** | Auto-generated config editor with tabbed categories |
 | **SetupWizard** | First-run configuration (Ollama, models, profile) |
 | **DictationHistoryWindow** | Scrollable list of past dictations with copy/delete/clear actions |
@@ -127,13 +128,28 @@ The orb listens to nothing. It has no audio input, takes no audio source as an a
 
 Two hosts embed it. `OrbWindow` is the floating instance: frameless, translucent, always on top and draggable; built at startup with a provider that reads the shared `JarvisState` (see Assistant State below), shown at launch only when the dashboard is unavailable (see Dashboard; the dashboard draws its own canvas orb from the same state), and otherwise toggled from the tray action `🟠 Toggle Orb` or the hotkey `Ctrl+Shift+J` (`Cmd+Shift+J` on macOS: a global pynput hotkey, disabled on macOS 26+ where pynput crashes the process, and a window-scoped Qt shortcut that works while the orb has focus). Hiding the window pauses the widget; showing it resumes it. `ChatWindow` embeds its own instance in the introductory panel that only an empty conversation shows, drives it through `set_state` (THINKING while a query is in flight, IDLE otherwise), pauses it the moment a message lands or the window hides, and resumes it when the window shows with an empty transcript (see `chat_window.spec.md`).
 
+### Face
+
+`FaceWindow` (`face_widget.py`) opens from the tray action `👤 Show Face`, which also restores it when it is minimised, and only from there: with the talking face enabled or not, it never opens by itself. It shows one of two faces, never both.
+
+- **Her talking face**, while a renderer draws one (`src/jarvis/output/face/face.spec.md`): the frame `read_face_frame()` returns, imported from `jarvis`, scaled to fit the window with its proportions kept and centred on black. The window shows a frame for as long as it is less than one second old, and goes back to the drawn face once it has none that recent. A live renderer's newest frame is never older than its delay, the hold after a cut included (`face.spec.md`, "Interrupting"), so an older frame, or none, is what a renderer that is not running, has failed, has stopped or has stalled looks like from here, and so is a frame it drew before it last rested.
+- **The drawn face** otherwise: the low-poly face that follows the assistant's state (see Assistant State).
+
+A read that fails counts as no frame: it runs in a Qt slot, where an exception would end the whole app, so the window stays up, shows the drawn face and logs the failure once.
+
+**Reading is watching.** While the window is on screen, which means shown and not minimised, it reads a frame sixty times a second, so each frame shows within a refresh of its moment. Hidden or minimised, it reads nothing. A window left open on a locked screen or on another desktop is still on screen. Each read is the heartbeat that tells the renderer someone is watching (`face.spec.md`, "Watching and resting"), so within two seconds of the window leaving the screen the GPU rests and her voice is no longer held back for the face.
+
+**Nothing is kept.** The window holds the frame on screen in memory and writes nothing anywhere: no frame, no recording.
+
+`talking_face.py` holds the view that reads and paints the frames. It imports from `jarvis` the reader `face.spec.md` puts there for a front end, and nothing of the renderer. It imports it on the first read, so importing the desktop app's modules, as the settings window does, loads no numpy (`tests/test_dictation_hotkeys_stay_light.py`).
+
 ### Assistant State
 
 The orb, the dashboard and the face show what the assistant is doing by reading the shared `JarvisState` through `get_jarvis_state()`, both defined in `src/jarvis/state.py` and imported from `jarvis` (`src/jarvis/state.spec.md` owns the contract: the values, who publishes each, and the file that carries it between processes). The desktop app reads it by polling and never subscribes, because the daemon publishes from its own threads, and from another process in a development checkout.
 
 - The floating orb's `StateController` polls a provider each frame.
 - The dashboard bridge polls at 5 Hz and maps the value to the HUD orb's accent and label.
-- The face polls each frame.
+- The drawn face polls each frame.
 
 The desktop app publishes one value itself: `ASLEEP`, when the daemon stops and while the setup wizard is open, so nothing looks ready while nothing is listening. It defines no state of its own.
 
