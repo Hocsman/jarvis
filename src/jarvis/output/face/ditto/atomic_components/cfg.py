@@ -1,6 +1,7 @@
 # Modified for Jarvis from antgroup/ditto-talkinghead (Apache-2.0, commit c3e47ee):
 # the pickle is read with an unpickler that admits numpy arrays only, and the
-# MediaPipe landmark model is no longer part of the avatar registrar.
+# MediaPipe landmark model is not part of the avatar registrar; every model path
+# is resolved inside the model folder, never against the working directory.
 import os
 
 from ...safe_pickle import load as load_pkl
@@ -9,10 +10,9 @@ from ...safe_pickle import load as load_pkl
 def parse_cfg(cfg_pkl, data_root):
 
     def _check_path(p):
-        if os.path.isfile(p):
-            return p
-        else:
-            return os.path.join(data_root, p)
+        if os.path.isabs(p) or ".." in p.replace("\\", "/").split("/"):
+            raise ValueError(f"model path outside the model folder: {p}")
+        return os.path.join(data_root, p)
 
     cfg = load_pkl(cfg_pkl)
 

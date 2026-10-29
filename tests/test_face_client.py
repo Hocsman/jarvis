@@ -15,13 +15,13 @@ import time
 import numpy as np
 import pytest
 
-from jarvis.output.face.client import FaceRenderer, MSG_AUDIO, MSG_CUT, MSG_QUIT, HEADER
+from jarvis.output.face.client import FaceRenderer, MSG_AUDIO, MSG_CUT, MSG_QUIT, HEADER, PORTRAIT_ENV
 
 
 def _fake(body):
     """A command that runs ``body`` as the renderer, with the protocol's helpers."""
     script = textwrap.dedent("""
-        import json, struct, sys, time
+        import json, os, struct, sys, time
         HEADER = struct.Struct(%r)
         def say(**event):
             print(json.dumps(event), flush=True)
@@ -151,6 +151,68 @@ class TestSending:
         r.cut(1.0)
 
 
-def test_the_header_is_what_the_renderer_reads():
-    assert HEADER.format == "<BdII"
-    assert struct.calcsize(HEADER.format) == HEADER.size
+class TestStartingAndStopping:
+    def test_the_portrait_reaches_the_renderer_in_its_environment_not_its_command_line(self, made, tmp_path):
+        log = tmp_path / "env.txt"
+        r = made(f"""
+            open({str(log)!r}, "w", encoding="utf-8").write(os.environ.get({PORTRAIT_ENV!r}, "") + "|" + " ".join(sys.argv))
+            say(event="ready", delay=0.75)
+            for _ in messages():
+                pass
+        """)
+        assert _wait(r.ready)
+
+        portrait, argv = log.read_text(encoding="utf-8").split("|")
+        assert portrait == "portrait.png"
+        assert "portrait.png" not in argv
+
+    def test_the_packaged_app_says_why_instead_of_starting_a_child(self, monkeypatch):
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        r = FaceRenderer("portrait.png", command=[sys.executable, "-c", "raise SystemExit(5)"])
+
+        r.start()
+        try:
+            assert r.failure and "source install" in r.failure
+            assert r._proc is None
+        finally:
+            r.stop()
+
+    def test_a_renderer_that_ignores_quit_is_killed_on_stop(self, made):
+        r = made("""
+            say(event="ready", delay=0.75)
+            time.sleep(60)
+        """)
+        assert _wait(r.ready)
+
+        started = time.monotonic()
+        r.stop(timeout=1.0)
+
+        assert time.monotonic() - started < 5.0
+        assert r._proc.poll() is not None
+
+    def test_a_line_that_is_not_an_event_does_not_deafen_the_handle(self, made):
+        r = made("""
+            print(42, flush=True)
+            print("[1, 2]", flush=True)
+            say(event="ready", delay=0.75)
+            for _ in messages():
+                pass
+        """)
+
+        assert _wait(r.ready)
+
+
+class TestNeverRaising:
+    def test_what_cannot_be_sent_is_dropped_without_raising(self, made):
+        r = made("""
+            say(event="ready", delay=0.75)
+            for _ in messages():
+                pass
+        """)
+        assert _wait(r.ready)
+
+        r.send_audio(None, object(), "fast")
+        r.send_audio(1.0, np.zeros(10, np.float32), -5)
+        r.cut("soon")
+
+        assert r.ready()

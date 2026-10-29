@@ -1,6 +1,6 @@
 # Modified for Jarvis from antgroup/ditto-talkinghead (Apache-2.0, commit c3e47ee):
-# PyTorch only, and the sampling can be captured once as a CUDA graph in half
-# precision and replayed for every call (capture_graph).
+# PyTorch only; the sampling is captured once as a CUDA graph in half precision
+# (capture_graph) and replayed for every call.
 import torch
 from ..utils.load_model import load_model
 
@@ -9,7 +9,7 @@ class LMDM:
     def __init__(self, model_path, device="cuda", **kwargs):
         kwargs["module_name"] = "LMDM"
 
-        self.model, _ = load_model(model_path, device=device, **kwargs)
+        self.model = load_model(model_path, device=device, **kwargs)
         self.device = device
 
         self.motion_feat_dim = kwargs.get("motion_feat_dim", 265)
@@ -43,15 +43,10 @@ class LMDM:
         self._graph = (graph, kp, aud, out, sampling_timesteps)
 
     def __call__(self, kp_cond, aud_cond, sampling_timesteps):
-        if self._graph is not None and self._graph[4] == sampling_timesteps:
-            graph, kp, aud, out, _ = self._graph
-            kp.copy_(torch.from_numpy(kp_cond))
-            aud.copy_(torch.from_numpy(aud_cond))
-            graph.replay()
-            return out.float().cpu().numpy()
-        with torch.no_grad():
-            return self.model.ddim_sample(
-                torch.from_numpy(kp_cond).to(self.device),
-                torch.from_numpy(aud_cond).to(self.device),
-                sampling_timesteps,
-            ).cpu().numpy()
+        if self._graph is None or self._graph[4] != sampling_timesteps:
+            raise RuntimeError("the sampling runs from its CUDA graph: call capture_graph first")
+        graph, kp, aud, out, _ = self._graph
+        kp.copy_(torch.from_numpy(kp_cond))
+        aud.copy_(torch.from_numpy(aud_cond))
+        graph.replay()
+        return out.float().cpu().numpy()

@@ -1,9 +1,15 @@
+# Modified for Jarvis from antgroup/ditto-talkinghead (Apache-2.0, commit c3e47ee):
+# softmax in numpy, so scipy is not needed.
 import copy
 import random
 import numpy as np
-from scipy.special import softmax
 
 from ..models.stitch_network import StitchNetwork
+
+
+def softmax(x, axis=None):
+    e = np.exp(x - np.max(x, axis=axis, keepdims=True))
+    return e / np.sum(e, axis=axis, keepdims=True)
 
 
 """

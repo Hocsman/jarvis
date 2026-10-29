@@ -6,7 +6,7 @@ from ..utils.load_model import load_model
 
 class AppearanceExtractor:
     def __init__(self, model_path, device="cuda"):
-        self.model, _ = load_model(model_path, device=device, module_name="AppearanceFeatureExtractor")
+        self.model = load_model(model_path, device=device, module_name="AppearanceFeatureExtractor")
         self.device = device
 
     def __call__(self, image):

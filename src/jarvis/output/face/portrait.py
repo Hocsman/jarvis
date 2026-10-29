@@ -23,12 +23,12 @@ class UnreadablePortrait(ValueError):
 
 def load(path: str) -> np.ndarray:
     """The portrait as RGB, widened; raises UnreadablePortrait."""
-    import cv2
-
     try:
         data = np.fromfile(str(Path(path).expanduser()), np.uint8)   # cv2.imread cannot open every Windows path
     except OSError as e:
         raise UnreadablePortrait(f"the portrait cannot be read: {e}") from e
+    import cv2
+
     bgr = cv2.imdecode(data, cv2.IMREAD_COLOR) if data.size else None
     if bgr is None:
         raise UnreadablePortrait("the portrait is not an image")

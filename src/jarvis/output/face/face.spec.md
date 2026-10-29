@@ -16,31 +16,36 @@ own spec.
 
 ## Privacy
 
-- The portrait is the file named to the renderer when it starts. The renderer
-  reads it on this machine. It is not copied, not cached and not sent anywhere.
+- The portrait is the file named to the renderer when it starts, in its
+  environment, which other users of the machine cannot read, rather than on its
+  command line, which they can. The renderer reads it on this machine. It is not
+  copied, not cached and not sent anywhere.
 - Her audio reaches the renderer through a pipe between two processes of this
   machine. It is not written to disk and not sent anywhere.
 - Frames live in shared memory and nowhere else. No frame is written to disk.
 - The model files are fetched once, from the Hugging Face repository
   `digital-avatar/ditto-talkinghead`, when the renderer starts and finds them
-  missing. The request names files and carries nothing of the user's.
+  missing. The request names files and carries nothing of the user's: no
+  Hugging Face token is sent, even when one is saved on the machine.
 
 ## Hardware and installation
 
 The renderer needs an NVIDIA GPU with CUDA, PyTorch built with CUDA, TensorRT
-(`tensorrt-cu12`) and OpenCV (`opencv-python-headless`). TensorRT and OpenCV
-are not in `requirements.txt`: like `moshi`, they are installed by hand,
-OpenCV in a 4.x release because `requirements.txt` keeps numpy below 2. Without any of them the renderer reports why it cannot start
-and stops; nothing else changes. It runs from a source install only: the
-packaged app carries no TensorRT, and `FaceRenderer` says so instead of
-starting a child.
+(`tensorrt-cu12`), OpenCV (`opencv-python-headless`) and `einops`. None of the
+last three is in `requirements.txt`: like `moshi`, which brings `einops` with
+it, they are installed by hand, OpenCV in a 4.x release because
+`requirements.txt` keeps numpy below 2. Without any of them the renderer
+reports why it cannot start and stops; nothing else changes. It runs from a
+source install only: the packaged app carries no TensorRT, and `FaceRenderer`
+says so instead of starting a child. Everything around the model (the
+timeline, the shared memory, the handle) needs only numpy.
 
 ## The process
 
 `FaceRenderer` (`client.py`) is the handle on the renderer. It starts the
 renderer as a child process, `python -m jarvis.output.face.process`, with the
-interpreter of the process that holds it, and passes it the portrait and the
-framing. The model, TensorRT and the GPU memory they take all live in that
+interpreter of the process that holds it, and passes it the framing on its
+command line and the portrait in its environment (`JARVIS_FACE_PORTRAIT`). The model, TensorRT and the GPU memory they take all live in that
 child, so a renderer that crashes, hangs or runs out of memory costs the face
 and never the voice.
 
@@ -54,11 +59,17 @@ and never the voice.
 - **`FaceRenderer` never raises to its caller and never blocks it.** Sending
   is a write to a pipe from a worker thread fed by an unbounded queue, so a
   renderer that stops reading costs memory, not time, until it is declared
-  dead. A child that has not read for five seconds is dead, and is killed. A
-  failure to start, a `failed` line, a child that exits, a pipe that breaks
-  and a child that stops reading each turn the face off for the rest of the
-  session; the reason is logged once. `ready()` is true only between a `ready`
-  line and the first of those.
+  dead; what cannot be sent (a time or a rate of the wrong kind) is dropped
+  and logged. A watchdog declares dead a child that has not taken a message
+  for five seconds, and kills it. A failure to start, a `failed` line, a child
+  that exits, a pipe that breaks and a child that stops reading each turn the
+  face off for the rest of the session; the reason is logged once. `ready()`
+  is true only between a `ready` line and the first of those, and only
+  reports: it changes nothing. Nothing is sent before `ready` or after a
+  failure.
+- **The renderer stops when the daemon does.** The end of its stdin, a
+  message cut short and a message it cannot read each end it like quit, so a
+  renderer is never left running without the daemon that started it.
 
 ## The clock
 
@@ -86,7 +97,9 @@ for them.
 time. Each chunk carries 120 ms of audio before its five frames and 85 ms
 after them, which is what Ditto's streaming audio encoder reads, and it is fed
 the moment the clock reaches the end of that window minus the delay. A chunk
-is never fed early: the audio after it might not have arrived yet.
+is never fed early: the audio after it might not have arrived yet. One
+sampling of the motion model yields one chunk's frames. `timeline.py` holds
+this geometry and Ditto's stream takes it from there.
 
 **Stamps.** Every frame is stamped with the time its moment of audio is heard:
 frame n of a chunk whose five frames start at time S is stamped S + n / 25.
@@ -102,21 +115,21 @@ The face costs the GPU nothing while no one can see it.
 - While the latest heartbeat is less than two seconds old, the renderer feeds
   Ditto continuously, silence included, so the face keeps blinking and
   moving between sentences.
-- Otherwise it feeds only the stretch of timeline that holds audio, and rests
-  in between: no chunk, no frame, no GPU work.
-- Frames still inside Ditto when it rests come out when feeding resumes. They
-  keep the stamps they were given, so they are already past, and a front end
-  never shows them.
+- Otherwise it rests, whatever audio it is handed: no chunk, no frame, no GPU
+  work. A viewer who arrives while she speaks sees her from the next chunk
+  that can still be drawn on time.
+- Frames still inside Ditto when it rests are never published.
 
 ## Interrupting
 
 `cut(at)` means she stops talking at `at`. The renderer drops every sample
 heard at or after `at`, so what it draws from then on is silence: the mouth
 closes. Frames drawn before the cut but stamped after it show words she will
-not say, so the cut also raises the generation in the shared memory, and a
-front end does not show a frame stamped after the cut that was drawn in an
-earlier generation. The face holds its last frame until the first frame drawn
-after the cut is due, at most one delay later.
+not say. The cut withdraws those already published, and the renderer refuses
+to publish those still being drawn, whichever cut since they were drawn
+covers them: a second cut never brings back what an earlier one took. The
+face holds its last frame until the first frame drawn after the cut is due,
+at most one delay later.
 
 ## Shared memory
 
@@ -124,14 +137,21 @@ after the cut is due, at most one delay later.
 and named after the user so that two users of one machine never share a face.
 It holds a header and a ring of 24 frames of 512 by 512 RGB pixels.
 
-- **The header** holds the format version, the frame size, the number of
-  slots, the sequence number of the last frame published, the viewer
-  heartbeat, the current generation and the time of the last cut.
-- **A slot** holds a sequence number, a stamp, a generation and the pixels.
-  The renderer writes the pixels and the stamp first and the sequence number
-  last. A reader copies a slot and keeps the copy only if the sequence number
-  was the same before and after, so a copy torn by a concurrent write is
-  thrown away, never shown.
+- **The header** holds a tag and the format version, the frame size, the
+  number of slots, the sequence number of the last frame published, the
+  viewer heartbeat and the renderer heartbeat.
+- **A slot** holds a sequence number, a stamp and the pixels. The renderer
+  writes the pixels and the stamp first and the sequence number last, and a
+  cut withdraws a slot by clearing its sequence number. A reader copies a slot
+  and keeps the copy only if the sequence number was the same before and
+  after, so a copy torn by a concurrent write is thrown away, never shown.
+- **The renderer beats** into the header on every turn of its loop, resting
+  included. A reader that finds the beat more than two seconds old shows
+  nothing and lets go of the segment, so a renderer started after it is found
+  again; a new renderer reuses a segment a front end still holds.
+- **Only its user opens it.** On Linux the segments of every user live in one
+  directory, so a segment that does not belong to the user, or that others may
+  open, is used by neither side. Windows keeps such names per session.
 - **Readers never hold the renderer up**, and the renderer never waits for a
   reader. Twenty-four slots hold about one second of frames, more than the
   delay keeps ahead of the clock.
@@ -148,12 +168,14 @@ changed from the original says so at its top.
 
 - **Its configuration is a pickle**, and a pickle can run code. It is read
   with an unpickler that admits numpy arrays and nothing else, and any other
-  object makes the load fail.
+  object makes the load fail. The model paths it names are resolved inside the
+  model folder, never against the working directory.
 - **The portrait is measured once**, when the renderer starts: face detection
   and landmarks (ONNX Runtime, on the CPU), then the appearance and motion
   features Ditto animates. The openness of the eyes and the direction of the
   gaze, which the motion model is conditioned on, are measured from Ditto's
-  203-point landmarks.
+  203-point landmarks. The models that measure the portrait are released once
+  it is measured.
 - **Framing.** Ditto animates a square around the face. The renderer publishes
   that square as it is, so everything on screen moves with the head, and never
   pastes it back into the still portrait, where hair and background outside the
@@ -166,7 +188,8 @@ changed from the original says so at its top.
   new frames per step (an overlap of 75). The motion model is replayed from a
   CUDA graph in half precision. The warping network and the decoder, which do
   most of the work, run as TensorRT engines in half precision. The audio
-  encoder runs on the CPU, which spares the GPU for the voice and Whisper.
+  encoder runs on the CPU, which spares the GPU for the voice and Whisper, on
+  four threads that do not spin while they wait.
   Together they keep up with real time next to Kyutai and Whisper on an RTX
   5070 Ti.
 
@@ -174,18 +197,19 @@ changed from the original says so at its top.
 
 - **Weights** live in `~/.local/share/jarvis/models/ditto/`: the files listed in
   `weights.py`, about 2.2 GB, from one pinned revision of the repository. A
-  file is downloaded under a temporary name and renamed once complete, then
-  checked against its SHA-256; a file that does not match is deleted, never
-  loaded.
+  file is downloaded into a staging folder, checked there against its
+  SHA-256, and only then moved into place, so a file at its final path has
+  always matched; a file that does not match is deleted, never loaded.
 - **TensorRT engines** are built from those weights on the first start on a
-  given GPU: the two networks are exported to ONNX, then compiled, which takes
-  about two minutes. They are kept under `engines/<key>/`, where the key names
-  the GPU, the TensorRT version and the weights. An engine whose key does not
-  match is built again, never loaded: an engine built elsewhere can crash the
-  process that loads it.
+  given GPU: the two networks are exported to ONNX, then compiled, which took
+  thirty seconds on an RTX 5070 Ti and keeps the GPU busy meanwhile. They are
+  kept under `engines/<key>/`, where the key names the GPU, the TensorRT
+  version and the weights by their published SHA-256. An engine whose key does
+  not match is built again, never loaded: an engine built elsewhere can crash
+  the process that loads it.
 - **Warm-up.** Ditto's first seconds run slowly while kernels load and memory
-  is laid out, so the renderer feeds three seconds of silence before it
-  reports `ready`. Feeding the face only starts then.
+  is laid out, so the renderer feeds three seconds of silence nobody sees, then
+  waits for what is still inside Ditto to come out, before it reports `ready`.
 
 ## Failure
 
@@ -196,8 +220,11 @@ A renderer that dies while drawing ends the same way. In every case the face
 is off until the daemon starts again, and nothing she says depends on it.
 
 A frame that comes after its stamp is not a failure: a front end shows the
-newest frame due and skips the rest. The renderer counts the frames it
-published after their stamp and logs the count when it rests.
+newest frame due and skips the rest. When Ditto falls behind, so that a frame
+it still owes should already be on screen, the renderer skips the chunk that
+falls due rather than queue it behind, so the face catches up with the voice
+instead of trailing it. It counts the frames it published after their stamp
+and the chunks it skipped, and logs both when it rests.
 
 ## Testing
 
@@ -206,21 +233,31 @@ it holds everything around the model to the contract, and the renderer itself
 is checked by hand.
 
 - `tests/test_face_timeline.py`: audio laid on the timeline at its time,
-  resampled, joined across small pieces, overlapping, cut and forgotten; the
-  chunk windows, when each is due, the stamps, feeding while watched, waking
-  for audio and resting after it.
+  resampled as scipy would, joined across small pieces, overlapping, cut and
+  forgotten; the chunk windows, when each is due, the stamps, feeding while
+  watched, resting otherwise even while she speaks, a viewer arriving
+  mid-sentence, a feeder that fell behind.
 - `tests/test_face_frames.py`: the shared memory between two processes, the
-  newest frame due, nothing early, torn copies thrown away, the generation and
-  the cut, the heartbeat, a renderer that stopped beating.
+  newest frame due, nothing early, torn copies thrown away, cuts withdrawing
+  and refusing frames (two cuts included), the heartbeats, a reader that
+  outlives its renderer and finds the next one.
+- `tests/test_face_process.py`: the renderer with Ditto faked; messages read,
+  cut and the end of the daemon, frames published at their stamps, warm-up
+  frames and frames left inside Ditto at a rest never shown, frames after a
+  cut refused, late frames counted, a chunk skipped while Ditto owes a frame already due, nothing
+  fed while no one watches, `failed` with its reason.
 - `tests/test_face_client.py`: the renderer process faked; `ready` and
-  `failed`, a child that dies or cannot start, messages in order, a caller
+  `failed`, a child that dies, cannot start or ignores quit, the packaged app
+  refused, the portrait in the environment and not the command line, messages
+  in order, what cannot be sent dropped, a line that is not an event, a caller
   never blocked by a child that stops reading.
 - `tests/test_face_pickle.py`: the configuration unpickler admits numpy arrays
   and refuses anything else without running it.
 - `tests/test_face_files.py`: the portrait widened around the original pixels
-  and refused when unreadable; weights fetched only when missing and deleted
-  when their digest does not match; an engine key that changes with the GPU,
-  TensorRT and the weights.
+  and refused when unreadable (the image cases need OpenCV and are skipped
+  without it); weights fetched only when missing, without a token, and never
+  put in place when their digest does not match; an engine key that changes
+  with the GPU, TensorRT and the weights; engines built once, then found.
 - `scripts/check_talking_face.py`, by hand on a machine with the GPU, the
   packages and the weights: the real renderer fed a WAV the way a speech engine
   feeds it, read the way a front end reads it, and how late each frame was.

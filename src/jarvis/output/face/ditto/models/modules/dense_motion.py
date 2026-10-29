@@ -1,7 +1,6 @@
 # Modified for Jarvis from antgroup/ditto-talkinghead (Apache-2.0, commit c3e47ee):
-# the background heatmap is created on the heatmap's device, so warping makes no
-# host-to-device copy.
-# coding: utf-8
+# the background heatmap is created with the heatmap's device and dtype, so
+# the ONNX export traces it in half precision.
 
 """
 The module that predicting a dense motion from sparse motion representation given by kp_source and kp_driving

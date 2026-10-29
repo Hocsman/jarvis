@@ -26,7 +26,7 @@ import soundfile as sf
 
 from jarvis.output.face import timeline as tl
 from jarvis.output.face.client import FaceRenderer
-from jarvis.output.face.frames import FrameReader
+from jarvis.output.face.frames import HEIGHT, WIDTH, FrameReader
 
 PIECE = 0.08          # Kyutai hands over 80 ms at a time
 SPEED = 1.25          # and makes it a little faster than it is played
@@ -120,7 +120,7 @@ def main() -> int:
         with tempfile.TemporaryDirectory() as d:
             silent, wav = Path(d) / "v.mp4", Path(d) / "a.wav"
             first, last = kept[0][0], kept[-1][0]
-            vw = cv2.VideoWriter(str(silent), cv2.VideoWriter_fourcc(*"mp4v"), tl.FPS, (512, 512))
+            vw = cv2.VideoWriter(str(silent), cv2.VideoWriter_fourcc(*"mp4v"), tl.FPS, (WIDTH, HEIGHT))
             frames = iter(kept)
             nxt = next(frames)
             current = None

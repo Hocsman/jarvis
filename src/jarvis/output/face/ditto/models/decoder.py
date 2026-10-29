@@ -6,5 +6,5 @@ from ..utils.load_model import load_model
 
 class Decoder:
     def __init__(self, model_path, device="cuda"):
-        self.model, _ = load_model(model_path, device=device, module_name="SPADEDecoder")
+        self.model = load_model(model_path, device=device, module_name="SPADEDecoder")
         self.device = device

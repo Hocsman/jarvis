@@ -214,13 +214,16 @@ def _isolate_face_frames(request, monkeypatch):
     import importlib
 
     name = f"jarvis_face_test_{os.getpid()}_{abs(hash(request.node.nodeid)):x}"[:30]
+    patched = 0
     for path in ("jarvis.output.face.frames", "src.jarvis.output.face.frames"):
         try:
             module = importlib.import_module(path)
         except ImportError:
             continue
-        monkeypatch.setattr(module, "_NAME", name)
+        monkeypatch.setattr(module, "segment_name", lambda: name)
         monkeypatch.setattr(module, "_reader", None)
+        patched += 1
+    assert patched, "neither face frames module could be imported"
 
 
 @pytest.fixture(autouse=True)

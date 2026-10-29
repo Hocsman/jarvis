@@ -3,16 +3,15 @@
 
 The two networks do most of the work of drawing a frame. They are exported to
 ONNX in half precision and compiled on the machine that runs them, once per
-GPU, TensorRT version and weights; an engine built for anything else is built
-again, never loaded.
+GPU, TensorRT version and weights (named by their published SHA-256); an
+engine built for anything else is built again, never loaded.
 """
 
 import hashlib
 import json
-import os
 import time
 from pathlib import Path
-from typing import Callable, Dict, Tuple
+from typing import Callable, Dict, Optional, Tuple
 
 from ...debug import debug_log
 
@@ -20,19 +19,25 @@ EXPORT_VERSION = 1   # what the export below produces; a change to it builds new
 _WORKSPACE = 4 << 30
 
 
-def engine_key(gpu: str, capability: Tuple[int, int], trt_version: str, warp_size: int, decoder_size: int) -> str:
-    text = f"{EXPORT_VERSION}|{gpu}|{capability[0]}.{capability[1]}|{trt_version}|{warp_size}|{decoder_size}"
+def engine_key(gpu: str, capability: Tuple[int, int], trt_version: str, warp_sha: str, decoder_sha: str) -> str:
+    text = f"{EXPORT_VERSION}|{gpu}|{capability[0]}.{capability[1]}|{trt_version}|{warp_sha}|{decoder_sha}"
     return hashlib.sha1(text.encode("utf-8")).hexdigest()[:16]
 
 
-def ensure_engines(root: Path, warp_pth: str, decoder_pth: str) -> Tuple[Path, Path]:
-    """The paths of the two engines for this GPU, building whichever is missing."""
+def ensure_engines(root: Path, build: Optional[Callable[[Path, Path, Path, Path], None]] = None) -> Tuple[Path, Path]:
+    """The paths of the two engines for this GPU, building them when either is missing.
+
+    ``build(warp_pth, decoder_pth, warp_engine, decoder_engine)`` defaults to the
+    export and compilation below.
+    """
     import tensorrt as trt
     import torch
 
+    from . import weights
+
     gpu = torch.cuda.get_device_name(0)
     key = engine_key(gpu, torch.cuda.get_device_capability(0), trt.__version__,
-                     os.path.getsize(warp_pth), os.path.getsize(decoder_pth))
+                     weights.digest(weights.WARP), weights.digest(weights.DECODER))
     folder = root / "engines" / key
     warp_engine, decoder_engine = folder / "warp_fp16.engine", folder / "decoder_fp16.engine"
     if warp_engine.is_file() and decoder_engine.is_file():
@@ -41,16 +46,20 @@ def ensure_engines(root: Path, warp_pth: str, decoder_pth: str) -> Tuple[Path, P
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "key.json").write_text(json.dumps({
         "export": EXPORT_VERSION, "gpu": gpu, "tensorrt": trt.__version__,
-        "warp_bytes": os.path.getsize(warp_pth), "decoder_bytes": os.path.getsize(decoder_pth),
+        "warp_sha256": weights.digest(weights.WARP), "decoder_sha256": weights.digest(weights.DECODER),
     }, indent=1), encoding="utf-8")
-    print(f"  🔧 Face: building the TensorRT engines for {gpu} (about two minutes, once)", flush=True)
-    feature_shape = _export_warp(warp_pth, folder / "warp_fp16.onnx")
-    _export_decoder(decoder_pth, folder / "decoder_fp16.onnx", feature_shape)
-    for onnx, engine in ((folder / "warp_fp16.onnx", warp_engine), (folder / "decoder_fp16.onnx", decoder_engine)):
-        if not engine.is_file():
-            _build(onnx, engine)
-        onnx.unlink(missing_ok=True)
+    debug_log(f"face: building the TensorRT engines for {gpu}", "face")
+    (build or _export_and_build)(root / weights.WARP, root / weights.DECODER, warp_engine, decoder_engine)
     return warp_engine, decoder_engine
+
+
+def _export_and_build(warp_pth: Path, decoder_pth: Path, warp_engine: Path, decoder_engine: Path) -> None:
+    folder = warp_engine.parent
+    feature_shape = _export_warp(str(warp_pth), folder / "warp_fp16.onnx")
+    _export_decoder(str(decoder_pth), folder / "decoder_fp16.onnx", feature_shape)
+    for onnx, engine in ((folder / "warp_fp16.onnx", warp_engine), (folder / "decoder_fp16.onnx", decoder_engine)):
+        _build(onnx, engine)
+        onnx.unlink(missing_ok=True)
 
 
 def _export_warp(warp_pth: str, onnx_path: Path) -> Tuple[int, ...]:

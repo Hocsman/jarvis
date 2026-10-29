@@ -5,26 +5,40 @@ Every time here is a `time.perf_counter()` value (`face.spec.md`, "The clock").
 """
 
 from dataclasses import dataclass
-from math import gcd
+from math import ceil, gcd
 from typing import List, Optional, Tuple
 
 import numpy as np
-from scipy.signal import resample_poly
 
 RATE = 16000                 # what Ditto's audio encoder reads
 FPS = 25
-CHUNK_FRAMES = 5
+# Ditto reads each chunk as frames of 40 ms: three before the five it animates,
+# then two after, and its audio encoder 80 samples more.
+CHUNKSIZE = (3, 5, 2)
+CHUNK_FRAMES = CHUNKSIZE[1]
 CHUNK_SECONDS = CHUNK_FRAMES / FPS
-PAST_SECONDS = 3 / FPS       # audio before a chunk's five frames that Ditto reads
-FUTURE_SECONDS = 2 / FPS + 80 / RATE   # and after them
-CHUNK_SAMPLES = round((PAST_SECONDS + CHUNK_SECONDS + FUTURE_SECONDS) * RATE)   # 6480
+PAST_SECONDS = CHUNKSIZE[0] / FPS
+FUTURE_SECONDS = CHUNKSIZE[2] / FPS + 80 / RATE
+CHUNK_SAMPLES = sum(CHUNKSIZE) * RATE // FPS + 80   # 6480
 DELAY = 0.75                 # audio heard at H is handed over by H - DELAY
-TAIL_SECONDS = 1.0           # feeding goes on this long after her last word, so the mouth closes
-LEAD_SECONDS = 0.4           # and starts this long before her first one, so the motion is settled
 
 # Samples of the previous piece kept to resample the join with the next one; a
 # multiple of every input rate's step, so the overlap maps to whole samples.
 _JOIN_SECONDS = 0.01
+
+
+def resample(x: np.ndarray, up: int, down: int) -> np.ndarray:
+    """Resample by up/down: zeros inserted, a Kaiser-windowed sinc low-pass,
+    every down-th sample kept (scipy's resample_poly with its defaults)."""
+    widest = max(up, down)
+    half = 10 * widest
+    n = np.arange(-half, half + 1)
+    taps = np.sinc(n / widest) * np.kaiser(2 * half + 1, 5.0)
+    taps *= up / taps.sum()
+    spread = np.zeros(len(x) * up, np.float64)
+    spread[::up] = x
+    filtered = np.convolve(spread, taps)[half:half + len(spread)]
+    return filtered[::down][:ceil(len(x) * up / down)].astype(np.float32)
 
 
 class Timeline:
@@ -38,11 +52,9 @@ class Timeline:
         self._n = int(seconds * RATE)
         self._buf = np.zeros(self._n, np.float32)
         self._floor: Optional[int] = None      # first sample still held
-        self._spans: List[Tuple[float, float]] = []   # where audio was laid, merged
         # (rate, end time, last input samples) of the previous piece, to join the next one smoothly
         self._tail: Optional[Tuple[int, float, np.ndarray]] = None
 
-    # -- positions --------------------------------------------------------
     @staticmethod
     def _pos(t: float) -> int:
         return int(round(t * RATE))
@@ -72,24 +84,22 @@ class Timeline:
             self._buf[i:i + take] = 0.0
             first += take
 
-    # -- what the renderer is handed --------------------------------------
     def lay(self, heard_at: float, samples: np.ndarray, rate: int) -> None:
         """Lay ``samples`` (mono, at ``rate``) so that the first is heard at ``heard_at``."""
         samples = np.asarray(samples, np.float32).reshape(-1)
-        if not len(samples):
+        if not len(samples) or rate <= 0:
             return
         end = heard_at + len(samples) / rate
         start = heard_at
         if rate != RATE:
             g = gcd(rate, RATE)
             up, down = RATE // g, rate // g
-            # A piece that continues the previous one is resampled together with the
-            # end of it, so the filter sees across the join: the previous piece's last
-            # samples, spoilt by the edge, are written again correctly.
             keep = max(down, int(_JOIN_SECONDS * rate) // down * down)
-            # Each end of a resampled block is spoilt by the filter's edge, so only the
-            # second half of the overlap is written again: there the new block is past
-            # its own edge and the previous one was at its own.
+            # A piece that continues the previous one is resampled together with the
+            # end of it, so the filter sees across the join. Each end of a resampled
+            # block is spoilt by the filter's edge, so only the second half of the
+            # overlap is written again: there the new block is past its own edge and
+            # the previous one was at its own.
             if self._tail is not None and self._tail[0] == rate and abs(self._tail[1] - heard_at) < 0.5 / rate:
                 before = self._tail[2][-keep:]
                 joined = np.concatenate([before, samples])
@@ -99,11 +109,10 @@ class Timeline:
                 joined = samples
                 skip = 0
             self._tail = (rate, end, joined[-keep:].copy())
-            samples = resample_poly(joined, up, down).astype(np.float32)[skip:]
+            samples = resample(joined, up, down)[skip:]
         else:
             self._tail = None
         self._write(self._pos(start), samples)
-        self._add_span(heard_at, end)
 
     def cut(self, at: float) -> None:
         """Nothing heard at or after ``at`` will be said: it becomes silence."""
@@ -111,7 +120,6 @@ class Timeline:
         if self._floor is not None:
             first, last, _ = self._clip(pos, self._floor + self._n - pos)
             self._zero(first, last)
-        self._spans = [(a, min(b, at)) for a, b in self._spans if a < at]
         self._tail = None
 
     def forget(self, before: float) -> None:
@@ -124,9 +132,7 @@ class Timeline:
             return
         self._zero(self._floor, min(pos, self._floor + self._n))
         self._floor = pos
-        self._spans = [(max(a, before), b) for a, b in self._spans if b > before]
 
-    # -- what the feeder reads --------------------------------------------
     def read(self, start: float, count: int) -> np.ndarray:
         out = np.zeros(count, np.float32)
         if self._floor is None:
@@ -140,22 +146,6 @@ class Timeline:
             skip += take
         return out
 
-    def has_audio(self, start: float, end: float) -> bool:
-        return any(a < end and b > start for a, b in self._spans)
-
-    def last_audio_end(self) -> Optional[float]:
-        return max((b for _a, b in self._spans), default=None)
-
-    def _add_span(self, start: float, end: float) -> None:
-        spans = sorted(self._spans + [(start, end)])
-        merged = [spans[0]]
-        for a, b in spans[1:]:
-            if a <= merged[-1][1] + 1e-6:
-                merged[-1] = (merged[-1][0], max(merged[-1][1], b))
-            else:
-                merged.append((a, b))
-        self._spans = merged
-
 
 @dataclass
 class Step:
@@ -166,10 +156,10 @@ class Step:
 class Feeder:
     """Decides, at each instant, whether to feed Ditto a chunk.
 
-    While someone watches it feeds continuously; otherwise only around her
-    audio, from LEAD_SECONDS before it to TAIL_SECONDS after it, and rests in
-    between. A chunk is fed the moment the end of its window is one delay
-    ahead of the clock, never earlier.
+    It feeds continuously while someone watches and rests otherwise. A chunk
+    is fed the moment the end of its window is one delay ahead of the clock,
+    never earlier; a feeder that fell behind jumps to the first chunk it can
+    still feed on time.
     """
 
     def __init__(self, timeline: Timeline, delay: float = DELAY) -> None:
@@ -192,24 +182,18 @@ class Feeder:
         """The first chunk that can still be fed on time."""
         return now + self.delay - CHUNK_SECONDS - FUTURE_SECONDS
 
-    def _wanted(self, start: float, watched: bool) -> bool:
-        return watched or self.timeline.has_audio(start - TAIL_SECONDS, start + LEAD_SECONDS)
-
     def step(self, now: float, watched: bool) -> Step:
-        if self.next_start is None:
-            start = self.earliest(now)
-            if self._wanted(start, watched):
-                return Step(feed=start)
+        if not watched:
+            self.next_start = None
             return Step(wait=0.05)
+        if self.next_start is None:
+            return Step(feed=self.earliest(now))
         start = self.next_start
         due = self.due(start)
         if now < due:
             return Step(wait=due - now)
         if now - due > CHUNK_SECONDS:
             start = self.earliest(now)
-        if not self._wanted(start, watched):
-            self.next_start = None
-            return Step(wait=0.05)
         return Step(feed=start)
 
     def fed(self, start: float) -> None:

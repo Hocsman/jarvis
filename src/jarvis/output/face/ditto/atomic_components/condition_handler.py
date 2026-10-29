@@ -1,6 +1,12 @@
+# Modified for Jarvis from antgroup/ditto-talkinghead (Apache-2.0, commit c3e47ee):
+# softmax in numpy, so scipy is not needed.
 import numpy as np
-from scipy.special import softmax
 import copy
+
+
+def softmax(x, axis=None):
+    e = np.exp(x - np.max(x, axis=axis, keepdims=True))
+    return e / np.sum(e, axis=axis, keepdims=True)
 
 
 def _get_emo_avg(idx=6):

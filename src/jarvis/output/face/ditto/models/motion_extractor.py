@@ -6,7 +6,7 @@ from ..utils.load_model import load_model
 
 class MotionExtractor:
     def __init__(self, model_path, device="cuda"):
-        self.model, _ = load_model(model_path, device=device, module_name="MotionExtractor")
+        self.model = load_model(model_path, device=device, module_name="MotionExtractor")
         self.device = device
 
         self.output_names = [

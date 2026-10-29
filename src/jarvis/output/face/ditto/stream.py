@@ -3,7 +3,8 @@
 # each frame is Ditto's own 512x512 square handed to a callback (no paste-back
 # into the portrait, no video file); the warping network and the decoder are
 # TensorRT engines handed in by the caller; the motion sampling is replayed from
-# a CUDA graph; the workers stop on request.
+# a CUDA graph; the models that only register the portrait are released after
+# it; the workers stop on request.
 import queue
 import threading
 import traceback
@@ -17,11 +18,7 @@ from .atomic_components.cfg import parse_cfg
 from .atomic_components.condition_handler import ConditionHandler
 from .atomic_components.motion_stitch import MotionStitch
 from .atomic_components.wav2feat import Wav2Feat
-
-# What each chunk of audio covers, in frames of 40 ms: three before the five it
-# animates and two after. A chunk is 6480 samples at 16 kHz.
-CHUNKSIZE = (3, 5, 2)
-CHUNK_SAMPLES = int(sum(CHUNKSIZE) * 0.04 * 16000) + 80
+from ..timeline import CHUNK_FRAMES, CHUNK_SAMPLES, CHUNKSIZE
 
 
 class Stream:
@@ -31,8 +28,8 @@ class Stream:
             condition_handler_cfg,
             lmdm_cfg,
             stitch_network_cfg,
-            self.warp_network_cfg,
-            self.decoder_cfg,
+            _warp_network_cfg,   # run through TensorRT, see engines.py
+            _decoder_cfg,
             wav2feat_cfg,
             self.default_kwargs,
         ] = parse_cfg(cfg_pkl, data_root)
@@ -44,13 +41,14 @@ class Stream:
         self.wav2feat = Wav2Feat(**wav2feat_cfg)
         self.thread_list = []
 
-    def setup(self, rgb, warp, decode, on_frame, crop_scale=2.3, overlap_v2=75, sampling_timesteps=10):
+    def setup(self, rgb, warp, decode, on_frame, crop_scale=2.3, sampling_timesteps=10):
         """Register ``rgb`` (a still portrait) and start the workers.
 
         ``warp(f_s, x_s, x_d)`` and ``decode(feature)`` return CUDA tensors;
         ``on_frame(rgb_uint8)`` receives every frame, in order, from a worker
-        thread.
+        thread. Each sampling of the motion model yields one chunk's frames.
         """
+        overlap_v2 = self.audio2motion.lmdm.seq_frames - CHUNK_FRAMES
         kwargs = dict(self.default_kwargs)
         self.emo = kwargs.get("emo", 4)
         self.on_frame = on_frame
@@ -103,6 +101,9 @@ class Stream:
         self.cond_idx_start = 0 - len(self.audio_feat)
 
         self._f_s = torch.from_numpy(self.source_info["f_s_lst"][0]).cuda().half()
+        # The registrar's models measured the portrait and are not needed again.
+        del self.avatar_registrar
+        torch.cuda.empty_cache()
 
         self.worker_exception = None
         self.stop_event = threading.Event()
@@ -248,6 +249,7 @@ class Stream:
 
     def run_chunk(self, audio_chunk):
         """Feed one chunk of CHUNK_SAMPLES samples at 16 kHz."""
+        assert len(audio_chunk) == CHUNK_SAMPLES, len(audio_chunk)
         aud_feat = self.wav2feat(audio_chunk, chunksize=CHUNKSIZE)
         self._put(self.audio2motion_queue, aud_feat)
 

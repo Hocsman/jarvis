@@ -13,7 +13,6 @@ class Wav2Feat:
             raise ValueError(f"Unsupported w2f_type: {w2f_type}")
         self.w2f = Wav2FeatHubert(hubert_cfg=w2f_cfg)
         self.feat_dim = 1024
-        self.support_streaming = True
 
     def __call__(self, audio, chunksize=(3, 5, 2)):
         return self.w2f(audio, chunksize=chunksize)

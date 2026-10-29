@@ -10,10 +10,11 @@ import hashlib
 import os
 import struct
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from multiprocessing import shared_memory
-from typing import Optional
+from typing import List, Optional
 
 import numpy as np
 
@@ -21,32 +22,25 @@ from ...debug import debug_log
 
 WIDTH = HEIGHT = 512
 SLOTS = 24
-STALE_SECONDS = 2.0      # a renderer silent this long is gone
-_RETRY_SECONDS = 1.0     # how often a reader looks again for a segment that is not there
+STALE_SECONDS = 2.0      # a renderer that has not beaten for this long is gone
+_RETRY_SECONDS = 1.0     # how often a reader looks again for a segment
 
 _MAGIC = b"JFAC"
 _VERSION = 1
-# magic, version, width, height, slots, last sequence, viewer beat, renderer beat, generation, cut time
-_HEADER = struct.Struct("<4sIIII4xQddQd")
-# sequence (0 while being written), stamp, generation
-_SLOT = struct.Struct("<QdQ8x")
+# magic, version, width, height, slots | last sequence, viewer beat, renderer beat
+_HEADER = struct.Struct("<4sIIII4xQdd")
+_OFF_LAST_SEQ = struct.calcsize("<4sIIII4x")
+_OFF_VIEWER = _OFF_LAST_SEQ + 8
+_OFF_RENDERER = _OFF_VIEWER + 8
+# sequence (0 while being written, or once a cut has withdrawn it), stamp
+_SLOT = struct.Struct("<Qd")
 _PIXELS = WIDTH * HEIGHT * 3
 _SLOT_SIZE = _SLOT.size + _PIXELS
 _SIZE = _HEADER.size + SLOTS * _SLOT_SIZE
 
-_OFF_LAST_SEQ = 24
-_OFF_VIEWER = 32
-_OFF_RENDERER = 40
-_OFF_GENERATION = 48
-_OFF_CUT = 56
-
-_NAME: Optional[str] = None   # tests give each test its own segment
-
 
 def segment_name() -> str:
     """One segment per user of the machine, so two users never share a face."""
-    if _NAME:
-        return _NAME
     try:
         who = getpass.getuser()
     except Exception:
@@ -58,6 +52,15 @@ def _slot_offset(index: int) -> int:
     return _HEADER.size + index * _SLOT_SIZE
 
 
+def _owned(shm: shared_memory.SharedMemory) -> bool:
+    """Whether this user alone can open the segment. Windows keeps named
+    mappings per session; on POSIX they all live in one shared directory."""
+    if sys.platform == "win32":
+        return True
+    st = os.fstat(shm._fd)
+    return st.st_uid == os.getuid() and not st.st_mode & 0o077
+
+
 @dataclass
 class Frame:
     pixels: np.ndarray   # HEIGHT x WIDTH x 3, RGB, uint8
@@ -66,41 +69,65 @@ class Frame:
 
 
 class FrameWriter:
-    """The renderer's side: creates the segment and publishes frames."""
+    """The renderer's side: owns the segment and publishes frames."""
 
     def __init__(self, name: Optional[str] = None) -> None:
         self.name = name or segment_name()
-        try:
-            self._shm = shared_memory.SharedMemory(name=self.name, create=True, size=_SIZE)
-        except FileExistsError:
-            # A renderer that died left its segment behind (POSIX keeps it).
-            old = shared_memory.SharedMemory(name=self.name)
-            old.close()
-            old.unlink()
-            self._shm = shared_memory.SharedMemory(name=self.name, create=True, size=_SIZE)
+        self._shm = self._open()
         self._buf = self._shm.buf
         self._buf[:_SIZE] = bytes(_SIZE)
-        _HEADER.pack_into(self._buf, 0, _MAGIC, _VERSION, WIDTH, HEIGHT, SLOTS, 0, 0.0, 0.0, 0, float("inf"))
+        _HEADER.pack_into(self._buf, 0, _MAGIC, _VERSION, WIDTH, HEIGHT, SLOTS, 0, 0.0, 0.0)
+        self._lock = threading.Lock()
         self._seq = 0
         self._generation = 0
+        self._cuts: List[float] = []   # the cut that ended each generation
 
-    def publish(self, rgb: np.ndarray, stamp: float, generation: int) -> int:
-        self._seq += 1
-        off = _slot_offset(self._seq % SLOTS)
-        _SLOT.pack_into(self._buf, off, 0, 0.0, 0)
-        np.frombuffer(self._buf, np.uint8, _PIXELS, off + _SLOT.size)[:] = np.asarray(rgb, np.uint8).reshape(-1)
-        _SLOT.pack_into(self._buf, off, 0, stamp, generation)
-        struct.pack_into("<Q", self._buf, off, self._seq)
-        struct.pack_into("<Q", self._buf, _OFF_LAST_SEQ, self._seq)
-        return self._seq
+    def _open(self) -> shared_memory.SharedMemory:
+        try:
+            return shared_memory.SharedMemory(name=self.name, create=True, size=_SIZE)
+        except FileExistsError:
+            pass
+        # A previous renderer's segment: kept alive by a front end that still
+        # holds it (Windows), or left behind by a renderer that died (POSIX).
+        shm = shared_memory.SharedMemory(name=self.name)
+        if shm.size >= _SIZE and _owned(shm):
+            return shm
+        shm.close()
+        if sys.platform == "win32":
+            raise RuntimeError("the face's shared memory is held by another program")
+        stale = shared_memory.SharedMemory(name=self.name)
+        stale.close()
+        stale.unlink()   # refused for another user's segment, which then stays refused
+        return shared_memory.SharedMemory(name=self.name, create=True, size=_SIZE)
+
+    def publish(self, rgb: np.ndarray, stamp: float, generation: int) -> bool:
+        """Publish a frame drawn in ``generation``; False when a cut since then
+        means it shows words she will not say."""
+        with self._lock:
+            if generation < self._generation and stamp >= min(self._cuts[generation:]):
+                return False
+            self._seq += 1
+            off = _slot_offset(self._seq % SLOTS)
+            struct.pack_into("<Q", self._buf, off, 0)
+            np.frombuffer(self._buf, np.uint8, _PIXELS, off + _SLOT.size)[:] = np.asarray(rgb, np.uint8).reshape(-1)
+            _SLOT.pack_into(self._buf, off, 0, stamp)
+            struct.pack_into("<Q", self._buf, off, self._seq)
+            struct.pack_into("<Q", self._buf, _OFF_LAST_SEQ, self._seq)
+            return True
 
     def cut(self, at: float) -> int:
-        """Frames drawn so far and stamped at or after ``at`` must not be shown.
-        Returns the new generation, which the frames drawn from now on carry."""
-        self._generation += 1
-        struct.pack_into("<d", self._buf, _OFF_CUT, at)
-        struct.pack_into("<Q", self._buf, _OFF_GENERATION, self._generation)
-        return self._generation
+        """She stops talking at ``at``: frames stamped from then on are
+        withdrawn, published or not. Returns the generation the frames drawn
+        from now on carry."""
+        with self._lock:
+            self._cuts.append(at)
+            self._generation += 1
+            for slot in range(SLOTS):
+                off = _slot_offset(slot)
+                seq, stamp = _SLOT.unpack_from(self._buf, off)
+                if seq and stamp >= at:
+                    struct.pack_into("<Q", self._buf, off, 0)
+            return self._generation
 
     def beat(self, now: float) -> None:
         struct.pack_into("<d", self._buf, _OFF_RENDERER, now)
@@ -119,7 +146,7 @@ class FrameWriter:
 
 
 class FrameReader:
-    """A front end's side: attaches when the segment exists and reads frames."""
+    """A front end's side: attaches while a renderer beats, and reads frames."""
 
     def __init__(self, name: Optional[str] = None) -> None:
         self._name = name
@@ -146,7 +173,8 @@ class FrameReader:
                 resource_tracker.unregister(shm._name, "shared_memory")
             except Exception:
                 pass
-        if shm.size < _SIZE or bytes(shm.buf[:4]) != _MAGIC or struct.unpack_from("<I", shm.buf, 4)[0] != _VERSION:
+        if (shm.size < _SIZE or not _owned(shm) or bytes(shm.buf[:4]) != _MAGIC
+                or struct.unpack_from("<I", shm.buf, 4)[0] != _VERSION):
             shm.close()
             return False
         self._shm, self._buf = shm, shm.buf
@@ -164,25 +192,21 @@ class FrameReader:
             now = time.perf_counter()
         buf = self._buf
         struct.pack_into("<d", buf, _OFF_VIEWER, now)
-        renderer = struct.unpack_from("<d", buf, _OFF_RENDERER)[0]
-        if now - renderer > STALE_SECONDS:
+        if now - struct.unpack_from("<d", buf, _OFF_RENDERER)[0] > STALE_SECONDS:
+            # Let go: the next renderer may bring a segment of its own.
+            self.close()
             return None
-        generation = struct.unpack_from("<Q", buf, _OFF_GENERATION)[0]
-        cut = struct.unpack_from("<d", buf, _OFF_CUT)[0]
         for _attempt in range(2):
             best = None
             for slot in range(SLOTS):
-                seq, stamp, gen = _SLOT.unpack_from(buf, _slot_offset(slot))
-                if not seq or stamp > now or (gen < generation and stamp >= cut):
-                    continue
-                if best is None or (stamp, seq) > (best[1], best[0]):
+                seq, stamp = _SLOT.unpack_from(buf, _slot_offset(slot))
+                if seq and stamp <= now and (best is None or (stamp, seq) > (best[1], best[0])):
                     best = (seq, stamp, slot)
             if best is None:
                 return None
             seq, stamp, slot = best
             pixels = self._copy_pixels(slot)
-            again = _SLOT.unpack_from(buf, _slot_offset(slot))
-            if again[0] == seq and again[1] == stamp:
+            if _SLOT.unpack_from(buf, _slot_offset(slot)) == (seq, stamp):
                 return Frame(pixels, stamp, seq)
         return None
 

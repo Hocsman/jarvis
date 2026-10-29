@@ -1,7 +1,6 @@
 # Modified for Jarvis from antgroup/ditto-talkinghead (Apache-2.0, commit c3e47ee):
 # the coordinate grid is built on the reference's device, in float32 then cast,
-# so warping makes no host-to-device copy (CUDA graphs) and exports to ONNX in half precision.
-# coding: utf-8
+# so the ONNX export traces it in half precision.
 
 """
 This file defines various neural network modules and utility functions, including convolutional and residual blocks,

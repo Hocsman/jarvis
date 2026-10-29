@@ -41,6 +41,16 @@ class TestLayingAudio:
 
         assert np.abs(got - want).max() < 0.02
 
+    def test_the_resampling_matches_scipys_polyphase_filter(self):
+        signal = pytest.importorskip("scipy.signal")
+        sound = np.random.default_rng(3).standard_normal(4800).astype(np.float32)
+
+        ours = tl.resample(sound, 2, 3)
+        theirs = signal.resample_poly(sound, 2, 3)
+
+        assert len(ours) == len(theirs)
+        assert np.abs(ours - theirs).max() < 1e-4
+
     def test_audio_handed_over_in_small_pieces_reads_as_if_it_came_whole(self):
         # Kyutai hands over 80 ms at a time; the joins must not click.
         whole, pieces = Timeline(), Timeline()
@@ -91,7 +101,6 @@ class TestCutting:
 
         assert line.read(T0, RATE).all()
         assert not line.read(T0 + 1.0, RATE).any()
-        assert line.last_audio_end() == pytest.approx(T0 + 1.0)
 
     def test_audio_laid_after_a_cut_is_kept(self):
         # The reply that follows a stop word is spoken.
@@ -153,27 +162,24 @@ class TestFeeding:
         assert end == pytest.approx(start + tl.CHUNK_SECONDS + tl.FUTURE_SECONDS)
         assert round((end - first) * RATE) == tl.CHUNK_SAMPLES
 
-    def test_audio_wakes_a_resting_face_in_time_to_draw_it(self):
+    def test_audio_alone_does_not_wake_a_face_no_one_watches(self):
+        # The face costs the GPU nothing while no one can see it, even while she speaks.
         line = Timeline()
-        heard = T0 + 3.0
-        line.lay(heard, np.ones(RATE, np.float32), RATE)
+        line.lay(T0 + 3.0, np.ones(RATE, np.float32), RATE)
         feeder = Feeder(line)
 
-        fed = _drive(feeder, line, T0 + 6.0, watched=False)
+        assert _drive(feeder, line, T0 + 6.0, watched=False) == []
 
-        starts = [s for s, _ in fed]
-        assert starts and starts[0] <= heard
-        assert any(s <= heard + 0.9 < s + tl.CHUNK_SECONDS for s in starts)
-
-    def test_after_her_last_word_the_face_rests_once_the_mouth_has_closed(self):
+    def test_a_viewer_arriving_mid_sentence_gets_frames_from_the_next_chunk_due(self):
         line = Timeline()
-        line.lay(T0 + 1.0, np.ones(RATE, np.float32), RATE)
+        line.lay(T0, np.ones(5 * RATE, np.float32), RATE)
         feeder = Feeder(line)
 
-        fed = _drive(feeder, line, T0 + 10.0, watched=False)
+        fed = _drive(feeder, line, T0 + 4.0, watched=lambda now: now >= T0 + 2.0)
 
-        last = max(s for s, _ in fed)
-        assert T0 + 2.0 + tl.TAIL_SECONDS - tl.CHUNK_SECONDS <= last < T0 + 2.0 + tl.TAIL_SECONDS + tl.CHUNK_SECONDS
+        first_start, first_at = fed[0]
+        assert first_at == pytest.approx(T0 + 2.0, abs=0.011)
+        assert first_start == pytest.approx(feeder.earliest(first_at))
 
     def test_a_viewer_leaving_lets_the_face_rest(self):
         feeder = Feeder(Timeline())

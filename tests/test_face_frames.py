@@ -2,12 +2,14 @@
 "Shared memory", "Watching and resting", "Interrupting").
 
 The renderer writes frames stamped with the moment they are to be on screen; a
-front end reads the newest one due, never one early, never a torn one.
+front end reads the newest one due, never one early, never a torn one, never
+one showing words a cut took back.
 """
 
 import subprocess
 import sys
 import textwrap
+import time
 
 import numpy as np
 import pytest
@@ -73,25 +75,46 @@ class TestReading:
     def test_a_copy_torn_by_a_write_is_thrown_away(self, writer, reader):
         writer.publish(_frame(1), NOW, 0)
         writer.publish(_frame(2), NOW + 0.04, 0)
-
         real_copy = reader._copy_pixels
 
         def torn(slot):
             pixels = real_copy(slot)
             if (pixels == 2).all():
-                writer.publish(_frame(9), NOW + 10.0, 0)   # lands in the middle of the copy
-                for _ in range(fr.SLOTS - 1):
+                # The whole ring is rewritten, with frames not yet due, during the copy.
+                for _ in range(fr.SLOTS):
                     writer.publish(_frame(9), NOW + 10.0, 0)
             return pixels
 
         reader._copy_pixels = torn
-        got = reader.read(NOW + 0.05)
 
-        assert got is None or not (got.pixels == 2).all()
+        assert reader.read(NOW + 0.05) is None
+
+
+class TestFollowingTheRenderer:
+    def test_a_reader_that_outlived_its_renderer_shows_the_next_one(self, monkeypatch, reader):
+        monkeypatch.setattr(fr, "_RETRY_SECONDS", 0.0)
+        first = FrameWriter()
+        first.beat(NOW)
+        first.publish(_frame(1), NOW, 0)
+        assert (reader.read(NOW + 0.01).pixels == 1).all()
+
+        first.close()
+        second = FrameWriter()   # the reader still holds the first one's mapping
+        try:
+            later = NOW + 10.0
+            second.beat(later)
+            second.publish(_frame(2), later, 0)
+
+            got = None
+            for _ in range(3):
+                got = reader.read(later + 0.01) or got
+            assert got is not None and (got.pixels == 2).all()
+        finally:
+            second.close()
 
 
 class TestCut:
-    def test_frames_drawn_before_a_cut_and_stamped_after_it_are_not_shown(self, writer, reader):
+    def test_frames_published_before_a_cut_and_stamped_after_it_are_withdrawn(self, writer, reader):
         for i in range(10):
             writer.publish(_frame(i), NOW + i * 0.1, 0)
 
@@ -99,6 +122,22 @@ class TestCut:
         got = reader.read(NOW + 0.8)
 
         assert got.stamp == pytest.approx(NOW + 0.4)
+
+    def test_frames_drawn_before_a_cut_and_published_after_it_are_refused(self, writer, reader):
+        writer.publish(_frame(1), NOW, 0)
+        writer.cut(NOW + 0.45)
+
+        assert writer.publish(_frame(2), NOW + 0.5, 0) is False
+        assert writer.publish(_frame(3), NOW + 0.3, 0) is True
+        assert reader.read(NOW + 0.6).stamp == pytest.approx(NOW + 0.3)
+
+    def test_a_second_cut_does_not_bring_back_what_the_first_took(self, writer, reader):
+        writer.cut(NOW + 0.4)
+        writer.cut(NOW + 0.8)
+
+        assert writer.publish(_frame(1), NOW + 0.5, 0) is False
+        assert writer.publish(_frame(2), NOW + 0.9, 1) is False
+        assert writer.publish(_frame(3), NOW + 0.5, 1) is True
 
     def test_frames_drawn_after_the_cut_are_shown(self, writer, reader):
         for i in range(10):
@@ -125,8 +164,7 @@ def test_another_process_reads_what_the_renderer_published(writer):
         import sys
         sys.path.insert(0, {str(fr.__file__).rsplit('jarvis', 1)[0]!r})
         from jarvis.output.face import frames
-        frames._NAME = {writer.name!r}
-        r = frames.FrameReader()
+        r = frames.FrameReader({writer.name!r})
         f = r.read({NOW + 0.01})
         print(int(f.pixels[0, 0, 0]) if f is not None else 'none')
         r.close()

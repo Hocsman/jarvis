@@ -1,6 +1,7 @@
 # Modified for Jarvis from antgroup/ditto-talkinghead (Apache-2.0, commit c3e47ee):
-# a single still image only, and the eyes are measured from the 203-point
-# landmarks (utils/eye_info.py) instead of MediaPipe.
+# a single still image only, a portrait with no face raises NoFaceFound, and the
+# eyes are measured from the 203-point landmarks (utils/eye_info.py) instead of
+# MediaPipe.
 import cv2
 import numpy as np
 
@@ -93,8 +94,6 @@ class Source2Info:
         return {
             "x_s_info": kp_info,
             "f_s": fs,
-            "M_c2o": M_c2o,
             "eye_open": eye_open,   # [1, 2]
             "eye_ball": eye_ball,    # [1, 6]
-            "img_crop": img_crop,
         }

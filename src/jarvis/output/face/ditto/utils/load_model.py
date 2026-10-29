@@ -5,7 +5,7 @@
 
 def load_model(model_path: str, device: str = "cuda", **kwargs):
     if model_path.endswith(".pt") or model_path.endswith(".pth"):
-        return create_model(model_path, device, **kwargs), "pytorch"
+        return create_model(model_path, device, **kwargs)
     raise ValueError(f"Unsupported model file type: {model_path}")
 
 

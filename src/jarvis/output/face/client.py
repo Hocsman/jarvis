@@ -24,18 +24,27 @@ from ...debug import debug_log
 # One message: kind, a time, a sample rate, the number of payload bytes.
 HEADER = struct.Struct("<BdII")
 MSG_AUDIO, MSG_CUT, MSG_QUIT = 1, 2, 3
+PORTRAIT_ENV = "JARVIS_FACE_PORTRAIT"   # read by process.py
 
 
 class FaceRenderer:
+    """Starts the renderer and hands it what a speech engine is about to say.
+
+    Every time it takes is a ``time.perf_counter()`` value. Nothing is sent
+    before the renderer reports ready, or after it failed: those calls do
+    nothing.
+    """
+
     def __init__(self, portrait: str, framing: str = "head", command: Optional[List[str]] = None,
                  stall_seconds: float = 5.0) -> None:
-        self._command = command or [sys.executable, "-m", "jarvis.output.face.process",
-                                    "--portrait", portrait, "--framing", framing]
+        self._portrait = portrait
+        self._command = command or [sys.executable, "-m", "jarvis.output.face.process", "--framing", framing]
         self._stall_seconds = stall_seconds
         self._proc: Optional[subprocess.Popen] = None
         self._outbox: "queue.Queue[Optional[bytes]]" = queue.Queue()
         self._threads: List[threading.Thread] = []
         self._lock = threading.Lock()
+        self._done = threading.Event()
         self._ready = False
         self._stopping = False
         self._writing_since: Optional[float] = None
@@ -44,23 +53,26 @@ class FaceRenderer:
 
     # -- lifecycle ---------------------------------------------------------
     def start(self) -> None:
+        """Start the renderer; it reports ready once it can draw."""
         if getattr(sys, "frozen", False):
             self._fail("the face runs from a source install only: the packaged app carries no TensorRT")
             return
         flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-        # The child imports jarvis from the same tree as this module.
         env = dict(os.environ)
+        # The child imports jarvis from the same tree as this module, and reads the
+        # portrait from its environment, which other users cannot see.
         src = str(Path(__file__).resolve().parents[3])
         env["PYTHONPATH"] = src + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+        env[PORTRAIT_ENV] = self._portrait
         try:
             self._proc = subprocess.Popen(self._command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                          stderr=subprocess.PIPE, bufsize=0, creationflags=flags, env=env)
+                                          stderr=subprocess.PIPE, creationflags=flags, env=env)
         except Exception as e:
             self._fail(f"the renderer could not start: {e}")
             return
         debug_log("face: renderer started", "face")
         for target, name in ((self._write_loop, "face-send"), (self._read_events, "face-events"),
-                             (self._read_log, "face-log")):
+                             (self._read_log, "face-log"), (self._watch, "face-watch")):
             t = threading.Thread(target=target, daemon=True, name=name)
             t.start()
             self._threads.append(t)
@@ -78,28 +90,37 @@ class FaceRenderer:
             except subprocess.TimeoutExpired:
                 self._proc.kill()
                 self._proc.wait(timeout=timeout)
+        self._done.set()
         for t in self._threads:
             t.join(timeout=timeout)
         self._ready = False
 
     def ready(self) -> bool:
         """True between the renderer's ``ready`` line and the first failure."""
-        since = self._writing_since
-        if since is not None and time.monotonic() - since > self._stall_seconds:
-            self._fail("the renderer stopped reading")
         return self._ready and self.failure is None
 
     # -- what the speech engine hands over ----------------------------------
     def send_audio(self, heard_at: float, samples, rate: int) -> None:
+        """Hand over mono samples at ``rate`` whose first is heard at ``heard_at``.
+
+        To be drawn on time they must arrive one ``delay`` before they are heard.
+        """
         if not self.ready():
             return
-        payload = np.asarray(samples, dtype="<f4").tobytes()
-        self._outbox.put(HEADER.pack(MSG_AUDIO, heard_at, rate, len(payload)) + payload)
+        try:
+            payload = np.asarray(samples, dtype="<f4").reshape(-1).tobytes()
+            self._outbox.put(HEADER.pack(MSG_AUDIO, float(heard_at), int(rate), len(payload)) + payload)
+        except Exception as e:
+            debug_log(f"face: audio not handed over: {e}", "face")
 
     def cut(self, at: float) -> None:
+        """She stops talking at ``at``: nothing heard from then on is drawn."""
         if not self.ready():
             return
-        self._outbox.put(HEADER.pack(MSG_CUT, at, 0, 0))
+        try:
+            self._outbox.put(HEADER.pack(MSG_CUT, float(at), 0, 0))
+        except Exception as e:
+            debug_log(f"face: cut not handed over: {e}", "face")
 
     # -- workers -----------------------------------------------------------
     def _fail(self, reason: str) -> None:
@@ -116,6 +137,14 @@ class FaceRenderer:
             except Exception:
                 pass
         self._outbox.put(None)
+        self._done.set()
+
+    def _watch(self) -> None:
+        """A renderer that stops reading is dead: nothing else would notice."""
+        while not self._done.wait(0.5):
+            since = self._writing_since
+            if since is not None and time.monotonic() - since > self._stall_seconds:
+                self._fail("the renderer stopped reading")
 
     def _write_loop(self) -> None:
         while True:
@@ -125,6 +154,7 @@ class FaceRenderer:
             self._writing_since = time.monotonic()
             try:
                 self._proc.stdin.write(message)
+                self._proc.stdin.flush()
             except Exception as e:
                 self._fail(f"the pipe to the renderer broke: {e}")
                 break
@@ -136,21 +166,25 @@ class FaceRenderer:
             pass
 
     def _read_events(self) -> None:
-        for raw in self._proc.stdout:
-            line = raw.decode("utf-8", "replace").strip()
-            try:
-                event = json.loads(line)
-            except ValueError:
-                debug_log(f"face renderer: {line}", "face")
-                continue
-            if event.get("event") == "ready":
-                self.delay = float(event.get("delay", 0.0))
-                self._ready = self.failure is None
-                debug_log(f"face: renderer ready, delay {self.delay:.2f}s", "face")
-            elif event.get("event") == "failed":
-                self._fail(str(event.get("reason") or "the renderer failed"))
-        code = self._proc.wait()
-        self._fail(f"the renderer exited (code {code})")
+        try:
+            for raw in self._proc.stdout:
+                line = raw.decode("utf-8", "replace").strip()
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    event = None
+                if not isinstance(event, dict):
+                    debug_log(f"face renderer: {line}", "face")
+                    continue
+                if event.get("event") == "ready":
+                    self.delay = float(event.get("delay", 0.0))
+                    self._ready = self.failure is None
+                    debug_log(f"face: renderer ready, delay {self.delay:.2f}s", "face")
+                elif event.get("event") == "failed":
+                    self._fail(str(event.get("reason") or "the renderer failed"))
+        finally:
+            code = self._proc.wait()
+            self._fail(f"the renderer exited (code {code})")
 
     def _read_log(self) -> None:
         for raw in self._proc.stderr:

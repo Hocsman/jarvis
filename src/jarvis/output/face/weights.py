@@ -1,12 +1,14 @@
 """Ditto's model files: which ones the renderer needs, where they live, and
 fetching the ones that are missing.
 
-The files come from one pinned revision of the Hugging Face repository, and
-each is checked against its SHA-256 once downloaded: a file that does not match
-is deleted, never loaded.
+The files come from one pinned revision of the Hugging Face repository. Each is
+downloaded into a staging folder, checked against its SHA-256 there, and only
+then moved into place: a file at its final path has always matched, and one
+that does not match is deleted, never loaded. The request sends no token.
 """
 
 import hashlib
+import os
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -32,6 +34,14 @@ FILES = (
 
 CONFIG = "ditto_cfg/v0.4_hubert_cfg_pytorch.pkl"
 DATA_ROOT = "ditto_pytorch"
+WARP = "ditto_pytorch/models/warp_network.pth"
+DECODER = "ditto_pytorch/models/decoder.pth"
+_STAGING = ".staging"
+
+
+def digest(name: str) -> str:
+    """The published SHA-256 of one of the files."""
+    return next(sha for file, sha, _size in FILES if file == name)
 
 
 def models_dir() -> Path:
@@ -61,13 +71,17 @@ def fetch(root: Path, download: Optional[Callable[..., str]] = None) -> None:
     """
     if download is None:
         from huggingface_hub import hf_hub_download as download
-    expected = {name: sha for name, sha, _size in FILES}
+    staging = root / _STAGING
     for name in missing(root):
         debug_log(f"face: fetching {name}", "face")
         try:
-            path = Path(download(repo_id=REPO, filename=name, revision=REVISION, local_dir=str(root)))
+            path = Path(download(repo_id=REPO, filename=name, revision=REVISION, local_dir=str(staging),
+                                 token=False))
         except Exception as e:
             raise RuntimeError(f"could not download {name}: {e}") from e
-        if _sha256(path) != expected[name]:
+        if _sha256(path) != digest(name):
             path.unlink(missing_ok=True)
             raise RuntimeError(f"{name} does not match its published digest")
+        final = root / name
+        final.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(path, final)

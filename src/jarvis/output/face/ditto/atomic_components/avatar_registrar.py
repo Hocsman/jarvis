@@ -36,12 +36,9 @@ class AvatarRegistrar:
         return {
             "x_s_info_lst": [info["x_s_info"]],
             "f_s_lst": [info["f_s"]],
-            "M_c2o_lst": [info["M_c2o"]],
             "eye_open_lst": [info["eye_open"]],
             "eye_ball_lst": [info["eye_ball"]],
             "sc": info["x_s_info"]["kp"].flatten(),
-            "is_image_flag": True,
-            "img_crop": info["img_crop"],
         }
 
     def __call__(self, *args, **kwargs):
