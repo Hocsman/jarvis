@@ -9,12 +9,12 @@ error, which the page must show as text. A third, given the port of a
 server this script runs on 127.0.0.1 serving pages it wrote itself, is
 pointed at that server. From there a link, a redirect, a frame and two
 new windows try to reach 127.0.0.2, a loopback address the guard does not
-name, a link tries another service on 127.0.0.1, and a frame tries a
-``data:`` document. Both servers count every request they receive:
-refused, they reach them never, and let through they would still stay on
-this machine. Every remote address is a decision asked of the page
-without loading anything, and Chromium is given no proxy, so nothing
-leaves the machine.
+name, and a link tries another service on 127.0.0.1, on another port. A
+server on each of those two counts every request it receives: refused,
+the attempts never reach it, and let through they would still stay on
+this machine. A frame and a link try a ``data:`` document. Every remote
+address is a decision asked of the page without loading anything, and
+Chromium is given no proxy, so nothing leaves the machine.
 
 The name keeps it out of the suite's collection.
 """
@@ -291,6 +291,12 @@ report["service_link"] = {
     "refused": refused(),
     "stayed": nothing_moved(shown) and page.title() == title,
 }
+
+# A link that moves the main frame to a data: document. Chromium refuses
+# a navigation the page starts there before the guard is asked.
+shown, title = view.url(), page.title()
+clicked = click_link("data:text/html,<title>a data: document</title>")
+report["data_link"] = {"clicked": clicked is True, "stayed": nothing_moved(shown) and page.title() == title}
 
 # The server answers with a redirect to the host off the list.
 del logged[:]

@@ -8,7 +8,9 @@ navigation, in any frame, only to ``http`` on a host named ``localhost``
 hands it, or to any ``about:`` address (Qt's internal states). A
 ``data:`` address passes in the main frame alone: it is the
 self-contained document ``setHtml`` loads, which carries the error page,
-and that page shows its message as text. The page refuses every other
+and that page shows its message as text. A page cannot move the main
+frame to a ``data:`` document: Chromium refuses that before the guard is
+asked. The page refuses every other
 navigation and logs the refusal with the address's scheme, host and port
 alone. A link or a script that opens a new window opens nothing: the
 view creates no window (``desktop_app.spec.md``, "Memory Viewer").
@@ -192,8 +194,14 @@ class TestNoOtherPage:
         framed = report["data_frame"]
         assert framed["loaded"]
         (line,) = framed["refused"]
-        assert "data:" in line
+        # The address is logged as the bare scheme: no payload, no port.
+        assert line.endswith(" data:")
         assert framed["frame_shows"] == "about:blank"
+
+    def test_a_link_to_a_data_document_opens_nothing(self, report):
+        followed = report["data_link"]
+        assert followed["clicked"]
+        assert followed["stayed"]
 
     def test_a_new_window_opens_nothing(self, report):
         opened = report["new_window"]

@@ -1257,9 +1257,9 @@ def _port_holds_viewer_server(port: int) -> bool:
         return False
 
 
-# The embedded viewer navigates to its own server alone: ``http``, on one
-# of the loopback names, on the viewer's port, so no other service on the
-# machine (Ollama on 11434, say) and no other scheme on those names. Two
+# The embedded viewer navigates only to ``http`` on one of the loopback
+# names and on the viewer's port, so to no other service on the machine
+# (Ollama on 11434, say) and to no other scheme on those names. Two
 # schemes pass without a host check: ``about:`` in any frame, for Qt's
 # internal page states, and ``data:`` in the main frame alone, because
 # ``setHtml`` is a main-frame navigation to a self-contained
@@ -1286,7 +1286,9 @@ if QWebEnginePage is not None:
 
     class _LocalOnlyPage(QWebEnginePage):
         """WebEngine page that refuses every navigation, in any frame, to
-        anything but the viewer's own server on ``port``.
+        anything but ``http`` on a loopback name and the viewer's ``port``,
+        Qt's ``about:`` states, and the main-frame ``data:`` document the
+        error page rides (``_is_local_navigation``).
 
         The served page holds the launch token and references no remote
         asset; this makes navigation a property of the view too, so no
@@ -1305,12 +1307,13 @@ if QWebEnginePage is not None:
         def acceptNavigationRequest(self, url, navigation_type, is_main_frame):
             if _is_local_navigation(url, self._port, is_main_frame):
                 return super().acceptNavigationRequest(url, navigation_type, is_main_frame)
-            port = url.port()
-            debug_log(
-                f"viewer navigation refused: {url.scheme()}://{url.host()}"
-                + (f":{port}" if port != -1 else ""),
-                "desktop",
-            )
+            # Scheme, host and port alone: no credentials, path (a data:
+            # document's payload), query or fragment.
+            parts = QUrl.UrlFormattingOption
+            address = url.adjusted(
+                parts.RemoveUserInfo | parts.RemovePath | parts.RemoveQuery | parts.RemoveFragment
+            ).toString()
+            debug_log(f"viewer navigation refused: {address}", "desktop")
             return False
 
 else:
