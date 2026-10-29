@@ -70,6 +70,10 @@ class DashboardWindow(QMainWindow):
     def set_submit_fn(self, fn: Optional[Callable[[str], None]]) -> None:
         self.bridge.set_submit_fn(fn)
 
+    def reload_settings(self) -> None:
+        """The settings were saved: the bridge reads them again."""
+        self.bridge.reload_settings()
+
     def deliver_reply(self, text: Optional[str]) -> None:
         self.bridge.deliver_reply(text)
 

@@ -333,16 +333,16 @@
       </div>
       <div class="wx-main">
         <div>
-          <div class="wx-temp" id="wx-temp">25.2°C</div>
-          <div class="wx-loc" id="wx-loc">Paris, FR</div>
-          <div class="wx-desc" id="wx-desc">nuageux</div>
+          <div class="wx-temp" id="wx-temp">--°C</div>
+          <div class="wx-loc" id="wx-loc">—</div>
+          <div class="wx-desc" id="wx-desc">—</div>
         </div>
-        <div class="wx-ico" id="wx-ico">☁️</div>
+        <div class="wx-ico" id="wx-ico">🌡️</div>
       </div>
       <div class="tri">
-        <div class="cell"><div class="k">HUMIDITÉ</div><div class="v" id="wx-hum">75%</div></div>
-        <div class="cell"><div class="k">VENT</div><div class="v" id="wx-wind">13 km/h</div></div>
-        <div class="cell"><div class="k">RESSENTI</div><div class="v" id="wx-feels">23°C</div></div>
+        <div class="cell"><div class="k">HUMIDITÉ</div><div class="v" id="wx-hum">--%</div></div>
+        <div class="cell"><div class="k">VENT</div><div class="v" id="wx-wind">-- km/h</div></div>
+        <div class="cell"><div class="k">RESSENTI</div><div class="v" id="wx-feels">--°C</div></div>
       </div>
     </div>
 
@@ -566,6 +566,29 @@
   document.getElementById("focus-chat").onclick = () => input.focus();
   document.getElementById("clear-transcript").onclick = clearTranscript;
 
+  // ── Weather ────────────────────────────────────────────────────
+  // The markup's placeholders claim nothing. The card and the chip go
+  // back to them before each reading is drawn, so a field it lacks never
+  // keeps an older value, and whenever there is no weather to fetch.
+  const WX_FIELDS = ["wx-temp", "wx-loc", "wx-desc", "wx-ico", "wx-hum", "wx-wind", "wx-feels",
+                     "wx-chip-temp", "wx-chip-loc"];
+  const wxPlaceholders = Object.fromEntries(
+    WX_FIELDS.map(id => [id, document.getElementById(id).textContent]));
+  function clearWeather() {
+    for (const id of WX_FIELDS) document.getElementById(id).textContent = wxPlaceholders[id];
+  }
+  // Only the bridge knows whether there is weather to fetch (location on
+  // and a city known), and it says so again each time the saved settings
+  // change it; until it first says so the weather ⟳ stays disabled.
+  const wxRefresh = document.getElementById("weather-refresh");
+  const wxRefreshTitle = wxRefresh.title;
+  function showWeatherAvailability() {
+    wxRefresh.disabled = !jarvis.weatherAvailable;
+    wxRefresh.title = wxRefresh.disabled
+      ? "Météo indisponible : localisation coupée ou ville inconnue" : wxRefreshTitle;
+    if (wxRefresh.disabled) clearWeather();
+  }
+
   function wireBridge(obj) {
     jarvis = obj;
     jarvis.userEcho.connect(t => addMsg(t, "user"));
@@ -592,6 +615,7 @@
     jarvis.weatherUpdated.connect(s => {
       try {
         const o = JSON.parse(s);
+        clearWeather();
         if (o.temp != null) { document.getElementById("wx-temp").textContent = o.temp + "°C";
           document.getElementById("wx-chip-temp").textContent = o.temp + "°C"; }
         if (o.loc)  { document.getElementById("wx-loc").textContent = o.loc;
@@ -603,11 +627,8 @@
         if (o.feels!= null) document.getElementById("wx-feels").textContent = o.feels + "°C";
       } catch(e){}
     });
-    // Only the bridge knows whether there is weather to fetch (location on
-    // and a city known); until it says so the weather ⟳ stays disabled.
-    const wxRefresh = document.getElementById("weather-refresh");
-    wxRefresh.disabled = !jarvis.weatherAvailable;
-    if (wxRefresh.disabled) wxRefresh.title = "Météo indisponible : localisation coupée ou ville inconnue";
+    showWeatherAvailability();
+    jarvis.weatherAvailableChanged.connect(showWeatherAvailability);
     if (jarvis.ready) jarvis.ready();
   }
 

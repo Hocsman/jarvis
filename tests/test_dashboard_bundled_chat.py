@@ -518,3 +518,67 @@ class TestTheGearInTheDashboard:
         _drain(qapp, lambda: opened, timeout=1.0)
 
         assert opened == [True]
+
+
+# ── The dashboard follows the saved settings ──────────────────────────
+
+
+class TestTheDashboardFollowsTheSavedSettings:
+    """Saving the settings, or running the setup wizard, has the open
+    dashboard re-read them, so its weather stops or starts without a
+    restart (``desktop_app.spec.md``, "Dashboard")."""
+
+    @staticmethod
+    def _saved(monkeypatch, **settings):
+        """What ``load_settings`` reads from disk from now on."""
+        import jarvis.config
+        from types import SimpleNamespace
+
+        saved = SimpleNamespace(weather_city="Lyon", response_language="fr", **settings)
+        monkeypatch.setattr(jarvis.config, "load_settings", lambda *a, **k: saved)
+
+    def test_saving_the_settings_turns_the_dashboards_weather_off(self, qapp, tray, monkeypatch):
+        from PyQt6.QtWidgets import QDialog
+
+        import desktop_app.dashboard.bridge as bridge_module
+        import desktop_app.settings_window as settings_window
+
+        monkeypatch.setattr(bridge_module, "fetch_weather_summary", lambda city, language="en": None)
+        self._saved(monkeypatch, location_enabled=True)
+        tray.show_dashboard()
+        assert _bridge(tray).property("weatherAvailable") is True
+
+        test = self
+
+        class _Settings:
+            def exec(self):
+                test._saved(monkeypatch, location_enabled=False)
+                return QDialog.DialogCode.Accepted
+
+        monkeypatch.setattr(settings_window, "SettingsWindow", _Settings)
+        tray.show_settings()
+
+        assert _bridge(tray).property("weatherAvailable") is False
+
+    def test_running_the_setup_wizard_brings_the_dashboards_weather_on(self, qapp, tray, monkeypatch):
+        from PyQt6.QtWidgets import QWizard
+
+        import desktop_app.dashboard.bridge as bridge_module
+        import desktop_app.setup_wizard as setup_wizard
+
+        monkeypatch.setattr(bridge_module, "fetch_weather_summary", lambda city, language="en": None)
+        self._saved(monkeypatch, location_enabled=False)
+        tray.show_dashboard()
+        assert _bridge(tray).property("weatherAvailable") is False
+
+        test = self
+
+        class _Wizard:
+            def exec(self):
+                test._saved(monkeypatch, location_enabled=True)
+                return QWizard.DialogCode.Rejected
+
+        monkeypatch.setattr(setup_wizard, "SetupWizard", _Wizard)
+        tray.show_setup_wizard()
+
+        assert _bridge(tray).property("weatherAvailable") is True

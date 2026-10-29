@@ -451,6 +451,261 @@ class TestTheRefreshButtons:
         assert "jarvis.weatherAvailable" in _page_script()
 
 
+def _weather_settings(location_enabled=True, weather_city="Lyon", response_language="fr"):
+    """Saved settings as far as the weather reads them."""
+    return SimpleNamespace(location_enabled=location_enabled, weather_city=weather_city,
+                           response_language=response_language)
+
+
+@pytest.fixture
+def _cities_asked(monkeypatch):
+    """Every city the bridge asks Open-Meteo about; each reading comes back at once."""
+    from desktop_app.dashboard import bridge as bridge_module
+
+    asked = []
+    monkeypatch.setattr(bridge_module, "fetch_weather_summary",
+                        lambda city, language="en": asked.append(city) or {"temp": 12, "loc": city})
+    return asked
+
+
+class TestTheWeatherFollowsTheSavedSettings:
+    """The host has the bridge re-read the settings each time they are
+    saved, and the weather follows them without a restart
+    (``desktop_app.spec.md``, "Dashboard")."""
+
+    @pytest.mark.unit
+    def test_once_location_is_turned_off_nothing_more_is_sent(self, _qapp, _cities_asked) -> None:
+        from desktop_app.dashboard.bridge import DashboardBridge
+
+        b = DashboardBridge(cfg=_weather_settings(location_enabled=True))
+        assert b._weather_timer.isActive()
+
+        b.reload_settings(_weather_settings(location_enabled=False))
+        b.refreshWeather()
+        b.ready()
+        _wait_for(lambda: _cities_asked, _qapp, seconds=0.2)
+
+        assert _cities_asked == []
+        assert not b._weather_timer.isActive(), "the 10-minute tick should stop"
+
+    @pytest.mark.unit
+    def test_turning_location_off_tells_the_page(self, _qapp, _cities_asked) -> None:
+        from desktop_app.dashboard.bridge import DashboardBridge
+
+        b = DashboardBridge(cfg=_weather_settings(location_enabled=True))
+        changes = []
+        b.weatherAvailableChanged.connect(changes.append)
+
+        b.reload_settings(_weather_settings(location_enabled=False))
+
+        assert changes == [False]
+        assert b.property("weatherAvailable") is False
+
+    @pytest.mark.unit
+    def test_turning_location_on_brings_the_weather_without_a_restart(self, _qapp, _cities_asked) -> None:
+        from desktop_app.dashboard.bridge import DashboardBridge
+
+        b = DashboardBridge(cfg=_weather_settings(location_enabled=False))
+        changes, weather = [], []
+        b.weatherAvailableChanged.connect(changes.append)
+        b.weatherUpdated.connect(weather.append)
+
+        b.reload_settings(_weather_settings(location_enabled=True, weather_city="Lyon"))
+        _wait_for(lambda: weather, _qapp)
+
+        assert changes == [True]
+        assert b.property("weatherAvailable") is True
+        assert json.loads(weather[-1])["loc"] == "Lyon"
+        assert b._weather_timer.isActive(), "the 10-minute tick should run"
+
+    @pytest.mark.unit
+    def test_a_new_city_is_fetched_at_once(self, _qapp, _cities_asked) -> None:
+        from desktop_app.dashboard.bridge import DashboardBridge
+
+        b = DashboardBridge(cfg=_weather_settings(weather_city="Lyon"))
+        changes, weather = [], []
+        b.weatherAvailableChanged.connect(changes.append)
+        b.weatherUpdated.connect(weather.append)
+
+        b.reload_settings(_weather_settings(weather_city="Paris"))
+        _wait_for(lambda: weather, _qapp)
+
+        assert _cities_asked == ["Paris"]
+        assert json.loads(weather[-1])["loc"] == "Paris"
+        assert changes == []
+
+    @pytest.mark.unit
+    def test_saving_settings_that_leave_the_weather_as_it_was_sends_nothing(self, _qapp, _cities_asked) -> None:
+        from desktop_app.dashboard.bridge import DashboardBridge
+
+        b = DashboardBridge(cfg=_weather_settings(weather_city="Lyon"))
+        changes = []
+        b.weatherAvailableChanged.connect(changes.append)
+
+        b.reload_settings(_weather_settings(weather_city="Lyon"))
+        _wait_for(lambda: _cities_asked, _qapp, seconds=0.2)
+
+        assert _cities_asked == []
+        assert changes == []
+
+    @pytest.mark.unit
+    def test_with_no_settings_handed_over_it_reads_the_saved_ones(self, _qapp, _cities_asked, monkeypatch) -> None:
+        import jarvis.config
+
+        from desktop_app.dashboard.bridge import DashboardBridge
+
+        b = DashboardBridge(cfg=_weather_settings(location_enabled=True))
+        monkeypatch.setattr(jarvis.config, "load_settings",
+                            lambda *a, **k: _weather_settings(location_enabled=False))
+
+        b.reload_settings()
+
+        assert b.property("weatherAvailable") is False
+
+    @pytest.mark.unit
+    def test_a_reading_on_its_way_when_location_is_turned_off_never_reaches_the_page(
+            self, _qapp, monkeypatch) -> None:
+        import threading
+
+        from desktop_app.dashboard import bridge as bridge_module
+
+        release, returned = threading.Event(), threading.Event()
+
+        def slow_fetch(city, language="en"):
+            release.wait(2)
+            returned.set()
+            return {"temp": 12, "loc": city}
+
+        monkeypatch.setattr(bridge_module, "fetch_weather_summary", slow_fetch)
+        b = bridge_module.DashboardBridge(cfg=_weather_settings(location_enabled=True))
+        weather = []
+        b.weatherUpdated.connect(weather.append)
+
+        b.refreshWeather()
+        b.reload_settings(_weather_settings(location_enabled=False))
+        release.set()
+        _wait_for(returned.is_set, _qapp)
+        _wait_for(lambda: weather, _qapp, seconds=0.3)
+
+        assert weather == []
+
+    @pytest.mark.unit
+    def test_after_the_city_changes_only_the_new_citys_weather_is_shown(self, _qapp, monkeypatch) -> None:
+        """The old city's reading may come back last; it is not shown, and
+        it does not hold back the new city's fetch either."""
+        import threading
+
+        from desktop_app.dashboard import bridge as bridge_module
+
+        asked, release, returned = [], threading.Event(), threading.Event()
+
+        def fetch(city, language="en"):
+            asked.append(city)
+            if city == "Lyon":
+                release.wait(2)
+                returned.set()
+            return {"temp": 12, "loc": city}
+
+        monkeypatch.setattr(bridge_module, "fetch_weather_summary", fetch)
+        b = bridge_module.DashboardBridge(cfg=_weather_settings(weather_city="Lyon"))
+        weather = []
+        b.weatherUpdated.connect(weather.append)
+
+        b.refreshWeather()
+        b.reload_settings(_weather_settings(weather_city="Paris"))
+        _wait_for(lambda: weather, _qapp)
+        release.set()
+        _wait_for(returned.is_set, _qapp)
+        _wait_for(lambda: len(weather) > 1, _qapp, seconds=0.3)
+
+        assert asked == ["Lyon", "Paris"]
+        assert [json.loads(w)["loc"] for w in weather] == ["Paris"]
+
+    @pytest.mark.unit
+    def test_the_page_is_told_when_there_comes_to_be_weather_or_none(self) -> None:
+        """QWebChannel updates the page's copy of a property only when the
+        property has a notify signal; a constant one is read once."""
+        from desktop_app.dashboard.bridge import DashboardBridge
+
+        meta = DashboardBridge.staticMetaObject
+        prop = meta.property(meta.indexOfProperty("weatherAvailable"))
+
+        assert not prop.isConstant()
+        assert prop.hasNotifySignal()
+        assert bytes(prop.notifySignal().name()).decode() == "weatherAvailableChanged"
+
+    @pytest.mark.unit
+    def test_the_page_listens_for_it(self) -> None:
+        assert re.search(r"\bjarvis\.weatherAvailableChanged\.connect\(", _page_script())
+
+
+def _page_texts() -> dict:
+    """The text each element with an id holds in the markup, before any
+    script runs."""
+    class Collect(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.open = []
+            self.texts = {}
+
+        def handle_starttag(self, tag, attrs):
+            element_id = dict(attrs).get("id")
+            self.open.append(element_id)
+            if element_id:
+                self.texts[element_id] = ""
+
+        def handle_endtag(self, tag):
+            if self.open:
+                self.open.pop()
+
+        def handle_data(self, data):
+            for element_id in self.open:
+                if element_id:
+                    self.texts[element_id] += data
+
+    parser = Collect()
+    parser.feed(_PAGE.read_text(encoding="utf-8"))
+    return {element_id: text.strip() for element_id, text in parser.texts.items()}
+
+
+class TestTheWeatherCardShowsOnlyWhatWasFetched:
+    """Until a reading comes, and whenever there is no weather to fetch,
+    the weather card and the top-bar chip show placeholders that claim
+    nothing (``desktop_app.spec.md``, "Dashboard")."""
+
+    _FIELDS = ("wx-temp", "wx-loc", "wx-desc", "wx-ico", "wx-hum", "wx-wind", "wx-feels",
+               "wx-chip-temp", "wx-chip-loc")
+
+    @pytest.mark.unit
+    def test_before_any_reading_no_figure_is_shown(self) -> None:
+        texts = _page_texts()
+
+        assert {field: texts[field] for field in self._FIELDS if re.search(r"\d", texts[field])} == {}
+
+    @pytest.mark.unit
+    def test_before_any_reading_no_place_and_no_sky_is_named(self) -> None:
+        texts = _page_texts()
+        words = re.compile(r"[^\W\d_]")
+
+        assert {field: texts[field] for field in ("wx-loc", "wx-desc", "wx-chip-loc")
+                if words.search(texts[field])} == {}
+
+    @pytest.mark.unit
+    def test_before_any_reading_the_icon_shows_no_sky(self) -> None:
+        from jarvis.utils.weather_now import _WMO_EN, _WMO_FR
+
+        skies = {icon for _description, icon in (*_WMO_EN.values(), *_WMO_FR.values())}
+
+        assert _page_texts()["wx-ico"] not in skies
+
+    @pytest.mark.unit
+    def test_the_card_waits_with_the_same_placeholders_as_the_chip(self) -> None:
+        texts = _page_texts()
+
+        assert texts["wx-temp"] == texts["wx-chip-temp"]
+        assert texts["wx-loc"] == texts["wx-chip-loc"]
+
+
 class TestClearingTheTranscript:
     """🗑️ Effacer empties the page and nothing else: the dialogue memory is
     the daemon's and voice shares it (``desktop_app.spec.md``, "Dashboard")."""

@@ -2046,6 +2046,9 @@ class JarvisSystemTray:
 
         wizard = SetupWizard()
         result = wizard.exec()
+        # Its pages save as they go, so even a cancelled wizard may have
+        # changed what the dashboard shows.
+        self._dashboard_follows_settings()
 
         # Restart daemon after wizard completes (finished or cancelled)
         # This ensures any config changes (model selection, etc.) are applied
@@ -2061,6 +2064,8 @@ class JarvisSystemTray:
 
         dialog = SettingsWindow()
         result = dialog.exec()
+        if result == QDialog.DialogCode.Accepted:
+            self._dashboard_follows_settings()
 
         # If settings were saved and daemon is running, offer to restart
         if result == QDialog.DialogCode.Accepted and self.is_listening:
@@ -2073,6 +2078,17 @@ class JarvisSystemTray:
             if reply == QMessageBox.StandardButton.Yes:
                 self.stop_daemon()
                 self.start_daemon()
+
+    def _dashboard_follows_settings(self) -> None:
+        """The settings were saved: an open dashboard reads them again, so
+        its weather stops the moment location is turned off, and starts
+        without a restart when it is turned on. The dashboard runs in this
+        process, so it needs no daemon restart for that."""
+        dashboard = getattr(self, "dashboard_window", None)
+        if dashboard is None:
+            return
+        debug_log("settings saved: the dashboard reads them again", "desktop")
+        dashboard.reload_settings()
 
     def collect_runtime_status(self) -> RuntimeStatusSnapshot:
         """Collect current runtime state for the tray diagnostics dialog."""

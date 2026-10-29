@@ -2,10 +2,11 @@
 
 Exposed to the page over ``QWebChannel`` as ``window.jarvis``. The page
 calls slots (``submitQuery``, ``openSettings``, ``refreshStats``,
-``refreshWeather``, ``ready``), reads one constant property
-(``weatherAvailable``) and listens to signals (``statsUpdated``,
-``stateChanged``, ``weatherUpdated``, ``replyReceived`` …). Complex
-payloads cross as JSON strings to keep the channel marshalling trivial.
+``refreshWeather``, ``ready``), reads one property (``weatherAvailable``,
+which ``weatherAvailableChanged`` announces) and listens to signals
+(``statsUpdated``, ``stateChanged``, ``weatherUpdated``, ``replyReceived``
+…). Complex payloads cross as JSON strings to keep the channel
+marshalling trivial.
 
 The bridge owns three timers:
 - a system-stats timer (psutil) that pushes CPU / RAM / disk,
@@ -16,7 +17,8 @@ The bridge owns three timers:
 Chat is wired by the host (the tray): it sets ``submit_fn`` to the
 daemon submission callable and calls ``deliver_reply`` / ``deliver_busy``
 when the daemon answers, which re-emit as signals to the page. It also
-hands over ``open_settings``, the settings window the page's gear opens.
+hands over ``open_settings``, the settings window the page's gear opens,
+and calls ``reload_settings`` each time the settings are saved.
 """
 
 from __future__ import annotations
@@ -56,6 +58,8 @@ _STAGE_VIEW = {
     "tool":       "⚙️ Utilisation de {detail}…",
 }
 _STAGE_DEFAULT = "⏳ Traitement…"
+
+_WEATHER_INTERVAL_MS = 600_000
 
 
 def stage_label(stage_id: str, detail: Optional[str] = None) -> str:
@@ -120,11 +124,20 @@ def dispatch_chat_ipc_line(line: str, bridge) -> bool:
     return True
 
 
+class _WeatherRelay(QObject):
+    """Carries a finished fetch from its worker thread to the bridge's
+    thread, where the settings it was asked under are compared with the
+    current ones. It is not on the channel: the page can neither call it
+    nor hear it."""
+    done = pyqtSignal(int, object)     # (settings generation, reading or None)
+
+
 class DashboardBridge(QObject):
     # Python -> JS
     statsUpdated = pyqtSignal(str)     # JSON: {cpu, ram, disk_used, disk_total, disk_pct}
     stateChanged = pyqtSignal(str)     # JSON: {accent:[r,g,b], status:"…"}
     weatherUpdated = pyqtSignal(str)   # JSON: {temp, loc, desc, icon, hum, wind, feels}
+    weatherAvailableChanged = pyqtSignal(bool)  # weatherAvailable's notify signal
     userEcho = pyqtSignal(str)         # echo the user's message into the transcript
     stageChanged = pyqtSignal(str)     # localised label for the running phase
     tokenReceived = pyqtSignal(str)    # content delta while the reply generates
@@ -146,6 +159,39 @@ class DashboardBridge(QObject):
         self._last_state: Optional[str] = None
         self._chat_pending: bool = False
 
+        # A city handed over by the host wins over the saved one, on every reading.
+        self._weather_city_override = (weather_city or "").strip()
+        self._read_weather_settings(cfg)
+        # Bumped whenever the weather settings change: a reading asked for
+        # under an older generation answers settings that no longer hold.
+        self._weather_generation: int = 0
+        # The generation of the fetch on its way, if any.
+        self._weather_in_flight: Optional[int] = None
+        self._weather_relay = _WeatherRelay(self)
+        self._weather_relay.done.connect(self._weather_fetched)
+
+        # System stats: poll every 2 s.
+        self._stats_timer = QTimer(self)
+        self._stats_timer.timeout.connect(self._emit_stats)
+        self._stats_timer.start(2000)
+
+        # Voice state: poll the cross-process JarvisState at 5 Hz so the
+        # orb tracks listening/thinking/speaking without a heavy loop.
+        self._state_timer = QTimer(self)
+        self._state_timer.timeout.connect(self._emit_state_if_changed)
+        self._state_timer.start(200)
+
+        # Weather: refresh every 10 min only when location is enabled AND a city is known
+        self._weather_timer = QTimer(self)
+        self._weather_timer.timeout.connect(self._fetch_weather_async)
+        if self.weatherAvailable:
+            self._weather_timer.start(_WEATHER_INTERVAL_MS)
+
+    def _read_weather_settings(self, cfg: Optional[Any]) -> None:
+        """Read what the weather depends on: whether location is on, the
+        city, and the language of the description. With no ``cfg`` the
+        saved settings are loaded. The city is looked up from the IP
+        address only when location is on and none is set."""
         if cfg is None:
             try:
                 from jarvis.config import load_settings
@@ -153,11 +199,10 @@ class DashboardBridge(QObject):
             except Exception:
                 cfg = None
 
-        self._cfg = cfg
         self._location_enabled = bool(getattr(cfg, "location_enabled", False)) if cfg is not None else False
         self._language = (getattr(cfg, "response_language", "") or "").strip().lower() or "en"
 
-        city = (weather_city or "").strip()
+        city = self._weather_city_override
         if not city and cfg is not None:
             city = (getattr(cfg, "weather_city", "") or "").strip()
 
@@ -175,28 +220,40 @@ class DashboardBridge(QObject):
                 pass
 
         self._weather_city: Optional[str] = city if (self._location_enabled and city) else None
-        self._weather_fetching: bool = False
-
-        # System stats: poll every 2 s.
-        self._stats_timer = QTimer(self)
-        self._stats_timer.timeout.connect(self._emit_stats)
-        self._stats_timer.start(2000)
-
-        # Voice state: poll the cross-process JarvisState at 5 Hz so the
-        # orb tracks listening/thinking/speaking without a heavy loop.
-        self._state_timer = QTimer(self)
-        self._state_timer.timeout.connect(self._emit_state_if_changed)
-        self._state_timer.start(200)
-
-        # Weather: refresh every 10 min only when location is enabled AND a city is known
-        self._weather_timer = QTimer(self)
-        self._weather_timer.timeout.connect(self._fetch_weather_async)
-        if self.weatherAvailable:
-            self._weather_timer.start(600_000)
 
     # ── setters used by the host (tray) ────────────────────────────────
     def set_submit_fn(self, fn: Optional[Callable[[str], None]]) -> None:
         self._submit_fn = fn
+
+    def reload_settings(self, cfg: Optional[Any] = None) -> None:
+        """The settings were saved: read again what the weather depends on
+        (``cfg``, or the saved settings when none is given).
+
+        Location turned off stops the weather timer, so nothing more is
+        sent, and the page is told there is no weather. Location turned
+        on, or another city or language, fetches at once and restarts the
+        timer. A reading still on its way answers the old settings and is
+        dropped when it comes. Settings that leave the weather as it was
+        change nothing.
+        """
+        was_available = self.weatherAvailable
+        before = (self._weather_city, self._language)
+        self._read_weather_settings(cfg)
+        if (self._weather_city, self._language) == before:
+            debug_log("dashboard settings re-read: the weather is unchanged", "desktop")
+            return
+
+        self._weather_generation += 1
+        available = self.weatherAvailable
+        if available != was_available:
+            self.weatherAvailableChanged.emit(available)
+        if available:
+            debug_log("dashboard settings re-read: weather on or its city changed, fetching now", "desktop")
+            self._weather_timer.start(_WEATHER_INTERVAL_MS)
+            self._fetch_weather_async()
+        else:
+            debug_log("dashboard settings re-read: weather off (location off or no city known)", "desktop")
+            self._weather_timer.stop()
 
     def deliver_stage(self, payload: Any) -> None:
         """Called by the host when the engine enters a preparation phase.
@@ -287,11 +344,12 @@ class DashboardBridge(QObject):
         debug_log(f"dashboard weather refresh (available={self.weatherAvailable})", "desktop")
         self._fetch_weather_async()
 
-    @pyqtProperty(bool, constant=True)
+    @pyqtProperty(bool, notify=weatherAvailableChanged)
     def weatherAvailable(self) -> bool:
         """Whether there is weather to fetch: location on and a city known
-        (``_weather_city`` is only set when both hold). Settled when the
-        bridge is built, so the page reads it once."""
+        (``_weather_city`` is only set when both hold). It changes only in
+        ``reload_settings``, which announces it with
+        ``weatherAvailableChanged``."""
         return self._weather_city is not None
 
     @pyqtSlot()
@@ -304,33 +362,45 @@ class DashboardBridge(QObject):
 
     # ── weather ────────────────────────────────────────────────────────
     def _fetch_weather_async(self) -> None:
-        """Fetch the weather on a worker thread, one fetch at a time: a
-        refresh or a tick while one is on its way would bring the same
-        weather, so it adds nothing."""
+        """Fetch the weather on a worker thread, one fetch per settings
+        generation at a time: a refresh or a tick while one is on its way
+        would bring the same weather, so it adds nothing. A fetch asked
+        under older settings does not hold back one for the new city."""
         if not self.weatherAvailable:
             return
-        if self._weather_fetching:
+        if self._weather_in_flight == self._weather_generation:
             debug_log("dashboard weather fetch already on its way; skipped", "desktop")
             return
-        self._weather_fetching = True
+        generation = self._weather_generation
+        self._weather_in_flight = generation
+        city, language, relay = self._weather_city, self._language, self._weather_relay
         import threading
 
         def _work():
             data = None
             try:
-                data = fetch_weather_summary(self._weather_city, language=self._language)
+                data = fetch_weather_summary(city, language=language)
             except Exception as exc:
                 debug_log(f"dashboard weather fetch failed: {exc}", "desktop")
-            finally:
-                # Cleared before the push, so a refresh sent on seeing this
-                # weather is never turned away.
-                self._weather_fetching = False
-            if data:
-                # Emitted from a worker thread; Qt queues it onto the
-                # main thread for the JS push.
-                self.weatherUpdated.emit(json.dumps(data, ensure_ascii=False))
+            # Queued onto the bridge's thread, failed or not, so the
+            # in-flight mark is cleared there.
+            relay.done.emit(generation, data)
 
         threading.Thread(target=_work, name="dashboard-weather", daemon=True).start()
+
+    def _weather_fetched(self, generation: int, data: Optional[dict]) -> None:
+        """A fetch came back; this runs on the bridge's thread. A reading
+        asked under settings that have changed since is dropped: location
+        may be off now, or the city another."""
+        if self._weather_in_flight == generation:
+            # Cleared before the push, so a refresh sent on seeing this
+            # weather is never turned away.
+            self._weather_in_flight = None
+        if generation != self._weather_generation:
+            debug_log("dashboard weather reading dropped: the settings changed while it was on its way", "desktop")
+            return
+        if data:
+            self.weatherUpdated.emit(json.dumps(data, ensure_ascii=False))
 
     # ── internal emitters ──────────────────────────────────────────────
     def _emit_stats(self) -> None:

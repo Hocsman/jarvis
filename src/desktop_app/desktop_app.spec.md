@@ -113,6 +113,15 @@ The central controller that manages:
 
 **Settings.** The gear in the page's top bar opens the settings window, the same one as the tray's `⚙️ Settings`, with the same offer to restart once it is saved. The page calls the bridge's `openSettings`, and once that call has returned the bridge calls the tray's `show_settings`, which it was handed when the window was built: the settings window runs modally, so it does not open inside the page's call. A bridge built without it does nothing.
 
+**Weather.** There is weather to fetch when location is on and a city is known: `weather_city`, or, when that is empty, the city the location lookup finds (see `location.spec.md`). The bridge reads this when it is built and again each time the settings are saved: the tray calls the window's `reload_settings` once the settings window is saved and once the setup wizard closes, finished or cancelled, since its pages save as they go. It does so whether or not a daemon runs: the dashboard lives in the tray's process, so the offer to restart has nothing to do with it.
+
+- Turning location off, or leaving no city known, stops the 10-minute weather timer at once, so the city is no longer sent to Open-Meteo, and the page returns the weather card and the top-bar chip to their placeholders.
+- Turning it on, or changing the city or the response language, fetches at once and restarts the timer.
+- A reading still on its way when the settings change answers the old ones: it is dropped when it comes, and it does not hold back the fetch for the new ones.
+- Saved settings that leave the weather as it was send nothing.
+
+The bridge announces every change of `weatherAvailable` with `weatherAvailableChanged`, which updates the page's copy of the property (`QWebChannel` updates a property only through its notify signal). The card and the chip show a reading only once one has been fetched. Until then, and whenever there is no weather to fetch, they show placeholders that claim nothing: `--°C`, `—`, a thermometer, `--%`, `-- km/h`. Each reading is drawn over the placeholders, so a field it lacks shows its placeholder rather than an older value.
+
 **Chat.** The page's `submitQuery` reaches the daemon through a submit hook that the tray wires when a daemon starts, clears when it stops or dies, and pushes to the window on every lifecycle change (`_set_chat_daemon_status`), so a dashboard opened before the daemon starts and one opened after it behave the same. With no hook wired the bridge answers with a local preview line and nothing is sent. The route depends on where the daemon runs:
 
 - **Subprocess mode**: the hook writes a `__CHAT_QUERY__:` line to the daemon's stdin. The daemon's `__CHAT__:` lines come back through `_on_chat_ipc_line`, which feeds the dashboard as well as the chat window.
@@ -128,7 +137,7 @@ Nothing on this route logs the query text: the `start` event carries the redacte
 |---------|--------------|
 | ⚙️ (top bar) | Opens the settings (see Settings above) |
 | ⟳ on Stats Système | Calls `refreshStats`: a reading now instead of at the next 2-second tick |
-| ⟳ on Météo | Calls `refreshWeather`, which fetches the weather again. One fetch runs at a time: a click, or the 10-minute tick, while one is on its way starts nothing more, and a failed fetch does not hold back the next. The button starts disabled and stays so unless the bridge's constant `weatherAvailable` is true (location on and a city known), since with no weather to fetch the slot does nothing; its tooltip then says the weather is unavailable because location is off or no city is known |
+| ⟳ on Météo | Calls `refreshWeather`, which fetches the weather again. One fetch runs at a time for the same settings: a click, or the 10-minute tick, while one is on its way starts nothing more, and a failed fetch does not hold back the next. The button is enabled only while the bridge's `weatherAvailable` is true (see Weather above), since with no weather to fetch the slot does nothing: it starts disabled, and is enabled or disabled again on each `weatherAvailableChanged`. While it is disabled its tooltip says the weather is unavailable because location is off or no city is known |
 | ⌨️ | Puts the cursor in the message field; it never reaches the bridge |
 | ➤, or Enter in the message field | Sends the message (see Chat above) |
 | 🗑️ Effacer | Empties the transcript on the page and nothing else. The dialogue memory belongs to the daemon and voice shares it, so a click here never touches it: the page leaves a line in the emptied transcript saying that only the display was cleared and that Yuba still follows the conversation. A reply still being written stays, below that line |
