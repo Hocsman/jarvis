@@ -87,6 +87,16 @@ def _describe(code: Optional[int], language: str = "en") -> tuple[str, str]:
     return ("", "🌡️")
 
 
+def _figure(value, digits: Optional[int] = None):
+    """A figure Open-Meteo sent, rounded, or ``None`` when it sent none."""
+    if value is None:
+        return None
+    try:
+        return round(float(value), digits)
+    except (TypeError, ValueError):
+        return None
+
+
 def fetch_weather_summary(
     city: Optional[str] = None,
     language: Optional[str] = None,
@@ -96,7 +106,9 @@ def fetch_weather_summary(
     """Return current weather for ``city`` as a flat dict, or ``None``.
 
     Keys: ``temp, loc, desc, icon, hum, wind, feels`` — exactly what the
-    dashboard's ``weatherUpdated`` handler consumes.
+    dashboard's ``weatherUpdated`` handler consumes. A figure Open-Meteo
+    does not send is ``None``, never 0, so the card keeps its placeholder;
+    an answer with no current conditions at all is no reading.
 
     ``still_wanted``, when given, is asked before each of the two
     requests, and a no ends the fetch there: the first sends the city, the
@@ -150,15 +162,18 @@ def fetch_weather_summary(
         )
         wx.raise_for_status()
         cur = (wx.json() or {}).get("current") or {}
+        if not cur:
+            debug_log("weather_now: the forecast answer had no current conditions", "tools")
+            return None
         desc, icon = _describe(cur.get("weather_code"), language=lang)
         return {
-            "temp": round(float(cur.get("temperature_2m", 0)), 1),
+            "temp": _figure(cur.get("temperature_2m"), 1),
             "loc": loc_label,
             "desc": desc,
             "icon": icon,
-            "hum": round(float(cur.get("relative_humidity_2m", 0))),
-            "wind": round(float(cur.get("wind_speed_10m", 0))),
-            "feels": round(float(cur.get("apparent_temperature", 0))),
+            "hum": _figure(cur.get("relative_humidity_2m")),
+            "wind": _figure(cur.get("wind_speed_10m")),
+            "feels": _figure(cur.get("apparent_temperature")),
         }
     except Exception as exc:
         debug_log(f"weather_now: fetch failed for {city!r}: {exc}", "tools")

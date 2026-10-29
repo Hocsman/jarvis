@@ -17,8 +17,47 @@ def qapp():
     yield app
 
 
+def _open_meteo_answers(forecast):
+    """The geocoding answer for Paris, then ``forecast`` as the forecast answer."""
+    geo = MagicMock()
+    geo.json.return_value = {
+        "results": [{"latitude": 48.85, "longitude": 2.35, "name": "Paris", "country_code": "FR"}]
+    }
+    wx = MagicMock()
+    wx.json.return_value = forecast
+    return [geo, wx]
+
+
 class TestWeatherNow:
     """Tests for lightweight current weather utility."""
+
+    @pytest.mark.unit
+    def test_a_figure_open_meteo_leaves_out_is_left_out_not_shown_as_zero(self):
+        """The card shows a placeholder for a missing figure; a 0 would be
+        a reading nobody sent."""
+        current = {"temperature_2m": 18.2, "weather_code": 0}
+
+        with patch("requests.get", side_effect=_open_meteo_answers({"current": current})):
+            res = fetch_weather_summary("Paris", language="fr")
+
+        assert res["temp"] == 18.2
+        assert (res["hum"], res["wind"], res["feels"]) == (None, None, None)
+
+    @pytest.mark.unit
+    def test_a_figure_sent_as_null_is_left_out_and_the_rest_kept(self):
+        current = {"temperature_2m": None, "relative_humidity_2m": 65, "apparent_temperature": 17.5,
+                   "weather_code": 0, "wind_speed_10m": None}
+
+        with patch("requests.get", side_effect=_open_meteo_answers({"current": current})):
+            res = fetch_weather_summary("Paris", language="fr")
+
+        assert (res["temp"], res["wind"]) == (None, None)
+        assert (res["hum"], res["feels"], res["loc"]) == (65, 18, "Paris, FR")
+
+    @pytest.mark.unit
+    def test_an_answer_with_no_current_conditions_is_no_reading(self):
+        with patch("requests.get", side_effect=_open_meteo_answers({"latitude": 48.85})):
+            assert fetch_weather_summary("Paris", language="fr") is None
 
     @pytest.mark.unit
     def test_returns_none_when_city_empty_or_none(self):
