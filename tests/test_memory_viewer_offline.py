@@ -111,27 +111,50 @@ def test_fonts_come_from_local_stacks(viewer):
 
 
 @pytest.mark.unit
-def test_loopback_and_internal_urls_pass_the_guard():
+@pytest.mark.parametrize("is_main_frame", [True, False])
+def test_the_viewers_server_and_internal_urls_pass_the_guard(is_main_frame):
     from PyQt6.QtCore import QUrl
 
     from desktop_app.app import _is_local_navigation
 
-    assert _is_local_navigation(QUrl("http://localhost:5050/"))
-    assert _is_local_navigation(QUrl("http://127.0.0.1:5050/api/graph/node/3"))
-    assert _is_local_navigation(QUrl("http://[::1]:5050/"))
-    assert _is_local_navigation(QUrl("about:blank"))
-    # setHtml is a navigation to a self-contained data: document under
-    # Qt 6; the error page rides it, so the guard must let it through.
-    assert _is_local_navigation(QUrl("data:text/html;charset=UTF-8,<b>x</b>"))
+    def passes(address):
+        return _is_local_navigation(QUrl(address), port=5050, is_main_frame=is_main_frame)
+
+    assert passes("http://localhost:5050/")
+    assert passes("http://127.0.0.1:5050/api/graph/node/3")
+    assert passes("http://[::1]:5050/")
+    assert passes("about:blank")
 
 
 @pytest.mark.unit
-def test_remote_urls_are_refused_by_the_guard():
+def test_the_error_pages_data_document_passes_in_the_main_frame_alone():
     from PyQt6.QtCore import QUrl
 
     from desktop_app.app import _is_local_navigation
 
-    assert not _is_local_navigation(QUrl("https://fonts.googleapis.com/css2"))
-    assert not _is_local_navigation(QUrl("https://evil.example/"))
-    assert not _is_local_navigation(QUrl("http://192.168.1.5/"))
-    assert not _is_local_navigation(QUrl("file:///etc/passwd"))
+    # setHtml is a main-frame navigation to a self-contained data:
+    # document under Qt 6; the error page rides it.
+    document = QUrl("data:text/html;charset=UTF-8,<b>x</b>")
+    assert _is_local_navigation(document, port=5050, is_main_frame=True)
+    assert not _is_local_navigation(document, port=5050, is_main_frame=False)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("is_main_frame", [True, False])
+def test_other_urls_are_refused_by_the_guard(is_main_frame):
+    from PyQt6.QtCore import QUrl
+
+    from desktop_app.app import _is_local_navigation
+
+    def passes(address):
+        return _is_local_navigation(QUrl(address), port=5050, is_main_frame=is_main_frame)
+
+    assert not passes("https://fonts.googleapis.com/css2")
+    assert not passes("https://evil.example/")
+    assert not passes("http://192.168.1.5/")
+    assert not passes("file:///etc/passwd")
+    assert not passes("file://localhost/etc/passwd")
+    assert not passes("http://localhost:11434/")
+    assert not passes("http://localhost/")
+    assert not passes("https://127.0.0.1:5050/")
+    assert not passes("ftp://127.0.0.1:5050/")

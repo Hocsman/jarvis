@@ -31,6 +31,7 @@ import psutil
 import threading
 import traceback
 import atexit
+import html
 import webbrowser
 import urllib.parse
 from dataclasses import dataclass
@@ -1256,42 +1257,58 @@ def _port_holds_viewer_server(port: int) -> bool:
         return False
 
 
-# The embedded viewer navigates to the loopback names alone, whatever the
-# scheme or port: only the host is checked. Two schemes pass without a
-# host check: ``about:`` for Qt's internal page states, and ``data:``
-# because ``setHtml`` is a navigation to a self-contained
-# ``data:text/html`` document (the error page rides it).
+# The embedded viewer navigates to its own server alone: ``http``, on one
+# of the loopback names, on the viewer's port, so no other service on the
+# machine (Ollama on 11434, say) and no other scheme on those names. Two
+# schemes pass without a host check: ``about:`` in any frame, for Qt's
+# internal page states, and ``data:`` in the main frame alone, because
+# ``setHtml`` is a main-frame navigation to a self-contained
+# ``data:text/html`` document (the error page rides it) and nothing the
+# viewer shows frames one.
 _VIEWER_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
-_VIEWER_LOCAL_SCHEMES = frozenset({"about", "data"})
 
 
-def _is_local_navigation(url) -> bool:
-    """Whether the embedded memory viewer may navigate to ``url``."""
-    if (url.scheme() or "").lower() in _VIEWER_LOCAL_SCHEMES:
+def _is_local_navigation(url, port: int, is_main_frame: bool) -> bool:
+    """Whether the embedded memory viewer, served on ``port``, may navigate to ``url``."""
+    scheme = (url.scheme() or "").lower()
+    if scheme == "about":
         return True
-    return (url.host() or "").lower() in _VIEWER_LOCAL_HOSTS
+    if scheme == "data":
+        return is_main_frame
+    return (
+        scheme == "http"
+        and (url.host() or "").lower() in _VIEWER_LOCAL_HOSTS
+        and url.port(80) == port
+    )
 
 
 if QWebEnginePage is not None:
 
     class _LocalOnlyPage(QWebEnginePage):
-        """WebEngine page that refuses every navigation to a host other
-        than the loopback names, in any frame.
+        """WebEngine page that refuses every navigation, in any frame, to
+        anything but the viewer's own server on ``port``.
 
         The served page holds the launch token and references no remote
         asset; this makes navigation a property of the view too, so no
         link or injected redirect inside the embedded page can navigate
-        the machine to a remote host. Subresource requests (fetch, XHR,
-        images) do not pass through this guard; that the machine
-        contacts nobody rests on the served page referencing no remote
-        URL, which tests/test_memory_viewer_offline.py pins.
+        the machine to a remote host or to another service on it.
+        Subresource requests (fetch, XHR, images) do not pass through
+        this guard; that the machine contacts nobody rests on the served
+        page referencing no remote URL, which
+        tests/test_memory_viewer_offline.py pins.
         """
 
+        def __init__(self, parent, port: int):
+            super().__init__(parent)
+            self._port = port
+
         def acceptNavigationRequest(self, url, navigation_type, is_main_frame):
-            if _is_local_navigation(url):
+            if _is_local_navigation(url, self._port, is_main_frame):
                 return super().acceptNavigationRequest(url, navigation_type, is_main_frame)
+            port = url.port()
             debug_log(
-                f"viewer navigation refused: {url.scheme()}://{url.host()}",
+                f"viewer navigation refused: {url.scheme()}://{url.host()}"
+                + (f":{port}" if port != -1 else ""),
                 "desktop",
             )
             return False
@@ -1334,7 +1351,7 @@ class MemoryViewerWindow(QMainWindow):
             # Use embedded web view - URL will be set in showEvent when window is shown
             try:
                 self.web_view = QWebEngineView()
-                self.web_view.setPage(_LocalOnlyPage(self.web_view))
+                self.web_view.setPage(_LocalOnlyPage(self.web_view, self.MEMORY_VIEWER_PORT))
                 layout.addWidget(self.web_view)
                 web_view_created = True
             except Exception as e:
@@ -1571,7 +1588,7 @@ class MemoryViewerWindow(QMainWindow):
             self.is_server_running = False
 
     def _show_error_page(self, message: str) -> None:
-        """Show an error page in the web view."""
+        """Show an error page in the web view, with ``message`` as text."""
         if self.web_view:
             error_html = f"""
             <html>
@@ -1587,7 +1604,7 @@ class MemoryViewerWindow(QMainWindow):
             <body><div class="error">
                 <div class="icon">⚠️</div>
                 <h1>Connection Failed</h1>
-                <p>{message}</p>
+                <p>{html.escape(message)}</p>
             </div></body>
             </html>
             """
