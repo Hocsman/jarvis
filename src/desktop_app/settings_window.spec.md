@@ -207,7 +207,7 @@ A stored index, in any form the listener reads as that index (`"1"`, `1`, `"01"`
 
 ## Integration
 
-- Accessed via "⚙️ Settings" in the system tray menu.
+- Accessed via "⚙️ Settings" in the system tray menu, and via the gear in the dashboard's top bar (`desktop_app.spec.md`, "Dashboard").
 - Opens as a modal QDialog.
 - Imported from `show_settings` when the window is first opened. Importing the module loads none of sounddevice, numpy or pynput: the hotkey labels come from `jarvis/dictation/hotkeys.py`. sounddevice is imported when the window is built, to list the input devices for the Voice Input tab.
 

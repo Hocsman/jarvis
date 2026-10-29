@@ -63,8 +63,10 @@ foreign.write_text(
     "<html><head><title>foreign</title></head><body>"
     "<script src='qrc:///qtwebchannel/qwebchannel.js'></script><script>"
     "if (window.qt && qt.webChannelTransport) {"
-    "  new QWebChannel(qt.webChannelTransport,"
-    "    ch => ch.objects.jarvis.submitQuery('from a foreign page'));"
+    "  new QWebChannel(qt.webChannelTransport, ch => {"
+    "    ch.objects.jarvis.openSettings();"
+    "    ch.objects.jarvis.submitQuery('from a foreign page');"
+    "  });"
     "}"
     "</script></body></html>",
     encoding="utf-8",
@@ -74,7 +76,10 @@ index = dashboard_window._dashboard_index()
 index_url = QUrl.fromLocalFile(str(index))
 
 asked = []
-window = dashboard_window.DashboardWindow(submit_fn=asked.append)
+settings_opened = []
+window = dashboard_window.DashboardWindow(
+    submit_fn=asked.append, open_settings=lambda: settings_opened.append(True)
+)
 window.resize(1200, 800)
 window.show()
 view = window.view
@@ -116,6 +121,7 @@ drain(lambda: len(asked) > 1, 1.0)
 report["after_link"] = {
     "url_is_index": shows_index(),
     "asked": list(asked),
+    "settings_opened": bool(settings_opened),
 }
 
 # The page's answer for each address, asked directly. Nothing is loaded.

@@ -2,8 +2,8 @@
 
 The view is handed the bridge over ``QWebChannel``, and Qt gives the
 channel's transport to whatever document the view shows. A foreign page
-there could call ``submitQuery``, which drives the daemon and its tools.
-So the view navigates to the dashboard's own ``index.html`` alone (Qt's
+there could call ``submitQuery``, which drives the daemon and its tools,
+or ``openSettings``. So the view navigates to the dashboard's own ``index.html`` alone (Qt's
 internal ``about:`` states aside), in every frame, and a link or file
 dropped on it opens nothing.
 
@@ -88,6 +88,7 @@ class TestNoOtherPage:
     def test_a_link_to_another_page_opens_nothing(self, report):
         assert report["after_link"]["url_is_index"]
         assert report["after_link"]["asked"] == ["from the dashboard"]
+        assert report["after_link"]["settings_opened"] is False
 
     @pytest.mark.parametrize("frame", ["main_frame", "sub_frame"])
     @pytest.mark.parametrize("address", FOREIGN)
