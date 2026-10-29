@@ -2048,7 +2048,7 @@ class JarvisSystemTray:
         result = wizard.exec()
         # Its pages save as they go, so even a cancelled wizard may have
         # changed what the dashboard shows.
-        self._dashboard_follows_settings()
+        self._reload_dashboard_settings()
 
         # Restart daemon after wizard completes (finished or cancelled)
         # This ensures any config changes (model selection, etc.) are applied
@@ -2065,7 +2065,7 @@ class JarvisSystemTray:
         dialog = SettingsWindow()
         result = dialog.exec()
         if result == QDialog.DialogCode.Accepted:
-            self._dashboard_follows_settings()
+            self._reload_dashboard_settings()
 
         # If settings were saved and daemon is running, offer to restart
         if result == QDialog.DialogCode.Accepted and self.is_listening:
@@ -2079,16 +2079,15 @@ class JarvisSystemTray:
                 self.stop_daemon()
                 self.start_daemon()
 
-    def _dashboard_follows_settings(self) -> None:
-        """The settings were saved: an open dashboard reads them again, so
-        its weather stops the moment location is turned off, and starts
-        without a restart when it is turned on. The dashboard runs in this
-        process, so it needs no daemon restart for that."""
+    def _reload_dashboard_settings(self) -> None:
+        """The settings were saved: the dashboard, once built, reads them
+        again, shown or hidden (a closed dashboard is only hidden and its
+        weather timer keeps running). So its weather stops when location is
+        turned off, and starts without a restart when it is turned on. The
+        dashboard runs in this process, so it needs no daemon restart."""
         dashboard = getattr(self, "dashboard_window", None)
-        if dashboard is None:
-            return
-        debug_log("settings saved: the dashboard reads them again", "desktop")
-        dashboard.reload_settings()
+        if dashboard is not None:
+            dashboard.reload_settings()
 
     def collect_runtime_status(self) -> RuntimeStatusSnapshot:
         """Collect current runtime state for the tray diagnostics dialog."""

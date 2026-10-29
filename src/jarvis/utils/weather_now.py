@@ -11,7 +11,7 @@ can keep the previous values instead of blanking the card.
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 
 import requests
 
@@ -91,20 +91,34 @@ def fetch_weather_summary(
     city: Optional[str] = None,
     language: Optional[str] = None,
     timeout: float = 8.0,
+    still_wanted: Optional[Callable[[], bool]] = None,
 ) -> Optional[Dict]:
     """Return current weather for ``city`` as a flat dict, or ``None``.
 
     Keys: ``temp, loc, desc, icon, hum, wind, feels`` — exactly what the
     dashboard's ``weatherUpdated`` handler consumes.
+
+    ``still_wanted``, when given, is asked before each of the two
+    requests, and a no ends the fetch there: the first sends the city, the
+    second its coordinates, and a caller whose user has since turned
+    location off wants neither sent.
     """
     if not city or not str(city).strip():
         return None
     city = str(city).strip()
 
+    def wanted() -> bool:
+        if still_wanted is None or still_wanted():
+            return True
+        debug_log("weather_now: no longer wanted; nothing more is asked", "tools")
+        return False
+
     lang = (language or "en").strip().lower()
     lang_code = lang[:2] if len(lang) >= 2 else "en"
 
     try:
+        if not wanted():
+            return None
         geo = requests.get(
             "https://geocoding-api.open-meteo.com/v1/search",
             params={"name": city, "count": 1, "language": lang_code, "format": "json"},
@@ -121,6 +135,8 @@ def fetch_weather_summary(
         cc = r0.get("country_code") or ""
         loc_label = f"{loc_name}, {cc}" if cc else loc_name
 
+        if not wanted():
+            return None
         wx = requests.get(
             "https://api.open-meteo.com/v1/forecast",
             params={

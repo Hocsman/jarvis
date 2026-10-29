@@ -89,6 +89,30 @@ class TestWeatherNow:
             assert geo_call_params["language"] == "fr"
 
 
+    @pytest.mark.unit
+    def test_a_fetch_no_longer_wanted_asks_for_no_forecast(self):
+        """The forecast request carries the place's coordinates: once the
+        caller stops wanting the weather (location turned off while the
+        city was being looked up), it is not sent."""
+        mock_geo = MagicMock()
+        mock_geo.json.return_value = {
+            "results": [{"latitude": 48.85, "longitude": 2.35, "name": "Paris", "country_code": "FR"}]
+        }
+        mock_geo.raise_for_status = MagicMock()
+
+        with patch("requests.get", side_effect=[mock_geo, AssertionError("forecast sent")]) as mock_get:
+            res = fetch_weather_summary("Paris", still_wanted=lambda: mock_get.call_count == 0)
+
+        assert res is None
+        assert mock_get.call_count == 1
+
+    @pytest.mark.unit
+    def test_a_fetch_no_longer_wanted_before_it_starts_sends_nothing(self):
+        with patch("requests.get") as mock_get:
+            assert fetch_weather_summary("Paris", still_wanted=lambda: False) is None
+            mock_get.assert_not_called()
+
+
 class TestDashboardWeatherPrivacyGuard:
     """Tests for privacy guards in dashboard weather polling."""
 

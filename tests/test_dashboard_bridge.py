@@ -324,6 +324,29 @@ class TestNothingOnThePageLooksClickableAndDoesNothing:
         assert touched - set(methods) - properties == set()
 
 
+def _weather_settings(location_enabled=True, weather_city="Lyon", response_language="fr", **location):
+    """Saved settings as far as the weather reads them."""
+    return SimpleNamespace(location_enabled=location_enabled, weather_city=weather_city,
+                           response_language=response_language, **location)
+
+
+@pytest.fixture
+def _cities_asked(monkeypatch):
+    """Every city the bridge asks Open-Meteo about; each reading comes back at once."""
+    from desktop_app.dashboard import bridge as bridge_module
+
+    asked = []
+    monkeypatch.setattr(bridge_module, "fetch_weather_summary",
+                        lambda city, language="en", **_: asked.append(city) or {"temp": 12, "loc": city})
+    return asked
+
+
+def _readings(weather: list) -> list:
+    """The readings among what the bridge pushed to the page; ``{}`` tells
+    the page it has none for the current settings."""
+    return [reading for reading in map(json.loads, weather) if reading]
+
+
 class TestTheRefreshButtons:
     """The ⟳ on the stats and weather cards fetch now rather than at the
     next tick (``desktop_app.spec.md``, "Dashboard")."""
@@ -344,9 +367,9 @@ class TestTheRefreshButtons:
         from desktop_app.dashboard import bridge as bridge_module
 
         monkeypatch.setattr(bridge_module, "fetch_weather_summary",
-                            lambda city, language="en": {"temp": 12, "loc": city})
+                            lambda city, language="en", **_: {"temp": 12, "loc": city})
         b = bridge_module.DashboardBridge(
-            weather_city="Lyon", cfg=SimpleNamespace(location_enabled=True, response_language="fr"))
+            cfg=_weather_settings(location_enabled=True))
         weather = []
         b.weatherUpdated.connect(weather.append)
 
@@ -363,13 +386,13 @@ class TestTheRefreshButtons:
 
         asked, release = [], threading.Event()
 
-        def slow_fetch(city, language="en"):
+        def slow_fetch(city, language="en", **_):
             asked.append(city)
             release.wait(2)
             return {"temp": 12, "loc": city}
 
         monkeypatch.setattr(bridge_module, "fetch_weather_summary", slow_fetch)
-        b = bridge_module.DashboardBridge(weather_city="Lyon", cfg=SimpleNamespace(location_enabled=True))
+        b = bridge_module.DashboardBridge(cfg=_weather_settings(location_enabled=True))
         weather = []
         b.weatherUpdated.connect(weather.append)
 
@@ -386,8 +409,8 @@ class TestTheRefreshButtons:
 
         asked = []
         monkeypatch.setattr(bridge_module, "fetch_weather_summary",
-                            lambda city, language="en": asked.append(city) or {"loc": city})
-        b = bridge_module.DashboardBridge(weather_city="Lyon", cfg=SimpleNamespace(location_enabled=True))
+                            lambda city, language="en", **_: asked.append(city) or {"loc": city})
+        b = bridge_module.DashboardBridge(cfg=_weather_settings(location_enabled=True))
         weather = []
         b.weatherUpdated.connect(weather.append)
 
@@ -404,12 +427,12 @@ class TestTheRefreshButtons:
 
         asked = []
 
-        def failing_fetch(city, language="en"):
+        def failing_fetch(city, language="en", **_):
             asked.append(city)
             raise OSError("network down")
 
         monkeypatch.setattr(bridge_module, "fetch_weather_summary", failing_fetch)
-        b = bridge_module.DashboardBridge(weather_city="Lyon", cfg=SimpleNamespace(location_enabled=True))
+        b = bridge_module.DashboardBridge(cfg=_weather_settings(location_enabled=True))
 
         b.refreshWeather()
         _wait_for(lambda: asked, _qapp)
@@ -424,9 +447,9 @@ class TestTheRefreshButtons:
 
         asked = []
         monkeypatch.setattr(bridge_module, "fetch_weather_summary",
-                            lambda city, language="en": asked.append(city))
+                            lambda city, language="en", **_: asked.append(city))
         b = bridge_module.DashboardBridge(
-            weather_city="Lyon", cfg=SimpleNamespace(location_enabled=False))
+            cfg=_weather_settings(location_enabled=False))
 
         b.refreshWeather()
         _wait_for(lambda: asked, _qapp, seconds=0.2)
@@ -437,8 +460,8 @@ class TestTheRefreshButtons:
     def test_the_page_can_read_whether_there_is_weather_to_fetch(self, _qapp) -> None:
         from desktop_app.dashboard.bridge import DashboardBridge
 
-        on = DashboardBridge(weather_city="Lyon", cfg=SimpleNamespace(location_enabled=True))
-        off = DashboardBridge(weather_city="Lyon", cfg=SimpleNamespace(location_enabled=False))
+        on = DashboardBridge(cfg=_weather_settings(location_enabled=True))
+        off = DashboardBridge(cfg=_weather_settings(location_enabled=False))
 
         assert on.property("weatherAvailable") is True
         assert off.property("weatherAvailable") is False
@@ -451,21 +474,13 @@ class TestTheRefreshButtons:
         assert "jarvis.weatherAvailable" in _page_script()
 
 
-def _weather_settings(location_enabled=True, weather_city="Lyon", response_language="fr"):
-    """Saved settings as far as the weather reads them."""
-    return SimpleNamespace(location_enabled=location_enabled, weather_city=weather_city,
-                           response_language=response_language)
-
-
 @pytest.fixture
-def _cities_asked(monkeypatch):
-    """Every city the bridge asks Open-Meteo about; each reading comes back at once."""
+def _fast_ticks(monkeypatch):
+    """The weather timer ticks every 20 ms instead of every 10 minutes, so
+    a test can see whether it runs."""
     from desktop_app.dashboard import bridge as bridge_module
 
-    asked = []
-    monkeypatch.setattr(bridge_module, "fetch_weather_summary",
-                        lambda city, language="en": asked.append(city) or {"temp": 12, "loc": city})
-    return asked
+    monkeypatch.setattr(bridge_module, "_WEATHER_INTERVAL_MS", 20)
 
 
 class TestTheWeatherFollowsTheSavedSettings:
@@ -474,35 +489,36 @@ class TestTheWeatherFollowsTheSavedSettings:
     (``desktop_app.spec.md``, "Dashboard")."""
 
     @pytest.mark.unit
-    def test_once_location_is_turned_off_nothing_more_is_sent(self, _qapp, _cities_asked) -> None:
+    def test_once_location_is_turned_off_nothing_more_is_sent(self, _qapp, _cities_asked, _fast_ticks) -> None:
         from desktop_app.dashboard.bridge import DashboardBridge
 
         b = DashboardBridge(cfg=_weather_settings(location_enabled=True))
-        assert b._weather_timer.isActive()
 
         b.reload_settings(_weather_settings(location_enabled=False))
         b.refreshWeather()
         b.ready()
-        _wait_for(lambda: _cities_asked, _qapp, seconds=0.2)
+        _wait_for(lambda: _cities_asked, _qapp, seconds=0.2)   # ten ticks' worth
 
         assert _cities_asked == []
-        assert not b._weather_timer.isActive(), "the 10-minute tick should stop"
 
     @pytest.mark.unit
     def test_turning_location_off_tells_the_page(self, _qapp, _cities_asked) -> None:
         from desktop_app.dashboard.bridge import DashboardBridge
 
         b = DashboardBridge(cfg=_weather_settings(location_enabled=True))
-        changes = []
+        changes, weather = [], []
         b.weatherAvailableChanged.connect(changes.append)
+        b.weatherUpdated.connect(weather.append)
 
         b.reload_settings(_weather_settings(location_enabled=False))
 
         assert changes == [False]
         assert b.property("weatherAvailable") is False
+        assert [json.loads(w) for w in weather] == [{}], "the page should be left with no reading"
 
     @pytest.mark.unit
-    def test_turning_location_on_brings_the_weather_without_a_restart(self, _qapp, _cities_asked) -> None:
+    def test_turning_location_on_brings_the_weather_without_a_restart(
+            self, _qapp, _cities_asked, _fast_ticks) -> None:
         from desktop_app.dashboard.bridge import DashboardBridge
 
         b = DashboardBridge(cfg=_weather_settings(location_enabled=False))
@@ -511,12 +527,12 @@ class TestTheWeatherFollowsTheSavedSettings:
         b.weatherUpdated.connect(weather.append)
 
         b.reload_settings(_weather_settings(location_enabled=True, weather_city="Lyon"))
-        _wait_for(lambda: weather, _qapp)
+        _wait_for(lambda: len(_cities_asked) >= 2, _qapp)
 
         assert changes == [True]
         assert b.property("weatherAvailable") is True
-        assert json.loads(weather[-1])["loc"] == "Lyon"
-        assert b._weather_timer.isActive(), "the 10-minute tick should run"
+        assert _readings(weather)[0]["loc"] == "Lyon"
+        assert _cities_asked[:2] == ["Lyon", "Lyon"], "fetched at once, then on each tick"
 
     @pytest.mark.unit
     def test_a_new_city_is_fetched_at_once(self, _qapp, _cities_asked) -> None:
@@ -528,25 +544,90 @@ class TestTheWeatherFollowsTheSavedSettings:
         b.weatherUpdated.connect(weather.append)
 
         b.reload_settings(_weather_settings(weather_city="Paris"))
-        _wait_for(lambda: weather, _qapp)
+        _wait_for(lambda: _readings(weather), _qapp)
 
         assert _cities_asked == ["Paris"]
-        assert json.loads(weather[-1])["loc"] == "Paris"
+        assert [reading["loc"] for reading in _readings(weather)] == ["Paris"]
         assert changes == []
+
+    @pytest.mark.unit
+    def test_a_new_language_is_fetched_at_once(self, _qapp, monkeypatch) -> None:
+        from desktop_app.dashboard import bridge as bridge_module
+
+        asked = []
+        monkeypatch.setattr(bridge_module, "fetch_weather_summary",
+                            lambda city, language="en", **_: asked.append((city, language)) or {"loc": city})
+        b = bridge_module.DashboardBridge(cfg=_weather_settings(response_language="fr"))
+
+        b.reload_settings(_weather_settings(response_language="en"))
+        _wait_for(lambda: asked, _qapp)
+
+        assert asked == [("Lyon", "en")]
+
+    @pytest.mark.unit
+    def test_after_the_city_changes_the_old_citys_reading_is_not_left_on_the_page(
+            self, _qapp, monkeypatch) -> None:
+        """Even when the new city brings no reading (a misspelt name, the
+        network down), the page is told it has none."""
+        from desktop_app.dashboard import bridge as bridge_module
+
+        monkeypatch.setattr(bridge_module, "fetch_weather_summary", lambda city, language="en", **_: None)
+        b = bridge_module.DashboardBridge(cfg=_weather_settings(weather_city="Lyon"))
+        weather = []
+        b.weatherUpdated.connect(weather.append)
+
+        b.reload_settings(_weather_settings(weather_city="Lyoon"))
+        _wait_for(lambda: len(weather) > 1, _qapp, seconds=0.3)
+
+        assert [json.loads(w) for w in weather] == [{}]
 
     @pytest.mark.unit
     def test_saving_settings_that_leave_the_weather_as_it_was_sends_nothing(self, _qapp, _cities_asked) -> None:
         from desktop_app.dashboard.bridge import DashboardBridge
 
         b = DashboardBridge(cfg=_weather_settings(weather_city="Lyon"))
-        changes = []
+        changes, weather = [], []
         b.weatherAvailableChanged.connect(changes.append)
+        b.weatherUpdated.connect(weather.append)
 
         b.reload_settings(_weather_settings(weather_city="Lyon"))
         _wait_for(lambda: _cities_asked, _qapp, seconds=0.2)
 
         assert _cities_asked == []
         assert changes == []
+        assert weather == []
+
+    @pytest.mark.unit
+    def test_with_location_off_another_language_changes_nothing(self, _qapp, _cities_asked) -> None:
+        from desktop_app.dashboard.bridge import DashboardBridge
+
+        b = DashboardBridge(cfg=_weather_settings(location_enabled=False, response_language="fr"))
+        changes, weather = [], []
+        b.weatherAvailableChanged.connect(changes.append)
+        b.weatherUpdated.connect(weather.append)
+
+        b.reload_settings(_weather_settings(location_enabled=False, response_language="en"))
+
+        assert (changes, weather, _cities_asked) == ([], [], [])
+
+    @pytest.mark.unit
+    def test_a_save_that_leaves_location_alone_does_not_look_the_city_up_again(
+            self, _qapp, _cities_asked, monkeypatch) -> None:
+        """With no city set, the city comes from a location lookup that may
+        reach the network; a save of other settings does not repeat it."""
+        from desktop_app.dashboard import bridge as bridge_module
+
+        lookups = []
+        monkeypatch.setattr(bridge_module, "get_location_info",
+                            lambda **how: lookups.append(how) or {"city": "Lyon"})
+        b = bridge_module.DashboardBridge(cfg=_weather_settings(weather_city=""))
+        assert b.property("weatherAvailable") is True and len(lookups) == 1
+
+        b.reload_settings(_weather_settings(weather_city=""))
+        assert len(lookups) == 1
+
+        b.reload_settings(_weather_settings(weather_city="", location_ip_address="203.0.113.7"))
+        assert len(lookups) == 2
 
     @pytest.mark.unit
     def test_with_no_settings_handed_over_it_reads_the_saved_ones(self, _qapp, _cities_asked, monkeypatch) -> None:
@@ -571,7 +652,7 @@ class TestTheWeatherFollowsTheSavedSettings:
 
         release, returned = threading.Event(), threading.Event()
 
-        def slow_fetch(city, language="en"):
+        def slow_fetch(city, language="en", **_):
             release.wait(2)
             returned.set()
             return {"temp": 12, "loc": city}
@@ -585,9 +666,35 @@ class TestTheWeatherFollowsTheSavedSettings:
         b.reload_settings(_weather_settings(location_enabled=False))
         release.set()
         _wait_for(returned.is_set, _qapp)
-        _wait_for(lambda: weather, _qapp, seconds=0.3)
+        _wait_for(lambda: _readings(weather), _qapp, seconds=0.3)
 
-        assert weather == []
+        assert _readings(weather) == []
+
+    @pytest.mark.unit
+    def test_a_fetch_on_its_way_is_told_once_location_is_turned_off(self, _qapp, monkeypatch) -> None:
+        """So it sends nothing more: the fetcher asks before each of its
+        requests (``tests/test_dashboard_weather.py``)."""
+        import threading
+
+        from desktop_app.dashboard import bridge as bridge_module
+
+        release, answered = threading.Event(), []
+
+        def fetch(city, language="en", still_wanted=lambda: True):
+            answered.append(still_wanted())
+            release.wait(2)
+            answered.append(still_wanted())
+
+        monkeypatch.setattr(bridge_module, "fetch_weather_summary", fetch)
+        b = bridge_module.DashboardBridge(cfg=_weather_settings(location_enabled=True))
+
+        b.refreshWeather()
+        _wait_for(lambda: answered, _qapp)
+        b.reload_settings(_weather_settings(location_enabled=False))
+        release.set()
+        _wait_for(lambda: len(answered) == 2, _qapp)
+
+        assert answered == [True, False]
 
     @pytest.mark.unit
     def test_after_the_city_changes_only_the_new_citys_weather_is_shown(self, _qapp, monkeypatch) -> None:
@@ -599,7 +706,7 @@ class TestTheWeatherFollowsTheSavedSettings:
 
         asked, release, returned = [], threading.Event(), threading.Event()
 
-        def fetch(city, language="en"):
+        def fetch(city, language="en", **_):
             asked.append(city)
             if city == "Lyon":
                 release.wait(2)
@@ -613,13 +720,13 @@ class TestTheWeatherFollowsTheSavedSettings:
 
         b.refreshWeather()
         b.reload_settings(_weather_settings(weather_city="Paris"))
-        _wait_for(lambda: weather, _qapp)
+        _wait_for(lambda: _readings(weather), _qapp)
         release.set()
         _wait_for(returned.is_set, _qapp)
-        _wait_for(lambda: len(weather) > 1, _qapp, seconds=0.3)
+        _wait_for(lambda: len(_readings(weather)) > 1, _qapp, seconds=0.3)
 
         assert asked == ["Lyon", "Paris"]
-        assert [json.loads(w)["loc"] for w in weather] == ["Paris"]
+        assert [reading["loc"] for reading in _readings(weather)] == ["Paris"]
 
     @pytest.mark.unit
     def test_the_page_is_told_when_there_comes_to_be_weather_or_none(self) -> None:
@@ -668,19 +775,42 @@ def _page_texts() -> dict:
     return {element_id: text.strip() for element_id, text in parser.texts.items()}
 
 
+def _weather_fields() -> list:
+    """The ids the page's ``WX_FIELDS`` lists: the weather fields it can
+    put back to their placeholders."""
+    listed = re.search(r"\bWX_FIELDS\s*=\s*\[([^\]]*)\]", _page_script())
+    assert listed, "the page should list its weather fields in WX_FIELDS"
+    return re.findall(r'"([\w-]+)"', listed.group(1))
+
+
 class TestTheWeatherCardShowsOnlyWhatWasFetched:
     """Until a reading comes, and whenever there is no weather to fetch,
     the weather card and the top-bar chip show placeholders that claim
     nothing (``desktop_app.spec.md``, "Dashboard")."""
 
-    _FIELDS = ("wx-temp", "wx-loc", "wx-desc", "wx-ico", "wx-hum", "wx-wind", "wx-feels",
-               "wx-chip-temp", "wx-chip-loc")
+    @pytest.mark.unit
+    def test_every_weather_field_the_page_draws_can_be_put_back_to_its_placeholder(self) -> None:
+        drawn = {element_id for element_id in _ids_the_script_writes(r"\s*\.\s*textContent\s*=")
+                 if element_id.startswith("wx-")}
+        assert drawn
+
+        assert drawn - set(_weather_fields()) == set()
+
+    @pytest.mark.unit
+    def test_each_reading_is_drawn_over_the_placeholders(self) -> None:
+        """So a field the reading lacks never keeps an older value."""
+        script = _page_script()
+        draw = _js_function_body(script, "drawWeather")
+
+        assert re.search(r"\bjarvis\.weatherUpdated\.connect\(\s*drawWeather\s*\)", script)
+        assert "clearWeather()" in draw
+        assert draw.index("clearWeather()") < draw.index("textContent")
 
     @pytest.mark.unit
     def test_before_any_reading_no_figure_is_shown(self) -> None:
         texts = _page_texts()
 
-        assert {field: texts[field] for field in self._FIELDS if re.search(r"\d", texts[field])} == {}
+        assert {field: texts[field] for field in _weather_fields() if re.search(r"\d", texts[field])} == {}
 
     @pytest.mark.unit
     def test_before_any_reading_no_place_and_no_sky_is_named(self) -> None:

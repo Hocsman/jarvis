@@ -569,13 +569,29 @@
   // ── Weather ────────────────────────────────────────────────────
   // The markup's placeholders claim nothing. The card and the chip go
   // back to them before each reading is drawn, so a field it lacks never
-  // keeps an older value, and whenever there is no weather to fetch.
+  // keeps an older value; the bridge sends an empty reading ({}) whenever
+  // the one on the page answers settings that no longer hold.
   const WX_FIELDS = ["wx-temp", "wx-loc", "wx-desc", "wx-ico", "wx-hum", "wx-wind", "wx-feels",
                      "wx-chip-temp", "wx-chip-loc"];
   const wxPlaceholders = Object.fromEntries(
     WX_FIELDS.map(id => [id, document.getElementById(id).textContent]));
   function clearWeather() {
     for (const id of WX_FIELDS) document.getElementById(id).textContent = wxPlaceholders[id];
+  }
+  function drawWeather(s) {
+    try {
+      const o = JSON.parse(s);
+      clearWeather();
+      if (o.temp != null) { document.getElementById("wx-temp").textContent = o.temp + "°C";
+        document.getElementById("wx-chip-temp").textContent = o.temp + "°C"; }
+      if (o.loc)  { document.getElementById("wx-loc").textContent = o.loc;
+        document.getElementById("wx-chip-loc").textContent = o.loc; }
+      if (o.desc) document.getElementById("wx-desc").textContent = o.desc;
+      if (o.icon) document.getElementById("wx-ico").textContent = o.icon;
+      if (o.hum  != null) document.getElementById("wx-hum").textContent = o.hum + "%";
+      if (o.wind != null) document.getElementById("wx-wind").textContent = o.wind + " km/h";
+      if (o.feels!= null) document.getElementById("wx-feels").textContent = o.feels + "°C";
+    } catch(e){}
   }
   // Only the bridge knows whether there is weather to fetch (location on
   // and a city known), and it says so again each time the saved settings
@@ -586,7 +602,6 @@
     wxRefresh.disabled = !jarvis.weatherAvailable;
     wxRefresh.title = wxRefresh.disabled
       ? "Météo indisponible : localisation coupée ou ville inconnue" : wxRefreshTitle;
-    if (wxRefresh.disabled) clearWeather();
   }
 
   function wireBridge(obj) {
@@ -612,21 +627,7 @@
         document.getElementById("disk-v").textContent = o.disk_used + " GB";
       } catch(e){}
     });
-    jarvis.weatherUpdated.connect(s => {
-      try {
-        const o = JSON.parse(s);
-        clearWeather();
-        if (o.temp != null) { document.getElementById("wx-temp").textContent = o.temp + "°C";
-          document.getElementById("wx-chip-temp").textContent = o.temp + "°C"; }
-        if (o.loc)  { document.getElementById("wx-loc").textContent = o.loc;
-          document.getElementById("wx-chip-loc").textContent = o.loc; }
-        if (o.desc) document.getElementById("wx-desc").textContent = o.desc;
-        if (o.icon) document.getElementById("wx-ico").textContent = o.icon;
-        if (o.hum  != null) document.getElementById("wx-hum").textContent = o.hum + "%";
-        if (o.wind != null) document.getElementById("wx-wind").textContent = o.wind + " km/h";
-        if (o.feels!= null) document.getElementById("wx-feels").textContent = o.feels + "°C";
-      } catch(e){}
-    });
+    jarvis.weatherUpdated.connect(drawWeather);
     showWeatherAvailability();
     jarvis.weatherAvailableChanged.connect(showWeatherAvailability);
     if (jarvis.ready) jarvis.ready();

@@ -543,7 +543,7 @@ class TestTheDashboardFollowsTheSavedSettings:
         import desktop_app.dashboard.bridge as bridge_module
         import desktop_app.settings_window as settings_window
 
-        monkeypatch.setattr(bridge_module, "fetch_weather_summary", lambda city, language="en": None)
+        monkeypatch.setattr(bridge_module, "fetch_weather_summary", lambda city, language="en", **_: None)
         self._saved(monkeypatch, location_enabled=True)
         tray.show_dashboard()
         assert _bridge(tray).property("weatherAvailable") is True
@@ -560,13 +560,37 @@ class TestTheDashboardFollowsTheSavedSettings:
 
         assert _bridge(tray).property("weatherAvailable") is False
 
+    def test_a_cancelled_settings_window_leaves_the_dashboard_as_it_was(self, qapp, tray, monkeypatch):
+        """Cancelling saves nothing, so there is nothing to follow; settings
+        changed on disk by hand wait for the next save."""
+        from PyQt6.QtWidgets import QDialog
+
+        import desktop_app.dashboard.bridge as bridge_module
+        import desktop_app.settings_window as settings_window
+
+        monkeypatch.setattr(bridge_module, "fetch_weather_summary", lambda city, language="en", **_: None)
+        self._saved(monkeypatch, location_enabled=True)
+        tray.show_dashboard()
+
+        test = self
+
+        class _Settings:
+            def exec(self):
+                test._saved(monkeypatch, location_enabled=False)
+                return QDialog.DialogCode.Rejected
+
+        monkeypatch.setattr(settings_window, "SettingsWindow", _Settings)
+        tray.show_settings()
+
+        assert _bridge(tray).property("weatherAvailable") is True
+
     def test_running_the_setup_wizard_brings_the_dashboards_weather_on(self, qapp, tray, monkeypatch):
         from PyQt6.QtWidgets import QWizard
 
         import desktop_app.dashboard.bridge as bridge_module
         import desktop_app.setup_wizard as setup_wizard
 
-        monkeypatch.setattr(bridge_module, "fetch_weather_summary", lambda city, language="en": None)
+        monkeypatch.setattr(bridge_module, "fetch_weather_summary", lambda city, language="en", **_: None)
         self._saved(monkeypatch, location_enabled=False)
         tray.show_dashboard()
         assert _bridge(tray).property("weatherAvailable") is False
