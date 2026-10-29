@@ -1840,11 +1840,24 @@ class JarvisSystemTray:
         # Stop memory viewer server
         if hasattr(self, 'memory_viewer'):
             self.memory_viewer.stop_server()
-        # Safety net: if daemon process exists but is_listening was False, still clean up
-        # (This shouldn't happen in normal operation, but handles edge cases)
+        # Safety net: a daemon process still here after the stop above, because
+        # that stop failed, was refused during another one, or was never asked
+        # for (is_listening already False), is ended now.
         if self.daemon_process:
             try:
-                self.daemon_process.terminate()
+                if self._daemon_stopping:
+                    # A termination signal runs this from inside a stop's
+                    # wait, where the stop above is refused. Ask the daemon
+                    # to exit as that stop does, by closing its stdin, so
+                    # she still writes her diary.
+                    debug_log("exit during a stop: asking the daemon to exit", "desktop")
+                    try:
+                        if self.daemon_process.stdin:
+                            self.daemon_process.stdin.close()
+                    except Exception:
+                        pass
+                else:
+                    self.daemon_process.terminate()
                 try:
                     # Use longer timeout to allow diary update to complete
                     self.daemon_process.wait(timeout=60)
@@ -2075,15 +2088,17 @@ class JarvisSystemTray:
 
         # Saved while a stop is in progress (Settings stays reachable during
         # it, from the tray and from the dashboard's gear): she is going
-        # down anyway and reads the new settings at her next start.
+        # down anyway and reads the new settings at her next start. A
+        # notification, not a dialog: a dialog opened here would hold the
+        # stop, which waits below it, until it was dismissed.
         if result == QDialog.DialogCode.Accepted and self._daemon_stopping:
             debug_log("settings saved during a stop: no restart offered", "desktop")
-            note = QMessageBox()
-            note.setIcon(QMessageBox.Icon.Information)
-            note.setWindowTitle("⏳ Stopping")
-            note.setText("Settings saved. Jarvis is stopping; they apply the next time she starts.")
-            note.setStyleSheet(JARVIS_THEME_STYLESHEET)
-            note.exec()
+            self.tray_icon.showMessage(
+                "⚙️ Settings Saved",
+                "Jarvis is stopping; they apply the next time she starts",
+                QSystemTrayIcon.MessageIcon.Information,
+                4000,
+            )
             return
 
         # If settings were saved and daemon is running, offer to restart
@@ -2370,15 +2385,10 @@ class JarvisSystemTray:
     def show_chat(self) -> None:
         """Show the text chat window (created lazily on first open)."""
         if self.chat_window is None:
-            from desktop_app.chat_window import ChatWindow
-            self.chat_window = ChatWindow(
-                daemon_available=self.is_listening, **self._chat_hooks()
-            )
+            self._create_chat_window()
         else:
             self.chat_window.set_daemon_hooks(**self._chat_hooks())
-            self.chat_window.set_daemon_status(
-                "running" if self.is_listening else "stopped"
-            )
+            self.chat_window.set_daemon_status(self._chat_daemon_status())
         if self.chat_window.isMinimized():
             self.chat_window.showNormal()
         else:
@@ -2404,6 +2414,24 @@ class JarvisSystemTray:
         self.dashboard_window.show()
         self.dashboard_window.raise_()
         self.dashboard_window.activateWindow()
+
+    def _chat_daemon_status(self) -> str:
+        """The daemon's lifecycle as a chat window shows it. During a stop
+        she is still listening until the daemon exits, but takes no message."""
+        if self._daemon_stopping:
+            return "stopping"
+        return "running" if self.is_listening else "stopped"
+
+    def _create_chat_window(self) -> None:
+        """Create the chat window, showing the daemon's current lifecycle."""
+        from desktop_app.chat_window import ChatWindow
+
+        status = self._chat_daemon_status()
+        self.chat_window = ChatWindow(
+            daemon_available=status == "running", **self._chat_hooks()
+        )
+        if status == "stopping":
+            self.chat_window.set_daemon_status(status)
 
     def _set_chat_daemon_status(self, status: str) -> None:
         """Update an existing chat window with daemon lifecycle state."""
@@ -3013,10 +3041,7 @@ class JarvisSystemTray:
         the line to ``ChatWindow.process_ipc_line`` for parsing + signal emit.
         """
         if self.chat_window is None:
-            from desktop_app.chat_window import ChatWindow
-            self.chat_window = ChatWindow(
-                daemon_available=self.is_listening, **self._chat_hooks()
-            )
+            self._create_chat_window()
         self.chat_window.process_ipc_line(line)
         # The tray needs the same events: it is the only surface always
         # present, and for a destructive action it is the only route to a

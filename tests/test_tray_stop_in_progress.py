@@ -5,16 +5,17 @@ subprocess, three for a thread. The tray keeps the Qt event loop turning
 while it waits, so the windows stay alive, and so does every way of asking
 for another start or stop: the toggle, the quick stop, the setup wizard,
 the restart that Settings offers (from the tray and from the dashboard's
-gear), the status timer and the thread's own "finished" signal.
+gear), the status timer, the thread's own "finished" signal and the exit
+cleanup a termination signal runs.
 
-Any of those running inside the wait used to leave the app in a state that
-lies. A subprocess restarted from Settings was killed by the first stop's
-timeout a minute later, and the app read Stopped. In bundled mode the
-first stop forgot the thread the restart had just started: a daemon with
-the microphone live while the tray said Stopped.
+Any of those acting inside the wait would leave the app in a state that
+lies. A subprocess restarted from Settings would be killed by the first
+stop's timeout a minute later, and the app would read Stopped. In bundled
+mode the first stop would forget the thread the restart had just started:
+a daemon with the microphone live while the tray says Stopped.
 
-So one stop runs at a time, it alone decides what the tray shows when it
-ends, and while it runs the tray says so.
+So one stop runs at a time, it alone decides what the tray and the chat
+window show when it ends, and while it runs they say so.
 """
 
 from __future__ import annotations
@@ -48,8 +49,10 @@ class _Clock:
 class _Stdin:
     def __init__(self, process):
         self._process = process
+        self.lines = []
 
-    def write(self, _text):
+    def write(self, text):
+        self.lines.append(text)
         self._process.stop_requested()
 
     def flush(self):
@@ -90,6 +93,8 @@ class _DaemonProcess:
     def kill(self):
         self.killed = True
         self.returncode = -9
+
+    terminate = kill
 
     def wait(self, timeout=None):
         return self.returncode
@@ -150,6 +155,18 @@ class _ChatWindow:
     def set_daemon_status(self, status):
         self.statuses.append(status)
 
+    def isMinimized(self):
+        return False
+
+    def show(self):
+        pass
+
+    def raise_(self):
+        pass
+
+    def activateWindow(self):
+        pass
+
 
 class _SavedSettings:
     """The settings window, closed with Save."""
@@ -181,21 +198,17 @@ def launched(monkeypatch):
 
 @pytest.fixture
 def answers(monkeypatch):
-    """The questions and notes the tray puts to the user, answered Yes."""
+    """The questions the tray puts to the user once Settings is saved, each
+    answered Yes."""
     from PyQt6.QtWidgets import QMessageBox
 
-    asked = {"question": [], "shown": []}
+    asked = []
 
     def question(_parent, title, text, *_args, **_kwargs):
-        asked["question"].append((title, text))
+        asked.append((title, text))
         return QMessageBox.StandardButton.Yes
 
-    def shown(box):
-        asked["shown"].append((box.windowTitle(), box.text()))
-        return QMessageBox.StandardButton.Ok
-
     monkeypatch.setattr(QMessageBox, "question", question)
-    monkeypatch.setattr(QMessageBox, "exec", shown)
     monkeypatch.setattr("desktop_app.settings_window.SettingsWindow", _SavedSettings)
     return asked
 
@@ -229,6 +242,7 @@ def tray(qapp, monkeypatch):
 
     import desktop_app.app as app_mod
     from jarvis import daemon
+    from jarvis.state import JarvisState, get_jarvis_state
 
     monkeypatch.setattr(app_mod, "time", _Clock())
     monkeypatch.setattr(app_mod, "DiaryUpdateDialog", MagicMock)
@@ -243,6 +257,9 @@ def tray(qapp, monkeypatch):
             thread.end()
 
     monkeypatch.setattr(daemon, "request_stop", request_stop)
+    # A chat window opened for real seeds itself from the daemon's memory.
+    monkeypatch.setattr("desktop_app.chat_window.get_hot_window_messages", lambda: [])
+    get_jarvis_state().set_state(JarvisState.IDLE)
 
     t = app_mod.JarvisSystemTray.__new__(app_mod.JarvisSystemTray)
     t.app = qapp
@@ -263,15 +280,19 @@ def tray(qapp, monkeypatch):
     t.log_signals.new_log.connect(t.logs.append)
     t.tray_icon = MagicMock()
     t._confirm_signals = MagicMock()
+    t._pending_confirmation = None
+    t._ollama_runtime_ownership = app_mod.OllamaRuntimeOwnership()
     t.update_icon = lambda: None
     t._connect_dictation_history = lambda *args, **kwargs: None
-    t.toggle_action = QAction("▶️ Start Listening")
-    t.quick_stop_action = QAction("⚡ Stop Now (Skip Diary)")
-    t.quick_stop_action.setEnabled(False)
-    t.setup_wizard_action = QAction("🔧 Setup Wizard")
-    t.status_action = QAction("⚪ Status: Stopped")
+    t.toggle_action = QAction()
+    t.quick_stop_action = QAction()
+    t.setup_wizard_action = QAction()
+    t.status_action = QAction()
+    t._refresh_daemon_actions()
     t._wire_chat_signals()
     yield t
+    if not isinstance(t.chat_window, _ChatWindow):
+        t.chat_window.close()
     qapp.processEvents()
 
 
@@ -320,16 +341,23 @@ class TestTheTraySaysSheIsStopping:
         assert seen["wizard enabled"] is False
         assert "Stopping" in seen["status"]
 
-    def test_once_stopped_the_menu_offers_to_start_her_again(self, tray, launched):
+    def test_once_stopped_the_menu_is_back_to_offering_a_start(self, tray, launched):
+        def menu():
+            return [
+                (action.text(), action.isEnabled())
+                for action in (
+                    tray.toggle_action, tray.quick_stop_action,
+                    tray.setup_wizard_action, tray.status_action,
+                )
+            ]
+
+        before_she_started = menu()
         _listening(tray)
 
         tray.stop_daemon()
 
-        assert tray.toggle_action.text() == "▶️ Start Listening"
+        assert menu() == before_she_started
         assert tray.toggle_action.isEnabled()
-        assert tray.setup_wizard_action.isEnabled()
-        assert not tray.quick_stop_action.isEnabled()
-        assert tray.status_action.text() == "⚪ Status: Stopped"
 
     def test_a_stop_that_fails_does_not_leave_the_menu_stuck_on_stopping(self, tray, launched):
         process = _listening(tray)
@@ -369,8 +397,8 @@ class TestSettingsSavedDuringAStop:
         _during_the_stop(tray.show_settings)
         tray.stop_daemon()
 
-        assert answers["question"] == [], "a restart was offered while she was stopping"
-        assert len(answers["shown"]) == 1
+        assert answers == [], "a restart was offered while she was stopping"
+        assert any("Settings" in title for title, _text in _notifications(tray))
 
     def test_in_bundled_mode_no_daemon_is_left_running_behind_a_stopped_tray(self, tray, answers):
         _listening(tray, bundled=True)
@@ -391,7 +419,7 @@ class TestSettingsSavedDuringAStop:
 
         tray.show_settings()
 
-        assert len(answers["question"]) == 1
+        assert len(answers) == 1
         assert first.asked_to_stop >= 1
         assert len(launched) == 2
         assert tray.is_listening is True
@@ -414,21 +442,17 @@ class TestOtherWaysInDuringAStop:
         assert ("Jarvis Stopped", "Voice assistant is no longer listening") in _notifications(tray)
         assert tray.is_listening is False
 
-    def test_a_quick_stop_sends_the_daemon_nothing_more(self, tray, launched):
+    def test_a_quick_stop_does_not_reach_the_daemon(self, tray, launched):
+        from jarvis.daemon import SHUTDOWN_SKIP_DIARY_COMMAND
+
         process = _listening(tray)
-        asked_before_the_stop = process.asked_to_stop
 
         _during_the_stop(tray.quick_stop_daemon)
         tray.stop_daemon()
-        asked_by_this_stop = process.asked_to_stop - asked_before_the_stop
 
-        fresh = _listening(tray)
-        fresh_asks = fresh.asked_to_stop
-        tray.stop_daemon()
-
-        # The same number of shutdown requests as a stop on its own.
-        assert asked_by_this_stop == fresh.asked_to_stop - fresh_asks
+        assert not any(SHUTDOWN_SKIP_DIARY_COMMAND in line for line in process.stdin.lines)
         assert not any("Failed to stop" in line for line in tray.logs)
+        assert tray.is_listening is False
 
     def test_a_start_asked_for_by_anything_else_is_refused(self, tray, launched):
         _listening(tray)
@@ -450,6 +474,19 @@ class TestOtherWaysInDuringAStop:
         assert len(launched) == 1
         assert tray.is_listening is False
 
+    def test_an_exit_during_the_stop_lets_her_finish_her_diary(self, tray, launched):
+        """A termination signal runs the exit cleanup from inside the wait.
+        The daemon is asked to exit, as the stop asks it, not ended by
+        force in the middle of her diary."""
+        process = _listening(tray)
+
+        _during_the_stop(tray.cleanup_on_exit)
+        tray.stop_daemon()
+
+        assert process.asked_to_stop >= 1
+        assert process.killed is False
+        assert not any("Failed to stop" in line for line in tray.logs)
+
     def test_once_the_stop_is_over_she_can_be_started_again(self, tray, launched):
         _listening(tray)
         tray.stop_daemon()
@@ -459,6 +496,45 @@ class TestOtherWaysInDuringAStop:
         assert tray.is_listening is True
         assert tray.daemon_process is launched[-1]
         assert len(launched) == 2
+
+
+# ── The chat window during a stop ─────────────────────────────────────
+
+
+class TestTheChatWindowDuringAStop:
+    """She is still listening until the daemon exits, but she is going:
+    a chat window shown during the stop says so and takes no message."""
+
+    def test_an_open_chat_window_brought_forward_keeps_saying_she_is_stopping(self, tray, launched):
+        _listening(tray)
+
+        _during_the_stop(tray.show_chat)
+        tray.stop_daemon()
+
+        statuses = tray.chat_window.statuses
+        since_the_stop = statuses[statuses.index("stopping"):]
+        assert "running" not in since_the_stop
+        assert since_the_stop[-1] == "stopped"
+
+    @pytest.mark.parametrize("opened_by", ["the tray", "a reply arriving"])
+    def test_a_chat_window_first_opened_during_the_stop_takes_no_message(self, tray, launched, opened_by):
+        from jarvis.daemon import CHAT_IPC_PREFIX
+
+        _listening(tray)
+        tray.chat_window = None
+        seen = {}
+
+        def open_it():
+            if opened_by == "the tray":
+                tray.show_chat()
+            else:
+                tray._on_chat_ipc_line(f'{CHAT_IPC_PREFIX}{{"type": "complete", "data": "hi"}}')
+            seen["can type"] = tray.chat_window.input_widget.isEnabled()
+
+        _during_the_stop(open_it)
+        tray.stop_daemon()
+
+        assert seen["can type"] is False
 
 
 # ── The status check and the thread's own signal ──────────────────────
@@ -485,6 +561,19 @@ class TestTheDaemonEndingDuringItsStop:
         assert "crashed" not in tray.chat_window.statuses
         assert tray.chat_window.statuses[-1] == "stopped"
         assert tray.is_listening is False
+
+    @pytest.mark.parametrize("bundled", [False, True], ids=["subprocess", "bundled"])
+    def test_a_completed_stop_puts_her_to_sleep(self, tray, launched, bundled):
+        from jarvis.state import JarvisState, get_jarvis_state
+
+        _listening(tray, bundled=bundled)
+        get_jarvis_state().set_state(JarvisState.LISTENING)
+
+        tray.stop_daemon()
+        tray.app.processEvents()
+
+        # Nothing is listening: the face and the orb must not look ready.
+        assert get_jarvis_state().state is JarvisState.ASLEEP
 
     def test_in_bundled_mode_the_thread_ending_completes_the_stop_cleanly(self, tray):
         from jarvis.state import JarvisState, get_jarvis_state

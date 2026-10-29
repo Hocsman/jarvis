@@ -247,15 +247,16 @@ In subprocess mode, the daemon runs as a separate process. IPC is achieved via s
 
 ### Stopping
 
-`stop_daemon` waits for the daemon's final diary pass: up to 60 s for a subprocess, which is then killed, and up to three times that for a thread, after which the tray stops waiting for it. The wait keeps the Qt event loop turning (all but the bundled fast stop, which blocks), so the windows stay alive and so does every way of starting or stopping the daemon: the tray's toggle and fast stop, the setup wizard, the restart Settings offers (from the tray and from the dashboard's gear), the status timer and the daemon thread's `finished` signal.
+`stop_daemon` waits for the daemon's final diary pass: up to 60 s for a subprocess, which is then killed, and up to three times that for a thread, after which the tray stops waiting and marks her down even if the thread is still running (a thread cannot be killed). The wait keeps the Qt event loop turning (all but the bundled fast stop, which blocks), so the windows stay alive and so does every way of starting or stopping the daemon: the tray's toggle and fast stop, the setup wizard, the restart Settings offers (from the tray and from the dashboard's gear), the status timer, the daemon thread's `finished` signal and the exit cleanup a termination signal runs. A modal window opened from inside the wait (Settings, Runtime Status, Check for Updates) runs its own event loop, so the stop, its timeout included, resumes only once that window closes.
 
 One stop runs at a time. `_daemon_stopping` is set for the whole of `stop_daemon`, released when it returns whether it succeeded or failed, and while it is set:
 
 - `stop_daemon` and `start_daemon` return without doing anything. A daemon started inside a stop would be killed by that stop's timeout (subprocess), or forgotten while it runs, microphone live, under a tray that reads Stopped (bundled).
-- The tray says so: the toggle reads `⏳ Stopping…` and the status line `🟠 Status: Stopping…`. The toggle, `⚡ Stop Now (Skip Diary)` and `🔧 Setup Wizard` are disabled. An open chat window shows that she is stopping.
-- Settings can still be edited and saved, but saving offers no restart: a note says she is stopping and that the settings apply the next time she starts.
+- The tray says so: the toggle reads `⏳ Stopping…` and the status line `🟠 Status: Stopping…`. The toggle, `⚡ Stop Now (Skip Diary)` and `🔧 Setup Wizard` are disabled. A chat window, open already, brought forward or first created during the stop, shows that she is stopping and takes no message: she is still listening until the daemon exits, but she is going.
+- Settings can still be edited and saved, but saving offers no restart: a tray notification says she is stopping and that the settings apply the next time she starts. It is a notification rather than a dialog so that it does not hold the stop.
 - `show_setup_wizard` does nothing.
 - The status timer and the thread's `finished` signal leave a daemon that ends to the stop, which alone reports how it ended: `stopped`, never `crashed`.
+- The exit cleanup (`cleanup_on_exit`, run directly by the SIGINT/SIGTERM handler) asks a subprocess daemon to exit by closing its stdin, as the stop does, and waits for her diary rather than terminating her.
 
 A stop that completes marks the daemon down, tells the windows `stopped` and publishes `ASLEEP` in both modes. A stop that fails leaves the daemon marked running and the toggle offering to stop her again.
 
