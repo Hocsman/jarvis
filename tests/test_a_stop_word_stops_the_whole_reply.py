@@ -4,7 +4,9 @@
 still stops everything") promise that `interrupt()`:
 
 - stops the item playing;
-- discards every item queued before the call, without synthesising it;
+- discards every item queued before the call, so that none of them is
+  heard (nor synthesised, by an engine that synthesises one item at a
+  time);
 - abandons an item still being synthesised;
 - fires no completion callback for any of them, the end-of-reply marker
   included, because a hot window opened by an interrupted reply would
@@ -52,6 +54,7 @@ class Rig:
         self.entered = threading.Event()  # a synthesis is waiting on the gate
         self.hold_playback = False        # playback lasts until it is aborted
         self.identify_audio = False       # a stream reads whose audio it is fed (Kyutai)
+        self.prepares_ahead = False       # the next item is synthesised while one plays (Kyutai)
         self.current = ""
 
     def begin(self, text: str) -> None:
@@ -270,6 +273,7 @@ def _kyutai_rig(monkeypatch) -> Rig:
             return SimpleNamespace(frames=[])
 
     rig.identify_audio = True
+    rig.prepares_ahead = True
     monkeypatch.setitem(sys.modules, "sounddevice", rig.sounddevice())
     _silent_state(monkeypatch, tts_module.KyutaiTTS)
 
@@ -382,7 +386,11 @@ def test_a_stop_word_during_playback_cuts_the_sound_and_drops_what_follows(rig):
     assert rig.aborted, "the playing sentence was not cut"
     assert fired == []
     assert rig.heard == ["Première phrase.", "Autre réponse."]
-    assert rig.synthesised == ["Première phrase.", "Autre réponse."]
+    if not rig.prepares_ahead:
+        # An engine that prepares the next item while one plays may already
+        # have synthesised some of them when the stop word lands: it is what
+        # it does with them, not hearing them, that the contract is about.
+        assert rig.synthesised == ["Première phrase.", "Autre réponse."]
 
 
 @pytest.mark.unit

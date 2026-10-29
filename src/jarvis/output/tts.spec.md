@@ -59,7 +59,7 @@ The four engines are interchangeable to the listener. Each exposes:
 |--------|---------|
 | `enabled` | Whether the engine speaks at all |
 | `start()` | Create the worker thread. Idempotent |
-| `stop()` | Interrupt, end the worker (and Kyutai's player), wait up to two seconds for it |
+| `stop()` | Interrupt, end the worker (and Kyutai's player), wait up to two seconds for each thread. The engine counts as started until they are gone, so an item arriving meanwhile waits in the queue for the next worker |
 | `speak(text, completion_callback=None, duration_callback=None, language=None)` | Queue one item (see below). `language` is the language the user was heard in. Piper chooses its voice from it; Kokoro, Chatterbox and Kyutai accept it and ignore it |
 | `interrupt()` | Stop talking (see Interrupting) |
 | `is_speaking()` | Whether an item is being synthesised or played |
@@ -112,17 +112,17 @@ with no completion callback queues nothing. Empty text *with* a
 completion callback is the end-of-reply marker: it speaks nothing, and
 when the engine reaches it, after everything queued before it has been
 said, it fires its callback (for Kyutai, the player reaches it, so the
-marker waits for the audio of the items before it to finish playing). A streamed reply whose last sentence ended on punctuation
-leaves no tail for the callback to ride on, so it travels as a marker of
-its own (`streaming.spec.md`, "One reply is still one turn").
+marker waits for the audio of the items before it to finish playing). A
+streamed reply whose last sentence ended on punctuation leaves no tail
+for the callback to ride on, so it travels as a marker of its own
+(`streaming.spec.md`, "One reply is still one turn").
 
 **Callbacks belong to their item.** They are queued with the text and
-installed by the worker as it dequeues that item (Kyutai carries them with
-the item to its player). They are never
-engine-wide settings written by `speak`, because a reply spoken sentence
-by sentence would then fire the last chunk's callback after the first
-chunk finished and open the hot window mid-reply. An early chunk carries
-no callback at all.
+installed by the worker as it dequeues that item (Kyutai carries them
+with the item to its player). They are never engine-wide settings written
+by `speak`, because a reply spoken sentence by sentence would then fire
+the last chunk's callback after the first chunk finished and open the hot
+window mid-reply. An early chunk carries no callback at all.
 
 ## Speaking state and completion
 
@@ -179,7 +179,10 @@ talking, completely. The contract is the one `streaming.spec.md` states
 - the item playing stops within a fraction of a second (the output
   stream is aborted, and the playback loops poll every 50 ms, 100 ms for
   Chatterbox);
-- items queued before the call are discarded without being synthesised;
+- items queued before the call are discarded, so that none of them is
+  heard: Piper, Kokoro and Chatterbox never synthesise them, and Kyutai,
+  which prepares items while one plays, drops those it has already
+  prepared (see below);
 - an item still being synthesised is abandoned;
 - no completion callback fires for any of them, and the end-of-reply
   marker does not fire its callback either: an interrupted reply is
@@ -223,7 +226,10 @@ produces, so an item still being synthesised is abandoned within one frame
 of audio rather than run to its end. The player drops a prepared item whose
 count is stale without opening a stream, fires nothing for it, and stops
 the stream of the item it is playing; so the items prepared while the
-interrupted one played are never heard.
+interrupted one played are never heard. It drops an end-of-reply marker
+whose count is stale in the same way, and that is where a stop word usually
+finds the marker: the worker has handed it over while the last sentence
+still plays.
 
 ## What she owes the echo detector
 
@@ -238,7 +244,12 @@ engine owes the listener four things:
    the echo reference, and must not be used as one;
 3. the duration callback, which replaces the detector's estimate with the
    real length when the listener passed one. A streamed reply attaches it to
-   its tail only, so earlier chunks are timed by estimate;
+   its tail only, so earlier chunks are timed by estimate. Kyutai produces
+   the tail's length as soon as the tail is synthesised, which can be while
+   earlier chunks are still heard: the rate the detector derives from it (the
+   words of the whole reply over the tail's length) is then applied to those
+   chunks too, which moves its window ahead of the speech, and an utterance
+   of four words or fewer is judged by that window alone;
 4. the completion callback, which is what opens the hot window.
 
 Where no exact duration is known the detector estimates from `tts_rate`
@@ -473,8 +484,8 @@ takes what the synthesis has produced so far, waits for the stream to end,
 and fires the item's completion callback if the audio played to its end.
 The worker never waits for the player: as soon as one item's synthesis
 ends it takes up the next, so the silence between two sentences is the
-opening of a stream, a few tenths of a second, instead of a whole
-synthesis. If synthesis falls behind playback the stream plays silence
+opening of a stream, a few tenths of a second. If synthesis falls behind
+playback the stream plays silence
 until audio arrives, and the underruns are counted in the debug log. An
 item whose synthesis fails after playback began stops where its audio
 ends and fires no completion callback. `get_last_spoken_text()` names the
@@ -542,11 +553,13 @@ language. The line is not added for Kokoro or Kyutai.
 - The completion callback does not fire when the engine could not start
   or the item was interrupted.
 - An interrupt discards the items queued before it, whether the stop
-  lands during synthesis or during playback: they are never synthesised
-  and fire neither their callbacks nor the end-of-reply marker's. The
+  lands during synthesis or during playback: none of them is heard, and
+  they fire neither their callbacks nor the end-of-reply marker's. The
   item in hand is not heard (or, playing, is cut), and the items queued
   after the interrupt are spoken to the end with their callbacks, so are
-  the ones after a second stop. Held for each engine.
+  the ones after a second stop. Held for each engine. Piper, Kokoro and
+  Chatterbox also never synthesise the discarded items; Kyutai may already
+  have prepared some.
 - An interrupt landing just as the worker takes an item up is not lost,
   and an interrupt with nothing to stop swallows nothing queued after it.
 - An item that a stop word cancelled as the worker took it up publishes no
@@ -637,7 +650,10 @@ language. The line is not added for Kokoro or Kyutai.
   next, and is false once the last has been played or dropped.
 - A Kyutai interrupt drops the items queued before it without their
   callbacks, speaks the ones queued after, abandons a synthesis in flight at
-  its next frame, stops the stream being played, and never plays an item
-  that was prepared but not yet playing.
-- Stopping the Kyutai engine ends both its threads.
+  its next frame, stops the stream being played, never plays an item that
+  was prepared but not yet playing, and drops an end-of-reply marker that
+  is waiting behind the sentence being played.
+- Stopping the Kyutai engine ends both its threads, including while a
+  sentence plays with another prepared, and the engine speaks again
+  afterwards, even when an item arrived while it was stopping.
 - Kyutai marks the first sound once its output stream is running.

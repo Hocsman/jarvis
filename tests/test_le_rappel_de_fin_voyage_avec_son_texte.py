@@ -1,11 +1,11 @@
 """The completion callback belongs to its text, not to the engine.
 
-Each engine keeps `self._completion_callback` and `speak()` overwrites
-it, so the callback is a property of the engine rather than of the thing
-being said. With one utterance per reply that is invisible. With a reply
-spoken sentence by sentence it is not: the callback set for the last
-chunk would fire after the first one to finish, and that callback is what
-opens the hot window.
+Piper, Kokoro and Chatterbox keep `self._completion_callback`, so unless
+`speak()` leaves it alone the callback is a property of the engine rather
+than of the thing being said. With one utterance per reply that is
+invisible. With a reply spoken sentence by sentence it is not: the
+callback set for the last chunk would fire after the first one to finish,
+and that callback is what opens the hot window.
 
 She would open the window in the middle of her own reply and take her
 next sentence for a follow-up — which is the failure that three separate
@@ -15,6 +15,11 @@ So the queue carries `(text, completion_callback, duration_callback)`
 first, whatever an engine adds behind them (Piper adds the language), and
 the worker installs them as it dequeues. Only the worker thread ever
 writes them, and only for the item it is about to speak.
+
+Kyutai installs nothing: its callbacks travel with the item from the queue
+to the player, which fires them. It shares the tests of the queue's
+contents below; how the worker and the player carry the callbacks is
+covered in `test_kyutai_tts.py`.
 """
 
 from __future__ import annotations
@@ -65,8 +70,11 @@ def _draine(moteur):
 
 MOTEURS = ["KokoroTTS", "PiperTTS", "ChatterboxTTS", "KyutaiTTS"]
 
+# The engines whose worker installs the callbacks as it dequeues.
+MOTEURS_A_CALLBACK_INSTALLE = ["KokoroTTS", "PiperTTS", "ChatterboxTTS"]
 
-@pytest.mark.parametrize("nom", MOTEURS)
+
+@pytest.mark.parametrize("nom", MOTEURS_A_CALLBACK_INSTALLE)
 def test_the_callback_arrives_with_the_chunk_it_was_given_to(nom):
     moteur = _moteur(nom)
     fin = lambda: None
@@ -80,7 +88,7 @@ def test_the_callback_arrives_with_the_chunk_it_was_given_to(nom):
     assert [cb for _, cb in vus] == [None, None, fin]
 
 
-@pytest.mark.parametrize("nom", MOTEURS)
+@pytest.mark.parametrize("nom", MOTEURS_A_CALLBACK_INSTALLE)
 def test_the_earlier_chunks_carry_no_callback_at_all(nom):
     """The heart of it: an early chunk must not inherit the callback of a
     later one and open the hot window mid-reply."""
@@ -95,7 +103,7 @@ def test_the_earlier_chunks_carry_no_callback_at_all(nom):
     assert vus[0][1] is None
 
 
-@pytest.mark.parametrize("nom", MOTEURS)
+@pytest.mark.parametrize("nom", MOTEURS_A_CALLBACK_INSTALLE)
 def test_a_single_utterance_still_carries_its_callback(nom):
     """The control, and the path everything else in the app uses today."""
     moteur = _moteur(nom)
@@ -109,7 +117,7 @@ def test_a_single_utterance_still_carries_its_callback(nom):
     assert vus[0][1] is fin
 
 
-@pytest.mark.parametrize("nom", MOTEURS)
+@pytest.mark.parametrize("nom", MOTEURS_A_CALLBACK_INSTALLE)
 def test_the_text_is_unchanged_by_the_journey(nom):
     moteur = _moteur(nom)
 

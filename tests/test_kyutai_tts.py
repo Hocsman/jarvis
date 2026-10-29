@@ -80,6 +80,8 @@ class Stage:
         self.mid_gate = None
         self.fail_after = None    # audible frames a synthesis emits before it raises fail_midway
         self.fail_midway = None
+        self.close_gate = None    # closing a stream waits on it
+        self.closing = threading.Event()  # a stream is being closed
 
     @property
     def seconds(self):
@@ -240,7 +242,9 @@ def _install_fake_sounddevice(monkeypatch, stage):
             self.active = False
 
         def close(self):
-            pass
+            stage.closing.set()
+            if stage.close_gate is not None:
+                stage.close_gate.wait(10)
 
     module = types.ModuleType("sounddevice")
     module.OutputStream = OutputStream
@@ -1006,6 +1010,66 @@ class TestStreamingPlayback:
         alive = [t.name for t in threading.enumerate()
                  if t.is_alive() and t.name == "kyutai-player"]
         assert alive == []
+
+    def test_an_end_of_reply_marker_waiting_behind_the_audio_is_dropped_by_an_interrupt(
+            self, stage, make_engine):
+        """By the time a stop word is heard the worker has long since handed the
+        marker to the player, which holds it behind the sentence still playing:
+        that is where the interrupt has to find it."""
+        stage.hold_playback = True
+        tts = make_engine()
+        window = []
+
+        tts.speak("Dernière.")
+        assert _until(lambda: stage.streams and stage.streams[0].started)
+        tts.speak("", completion_callback=lambda: window.append("ouverte"))
+        assert _until(lambda: tts._q.empty() and tts._play_q.qsize() == 1), (
+            "the marker never reached the player")
+        tts.interrupt()
+        stage.hold_playback = False
+
+        heard, _ = _speak(tts, "Autre.")
+        assert heard
+        assert window == []
+
+    def test_stopping_the_engine_while_it_plays_drops_what_is_prepared_and_ends_both_threads(
+            self, stage, make_engine):
+        stage.hold_playback = True
+        tts = make_engine()
+        said = []
+
+        tts.speak("Une.", completion_callback=lambda: said.append("une"))
+        tts.speak("Deux.", completion_callback=lambda: said.append("deux"))
+        assert _until(lambda: "Deux." in stage.scripts)
+
+        tts.stop()
+
+        assert not tts.is_speaking()
+        assert said == []
+        assert [t for t in threading.enumerate() if t.name == "kyutai-player"] == []
+        stage.hold_playback = False
+        heard, _ = _speak(tts, "Trois.")
+        assert heard, "the engine did not speak again after being stopped"
+
+    def test_an_item_arriving_while_the_engine_stops_does_not_leave_it_wedged(
+            self, stage, make_engine):
+        stage.hold_playback = True
+        stage.close_gate = threading.Event()
+        tts = make_engine()
+
+        tts.speak("Une.")
+        assert _until(lambda: stage.streams and stage.streams[0].started)
+        stopper = threading.Thread(target=tts.stop, daemon=True)
+        stopper.start()
+        assert stage.closing.wait(5), "the player never closed its stream"
+        stage.hold_playback = False
+        time.sleep(0.2)  # the worker has gone; stop() waits for the player's stream
+        tts.speak("Deux.")
+        stage.close_gate.set()
+        stopper.join(5)
+
+        heard, _ = _speak(tts, "Trois.")
+        assert heard, "the engine did not speak again after being stopped"
 
 
 class TestGraphCapture:

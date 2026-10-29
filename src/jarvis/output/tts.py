@@ -2139,11 +2139,14 @@ class KyutaiTTS:
         except Exception:
             pass
         self._thread.join(timeout=2.0)
-        self._thread = None
         player, self._player = self._player, None
         if player is not None:
             self._play_q.put(None)
             player.join(timeout=2.0)
+        # The engine counts as started until both threads are gone, so an item
+        # arriving meanwhile waits in the queue instead of starting a worker
+        # that would see the stop flag and end at once.
+        self._thread = None
         self._stop.clear()
 
     def speak(self, text: str, completion_callback: Optional[Callable[[], None]] = None,
@@ -2251,14 +2254,13 @@ class KyutaiTTS:
                 debug_log("Kyutai TTS interrupted before synthesis", "tts")
                 return
 
+            started = time.time()
+            debug_log(f"Kyutai TTS starting synthesis: {len(text.split())} words", "tts")
             utterance = _Utterance(text, completion, epoch,
                                    int(self._PREBUFFER_SECONDS * self._sample_rate))
             self._ensure_player()
             self._play_q.put(utterance)
             handed_over = True
-
-            started = time.time()
-            debug_log(f"Kyutai TTS starting synthesis: {len(text.split())} words", "tts")
             try:
                 produced = self._synthesise(text, cancelled, utterance.add)
             except Exception as e:
@@ -2323,10 +2325,10 @@ class KyutaiTTS:
 
         interrupted = False
         # Spoken only once the audio has played to its end: every other way
-        # out (the engine that could not start, the synthesis that produced
-        # nothing or failed, the exception below, an interruption) leaves the
-        # completion callback unfired, because that callback settles a
-        # reminder as said (`reminders.spec.md`).
+        # out (the synthesis that produced nothing or failed, the exception
+        # below, an interruption) leaves the completion callback unfired,
+        # because that callback settles a reminder as said
+        # (`reminders.spec.md`).
         spoken = False
         try:
             while not utterance.ready.wait(0.05):
