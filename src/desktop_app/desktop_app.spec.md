@@ -111,6 +111,8 @@ The central controller that manages:
 
 **Where it can be shown.** A web view needs QtWebEngine, and QtWebEngine crashes the app the moment a view is shown inside a frozen macOS bundle. The memory viewer falls back to the system browser there; the dashboard cannot, because its channel to the bridge exists only inside this process. `_dashboard_available()` is therefore false without WebEngine and in a frozen macOS build. In that case the tray has no `🖥️ Dashboard` action, `show_dashboard()` does nothing, and the app starts with the floating orb instead.
 
+**Settings.** The gear in the page's top bar opens the settings window, the same one as the tray's `⚙️ Settings`, with the same offer to restart once it is saved. The page calls the bridge's `openSettings`, and once that call has returned the bridge calls the tray's `show_settings`, which it was handed when the window was built: the settings window runs modally, so it does not open inside the page's call. A bridge built without it does nothing.
+
 **Chat.** The page's `submitQuery` reaches the daemon through a submit hook that the tray wires when a daemon starts, clears when it stops or dies, and pushes to the window on every lifecycle change (`_set_chat_daemon_status`), so a dashboard opened before the daemon starts and one opened after it behave the same. With no hook wired the bridge answers with a local preview line and nothing is sent. The route depends on where the daemon runs:
 
 - **Subprocess mode**: the hook writes a `__CHAT_QUERY__:` line to the daemon's stdin. The daemon's `__CHAT__:` lines come back through `_on_chat_ipc_line`, which feeds the dashboard as well as the chat window.
