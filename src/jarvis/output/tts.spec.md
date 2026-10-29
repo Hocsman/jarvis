@@ -59,7 +59,7 @@ The four engines are interchangeable to the listener. Each exposes:
 |--------|---------|
 | `enabled` | Whether the engine speaks at all |
 | `start()` | Create the worker thread. Idempotent |
-| `stop()` | Interrupt, end the worker, wait up to two seconds for it |
+| `stop()` | Interrupt, end the worker (and Kyutai's player), wait up to two seconds for it |
 | `speak(text, completion_callback=None, duration_callback=None, language=None)` | Queue one item (see below). `language` is the language the user was heard in. Piper chooses its voice from it; Kokoro, Chatterbox and Kyutai accept it and ignore it |
 | `interrupt()` | Stop talking (see Interrupting) |
 | `is_speaking()` | Whether an item is being synthesised or played |
@@ -95,7 +95,10 @@ duration_callback)`, then the engine's own fields: for Piper the
 language, and last in every engine the count of interruptions at the
 moment the item was queued (see "Interrupting"). The language belongs to
 the item, not to the engine: sentences of two replies in two languages
-can wait in the queue together, each spoken in its own voice.
+can wait in the queue together, each spoken in its own voice. Kyutai has a
+second thread, the player, that plays what the worker has synthesised, in
+the same order (see "Kyutai"); for it "the worker speaks the item" reads
+"the worker synthesises it and the player plays it".
 
 **Text is processed when it is queued.** `_preprocess_for_speech`
 replaces links with a spoken description of the domain and strips
@@ -107,13 +110,15 @@ processed text is what the worker speaks and what
 **Empty text is dropped, unless it carries a callback.** Whitespace
 with no completion callback queues nothing. Empty text *with* a
 completion callback is the end-of-reply marker: it speaks nothing, and
-when the worker reaches it, after everything queued before it, it fires
-its callback. A streamed reply whose last sentence ended on punctuation
+when the engine reaches it, after everything queued before it has been
+said, it fires its callback (for Kyutai, the player reaches it, so the
+marker waits for the audio of the items before it to finish playing). A streamed reply whose last sentence ended on punctuation
 leaves no tail for the callback to ride on, so it travels as a marker of
 its own (`streaming.spec.md`, "One reply is still one turn").
 
 **Callbacks belong to their item.** They are queued with the text and
-installed by the worker as it dequeues that item. They are never
+installed by the worker as it dequeues that item (Kyutai carries them with
+the item to its player). They are never
 engine-wide settings written by `speak`, because a reply spoken sentence
 by sentence would then fire the last chunk's callback after the first
 chunk finished and open the hot window mid-reply. An early chunk carries
@@ -126,7 +131,11 @@ that item is finished, interrupted or abandoned. It describes the item
 in hand. It is false while the worker is idle, in the instant between
 two items, and for items still waiting in the queue. The end of a reply
 is therefore signalled by the completion callback, never inferred from
-`is_speaking()` going false.
+`is_speaking()` going false. Kyutai takes the next item up while the
+current one is still playing, so for it the item in hand is the earliest
+one not yet played: `is_speaking()` stays true from the first item taken up
+until the last one has been played, interrupted or abandoned, with no
+instant between two items.
 
 **The completion callback fires if and only if the item's audio played
 to its end.** It does not fire when the engine could not initialise,
@@ -138,8 +147,11 @@ recording that she said it. The end-of-reply marker is the one item that
 fires without playing anything; it has no audio to play.
 
 **The duration callback** receives the exact length of the item's audio
-in seconds, computed from the synthesised samples, after synthesis and
-before playback starts. It does not fire when nothing was synthesised.
+in seconds, computed from the synthesised samples, once synthesis has
+ended. Piper, Kokoro and Chatterbox play after synthesising, so it arrives
+before playback starts. Kyutai plays while it synthesises, so it arrives
+during playback, or before it when the item was prepared while the previous
+one played. It does not fire when nothing was synthesised.
 
 **Speaking state.** When an item starts, the engine publishes SPEAKING
 through the shared state (`state.spec.md`). Publishing never raises, so
@@ -205,9 +217,13 @@ engine does takes the published state out of SPEAKING: the listener, which
 heard the stop, publishes IDLE right after calling `interrupt()`
 (`state.spec.md`).
 
-Kyutai compares the count at every frame the model produces as well, so an
-item still being synthesised is abandoned within one frame of audio rather
-than run to its end.
+Kyutai applies the count in both its threads. The worker drops a stale item
+before preparing it and compares the count at every frame the model
+produces, so an item still being synthesised is abandoned within one frame
+of audio rather than run to its end. The player drops a prepared item whose
+count is stale without opening a stream, fires nothing for it, and stops
+the stream of the item it is playing; so the items prepared while the
+interrupted one played are never heard.
 
 ## What she owes the echo detector
 
@@ -244,8 +260,9 @@ can open it straight away.
 
 ## Audio output
 
-Each item is synthesised whole, then played. Piper, Kokoro and Kyutai play
-it through a `sounddevice.OutputStream` (mono; Piper in `int16` at the
+Piper, Kokoro and Chatterbox synthesise each item whole, then play it;
+Kyutai plays an item as it is synthesised (see "Kyutai"). Piper, Kokoro and
+Kyutai play through a `sounddevice.OutputStream` (mono; Piper in `int16` at the
 voice's own sample rate, Kokoro and Kyutai in `float32` at 24 kHz) in
 blocks of 1024 frames so an abort lands quickly. Chatterbox writes a temporary WAV
 and plays it through the pygame mixer. Opening, starting, aborting and
@@ -440,10 +457,28 @@ single-speaker script and conditioned on the voice, with the sampling
 temperature and guidance coefficient the model was released with (fixed,
 not settings). Each synthesis builds the model's generation state afresh,
 CUDA graphs included, so every sentence pays a set-up cost on top of the
-audio itself. Frames are decoded to audio as the model produces them, and
-the first audible frame arrives about a second in. Like the other engines
-the item is played once all of it exists, so the exact duration is known
-before playback starts.
+audio itself. Frames are decoded to audio as the model produces them: the
+first audible frame arrives a second or less after the item is taken up,
+whatever its length, and the model then produces audio two to three times
+faster than it is played. The exact duration is known once the last frame
+is decoded.
+
+**Playback.** The audio is played as it is produced, not once all of it
+exists, and the next item is prepared while the current one plays. A second
+thread, the player, started with the first item, takes the synthesised
+items in the order the worker took them up. For each it waits until about a
+quarter of a second of audio has been produced (or synthesis has ended, for
+an item shorter than that), then opens an output stream whose callback
+takes what the synthesis has produced so far, waits for the stream to end,
+and fires the item's completion callback if the audio played to its end.
+The worker never waits for the player: as soon as one item's synthesis
+ends it takes up the next, so the silence between two sentences is the
+opening of a stream, a few tenths of a second, instead of a whole
+synthesis. If synthesis falls behind playback the stream plays silence
+until audio arrives, and the underruns are counted in the debug log. An
+item whose synthesis fails after playback began stops where its audio
+ends and fires no completion callback. `get_last_spoken_text()` names the
+item whose playback began last.
 
 **Failure.** Initialisation is attempted once and its outcome is kept for
 the life of the engine. A `moshi` package (or one of its dependencies) that
@@ -585,9 +620,24 @@ language. The line is not added for Kokoro or Kyutai.
   repository name (a local path, a URL, a path going up) never reaches the
   network.
 - Kyutai's audio is played at the codec's rate, the duration callback
-  gets its exact length before playback, and the completion callback
-  fires only after the audio played to its end.
+  gets its exact length once synthesis has ended, and the completion
+  callback fires only after the audio played to its end.
+- Kyutai starts playing before synthesis has ended, once a short stretch of
+  audio is ready, and an item shorter than that plays when its synthesis
+  ends.
+- Kyutai prepares the next item while the current one plays: its synthesis
+  begins before the current one has finished playing, the items are heard in
+  the order they were queued, the completion callbacks fire in that order
+  each after its own audio, and the end-of-reply marker fires after the last
+  of them has played.
+- A Kyutai stream that runs out of audio plays silence until more arrives
+  instead of ending, an item whose synthesis fails midway fires no
+  completion callback, and an item that produced no audio opens no stream.
+- `is_speaking()` stays true across the hand-over from one Kyutai item to the
+  next, and is false once the last has been played or dropped.
 - A Kyutai interrupt drops the items queued before it without their
-  callbacks, speaks the ones queued after, and abandons a synthesis in
-  flight at its next frame.
+  callbacks, speaks the ones queued after, abandons a synthesis in flight at
+  its next frame, stops the stream being played, and never plays an item
+  that was prepared but not yet playing.
+- Stopping the Kyutai engine ends both its threads.
 - Kyutai marks the first sound once its output stream is running.

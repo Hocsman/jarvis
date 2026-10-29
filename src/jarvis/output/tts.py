@@ -1831,6 +1831,47 @@ class _ThreadLocalCapture:
         return self._cuda.graph(*args, **kwargs)
 
 
+class _Utterance:
+    """An item on its way from the synthesis to the speakers (Kyutai).
+
+    The worker adds the audio as the model produces it; the player's stream
+    takes it from the other end. The thread that synthesises writes
+    ``samples``, ``failed`` and the queue; the player reads them.
+    """
+
+    def __init__(self, text: str, completion: Optional[Callable[[], None]],
+                 epoch: int, prebuffer_samples: int) -> None:
+        self.text = text
+        self.completion = completion
+        self.epoch = epoch
+        self.chunks: queue.Queue = queue.Queue()  # float32 arrays, then None
+        self.samples = 0                # produced so far
+        self.ready = threading.Event()  # a first stretch is buffered, or synthesis is over
+        self.failed = False             # synthesis raised after it began
+        self.consumed = False           # the stream has taken the last sample
+        self._prebuffer = prebuffer_samples
+
+    def add(self, chunk) -> None:
+        self.chunks.put(chunk)
+        self.samples += len(chunk)
+        if self.samples >= self._prebuffer:
+            self.ready.set()
+
+    def close(self) -> None:
+        """Synthesis is over, however it ended."""
+        self.chunks.put(None)
+        self.ready.set()
+
+
+class _EndOfReply:
+    """The end-of-reply marker on its way to the player, where it waits for
+    the audio queued before it."""
+
+    def __init__(self, completion: Callable[[], None], epoch: int) -> None:
+        self.completion = completion
+        self.epoch = epoch
+
+
 class KyutaiTTS:
     """TTS implementation using Kyutai TTS 1.6B (English and French).
 
@@ -1840,13 +1881,19 @@ class KyutaiTTS:
     paid, which the warm-up does at startup. Model and voice download once
     from Hugging Face (``kyutai/tts-1.6b-en_fr``, ``kyutai/tts-voices``).
 
-    Mirrors :class:`KokoroTTS` (queue, worker, playback, callbacks). It
-    differs where the model does: it needs CUDA, and a synthesis in flight
-    is abandoned at the model's next frame rather than run to its end.
+    Mirrors :class:`KokoroTTS` (queue, worker, callbacks). It differs where
+    the model does: it needs CUDA; a synthesis in flight is abandoned at the
+    model's next frame rather than run to its end; and it plays an item as
+    it is synthesised, through a second thread (the player), while the worker
+    goes on to prepare the next one.
     """
 
     # A digit rather than a word: it has a reading in both languages.
     _WARMUP_TEXT = "1."
+
+    # Audio to have in hand before a stream opens, so a stretch the model
+    # produces slowly does not stutter the first words.
+    _PREBUFFER_SECONDS = 0.25
 
     # What the model was released with; settings of the model, not of Yuba.
     _CODEBOOKS = 32
@@ -1862,10 +1909,16 @@ class KyutaiTTS:
         self._stop = threading.Event()
         self._is_speaking = threading.Event()
         self._last_spoken_text: str = ""
-        self._completion_callback: Optional[Callable[[], None]] = None
-        self._duration_callback: Optional[Callable[[float], None]] = None
         # Interruptions so far; an item is live while its count is current.
         self._epoch = 0
+
+        # The player takes what the worker has synthesised, in order. The
+        # engine is speaking while any item taken up has not been played,
+        # interrupted or abandoned.
+        self._play_q: queue.Queue = queue.Queue()
+        self._player: Optional[threading.Thread] = None
+        self._pending = 0
+        self._pending_lock = threading.Lock()
 
         # Model (lazy loaded).
         self._model = None
@@ -1995,7 +2048,7 @@ class KyutaiTTS:
         # discarded, and a failure leaves the model loaded: it surfaces at
         # speak time, as without the warm-up.
         try:
-            self._synthesise(self._WARMUP_TEXT, lambda: False)
+            self._synthesise(self._WARMUP_TEXT, lambda: False, lambda chunk: None)
             debug_log("Kyutai TTS warm-up complete", "tts")
         except Exception as e:
             debug_log(f"Kyutai TTS warm-up failed: {e}", "tts")
@@ -2020,16 +2073,18 @@ class KyutaiTTS:
             self._initialized = True
             return self._model is not None
 
-    def _synthesise(self, text: str, cancelled: Callable[[], bool]):
-        """The audio of ``text`` as float32 samples, or None when
-        ``cancelled`` turned true. Frames are decoded as the model produces
-        them; the first audible one arrives about a second in."""
+    def _synthesise(self, text: str, cancelled: Callable[[], bool],
+                    on_audio: Callable[[Any], None]) -> Optional[int]:
+        """Synthesise ``text``, handing each decoded frame to ``on_audio`` as
+        float32 samples the moment the model produces it (the first audible
+        one arrives a second or less in). Returns how many samples were
+        produced, or None when ``cancelled`` turned true."""
         import numpy as np
 
         model = self._model
         entries = model.prepare_script([text], padding_between=1)
         conditions = model.make_condition_attributes([self._voice_path], cfg_coef=self._GUIDANCE)
-        chunks = []
+        produced = [0]
 
         def on_frame(frame):
             if cancelled():
@@ -2037,14 +2092,16 @@ class KyutaiTTS:
             # Frames still carrying -1 are the model's lead-in, not audio.
             if (frame != -1).all():
                 pcm = model.mimi.decode(frame[:, 1:, :]).cpu().numpy()
-                chunks.append(np.clip(pcm[0, 0], -1, 1).astype(np.float32))
+                chunk = np.clip(pcm[0, 0], -1, 1).astype(np.float32)
+                produced[0] += len(chunk)
+                on_audio(chunk)
 
         try:
             with model.mimi.streaming(1):
                 model.generate([entries], [conditions], on_frame=on_frame)
         except _SynthesisCancelled:
             return None
-        return np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)
+        return produced[0]
 
     def start(self) -> None:
         if not self.enabled or self._thread is not None:
@@ -2083,6 +2140,10 @@ class KyutaiTTS:
             pass
         self._thread.join(timeout=2.0)
         self._thread = None
+        player, self._player = self._player, None
+        if player is not None:
+            self._play_q.put(None)
+            player.join(timeout=2.0)
         self._stop.clear()
 
     def speak(self, text: str, completion_callback: Optional[Callable[[], None]] = None,
@@ -2096,7 +2157,7 @@ class KyutaiTTS:
             return
         # Empty text with a callback is the end-of-reply marker: it speaks
         # nothing and fires its callback once everything queued before it
-        # has been said.
+        # has been played.
         if self._thread is None:
             self.start()
         # The callbacks travel with their text, and so does the count of
@@ -2119,7 +2180,29 @@ class KyutaiTTS:
                 except Exception:
                     pass
 
+    def _begin(self) -> None:
+        """An item has been taken up: the engine is speaking until it has been
+        played, interrupted or abandoned."""
+        with self._pending_lock:
+            self._pending += 1
+            self._is_speaking.set()
+
+    def _end(self) -> None:
+        """An item is over, however it ended."""
+        with self._pending_lock:
+            self._pending = max(0, self._pending - 1)
+            if self._pending == 0:
+                self._is_speaking.clear()
+
+    def _ensure_player(self) -> None:
+        if self._player is None or not self._player.is_alive():
+            self._player = threading.Thread(target=self._play_run, daemon=True,
+                                            name="kyutai-player")
+            self._player.start()
+
     def _run(self) -> None:
+        """The worker: takes the items up one at a time and synthesises them,
+        without waiting for the player to finish the one before."""
         while not self._stop.is_set():
             try:
                 texte, _fin, _duree, epoch = self._q.get(timeout=0.5)
@@ -2129,42 +2212,34 @@ class KyutaiTTS:
                 debug_log("Kyutai TTS dropped an item queued before an interrupt", "tts")
                 continue
             if not texte:
+                # The end-of-reply marker waits behind the audio queued before it.
                 if _fin is not None:
-                    try:
-                        _fin()
-                    except Exception as e:
-                        debug_log(f"TTS end-of-reply callback error: {e}", "tts")
+                    self._ensure_player()
+                    self._play_q.put(_EndOfReply(_fin, epoch))
                 continue
-            self._completion_callback = _fin
-            self._duration_callback = _duree
             try:
-                self._speak_once(texte, epoch)
+                self._prepare(texte, _fin, _duree, epoch)
             except Exception as e:
-                debug_log(f"Kyutai TTS error in _speak_once: {e}", "tts")
-                continue
+                debug_log(f"Kyutai TTS error in _prepare: {e}", "tts")
 
-    def _speak_once(self, text: str, epoch: int) -> None:
+    def _prepare(self, text: str, completion: Optional[Callable[[], None]],
+                 duration: Optional[Callable[[float], None]], epoch: int) -> None:
+        """Take an item up and synthesise it, handing its audio to the player
+        as it is produced. Once the player has the item it is the one that
+        ends it."""
         def cancelled() -> bool:
             return self._epoch != epoch
 
-        self._is_speaking.set()
-        self._last_spoken_text = text
-        interrupted = False
-        # Spoken only once the audio has played to its end: every other way
-        # out (the engine that could not start, the synthesis that produced
-        # nothing, the exception below, an interruption) leaves the
-        # completion callback unfired, because that callback settles a
-        # reminder as said (`reminders.spec.md`).
-        spoken = False
-
-        # SPEAKING goes out only for an item that is still live: a stop word
-        # that landed since the worker took it up has been answered with IDLE
-        # (`state.spec.md`), and a SPEAKING after it would stay on the orb
-        # until the next wake word.
-        if not cancelled():
-            self._notify_speaking_state(True)
-
+        self._begin()
+        handed_over = False
         try:
+            # SPEAKING goes out only for an item that is still live: a stop word
+            # that landed since the worker took it up has been answered with IDLE
+            # (`state.spec.md`), and a SPEAKING after it would stay on the orb
+            # until the next wake word.
+            if not cancelled():
+                self._notify_speaking_state(True)
+
             if not self._ensure_initialized():
                 if self._init_error:
                     print(f"  ⚠️ Kyutai TTS: {self._init_error}", flush=True)
@@ -2176,49 +2251,127 @@ class KyutaiTTS:
                 debug_log("Kyutai TTS interrupted before synthesis", "tts")
                 return
 
-            import sounddevice as sd
+            utterance = _Utterance(text, completion, epoch,
+                                   int(self._PREBUFFER_SECONDS * self._sample_rate))
+            self._ensure_player()
+            self._play_q.put(utterance)
+            handed_over = True
 
-            start_time = time.time()
+            started = time.time()
             debug_log(f"Kyutai TTS starting synthesis: {len(text.split())} words", "tts")
+            try:
+                produced = self._synthesise(text, cancelled, utterance.add)
+            except Exception as e:
+                # Whatever was already produced plays to its end, then stops:
+                # nothing is said as spoken.
+                utterance.failed = True
+                debug_log(f"Kyutai TTS error: {e}", "tts")
+                print(f"  ⚠️ Kyutai TTS error: {e}", flush=True)
+                return
+            finally:
+                utterance.close()
 
-            full_audio = self._synthesise(text, cancelled)
-            if full_audio is None or cancelled():
+            if produced is None or cancelled():
                 debug_log("Kyutai TTS synthesis abandoned", "tts")
                 return
-            if len(full_audio) == 0:
+            if produced == 0:
                 debug_log("Kyutai TTS: no audio generated", "tts")
                 return
 
-            exact_duration = len(full_audio) / self._sample_rate
+            exact_duration = produced / self._sample_rate
             debug_log(
                 f"Kyutai TTS synthesis complete: {exact_duration:.2f}s of audio "
-                f"in {time.time() - start_time:.2f}s",
+                f"in {time.time() - started:.2f}s",
                 "tts",
             )
-
-            if self._duration_callback is not None:
+            if duration is not None:
                 try:
-                    self._duration_callback(exact_duration)
+                    duration(exact_duration)
                 except Exception as e:
                     debug_log(f"Kyutai TTS duration callback error: {e}", "tts")
+        except Exception as e:
+            debug_log(f"Kyutai TTS error: {e}", "tts")
+            print(f"  ⚠️ Kyutai TTS error: {e}", flush=True)
+        finally:
+            if not handed_over:
+                self._end()
 
-            # Stream playback in small blocks so interruption is responsive.
-            play_position = [0]
+    def _play_run(self) -> None:
+        """The player: plays what the worker has synthesised, one item at a
+        time and in the order the worker took them up."""
+        while True:
+            thing = self._play_q.get()
+            if thing is None:
+                return
+            if isinstance(thing, _EndOfReply):
+                if thing.epoch != self._epoch:
+                    debug_log("Kyutai TTS dropped the end-of-reply marker of an interrupted reply", "tts")
+                    continue
+                try:
+                    thing.completion()
+                except Exception as e:
+                    debug_log(f"TTS end-of-reply callback error: {e}", "tts")
+                continue
+            try:
+                self._play(thing)
+            except Exception as e:
+                debug_log(f"Kyutai TTS error in _play: {e}", "tts")
+
+    def _play(self, utterance: "_Utterance") -> None:
+        def cancelled() -> bool:
+            return self._epoch != utterance.epoch
+
+        interrupted = False
+        # Spoken only once the audio has played to its end: every other way
+        # out (the engine that could not start, the synthesis that produced
+        # nothing or failed, the exception below, an interruption) leaves the
+        # completion callback unfired, because that callback settles a
+        # reminder as said (`reminders.spec.md`).
+        spoken = False
+        try:
+            while not utterance.ready.wait(0.05):
+                if cancelled():
+                    return
+            if cancelled():
+                debug_log("Kyutai TTS dropped an item prepared but not yet playing", "tts")
+                return
+            if utterance.samples == 0:
+                return
+
+            import numpy as np
+            import sounddevice as sd
+
+            self._last_spoken_text = utterance.text
+            started = time.time()
             blocksize = 1024
+            leftover = [np.zeros(0, dtype=np.float32)]
+            underruns = [0]
 
             def audio_callback(outdata, frames, time_info, status):
                 if cancelled():
                     raise sd.CallbackAbort()
-                start = play_position[0]
-                end = start + frames
-                chunk = full_audio[start:end]
-                if len(chunk) < frames:
-                    outdata[:len(chunk), 0] = chunk
-                    outdata[len(chunk):, 0] = 0
-                    raise sd.CallbackStop()
-                else:
-                    outdata[:, 0] = chunk
-                play_position[0] = end
+                filled = 0
+                while filled < frames:
+                    if len(leftover[0]) == 0:
+                        if utterance.consumed:
+                            break
+                        try:
+                            piece = utterance.chunks.get_nowait()
+                        except queue.Empty:
+                            underruns[0] += 1  # synthesis is behind: play silence
+                            break
+                        if piece is None:
+                            utterance.consumed = True
+                            break
+                        leftover[0] = piece
+                    take = min(frames - filled, len(leftover[0]))
+                    outdata[filled:filled + take, 0] = leftover[0][:take]
+                    leftover[0] = leftover[0][take:]
+                    filled += take
+                if filled < frames:
+                    outdata[filled:, 0] = 0
+                    if utterance.consumed:
+                        raise sd.CallbackStop()
 
             try:
                 with self._audio_lock:
@@ -2255,10 +2408,11 @@ class KyutaiTTS:
                             pass
                         self._audio_stream = None
 
-            spoken = not (interrupted or cancelled())
+            spoken = utterance.consumed and not (
+                interrupted or cancelled() or utterance.failed)
             debug_log(
-                f"Kyutai TTS complete: actual={time.time() - start_time:.2f}s "
-                f"(audio={exact_duration:.2f}s), spoken={spoken}",
+                f"Kyutai TTS played: {time.time() - started:.2f}s, spoken={spoken}, "
+                f"underruns={underruns[0]}",
                 "tts",
             )
 
@@ -2266,11 +2420,10 @@ class KyutaiTTS:
             debug_log(f"Kyutai TTS error: {e}", "tts")
             print(f"  ⚠️ Kyutai TTS error: {e}", flush=True)
         finally:
-            self._is_speaking.clear()
-            callback, self._completion_callback = self._completion_callback, None
-            if callback is not None and spoken:
+            self._end()
+            if spoken and utterance.completion is not None:
                 try:
-                    callback()
+                    utterance.completion()
                 except Exception as e:
                     print(f"  ⚠️ Kyutai TTS completion callback error: {e}", flush=True)
 
