@@ -133,3 +133,46 @@ class TestStats:
 # unit-tested here because instantiating QWebEngineView under headless
 # pytest is unstable; the parse + delegate path is verified manually via
 # the standalone round-trip and exercised live in the app.
+
+
+class TestTheGearOpensTheSettings:
+    """The gear in the page's top bar opens the settings window, as the
+    tray's action does (``desktop_app.spec.md``, "Dashboard")."""
+
+    @pytest.mark.unit
+    def test_the_settings_open_once_the_pages_call_has_returned(self, _qapp) -> None:
+        from desktop_app.dashboard.bridge import DashboardBridge
+
+        opened = []
+        b = DashboardBridge(open_settings=lambda: opened.append(True))
+
+        b.openSettings()
+        assert opened == []      # a modal window is not opened inside the page's call
+        _qapp.processEvents()
+
+        assert opened == [True]
+
+    @pytest.mark.unit
+    def test_with_no_host_to_open_them_the_gear_does_nothing(self, _qapp) -> None:
+        b = _make_bridge()
+
+        b.openSettings()
+        _qapp.processEvents()
+
+    @pytest.mark.unit
+    def test_the_page_can_reach_it(self) -> None:
+        """QWebChannel publishes slots only: a plain method would leave the
+        page's call, and the gear, doing nothing."""
+        from desktop_app.dashboard.bridge import DashboardBridge
+
+        assert DashboardBridge.staticMetaObject.indexOfSlot("openSettings()") >= 0
+
+    @pytest.mark.unit
+    def test_the_gear_in_the_page_asks_for_them(self) -> None:
+        from pathlib import Path
+
+        page = (Path(__file__).resolve().parent.parent / "src" / "desktop_app"
+                / "dashboard" / "index.html").read_text(encoding="utf-8")
+
+        assert 'id="settings-gear"' in page
+        assert "openSettings" in page

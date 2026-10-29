@@ -2396,7 +2396,9 @@ class JarvisSystemTray:
             return
         if self.dashboard_window is None:
             from desktop_app.dashboard_window import DashboardWindow
-            self.dashboard_window = DashboardWindow(submit_fn=self._dashboard_submit_fn)
+            self.dashboard_window = DashboardWindow(
+                submit_fn=self._dashboard_submit_fn, open_settings=self.show_settings
+            )
         else:
             self.dashboard_window.set_submit_fn(self._dashboard_submit_fn)
         self.dashboard_window.show()
