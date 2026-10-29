@@ -168,7 +168,9 @@ It holds a header and a ring of 24 frames of 512 by 512 RGB pixels.
   again; a new renderer reuses a segment a front end still holds.
 - **Only its user opens it.** On Linux the segments of every user live in one
   directory, so a segment that does not belong to the user, or that others may
-  open, is used by neither side. Windows keeps such names per session.
+  open, is used by neither side, and a reader passes over one it cannot map (an
+  empty one, as a renderer killed while creating it leaves). Windows keeps such
+  names per session.
 - **Readers never hold the renderer up**, and the renderer never waits for a
   reader. Twenty-four slots hold about one second of frames, more than the
   delay keeps ahead of the clock.
@@ -270,7 +272,8 @@ is checked by hand.
 - `tests/test_face_frames.py`: the shared memory between two processes, the
   newest frame due, nothing early, torn copies thrown away, cuts withdrawing
   and refusing frames (two cuts included), the heartbeats, a reader that
-  outlives its renderer and finds the next one.
+  outlives its renderer and finds the next one, a segment it cannot map passed
+  over.
 - `tests/test_face_process.py`: the renderer with Ditto faked; messages read,
   cut and the end of the daemon, frames published at their stamps, warm-up
   frames and frames left inside Ditto at a rest never shown, frames after a

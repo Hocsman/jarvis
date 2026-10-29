@@ -301,6 +301,13 @@ class TestTheFacePage:
 
         assert fm is not None and fm.category == "face" and fm.field_type == field_type
 
+    def test_the_framings_offered_are_the_ones_the_renderer_draws(self):
+        from jarvis.output.face.process import CROP
+
+        offered = [value for value, _ in self._field("face_framing").choices]
+
+        assert sorted(offered) == sorted(CROP)
+
     def test_every_framing_offered_is_one_the_settings_keep(self, tmp_path, monkeypatch):
         from jarvis.config import load_settings
 

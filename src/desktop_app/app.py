@@ -2541,7 +2541,9 @@ class JarvisSystemTray:
             debug_log(f"failed to connect dictation history: {e}", "desktop")
 
     def show_face_window(self) -> None:
-        """Show the face window and bring it to front."""
+        """Show the face window and bring it to front, restored if minimised."""
+        if self.face_window.isMinimized():
+            self.face_window.showNormal()
         self.face_window.show()
         self.face_window.raise_()
         self.face_window.activateWindow()

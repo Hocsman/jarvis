@@ -1010,7 +1010,7 @@ class FaceWindow(QWidget):
         if self._faces.currentWidget() is not current:
             self._faces.setCurrentWidget(current)
             debug_log("face window: her talking face shown" if current is self.talking_face
-                      else "face window: no frame for a second, the drawn face shown", "desktop")
+                      else "face window: no recent frame of hers, the drawn face shown", "desktop")
 
     def _watch(self, on_screen: bool) -> None:
         if on_screen and not self._frame_timer.isActive():

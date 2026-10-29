@@ -182,7 +182,7 @@ Jarvis starts listening automatically — just say "Jarvis" and talk!
 - **Fast Stop** - Use the tray action `⚡ Stop Now (Skip Diary)` to release local model resources quickly when you need your machine back immediately.
 - **Dictation Mode** - Free, offline alternative to WisprFlow — hold a hotkey, speak, release to paste text into any app
 - **MCP Integration** - Connect to thousands of external tools (Home Assistant, GitHub, Slack, etc.)
-- **A Face That Speaks** - Optional: a portrait you choose, animated on your own GPU so its lips follow her words closely enough to lip-read, shown in the tray's face window. Off by default; needs the Kyutai voice and an NVIDIA GPU (see Text-to-Speech under Configuration)
+- **A Face That Speaks** - Optional: a portrait you choose, animated on your own GPU so its lips follow her words closely enough to lip-read, shown in the tray's face window. Off by default; needs a source install, the Kyutai voice and an NVIDIA GPU (see Text-to-Speech under Configuration)
 
 ## System Requirements
 
@@ -527,11 +527,14 @@ Then turn it on under **⚙️ Settings → 👤 Visage**, or in `config.json`:
 ```json
 { "tts_engine": "kyutai", "face_enabled": true, "face_portrait_path": "C:/Users/you/Pictures/portrait.png" }
 ```
-- Restart Jarvis, then open **👤 Show Face** from the tray. The face is drawn only while that window is on screen: closed or minimised, the GPU does no work for it.
+- Restart Jarvis, then open **👤 Show Face** from the tray. The face is drawn only while that window is open and not minimised: close or minimise it and the GPU stops drawing within two seconds. A window left open on a locked screen still counts as open, so close it when you step away.
+- It takes about 1.2 GB of VRAM on top of Kyutai's, held while Jarvis runs, whether the window is open or not.
 - While the window is open, her voice starts about three quarters of a second later than usual: the lips are drawn from her audio before you hear it.
 - The portrait must show one face, seen from the front. `face_framing` picks `head` (the whole head, the default) or `face` (closer).
 - The first start downloads about 2.2 GB of model files from Hugging Face (`digital-avatar/ditto-talkinghead`, no token sent) and builds GPU engines for your card, which takes a minute or two. Later starts take 10 to 25 seconds.
 - Privacy: the portrait is read on your machine and never copied or sent anywhere. Her audio and the frames stay in memory, and nothing is written to disk.
+- If the window shows the drawn face instead of the portrait, the face did not start: the log viewer says why (the voice is not Kyutai, the portrait was not found, a package is missing).
+- Known limitation: measured on an RTX 5070 Ti next to Kyutai and Whisper. On a slower card the face skips what it cannot draw in time, and her lips then pause or close while she keeps speaking.
 - Licences: Ditto is Apache-2.0. The face detector and landmark model it measures the portrait with (`det_10g.onnx`, `2d106det.onnx`) come from [InsightFace](https://github.com/deepinsight/insightface), which releases its pretrained models for non-commercial research only.
 
 **Chatterbox** - AI voice with emotion control (requires running from source). Not installed by default: `chatterbox-tts` pins `torch==2.6.0`, which conflicts with the newer CUDA torch builds Kokoro uses on recent GPUs. To use it, install it by hand first:

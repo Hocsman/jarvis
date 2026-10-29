@@ -57,6 +57,16 @@ class TestReading:
     def test_no_renderer_means_no_frame(self, reader):
         assert reader.read(NOW) is None
 
+    def test_a_segment_that_cannot_be_mapped_is_not_used(self, monkeypatch):
+        """On POSIX, an empty segment (a renderer killed while creating it,
+        or one another user made) cannot be mapped at all."""
+        def unmappable(*args, **kwargs):
+            raise ValueError("cannot mmap an empty file")
+
+        monkeypatch.setattr(fr.shared_memory, "SharedMemory", unmappable)
+
+        assert FrameReader("jarvis_face_test_empty").read(NOW) is None
+
     def test_a_renderer_that_stopped_beating_shows_nothing(self, writer, reader):
         writer.publish(_frame(1), NOW, 0)
 

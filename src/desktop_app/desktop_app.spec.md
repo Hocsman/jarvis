@@ -130,16 +130,18 @@ Two hosts embed it. `OrbWindow` is the floating instance: frameless, translucent
 
 ### Face
 
-`FaceWindow` (`face_widget.py`) opens from the tray action `👤 Show Face`, and only from there: with the talking face enabled or not, it never opens by itself. It shows one of two faces, never both.
+`FaceWindow` (`face_widget.py`) opens from the tray action `👤 Show Face`, which also restores it when it is minimised, and only from there: with the talking face enabled or not, it never opens by itself. It shows one of two faces, never both.
 
-- **Her talking face**, while a renderer draws one (`src/jarvis/output/face/face.spec.md`): the frame `read_face_frame()` returns, imported from `jarvis`, scaled to fit the window with its proportions kept and centred on black. The window shows it from the first frame it reads, and goes back to the drawn face once it has read no frame for one second, which is what a renderer that is not running, has failed or has stopped looks like from here.
+- **Her talking face**, while a renderer draws one (`src/jarvis/output/face/face.spec.md`): the frame `read_face_frame()` returns, imported from `jarvis`, scaled to fit the window with its proportions kept and centred on black. The window shows a frame for as long as it is less than one second old, and goes back to the drawn face once it has none that recent. A live renderer's newest frame is never older than its delay, the hold after a cut included (`face.spec.md`, "Interrupting"), so an older frame, or none, is what a renderer that is not running, has failed, has stopped or has stalled looks like from here, and so is a frame it drew before it last rested.
 - **The drawn face** otherwise: the low-poly face that follows the assistant's state (see Assistant State).
 
-**Reading is watching.** While the window is on screen it reads a frame sixty times a second, so each frame shows within a refresh of its moment. Hidden or minimised, it reads nothing. Each read is the heartbeat that tells the renderer someone is watching (`face.spec.md`, "Watching and resting"), so within two seconds of the window leaving the screen the GPU rests and her voice is no longer held back for the face.
+A read that fails counts as no frame: it runs in a Qt slot, where an exception would end the whole app, so the window stays up, shows the drawn face and logs the failure once.
+
+**Reading is watching.** While the window is on screen, which means shown and not minimised, it reads a frame sixty times a second, so each frame shows within a refresh of its moment. Hidden or minimised, it reads nothing. A window left open on a locked screen or on another desktop is still on screen. Each read is the heartbeat that tells the renderer someone is watching (`face.spec.md`, "Watching and resting"), so within two seconds of the window leaving the screen the GPU rests and her voice is no longer held back for the face.
 
 **Nothing is kept.** The window holds the frame on screen in memory and writes nothing anywhere: no frame, no recording.
 
-`talking_face.py` holds the view that reads and paints the frames. It imports from `jarvis` the reader `face.spec.md` puts there for a front end, and nothing of the renderer. It imports it on the first read, so the tray, which imports the window at startup, does not load numpy for a face nobody opened.
+`talking_face.py` holds the view that reads and paints the frames. It imports from `jarvis` the reader `face.spec.md` puts there for a front end, and nothing of the renderer. It imports it on the first read, so importing the desktop app's modules, as the settings window does, loads no numpy (`tests/test_dictation_hotkeys_stay_light.py`).
 
 ### Assistant State
 
