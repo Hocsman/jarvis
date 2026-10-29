@@ -75,6 +75,13 @@ class Stage:
         self.first_sounds = []
         self.captures = []        # (graph, keyword arguments) of each CUDA graph capture
         self.compile_module = None  # the stand-in for moshi.utils.compile
+        self.hold_playback = False  # a stream plays nothing while this is true
+        self.gate_after = None    # audible frames a synthesis emits before it waits on mid_gate
+        self.mid_gate = None
+        self.fail_after = None    # audible frames a synthesis emits before it raises fail_midway
+        self.fail_midway = None
+        self.close_gate = None    # closing a stream waits on it
+        self.closing = threading.Event()  # a stream is being closed
 
     @property
     def seconds(self):
@@ -148,7 +155,11 @@ def _install_fake_moshi(monkeypatch, stage):
                 cuda.graph("a graph in generate")
             for _ in range(stage.delay):
                 on_frame(np.full((1, 33, 1), -1, dtype=np.int64))
-            for _ in range(stage.frames):
+            for i in range(stage.frames):
+                if stage.fail_midway is not None and i == stage.fail_after:
+                    raise stage.fail_midway
+                if stage.mid_gate is not None and i == stage.gate_after:
+                    stage.mid_gate.wait(10)
                 on_frame(np.zeros((1, 33, 1), dtype=np.int64))
                 stage.emitted += 1
             return SimpleNamespace(frames=[])
@@ -210,6 +221,8 @@ def _install_fake_sounddevice(monkeypatch, stage):
         def _pump(self):
             try:
                 while not self.aborted:
+                    while stage.hold_playback and not self.aborted:
+                        time.sleep(0.005)
                     block = np.zeros((self.blocksize, 1), dtype=np.float32)
                     try:
                         self.callback(block, self.blocksize, None, None)
@@ -229,7 +242,9 @@ def _install_fake_sounddevice(monkeypatch, stage):
             self.active = False
 
         def close(self):
-            pass
+            stage.closing.set()
+            if stage.close_gate is not None:
+                stage.close_gate.wait(10)
 
     module = types.ModuleType("sounddevice")
     module.OutputStream = OutputStream
@@ -579,18 +594,20 @@ class TestPlayback:
         audio = np.concatenate(stage.streams[-1].audio)
         assert np.count_nonzero(audio) == stage.frames * SAMPLES_PER_FRAME
 
-    def test_the_duration_is_exact_and_known_before_playback_starts(self, stage, make_engine):
+    def test_the_duration_is_exact_and_arrives_before_the_completion_callback(
+            self, stage, make_engine):
         tts = make_engine()
-        seen = []
+        order = []
         done = threading.Event()
 
-        tts.speak("Bonjour.", completion_callback=done.set,
-                  duration_callback=lambda d: seen.append((d, len(stage.streams))))
+        tts.speak("Bonjour.",
+                  completion_callback=lambda: (order.append("completion"), done.set()),
+                  duration_callback=lambda d: order.append(("duration", d)))
         assert done.wait(5)
 
-        duration, streams_open = seen[-1]
-        assert duration == pytest.approx(stage.seconds)
-        assert streams_open == 0
+        assert [step if isinstance(step, str) else step[0] for step in order] == [
+            "duration", "completion"]
+        assert order[0][1] == pytest.approx(stage.seconds)
 
     def test_the_completion_callback_fires_once_the_audio_has_played_to_its_end(
             self, stage, make_engine):
@@ -840,6 +857,219 @@ class TestLifecycle:
         assert reached.wait(5)
         assert "no NVIDIA GPU was found" in capsys.readouterr().out
         assert asked == [1]
+
+
+class TestStreamingPlayback:
+    """See tts.spec.md, Kyutai, "Playback": the audio is played as it is
+    produced, and the next item is prepared while the current one plays."""
+
+    def test_playback_starts_before_synthesis_has_ended(self, stage, make_engine):
+        tts = make_engine()
+        assert tts._ensure_initialized()
+        emitted_by_the_warm_up = stage.emitted
+        stage.frames = 40
+        stage.gate_after = 12
+        stage.mid_gate = threading.Event()
+        done = threading.Event()
+
+        tts.speak("Longue.", completion_callback=done.set)
+
+        assert _until(lambda: stage.streams and stage.streams[-1].started)
+        assert stage.emitted - emitted_by_the_warm_up == 12, (
+            "the stream opened only once synthesis had ended")
+        stage.mid_gate.set()
+        assert done.wait(5)
+        audio = np.concatenate(stage.streams[-1].audio)
+        assert np.count_nonzero(audio) == 40 * SAMPLES_PER_FRAME
+
+    def test_an_item_shorter_than_the_first_stretch_plays_when_its_synthesis_ends(
+            self, stage, make_engine):
+        stage.frames = 2
+        tts = make_engine()
+
+        heard, _ = _speak(tts, "Court.")
+
+        assert heard
+        audio = np.concatenate(stage.streams[-1].audio)
+        assert np.count_nonzero(audio) == 2 * SAMPLES_PER_FRAME
+
+    def test_the_next_item_is_prepared_while_the_current_one_plays(self, stage, make_engine):
+        stage.hold_playback = True
+        stage.frames = 10
+        tts = make_engine()
+        done = threading.Event()
+
+        tts.speak("Une.")
+        tts.speak("Deux.", completion_callback=done.set)
+
+        assert _until(lambda: "Deux." in stage.scripts), "the second item was not prepared"
+        assert len(stage.streams) == 1
+        assert stage.streams[0].started and not stage.streams[0].finished
+        stage.hold_playback = False
+        assert done.wait(5)
+        assert len(stage.streams) == 2
+
+    def test_items_are_heard_in_order_each_completion_after_its_own_audio(
+            self, stage, make_engine):
+        tts = make_engine()
+        order = []
+        last = threading.Event()
+
+        def callback(name, final=False):
+            def fire():
+                order.append((name, sum(1 for s in stage.streams if s.finished)))
+                if final:
+                    last.set()
+            return fire
+
+        tts.speak("Un.", completion_callback=callback("un"))
+        tts.speak("Deux.", completion_callback=callback("deux"))
+        tts.speak("Trois.", completion_callback=callback("trois"))
+        tts.speak("", completion_callback=callback("fin", final=True))
+
+        assert last.wait(5)
+        assert order == [("un", 1), ("deux", 2), ("trois", 3), ("fin", 3)]
+
+    def test_a_stream_that_runs_out_of_audio_plays_silence_and_goes_on(
+            self, stage, make_engine):
+        tts = make_engine()
+        assert tts._ensure_initialized()
+        stage.frames = 16
+        stage.gate_after = 8
+        stage.mid_gate = threading.Event()
+        done = threading.Event()
+
+        tts.speak("Lente.", completion_callback=done.set)
+
+        assert _until(lambda: stage.streams and stage.streams[-1].started)
+        stream = stage.streams[-1]
+        assert _until(lambda: len(stream.audio) * stream.blocksize > 8 * SAMPLES_PER_FRAME + 2048)
+        assert stream.active and not stream.finished
+        stage.mid_gate.set()
+        assert done.wait(5)
+        audio = np.concatenate(stream.audio)
+        assert np.count_nonzero(audio) == 16 * SAMPLES_PER_FRAME
+
+    def test_an_item_whose_synthesis_fails_midway_fires_no_completion(self, stage, make_engine):
+        stage.frames = 12
+        stage.fail_after = 6
+        stage.fail_midway = RuntimeError("boom")
+        tts = make_engine()
+        said = []
+        reached = threading.Event()
+
+        tts.speak("Coupée.", completion_callback=lambda: said.append(1))
+        tts.speak("", completion_callback=reached.set)
+
+        assert reached.wait(5)
+        assert said == []
+        assert stage.streams and stage.streams[-1].finished
+        assert _until(lambda: not tts.is_speaking())
+
+    def test_is_speaking_stays_true_across_the_hand_over_to_the_next_item(
+            self, stage, make_engine):
+        stage.hold_playback = True
+        tts = make_engine()
+        seen_when_the_first_ends = []
+        done = threading.Event()
+
+        tts.speak("Une.", completion_callback=lambda: seen_when_the_first_ends.append(
+            tts.is_speaking()))
+        tts.speak("Deux.", completion_callback=done.set)
+        assert _until(lambda: "Deux." in stage.scripts)
+        stage.hold_playback = False
+
+        assert done.wait(5)
+        assert seen_when_the_first_ends == [True]
+        assert _until(lambda: not tts.is_speaking())
+
+    def test_an_item_prepared_while_another_plays_is_never_heard_after_an_interrupt(
+            self, stage, make_engine):
+        stage.hold_playback = True
+        tts = make_engine()
+        said = []
+
+        tts.speak("Une.", completion_callback=lambda: said.append("une"))
+        tts.speak("Deux.", completion_callback=lambda: said.append("deux"))
+        assert _until(lambda: "Deux." in stage.scripts)
+        tts.interrupt()
+        stage.hold_playback = False
+
+        assert _until(lambda: not tts.is_speaking())
+        assert said == []
+        assert len(stage.streams) == 1 and stage.streams[0].aborted
+        heard, _ = _speak(tts, "Trois.")
+        assert heard and len(stage.streams) == 2
+
+    def test_stopping_the_engine_ends_both_its_threads(self, stage, make_engine):
+        tts = make_engine()
+        _speak(tts, "Une.")
+
+        tts.stop()
+
+        alive = [t.name for t in threading.enumerate()
+                 if t.is_alive() and t.name == "kyutai-player"]
+        assert alive == []
+
+    def test_an_end_of_reply_marker_waiting_behind_the_audio_is_dropped_by_an_interrupt(
+            self, stage, make_engine):
+        """By the time a stop word is heard the worker has long since handed the
+        marker to the player, which holds it behind the sentence still playing:
+        that is where the interrupt has to find it."""
+        stage.hold_playback = True
+        tts = make_engine()
+        window = []
+
+        tts.speak("Dernière.")
+        assert _until(lambda: stage.streams and stage.streams[0].started)
+        tts.speak("", completion_callback=lambda: window.append("ouverte"))
+        assert _until(lambda: tts._q.empty() and tts._play_q.qsize() == 1), (
+            "the marker never reached the player")
+        tts.interrupt()
+        stage.hold_playback = False
+
+        heard, _ = _speak(tts, "Autre.")
+        assert heard
+        assert window == []
+
+    def test_stopping_the_engine_while_it_plays_drops_what_is_prepared_and_ends_both_threads(
+            self, stage, make_engine):
+        stage.hold_playback = True
+        tts = make_engine()
+        said = []
+
+        tts.speak("Une.", completion_callback=lambda: said.append("une"))
+        tts.speak("Deux.", completion_callback=lambda: said.append("deux"))
+        assert _until(lambda: "Deux." in stage.scripts)
+
+        tts.stop()
+
+        assert not tts.is_speaking()
+        assert said == []
+        assert [t for t in threading.enumerate() if t.name == "kyutai-player"] == []
+        stage.hold_playback = False
+        heard, _ = _speak(tts, "Trois.")
+        assert heard, "the engine did not speak again after being stopped"
+
+    def test_an_item_arriving_while_the_engine_stops_does_not_leave_it_wedged(
+            self, stage, make_engine):
+        stage.hold_playback = True
+        stage.close_gate = threading.Event()
+        tts = make_engine()
+
+        tts.speak("Une.")
+        assert _until(lambda: stage.streams and stage.streams[0].started)
+        stopper = threading.Thread(target=tts.stop, daemon=True)
+        stopper.start()
+        assert stage.closing.wait(5), "the player never closed its stream"
+        stage.hold_playback = False
+        time.sleep(0.2)  # the worker has gone; stop() waits for the player's stream
+        tts.speak("Deux.")
+        stage.close_gate.set()
+        stopper.join(5)
+
+        heard, _ = _speak(tts, "Trois.")
+        assert heard, "the engine did not speak again after being stopped"
 
 
 class TestGraphCapture:

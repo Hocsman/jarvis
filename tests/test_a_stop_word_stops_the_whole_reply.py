@@ -4,7 +4,9 @@
 still stops everything") promise that `interrupt()`:
 
 - stops the item playing;
-- discards every item queued before the call, without synthesising it;
+- discards every item queued before the call, so that none of them is
+  heard (nor synthesised, by an engine that synthesises one item at a
+  time);
 - abandons an item still being synthesised;
 - fires no completion callback for any of them, the end-of-reply marker
   included, because a hot window opened by an interrupted reply would
@@ -51,6 +53,8 @@ class Rig:
         self.gate: threading.Event | None = None  # synthesis waits on it
         self.entered = threading.Event()  # a synthesis is waiting on the gate
         self.hold_playback = False        # playback lasts until it is aborted
+        self.identify_audio = False       # a stream reads whose audio it is fed (Kyutai)
+        self.prepares_ahead = False       # the next item is synthesised while one plays (Kyutai)
         self.current = ""
 
     def begin(self, text: str) -> None:
@@ -72,10 +76,36 @@ class Rig:
         class _Stream:
             def __init__(self, **kwargs):
                 self.active = False
+                self.callback = kwargs.get("callback")
+                self.blocksize = kwargs.get("blocksize", 1024)
 
             def start(self):
+                if rig.identify_audio:
+                    self._start_reading_the_feed()
+                    return
                 rig.played()
                 self.active = rig.hold_playback
+
+            def _start_reading_the_feed(self):
+                """An engine that prepares the next item while one plays cannot be
+                told apart by the text it began last: the value of the samples it
+                feeds the stream says which item they belong to."""
+                block = np.zeros((self.blocksize, 1), dtype=np.float32)
+                try:
+                    self.callback(block, self.blocksize, None, None)
+                except (_Abort, _Stop):
+                    pass
+                number = int(round(float(block[0, 0]) * 100))
+                if number:
+                    rig.heard.append(rig.synthesised[number - 1])
+                if rig.hold_playback:
+                    self.active = True
+                    return
+                for _ in range(10000):  # what a device does: take everything fed
+                    try:
+                        self.callback(block, self.blocksize, None, None)
+                    except (_Abort, _Stop):
+                        break
 
             def abort(self):
                 rig.aborted += 1
@@ -212,7 +242,10 @@ def _kyutai_rig(monkeypatch) -> Rig:
             return self
 
         def numpy(self):
-            return np.zeros((1, 1, 480), dtype=np.float32)
+            # The number of the item being synthesised, so that a stream can
+            # tell whose audio it was fed (one hundredth each: samples are
+            # clipped to [-1, 1]).
+            return np.full((1, 1, 480), len(rig.synthesised) / 100.0, dtype=np.float32)
 
     class _Mimi:
         sample_rate = 24000
@@ -239,6 +272,8 @@ def _kyutai_rig(monkeypatch) -> Rig:
             on_frame(frame)
             return SimpleNamespace(frames=[])
 
+    rig.identify_audio = True
+    rig.prepares_ahead = True
     monkeypatch.setitem(sys.modules, "sounddevice", rig.sounddevice())
     _silent_state(monkeypatch, tts_module.KyutaiTTS)
 
@@ -351,7 +386,11 @@ def test_a_stop_word_during_playback_cuts_the_sound_and_drops_what_follows(rig):
     assert rig.aborted, "the playing sentence was not cut"
     assert fired == []
     assert rig.heard == ["Première phrase.", "Autre réponse."]
-    assert rig.synthesised == ["Première phrase.", "Autre réponse."]
+    if not rig.prepares_ahead:
+        # An engine that prepares the next item while one plays may already
+        # have synthesised some of them when the stop word lands: it is what
+        # it does with them, not hearing them, that the contract is about.
+        assert rig.synthesised == ["Première phrase.", "Autre réponse."]
 
 
 @pytest.mark.unit
