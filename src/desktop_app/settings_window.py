@@ -25,7 +25,7 @@ from PyQt6.QtGui import QFont
 from jarvis.config import (
     get_default_config, load_config,
     default_config_path, _save_json, _load_json,
-    SUPPORTED_CHAT_MODELS, SUPPORTED_WHISPER_MODELS,
+    SUPPORTED_CHAT_MODELS, SUPPORTED_WHISPER_MODELS, WHISPER_LANGUAGES,
 )
 from jarvis.debug import debug_log
 from desktop_app.themes import apply_theme
@@ -415,10 +415,11 @@ def _build_field_metadata() -> List[FieldMeta]:
       "Reject segments where no_speech_prob is at or above this value (filters hallucinations during silence)",
       "whisper", "float", min_val=0.0, max_val=1.0, step=0.05)
     f("whisper_language", "Language",
-      "Two-letter code of the one language you speak (fr, en, de…). Whisper then "
-      "transcribes only that one, which stops the phrases it invents out of silence "
-      "in other languages. Empty: it detects the language of each sentence",
-      "whisper", "str")
+      "The one language you speak to her. Whisper then transcribes only that one, "
+      "which stops the phrases it invents out of silence in other languages. "
+      "Detect: it guesses the language of each sentence",
+      "whisper", "choice",
+      choices=[("", "Detect")] + [(code, code) for code in WHISPER_LANGUAGES])
 
     # --- VAD ---
     f("vad_enabled", "Enable VAD",

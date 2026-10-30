@@ -956,12 +956,13 @@ class VoiceListener(threading.Thread):
                     self._publish_listening_state()
                     debug_log("early beep: wake word detected", "voice")
 
-        # Stop commands — while she speaks, and while a reply is on its way.
-        # Fast and text-based. While she only thinks, the stop has to be
-        # (nearly) all he said: a stop word inside a longer sentence is a
-        # question, "Jarvis, how do I stop the timer?", and waits its turn.
+        # Stop commands — while she speaks, while a reply is on its way, and
+        # while his question is still being collected. Fast and text-based.
+        # Outside her speech the stop has to be (nearly) all he said: a stop
+        # word inside a longer sentence is a question, "Jarvis, how do I stop
+        # the timer?", and waits its turn.
         speaking = bool(self.tts and self.tts.enabled and self.tts.is_speaking())
-        if speaking or (self._a_reply_is_on_its_way()
+        if speaking or (self._something_to_stop()
                         and len(text_lower.split()) <= STOP_WORDS_WHILE_THINKING):
             stop_commands = getattr(self.cfg, "stop_commands", ["stop", "quiet", "shush", "silence", "enough", "shut up"])
             # The threshold travels with the words. It was configurable,
@@ -1159,7 +1160,7 @@ class VoiceListener(threading.Thread):
             if intent_judgment is not None:
                 # If judge says stop command, interrupt TTS
                 if intent_judgment.stop and (
-                        (self.tts and self.tts.is_speaking()) or self._a_reply_is_on_its_way()):
+                        (self.tts and self.tts.is_speaking()) or self._something_to_stop()):
                     debug_log(f"🛑 Intent judge detected stop command", "voice")
                     self._stop_the_replies()
                     return
@@ -1541,8 +1542,11 @@ class VoiceListener(threading.Thread):
                 pass
             return
 
-        # Priority 5: Collection mode handling
+        # Priority 5: Collection mode handling. Marked processed like every
+        # accepted segment: left visible, the judge could restate it in a
+        # later query and it would be collected twice.
         if self.state_manager.is_collecting():
+            self._transcript_buffer.mark_segment_processed(text_lower)
             self.state_manager.add_to_collection(text_lower)
             return
 
@@ -1723,10 +1727,9 @@ class VoiceListener(threading.Thread):
         else:
             self.state_manager.start_collection(query)
 
-    def _whisper_language(self) -> Optional[str]:
-        """The language Whisper is told to hear, or None to let it detect."""
-        language = getattr(self.cfg, "whisper_language", "")
-        return language if isinstance(language, str) and language else None
+    def _something_to_stop(self) -> bool:
+        """A reply on its way, or his question still being collected."""
+        return self._a_reply_is_on_its_way() or self.state_manager.is_collecting()
 
     def _a_reply_is_on_its_way(self) -> bool:
         """Whether a turn is being prepared or said, or waits to be."""
@@ -2714,7 +2717,7 @@ class VoiceListener(threading.Thread):
                         _ = mlx_whisper.transcribe(
                             warmup_audio,
                             path_or_hf_repo=self._mlx_model_repo,
-                            language=self._whisper_language(),
+                            language=self.cfg.whisper_language,
                         )
                         debug_log(f"MLX Whisper model pre-loaded: repo={self._mlx_model_repo}", "voice")
 
@@ -2914,13 +2917,13 @@ class VoiceListener(threading.Thread):
                     try:
                         segments_iter, _ = self.model.transcribe(
                             warmup_audio,
-                            language=self._whisper_language(),
+                            language=self.cfg.whisper_language,
                             vad_filter=False,
                             condition_on_previous_text=not cpu_mode,
                             without_timestamps=cpu_mode,
                         )
                     except TypeError:
-                        segments_iter, _ = self.model.transcribe(warmup_audio, language=self._whisper_language())
+                        segments_iter, _ = self.model.transcribe(warmup_audio, language=self.cfg.whisper_language)
                     for _ in segments_iter:
                         pass
                     debug_log("faster-whisper warmup transcription complete", "voice")
@@ -3263,11 +3266,12 @@ class VoiceListener(threading.Thread):
                     result = mlx_whisper.transcribe(
                         audio,
                         path_or_hf_repo=self._mlx_model_repo,
-                        language=self._whisper_language(),
+                        language=self.cfg.whisper_language,
                     )
 
-                # Capture Whisper's auto-detected language (ISO-639-1) so
-                # downstream tools can pick locale-appropriate resources.
+                # Capture the language Whisper reports (the one named in
+                # `whisper_language`, or the one it detected) so downstream
+                # tools can pick locale-appropriate resources.
                 detected = result.get("language")
                 if isinstance(detected, str) and detected:
                     self._last_detected_language = detected
@@ -3328,12 +3332,12 @@ class VoiceListener(threading.Thread):
                 with self.transcribe_lock:
                     try:
                         segments, _info = self.model.transcribe(
-                            audio, language=self._whisper_language(), vad_filter=False,
+                            audio, language=self.cfg.whisper_language, vad_filter=False,
                             condition_on_previous_text=not cpu_mode,
                             without_timestamps=cpu_mode,
                         )
                     except TypeError:
-                        segments, _info = self.model.transcribe(audio, language=self._whisper_language())
+                        segments, _info = self.model.transcribe(audio, language=self.cfg.whisper_language)
                     segments_list = list(segments)
                 # Capture the detected language (faster-whisper exposes it
                 # on the info object). Guard against older API variants

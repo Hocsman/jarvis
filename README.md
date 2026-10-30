@@ -357,7 +357,7 @@ The settings are under **⚙️ Settings → 🔧 Advanced**:
 #### Language Modes
 - **Multilingual** (default, 99 languages): `"whisper_model": "medium"`
 - **English Only** (slightly better English accuracy): `"whisper_model": "medium.en"`
-- **One language you name**: `"whisper_language": "fr"` (Settings, *Whisper*, Language). Whisper then transcribes only that language, for voice and dictation: no more phrases invented out of silence in other languages, and a short word like "stop" is not spelled in another script. Leave it empty if you speak several languages to it.
+- **One language you name**: `"whisper_language": "fr"` (Settings, *Whisper*, Language). Whisper then transcribes only that language, for voice and dictation: no more phrases invented out of silence in other languages, and a short word like "stop" is not spelled in another script. Leave it empty if you speak several languages to it. A code Whisper does not know, or another language than English with an English-only (`.en`) model, is ignored with a warning in the log.
 
 #### Model Sizes
 | Model | English | Multilingual | Download | VRAM | Speed |
@@ -803,7 +803,7 @@ a small fallback chain before giving up rather than confabulating:
    2,000 queries/month. Get a key at
    [api.search.brave.com](https://api.search.brave.com/app/keys).
 2. **Wikipedia** — zero-config, on by default, uses the Wikipedia host
-   matching the language Whisper auto-detected on the utterance (so a
+   matching the language Whisper heard the utterance in (so a
    Turkish question gets a Turkish answer). Disable with
    `wikipedia_fallback_enabled: false`.
 3. **Honest failure** — if every provider fails, the reply tells you the
