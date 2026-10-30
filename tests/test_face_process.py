@@ -23,6 +23,7 @@ class FakeStream:
 
     def __init__(self):
         self.chunks = []
+        self.ctrl_info = {}       # frame index -> Ditto's per-frame controls
         self.worker_exception = None
         self.stopped = False
 
@@ -195,6 +196,98 @@ class TestFeeding:
         renderer.tick(renderer.feeder.due(start))
 
         assert len(renderer.stream.chunks) == 2
+
+
+class TestHerLipsAtRest:
+    """While she is silent her lips are the portrait's.
+
+    Ditto drives the mouth from the audio it is fed, silence included, and
+    drawn from silence the lips drift and then press in, as if she bit them.
+    So each frame tells Ditto how much its lips follow the voice: fully while
+    she is heard, not at all in silence, with a short ramp at either end so
+    the pauses between words do not close her mouth.
+    """
+
+    T = 1000.0
+
+    def _voice(self, renderer, start, seconds):
+        renderer.timeline.lay(start, 0.2 * np.ones(int(seconds * tl.RATE), np.float32), tl.RATE)
+
+    def _feed(self, renderer, chunks):
+        weights = []
+        for n in range(chunks):
+            before = len(renderer.due)
+            first_index = renderer.frames_fed
+            renderer._feed(self.T + n * tl.CHUNK_SECONDS, publish=True)
+            for i in range(first_index, first_index + len(renderer.due) - before):
+                weights.append(renderer.stream.ctrl_info.get(i, {}).get("vad_alpha", 1.0))
+        return weights
+
+    def test_in_silence_the_lips_are_the_portrait_s(self, renderer):
+        weights = self._feed(renderer, 4)
+
+        assert weights == [0.0] * len(weights)
+
+    def test_while_she_is_heard_they_follow_her_voice(self, renderer):
+        self._voice(renderer, self.T - 1.0, 3.0)
+
+        weights = self._feed(renderer, 4)
+
+        assert weights == [1.0] * len(weights)
+
+    def test_after_she_stops_they_return_to_the_portrait_s_gradually(self, renderer):
+        self._voice(renderer, self.T - 1.0, 1.2)   # her voice ends 0.2 s in
+
+        weights = self._feed(renderer, 4)
+
+        after = weights[int(0.2 * tl.FPS):]
+        assert after[0] < 1.0 and after[-1] == 0.0
+        assert all(a >= b for a, b in zip(after, after[1:])), after
+        assert len([w for w in after if 0.0 < w < 1.0]) >= 3, "no ramp: the mouth would snap shut"
+
+    def test_they_start_to_follow_just_before_she_speaks(self, renderer):
+        self._voice(renderer, self.T + 0.4, 1.0)
+
+        weights = self._feed(renderer, 4)
+
+        onset = int(0.4 * tl.FPS)
+        assert weights[onset] == 1.0
+        assert 0.0 < weights[onset - 1] < 1.0
+
+    def test_a_pause_between_words_does_not_close_her_mouth(self, renderer):
+        self._voice(renderer, self.T - 1.0, 1.2)
+        self._voice(renderer, self.T + 0.32, 1.0)   # 120 ms without a sound
+
+        weights = self._feed(renderer, 4)
+
+        assert min(weights[int(0.2 * tl.FPS):int(0.32 * tl.FPS)]) > 0.0
+
+    def test_each_frame_is_named_by_its_place_in_what_ditto_draws(self, renderer):
+        """Ditto counts the frames it draws from the first chunk fed, warm-up
+        included; the control must land on the frame it was meant for."""
+        renderer._feed(self.T - 1.0, publish=False)
+        self._voice(renderer, self.T, 1.0)
+
+        renderer._feed(self.T, publish=True)
+
+        warm = tl.CHUNK_FRAMES
+        assert all(i < warm for i in renderer.stream.ctrl_info), renderer.stream.ctrl_info
+
+
+def test_ditto_holds_only_the_lips_to_the_portrait_s():
+    """Its own control blended every expression keypoint, the eyes included,
+    so a silent face would stop blinking."""
+    from jarvis.output.face.ditto.atomic_components.motion_stitch import ctrl_vad
+
+    lips = [6, 12, 14, 17, 19, 20]
+    driven = np.arange(63, dtype=np.float32).reshape(1, 63) + 1.0
+    portrait = {"exp": np.zeros((1, 63), np.float32)}
+
+    held = ctrl_vad({"exp": driven.copy()}, portrait, 0.0)["exp"].reshape(21, 3)
+
+    others = [k for k in range(21) if k not in lips]
+    assert not held[lips].any()
+    assert (held[others] == driven.reshape(21, 3)[others]).all()
 
 
 class TestTellingTheHandle:

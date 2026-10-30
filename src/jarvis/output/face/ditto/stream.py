@@ -4,7 +4,7 @@
 # into the portrait, no video file); the warping network and the decoder are
 # TensorRT engines handed in by the caller; the motion sampling is replayed from
 # a CUDA graph; the models that only register the portrait are released after
-# it; the workers stop on request.
+# it; the workers stop on request; a frame's controls are taken as it is drawn.
 import queue
 import threading
 import traceback
@@ -146,8 +146,10 @@ class Stream:
         return None
 
     def _get_ctrl_info(self, fid):
+        # Taken, not read: the renderer adds one entry per silent frame for as
+        # long as it runs.
         if isinstance(self.ctrl_info, dict):
-            return self.ctrl_info.get(fid, {})
+            return self.ctrl_info.pop(fid, {})
         return {}
 
     def _decode_f3d_worker(self):

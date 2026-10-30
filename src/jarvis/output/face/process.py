@@ -29,6 +29,11 @@ STEPS = 10
 WARM_UP_SECONDS = 3.0
 WATCH_SECONDS = 2.0      # a viewer heartbeat younger than this means someone is watching
 KEEP_SECONDS = 5.0       # audio heard longer ago than this is forgotten
+# Her lips at rest: a frame whose audio is quieter than this is silence. Kyutai's
+# speech sits near 0.07 RMS per frame and its silences near 0.0003.
+VOICE_RMS = 0.005
+LIPS_ATTACK_FRAMES = 2    # the lips start to follow her voice this many frames before it
+LIPS_RELEASE_FRAMES = 6   # and return to the portrait's over this many after it
 
 
 def _log(text: str) -> None:
@@ -80,6 +85,8 @@ class Renderer:
         self.late: Dict[int, int] = {}       # frames published after their stamp, per epoch
         self.skipped = 0
         self.quit = threading.Event()
+        self.frames_fed = 0                   # Ditto's own count of the frames it draws
+        self._since_voice = LIPS_RELEASE_FRAMES + 1
 
     @classmethod
     def build(cls, portrait: str, framing: str) -> "Renderer":
@@ -136,13 +143,42 @@ class Renderer:
             self.quit.set()
 
     # -- feeding --------------------------------------------------------------
+    def _lips(self, audio: np.ndarray) -> list:
+        """How much each new frame's lips follow her voice: 1 while she is
+        heard, 0 in silence, where Ditto drawing from silence would press them
+        in, and a ramp between so the pauses between words keep her mouth."""
+        per = tl.RATE // tl.FPS
+        past = tl.CHUNKSIZE[0]
+        ahead = tl.CHUNK_FRAMES + tl.CHUNKSIZE[2]   # the chunk carries two frames of what follows
+        voiced = []
+        for k in range(ahead):
+            frame = audio[(past + k) * per:(past + k + 1) * per]
+            voiced.append(frame.size > 0 and float(np.sqrt(np.mean(np.square(frame)))) > VOICE_RMS)
+        weights = []
+        for k in range(tl.CHUNK_FRAMES):
+            if voiced[k]:
+                self._since_voice = 0
+                weights.append(1.0)
+                continue
+            self._since_voice += 1
+            release = max(0.0, 1.0 - self._since_voice / (LIPS_RELEASE_FRAMES + 1))
+            soon = next((j for j in range(1, LIPS_ATTACK_FRAMES + 1)
+                         if k + j < ahead and voiced[k + j]), None)
+            attack = 1.0 - soon / (LIPS_ATTACK_FRAMES + 1) if soon else 0.0
+            weights.append(max(release, attack))
+        return weights
+
     def _feed(self, start: float, publish: bool) -> None:
         first, _end = self.feeder.window(start)
         with self.lock:
             audio = self.timeline.read(first, tl.CHUNK_SAMPLES)
             generation = self.generation
-        for stamp in self.feeder.stamps(start):
+        for stamp, lips in zip(self.feeder.stamps(start), self._lips(audio)):
             self.due.append(_Due(stamp, generation, self.epoch, publish))
+            if lips < 1.0:
+                # Ditto names a frame by its place among those it draws.
+                self.stream.ctrl_info[self.frames_fed] = {"vad_alpha": lips}
+            self.frames_fed += 1
         self.stream.run_chunk(audio)
         self.feeder.fed(start)
 

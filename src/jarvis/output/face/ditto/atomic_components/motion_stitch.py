@@ -1,5 +1,5 @@
 # Modified for Jarvis from antgroup/ditto-talkinghead (Apache-2.0, commit c3e47ee):
-# softmax in numpy, so scipy is not needed.
+# softmax in numpy, so scipy is not needed; vad_alpha moves the lip keypoints only.
 import copy
 import random
 import numpy as np
@@ -63,14 +63,17 @@ def fade(x_d_info, dst, alpha, keys=None):
 
 
 def ctrl_vad(x_d_info, dst, alpha):
+    """Hold the lip keypoints ``alpha`` of the way to the driven expression
+    and the rest to ``dst``; every other keypoint stays as driven, so a
+    silent face goes on blinking."""
     exp = x_d_info["exp"]
     exp_dst = dst["exp"]
 
     _lip = [6, 12, 14, 17, 19, 20]
-    _a1 = np.zeros((21, 3), dtype=np.float32)
+    _a1 = np.ones((21, 3), dtype=np.float32)
     _a1[_lip] = alpha
     _a1 = _a1.reshape(1, -1)
-    x_d_info["exp"] = exp * alpha + exp_dst * (1 - alpha)
+    x_d_info["exp"] = exp * _a1 + exp_dst * (1 - _a1)
 
     return x_d_info
     
