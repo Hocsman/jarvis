@@ -28,8 +28,10 @@ mode = os.environ.get("FAKE_CLAUDE_MODE", "ok")
 time.sleep(float(os.environ.get("FAKE_CLAUDE_DELAY", "0")))
 if mode == "grandchild":
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    # A pid marker is one line: the file is there before the pid is, and
+    # the newline is what says the pid is all in.
     with open(os.environ["FAKE_CLAUDE_LOG"] + ".grandchild", "w", encoding="utf-8") as f:
-        f.write(str(child.pid))
+        print(child.pid, file=f)
     time.sleep(120)
 if mode == "sleep":
     time.sleep(120)
@@ -41,7 +43,7 @@ if mode == "orphan":
                     "import subprocess, sys; "
                     "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'], "
                     "stdin=subprocess.DEVNULL); "
-                    "open(sys.argv[1], 'w').write(str(p.pid))",
+                    "print(p.pid, file=open(sys.argv[1], 'w'))",
                     os.environ["FAKE_CLAUDE_LOG"] + ".orphan"])
     time.sleep(120)
 if mode == "garbage":
@@ -109,6 +111,20 @@ def wait_for_file(path: Path, timeout: float = 10.0) -> Path:
         time.sleep(0.05)
     assert path.exists(), f"the stand-in never wrote {path.name}"
     return path
+
+
+def wait_for_pid(path: Path, timeout: float = 10.0) -> int:
+    """Wait until the stand-in has written a pid to ``path``, and return
+    it. The file exists before the pid is in it, so only a finished line
+    counts: a loaded machine can show it empty for a while."""
+    deadline = time.monotonic() + timeout
+    while True:
+        text = path.read_text(encoding="utf-8") if path.exists() else ""
+        if text.endswith("\n"):
+            return int(text)
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"the stand-in never wrote a pid to {path.name}: {text!r}")
+        time.sleep(0.05)
 
 
 def make_projects(tmp_path: Path, names) -> Path:

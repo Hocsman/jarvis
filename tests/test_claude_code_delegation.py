@@ -24,6 +24,7 @@ import pytest
 
 from claude_code_fakes import (
     Ledger, install_fake_claude, make_cfg, make_projects, wait_for_calls, wait_for_file,
+    wait_for_pid,
 )
 from jarvis.projets import delegation as dl
 
@@ -364,8 +365,7 @@ def test_what_the_agent_started_dies_with_it(
     _launch(delegations, make_cfg(tmp_path, projects, claude_code_timeout_sec=3.0), projects)
     _wait(delegations, timeout=30.0)
 
-    marker = Path(str(fake_claude.log) + ".grandchild")
-    pid = int(marker.read_text(encoding="utf-8"))
+    pid = wait_for_pid(Path(str(fake_claude.log) + ".grandchild"))
     deadline = time.monotonic() + 10
     while psutil.pid_exists(pid) and time.monotonic() < deadline:
         time.sleep(0.1)
@@ -510,8 +510,7 @@ def test_what_a_cancelled_job_started_dies_with_it(
         tmp_path, projects, fake_claude, delegations, monkeypatch):
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "grandchild")
     _launch(delegations, make_cfg(tmp_path, projects), projects)
-    marker = wait_for_file(Path(str(fake_claude.log) + ".grandchild"))
-    pid = int(marker.read_text(encoding="utf-8"))
+    pid = wait_for_pid(Path(str(fake_claude.log) + ".grandchild"))
 
     delegations.cancel()
 
@@ -836,8 +835,7 @@ def test_a_stop_reaches_a_descendant_whose_parent_has_exited(
     job object holds it anyway, and so does the process group elsewhere."""
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "orphan")
     _launch(delegations, make_cfg(tmp_path, projects), projects)
-    marker = wait_for_file(Path(str(fake_claude.log) + ".orphan"))
-    pid = int(marker.read_text(encoding="utf-8"))
+    pid = wait_for_pid(Path(str(fake_claude.log) + ".orphan"))
     assert psutil.pid_exists(pid)
 
     _job, outcome = delegations.cancel()
@@ -853,7 +851,7 @@ def test_the_deadline_reaches_a_descendant_whose_parent_has_exited(
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "orphan")
     began = time.monotonic()
     _launch(delegations, make_cfg(tmp_path, projects, claude_code_timeout_sec=1.5), projects)
-    pid = int(wait_for_file(Path(str(fake_claude.log) + ".orphan")).read_text(encoding="utf-8"))
+    pid = wait_for_pid(Path(str(fake_claude.log) + ".orphan"))
 
     assert delegations.wait(20.0)
 
@@ -871,7 +869,7 @@ def test_closing_reaches_a_descendant_whose_parent_has_exited(
     d = dl.Delegations()
     d.open(lambda outcome: None)
     _launch(d, make_cfg(tmp_path, projects), projects)
-    pid = int(wait_for_file(Path(str(fake_claude.log) + ".orphan")).read_text(encoding="utf-8"))
+    pid = wait_for_pid(Path(str(fake_claude.log) + ".orphan"))
 
     d.close()
 
