@@ -20,6 +20,7 @@ case, and it is the one direction this must not move.
 
 from __future__ import annotations
 
+import threading
 from unittest.mock import MagicMock
 
 import pytest
@@ -50,6 +51,11 @@ def listener():
     obj.state_manager = MagicMock()
     obj._recent_audio_energy = []
     obj.tts.is_speaking.return_value = False
+    obj._speech_lock = threading.Lock()
+    obj._tune_lock = threading.Lock()
+    obj._stop_epoch = 0
+    obj._asked = None
+    obj.db = None
     return obj
 
 

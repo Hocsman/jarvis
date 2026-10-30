@@ -55,10 +55,10 @@ Stored rather than computed, and that is the whole point. Wrapping the
 columns in the folding function at query time cost one Python call per
 column, per keyword, per row, over a full scan: measured on a thousand
 nodes, 86 ms at two keywords and 692 ms at sixteen, against 2.2 ms and
-13.6 ms once stored. The call sits on the reply path, which is the
-listener's own loop — the one draining a 64-frame audio queue at 20 ms a
-frame, so 1.28 s before microphone frames start being dropped. A search
-must not be able to eat what he is saying.
+13.6 ms once stored. The call sits on the reply path, which holds the
+query lock: every millisecond of it is a millisecond before she starts
+speaking, and one more that every reply waiting behind it, spoken or
+typed, waits too.
 
 ### Branch-Pinned Traversal
 

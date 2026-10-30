@@ -18,6 +18,7 @@ import pytest
 from conftest import _created_listeners
 from jarvis.listening.state_manager import StateManager, ListeningState
 from jarvis.listening.intent_judge import IntentJudge, IntentJudgment
+from jarvis.listening.listener import _Turn
 
 
 # ---------------------------------------------------------------------------
@@ -1813,7 +1814,7 @@ class TestTheListenerPublishesItsState:
             return None
 
         with patch("jarvis.reply.engine.run_reply_engine", side_effect=engine):
-            listener._dispatch_query("what time is it")
+            listener._dispatch_query(_Turn("what time is it"))
 
         assert seen_by_the_engine == [JarvisState.THINKING]
         listener.state_manager.stop()

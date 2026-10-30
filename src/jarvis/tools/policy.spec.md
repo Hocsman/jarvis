@@ -79,7 +79,7 @@ Four branches, and their order is the design:
 
 ## Asking
 
-Nothing blocks. For voice, `run_reply_engine` runs on the listener's own audio thread while holding the shared query lock, so a gate that waited for a spoken answer would silence the microphone that has to hear it — and it would destroy the answer rather than delay it, because the audio queue overflows into a swallowed exception after about a second. So the gate raises a question, the turn ends with that question as its reply, and the answer arrives later through one of two doors.
+Nothing blocks. For voice, `run_reply_engine` runs on the listener's reply thread while holding the shared query lock, and the spoken answer is a later turn of that same thread: a gate that waited for it would wait on itself, and hold every typed question behind it. So the gate raises a question, the turn ends with that question as its reply, and the answer arrives later through one of two doors.
 
 **Which door is decided by risk, and it is the whole trust boundary.**
 
@@ -99,7 +99,7 @@ A false no costs a turn; a false yes costs a file. Whisper transcribing a room a
 
 **The pinned call.** A question holds the tool, its arguments, and a digest of both. The digest is recomputed when the approval comes back and compared: between the question and the answer the model got to run again, and a grant given for one path must not carry to whatever came back under the same name. An approval covers one execution — the second call in the same turn arrives with none.
 
-**Where the question waits.** One slot on `DialogueMemory`, the object voice and text already share. Never on disk: a deletion proposed before a crash and approved after it is an approval given without the context that produced it, so a restart erases every pending request. A spoken answer is accepted only on the turn immediately after the question, only from the same origin it was asked at, and never for a gesture-only action. The record is claimed *before* the answer is read — the judge runs on a question that is already gone.
+**Where the question waits.** One slot on `DialogueMemory`, the object voice and text already share. Never on disk: a deletion proposed before a crash and approved after it is an approval given without the context that produced it, so a restart erases every pending request. A spoken answer is accepted only on the turn immediately after the question, only from the same origin it was asked at, and never for a gesture-only action. For voice, only words heard after he heard the question can be that turn: the listener sets aside a turn whose words came before, and withdraws a question whose reply was stopped before he heard it (`listening/listening.spec.md`, "The Microphone Is Always Read"). The record is claimed *before* the answer is read — the judge runs on a question that is already gone.
 
 **What the user is shown** is authored by code, never by the model. Tool arguments are model output derived from text that may itself be attacker-influenced, and `webSearch` already fences web content as data, which is an admission that pages reach the model. The card shows the arguments losslessly: nothing truncated, no whitespace collapsed (the ledger's copy goes through `redact()`, which collapses it, and a path is not a sentence), and characters that show nothing of themselves escaped so they are visible and flagged.
 

@@ -7,10 +7,9 @@ on the connection: SQLite then calls it once per column, per keyword, per
 row, over a full scan, on blobs up to six thousand characters.
 
 Measured on the real store, a thousand nodes: 86 ms at two keywords,
-692 ms at sixteen. The call sits on the reply path, and the reply path is
-the VoiceListener's own loop — the one that drains a 64-frame audio queue
-at 20 ms a frame. Past 1.28 s the microphone frames are dropped inside a
-bare `except`. A search is not supposed to be able to eat his sentence.
+692 ms at sixteen. The call sits on the reply path, which holds the query
+lock: every millisecond of it is one before she speaks, and one more that
+every reply waiting behind it waits too.
 
 The folded text is a property of the row, so it is stored with the row.
 """
@@ -37,8 +36,8 @@ def _peuple(store, combien: int, texte: str):
 
 
 def test_a_search_over_a_thousand_nodes_stays_out_of_the_way(tmp_path):
-    """The budget is the audio queue: 1.28 s before frames are dropped.
-    A single search taking half of that is a search that costs him words."""
+    """The budget is the reply path: a search taking 640 ms is 640 ms
+    before she speaks, and as long again for every reply waiting behind it."""
     store = _store(tmp_path)
     _peuple(store, 1000, "Le Kestrel M3 est une station compacte. " * 40)
 

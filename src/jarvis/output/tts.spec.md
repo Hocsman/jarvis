@@ -212,10 +212,11 @@ worker taking an item up and starting it impossible to lose, and it is
 what lets the reply that follows a stop be spoken, since its items carry
 the new count.
 
-Nothing upstream does this work. A stop word is heard on the listener's
-own thread, which also dispatches the reply, so it is only heard once
-generation has ended and the whole reply (every chunk, the tail and the
-marker) is already waiting in the engine's queue.
+The listener does its part upstream. A stop can land while the reply is
+still being written, with only some of it queued: the engine drops what it
+holds, and the listener queues nothing more of that reply, no later
+sentence, no tail and no marker (`listening/listening.spec.md`, "The
+Microphone Is Always Read").
 
 An interrupted reply never reaches its completion callback, so nothing the
 engine does takes the published state out of SPEAKING: the listener, which

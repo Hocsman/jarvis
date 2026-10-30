@@ -103,8 +103,8 @@ if TYPE_CHECKING:
 #
 # A turn that hits a `demande` tool ends by asking, and the answer arrives
 # on a later turn. Nothing here blocks: for voice the engine runs on the
-# listener's own audio thread, so waiting would silence the microphone
-# that has to hear the answer.
+# listener's reply thread, and the answer is a later turn of that same
+# thread, so waiting would wait on itself.
 
 # What she says when the user declines. Deterministic, because handing a
 # refusal back to the model invites it to re-propose the thing just
@@ -183,14 +183,16 @@ def _end_question(db, action, outcome: str) -> None:
     _publish_settled(action, outcome)
 
 
-def _expire_forgotten_question(db, dialogue_memory) -> None:
-    """Close the question a new conversation leaves behind.
+def expire_waiting_question(db, dialogue_memory, why: str) -> None:
+    """Close the waiting question as one that can no longer be answered.
 
-    Whatever the user was doing when she asked, they are doing something
-    else now, and an approval given to a forgotten question is not an
-    approval. It ends `expiré`, in the ledger and on the card: dropped
-    without a row, it reads as a question she is still waiting on, and
-    its card stays up for a click that can answer nothing.
+    A new conversation leaves one behind: whatever the user was doing when
+    she asked, they are doing something else now. The voice listener
+    withdraws one he never heard, its reply having been stopped. Either
+    way an approval given to it is not an approval. It ends `expiré`, in
+    the ledger and on the card: dropped without a row, it reads as a
+    question she is still waiting on, and its card stays up for a click
+    that can answer nothing.
     """
     take = getattr(dialogue_memory, "take_pending", None)
     if not callable(take):
@@ -202,7 +204,7 @@ def _expire_forgotten_question(db, dialogue_memory) -> None:
     from ..tools.policy import OUTCOME_EXPIRED
 
     _end_question(db, held, OUTCOME_EXPIRED)
-    debug_log(f"    🙋 {held.tool} expired: a new conversation began", "tools")
+    debug_log(f"    🙋 {held.tool} expired: {why}", "tools")
 
 
 def _float_setting(cfg, name: str, default: float) -> float:
@@ -1294,7 +1296,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 pass
         # A question raised before the gap does not survive it.
         try:
-            _expire_forgotten_question(db, dialogue_memory)
+            expire_waiting_question(db, dialogue_memory, why="a new conversation began")
         except Exception as e:
             debug_log(f"forgotten question not closed: {e}", "tools")
 

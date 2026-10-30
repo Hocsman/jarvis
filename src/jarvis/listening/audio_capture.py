@@ -69,9 +69,9 @@ class UtteranceCapture:
              model: str = "", device: str = "") -> Optional[Path]:
         """Write one utterance and its sidecar. Returns the WAV's path.
 
-        Never raises: this sits on the listener's loop, which drains a
-        64-frame audio queue on a deadline, and a capture that threw would
-        cost him the sentence it was meant to record.
+        Never raises: this sits on the listener's loop, which reads the
+        audio queue on a deadline, and a capture that threw would cost him
+        the sentence it was meant to record.
         """
         if not self.enabled:
             return None

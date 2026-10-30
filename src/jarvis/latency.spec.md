@@ -67,7 +67,7 @@ The journal is a side channel. A database that cannot be written, a mark out of 
 
 - A transcript that returns early while a query is being collected (the assistant's own echo, an utterance the judge rejects) also moves the recorded end of speech and drops the judge note, so that row's early columns describe the last utterance heard, not the query.
 - A query dispatched while the previous reply is still playing (barging in with the wake word) can take the previous reply's next chunk for its first sound.
-- A query asked while a reply is being prepared or said waits its turn, and the loop goes on hearing meanwhile: its row takes the end of speech of the last utterance heard before its turn began, which can be a later sentence or her own echo.
+- A query asked while a reply is being prepared or said waits its turn, and the loop goes on hearing meanwhile: its row takes the end of speech of the last utterance heard before its turn began, which can be a later sentence or her own echo, and its `dispatch_ms` includes the wait for its turn.
 - Time is the wall clock the listener already uses; a clock set back during a turn gives zero, not a negative number.
 - The retention is applied when the daemon starts, so a daemon that stays up for weeks keeps more than `latency_journal_days` until its next start.
 

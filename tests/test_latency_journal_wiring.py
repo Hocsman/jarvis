@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from jarvis.listening.listener import _Turn
 from test_hot_window_input import _create_listener, _install_intent_judge, _make_judgment
 
 
@@ -86,7 +87,7 @@ def test_a_spoken_query_becomes_one_row_with_the_judge_and_the_engine_stages(_pr
     clock.now = 1006.0                         # dispatched 6 s after the end of speech
     with patch("jarvis.reply.engine.run_reply_engine", side_effect=fake_engine), \
          patch.object(listener, "_speak_reply"):
-        listener._dispatch_query("what time is it")
+        listener._dispatch_query(_Turn("what time is it"))
 
     row = _only_row(db)
     assert row["transcribed_ms"] == 400
@@ -116,7 +117,7 @@ def test_a_judge_that_cannot_answer_is_recorded_as_no_verdict(_print, db, journa
     clock.now = 1001.0
     with patch("jarvis.reply.engine.run_reply_engine", return_value="ok"), \
          patch.object(listener, "_speak_reply"):
-        listener._dispatch_query("what time is it")
+        listener._dispatch_query(_Turn("what time is it"))
 
     assert _only_row(db)["judge_outcome"] == "no_verdict"
     listener.state_manager.stop()
@@ -134,7 +135,7 @@ def test_an_engine_that_raises_still_closes_the_turn(_print, db, journal):
     )
     clock.now = 1001.0
     with patch("jarvis.reply.engine.run_reply_engine", side_effect=RuntimeError("boom")):
-        listener._dispatch_query("hello")
+        listener._dispatch_query(_Turn("hello"))
 
     assert len(db.recent_latency()) == 1
     listener.state_manager.stop()
@@ -310,7 +311,7 @@ def test_the_end_of_speech_is_the_end_of_the_utterance_less_its_trailing_silence
     clock.now = 1006.0
     with patch("jarvis.reply.engine.run_reply_engine", return_value="ok"), \
          patch.object(listener, "_speak_reply"):
-        listener._dispatch_query("what time is it")
+        listener._dispatch_query(_Turn("what time is it"))
 
     row = _only_row(db)
     assert row["transcribed_ms"] == 1200           # 999.2 -> 1000.4
@@ -349,7 +350,7 @@ def test_the_row_is_written_after_the_reply_has_been_queued(_print, db, journal)
 
     with patch("jarvis.reply.engine.run_reply_engine", return_value="hello"), \
          patch.object(listener, "_speak_reply", side_effect=speaking):
-        listener._dispatch_query("hello")
+        listener._dispatch_query(_Turn("hello"))
 
     assert seen_while_speaking == [0]
     assert len(db.recent_latency()) == 1
@@ -376,7 +377,7 @@ def test_a_sound_that_starts_while_the_reply_is_queued_lands_in_the_row(_print, 
 
     with patch("jarvis.reply.engine.run_reply_engine", return_value="hello"), \
          patch.object(listener, "_speak_reply", side_effect=speaking):
-        listener._dispatch_query("hello")
+        listener._dispatch_query(_Turn("hello"))
 
     assert _only_row(db)["first_sound_ms"] == 1500
     listener.state_manager.stop()
@@ -396,7 +397,7 @@ def test_an_apology_after_a_failed_turn_is_not_its_first_sound(_print, db, journ
     )
     clock.now = 1001.0
     with patch("jarvis.reply.engine.run_reply_engine", side_effect=RuntimeError("boom")):
-        listener._dispatch_query("hello")
+        listener._dispatch_query(_Turn("hello"))
     clock.now = 1002.0
     tts_module._sound_started()                    # the apology starts
 
@@ -419,7 +420,7 @@ def test_a_reply_with_nothing_to_say_arms_no_late_sound(_print, db, journal):
     clock.now = 1001.0
     with patch("jarvis.reply.engine.run_reply_engine", return_value=None), \
          patch.object(listener, "_speak_reply"):
-        listener._dispatch_query("stop")
+        listener._dispatch_query(_Turn("stop"))
     clock.now = 1005.0
     tts_module._sound_started()                    # a reminder, say
 
@@ -444,7 +445,7 @@ def test_a_journal_turned_off_in_the_settings_records_nothing_through_the_listen
     clock.now = 1001.0
     with patch("jarvis.reply.engine.run_reply_engine", return_value="hello"), \
          patch.object(listener, "_speak_reply"):
-        listener._dispatch_query("hello")
+        listener._dispatch_query(_Turn("hello"))
 
     assert db.recent_latency() == []
     assert journal.enabled is False

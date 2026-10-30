@@ -76,7 +76,7 @@ synthesised yet. The reply may still be being written when she is
 stopped: nothing it streams afterwards is said, and neither is its tail.
 
 **One reply is spoken in one voice.** The language the user was heard in
-is read when the stream begins, and every chunk, the tail and the
+is read when the query is handed to the reply thread, and every chunk, the tail and the
 end-of-reply marker carries that same language to the engine (see
 `tts.spec.md`, "Which voice"). A transcript of something else landing
 mid-reply moves the detected language, and must not move the voice of the
