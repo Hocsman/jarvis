@@ -118,13 +118,13 @@ def wait_for_pid(path: Path, timeout: float = 10.0) -> int:
     it. The file exists before the pid is in it, so only a finished line
     counts: a loaded machine can show it empty for a while."""
     deadline = time.monotonic() + timeout
-    text = ""
-    while time.monotonic() < deadline:
+    while True:
         text = path.read_text(encoding="utf-8") if path.exists() else ""
         if text.endswith("\n"):
             return int(text)
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"the stand-in never wrote a pid to {path.name}: {text!r}")
         time.sleep(0.05)
-    raise AssertionError(f"the stand-in never wrote a pid to {path.name}: {text!r}")
 
 
 def make_projects(tmp_path: Path, names) -> Path:
