@@ -529,8 +529,9 @@ said without them has been heard.
 - When synthesis falls behind playback the voice waits for its audio as it
   does without a face, and the pieces handed over after the wait are stamped
   later by as much. A stretch that reaches the face less than its delay
-  before it is heard comes too late to be drawn: there the mouth stays closed
-  until synthesis is ahead again. The debug log counts how far the voice ran
+  before it is heard comes too late to be drawn: there her lips rest as in the
+  portrait (`face/face.spec.md`, "Her lips at rest") until synthesis is ahead
+  again. The debug log counts how far the voice ran
   behind its moment.
 - A stop resets the schedule: the next reply waits for the face's delay
   only, not for what the stop cut.
