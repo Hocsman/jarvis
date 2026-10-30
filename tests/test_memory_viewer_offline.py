@@ -7,7 +7,8 @@ into a call to a third party, contradicting the offline promise, and
 it is the only remote content the embedded Chromium would ever parse.
 So the served HTML must reference no remote URL — the fonts come from
 stacks the machine already has — and the embedded view must refuse to
-navigate anywhere but the loopback server.
+navigate anywhere but the loopback server. The window's real view and
+page are driven in ``test_memory_viewer_navigation.py``.
 """
 
 from __future__ import annotations
@@ -134,27 +135,3 @@ def test_remote_urls_are_refused_by_the_guard():
     assert not _is_local_navigation(QUrl("https://evil.example/"))
     assert not _is_local_navigation(QUrl("http://192.168.1.5/"))
     assert not _is_local_navigation(QUrl("file:///etc/passwd"))
-
-
-@pytest.mark.unit
-def test_the_embedded_page_class_wires_the_guard():
-    """When WebEngine is available, the page the viewer window installs
-    overrides acceptNavigationRequest with the local-only decision, and
-    the window really installs it. WebEngine pages are not instantiated
-    in tests (CI-lightness), so the wiring is pinned structurally."""
-    import inspect
-
-    from desktop_app import app as desktop_app_mod
-
-    if not desktop_app_mod.HAS_WEBENGINE:
-        pytest.skip("QtWebEngine not installed")
-
-    from PyQt6.QtWebEngineCore import QWebEnginePage
-
-    assert issubclass(desktop_app_mod._LocalOnlyPage, QWebEnginePage)
-    assert "acceptNavigationRequest" in desktop_app_mod._LocalOnlyPage.__dict__
-    init_src = inspect.getsource(desktop_app_mod.MemoryViewerWindow.__init__)
-    assert "setPage(_LocalOnlyPage(" in init_src, (
-        "the viewer window does not install the local-only page; the "
-        "guard exists but never runs"
-    )

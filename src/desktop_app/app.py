@@ -1256,11 +1256,11 @@ def _port_holds_viewer_server(port: int) -> bool:
         return False
 
 
-# The embedded viewer navigates exactly one origin: the loopback server
-# that serves the page. Two schemes pass without a host check: ``about:``
-# for Qt's internal page states, and ``data:`` because ``setHtml`` is a
-# navigation to a self-contained ``data:text/html`` document (the error
-# page rides it).
+# The embedded viewer navigates to the loopback names alone, whatever the
+# scheme or port: only the host is checked. Two schemes pass without a
+# host check: ``about:`` for Qt's internal page states, and ``data:``
+# because ``setHtml`` is a navigation to a self-contained
+# ``data:text/html`` document (the error page rides it).
 _VIEWER_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 _VIEWER_LOCAL_SCHEMES = frozenset({"about", "data"})
 
@@ -1275,7 +1275,8 @@ def _is_local_navigation(url) -> bool:
 if QWebEnginePage is not None:
 
     class _LocalOnlyPage(QWebEnginePage):
-        """WebEngine page that refuses every non-loopback navigation.
+        """WebEngine page that refuses every navigation to a host other
+        than the loopback names, in any frame.
 
         The served page holds the launch token and references no remote
         asset; this makes navigation a property of the view too, so no

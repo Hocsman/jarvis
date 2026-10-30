@@ -130,9 +130,12 @@ class TestStats:
 
 # Note: DashboardWindow.process_ipc_line is a thin parser that delegates
 # to bridge.deliver_reply / deliver_busy (both covered above). It isn't
-# unit-tested here because instantiating QWebEngineView under headless
-# pytest is unstable; the parse + delegate path is verified manually via
-# the standalone round-trip and exercised live in the app.
+# unit-tested here: the window builds a QWebEngineView, which is not built
+# in the suite's process (Chromium aborts a process whose QApplication has
+# no program name, which the suite's shared one may lack); a web view is
+# built in a process of its own, as test_memory_viewer_navigation.py does.
+# The parse + delegate path is verified manually via the standalone
+# round-trip and exercised live in the app.
 
 
 class TestTheGearOpensTheSettings:
