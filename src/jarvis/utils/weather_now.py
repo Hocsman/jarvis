@@ -11,7 +11,7 @@ can keep the previous values instead of blanking the card.
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 
 import requests
 
@@ -87,24 +87,50 @@ def _describe(code: Optional[int], language: str = "en") -> tuple[str, str]:
     return ("", "🌡️")
 
 
+def _figure(value, digits: Optional[int] = None):
+    """A figure Open-Meteo sent, rounded, or ``None`` when it sent none."""
+    if value is None:
+        return None
+    try:
+        return round(float(value), digits)
+    except (TypeError, ValueError):
+        return None
+
+
 def fetch_weather_summary(
     city: Optional[str] = None,
     language: Optional[str] = None,
     timeout: float = 8.0,
+    still_wanted: Optional[Callable[[], bool]] = None,
 ) -> Optional[Dict]:
     """Return current weather for ``city`` as a flat dict, or ``None``.
 
     Keys: ``temp, loc, desc, icon, hum, wind, feels`` — exactly what the
-    dashboard's ``weatherUpdated`` handler consumes.
+    dashboard's ``weatherUpdated`` handler consumes. A figure Open-Meteo
+    does not send is ``None``, never 0, so the card keeps its placeholder;
+    an answer with no current conditions at all is no reading.
+
+    ``still_wanted``, when given, is asked before each of the two
+    requests, and a no ends the fetch there: the first sends the city, the
+    second its coordinates, and a caller whose user has since turned
+    location off wants neither sent.
     """
     if not city or not str(city).strip():
         return None
     city = str(city).strip()
 
+    def wanted() -> bool:
+        if still_wanted is None or still_wanted():
+            return True
+        debug_log("weather_now: no longer wanted; nothing more is asked", "tools")
+        return False
+
     lang = (language or "en").strip().lower()
     lang_code = lang[:2] if len(lang) >= 2 else "en"
 
     try:
+        if not wanted():
+            return None
         geo = requests.get(
             "https://geocoding-api.open-meteo.com/v1/search",
             params={"name": city, "count": 1, "language": lang_code, "format": "json"},
@@ -121,6 +147,8 @@ def fetch_weather_summary(
         cc = r0.get("country_code") or ""
         loc_label = f"{loc_name}, {cc}" if cc else loc_name
 
+        if not wanted():
+            return None
         wx = requests.get(
             "https://api.open-meteo.com/v1/forecast",
             params={
@@ -134,15 +162,18 @@ def fetch_weather_summary(
         )
         wx.raise_for_status()
         cur = (wx.json() or {}).get("current") or {}
+        if not cur:
+            debug_log("weather_now: the forecast answer had no current conditions", "tools")
+            return None
         desc, icon = _describe(cur.get("weather_code"), language=lang)
         return {
-            "temp": round(float(cur.get("temperature_2m", 0)), 1),
+            "temp": _figure(cur.get("temperature_2m"), 1),
             "loc": loc_label,
             "desc": desc,
             "icon": icon,
-            "hum": round(float(cur.get("relative_humidity_2m", 0))),
-            "wind": round(float(cur.get("wind_speed_10m", 0))),
-            "feels": round(float(cur.get("apparent_temperature", 0))),
+            "hum": _figure(cur.get("relative_humidity_2m")),
+            "wind": _figure(cur.get("wind_speed_10m")),
+            "feels": _figure(cur.get("apparent_temperature")),
         }
     except Exception as exc:
         debug_log(f"weather_now: fetch failed for {city!r}: {exc}", "tools")

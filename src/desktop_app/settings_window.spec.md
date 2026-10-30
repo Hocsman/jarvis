@@ -197,6 +197,7 @@ A stored index, in any form the listener reads as that index (`"1"`, `1`, `"01"`
 - A `choice` value the field does not list, and a microphone set by name, are written back exactly as they were read: saving another setting never moves one to the first option or to the default. Choosing a listed option, or Reset, still replaces it.
 - Existing keys not managed by the UI are preserved (e.g. `mcps`, `active_profiles`, `wake_aliases`, `allowlist_bundles`, `stop_commands`).
 - After save, a dialog confirms success and reminds the user to restart.
+- Once the window closes after a save, the dashboard reads the settings again, whether or not the daemon runs, so its weather follows location without a restart (`desktop_app.spec.md`, "Weather").
 - If the daemon is running when save completes, the tray app offers to restart it.
 
 ## Reset to Defaults
