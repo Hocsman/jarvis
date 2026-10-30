@@ -59,6 +59,7 @@ def _create_listener(**kwargs):
     mock_cfg.intent_judge_model = "gemma4:e2b"
     mock_cfg.ollama_base_url = "http://127.0.0.1:11434"
     mock_cfg.intent_judge_timeout_sec = 3.0
+    mock_cfg.whisper_language = None
     mock_db = MagicMock()
     mock_tts = MagicMock()
     mock_tts.enabled = True
@@ -1101,6 +1102,78 @@ class TestEchoRejectionInHotWindow:
 
         # Non-echo speech in hot window is accepted via override
         assert _accepted_query(listener) == "did you see the game last night"
+        listener.state_manager.stop()
+
+
+# ---------------------------------------------------------------------------
+# Tests: A sentence heard while his question is collected completes it
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+class TestASecondSentenceCompletesTheQuestion:
+    """A sentence that reaches her while his question is still being
+    collected completes it, and she answers both.
+
+    Field trace (2026-10-30): "Salut Yuba, comment tu vas ?" then "Tu
+    m'entends Yuba ?" inside the collection window. The second replaced the
+    first, and only "tu m'entends ?" was answered.
+    """
+
+    @patch("builtins.print")
+    def test_a_second_wake_word_sentence_adds_to_the_first(self, _print):
+        listener, _ = _create_listener()
+
+        listener._process_transcript("jarvis comment tu vas", utterance_energy=0.01)
+        listener._process_transcript("jarvis tu m'entends", utterance_energy=0.01)
+
+        query = _accepted_query(listener)
+        assert "comment tu vas" in query and "tu m'entends" in query
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_so_does_one_the_judge_accepts(self, _print):
+        listener, _ = _create_listener()
+        _install_intent_judge(listener, _make_judgment(directed=True, query="comment tu vas"))
+        listener._process_transcript("jarvis comment tu vas", utterance_energy=0.01)
+
+        _install_intent_judge(listener, _make_judgment(directed=True, query="tu m'entends"))
+        listener._process_transcript("jarvis tu m'entends", utterance_energy=0.01)
+
+        query = _accepted_query(listener)
+        assert "comment tu vas" in query and "tu m'entends" in query
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_a_stop_cancels_the_question_instead_of_joining_it(self, _print):
+        listener, _ = _create_listener()
+        listener._process_transcript("jarvis comment tu vas", utterance_energy=0.01)
+
+        listener._process_transcript("jarvis stop", utterance_energy=0.01)
+
+        assert not listener.state_manager.is_collecting()
+        assert _accepted_query(listener) == ""
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_what_joins_the_question_is_no_context_for_the_judge(self, _print):
+        """Left visible, the judge could restate it in a later query and it
+        would be collected twice."""
+        listener, _ = _create_listener()
+
+        def hear(text):
+            now = time.time()
+            listener._transcript_buffer.add(text, now - 1.0, now, 0.01)
+            listener._process_transcript(text, utterance_energy=0.01)
+
+        hear("jarvis")
+        hear("quel temps fait-il demain")
+
+        shown = IntentJudge()._build_user_prompt(
+            listener._transcript_buffer.get_last_seconds(120.0), wake_timestamp=None,
+            last_tts_text="", last_tts_finish_time=0.0, in_hot_window=False,
+            current_text="jarvis réponds")
+        assert "quel temps" not in shown
+        assert "quel temps fait-il demain" in _accepted_query(listener)
         listener.state_manager.stop()
 
 

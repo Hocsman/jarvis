@@ -1603,6 +1603,7 @@ def main() -> None:
                 voice_device=getattr(cfg, "voice_device", None),
                 filler_removal=getattr(cfg, "dictation_filler_removal", False),
                 custom_dictionary=getattr(cfg, "dictation_custom_dictionary", []),
+                whisper_language=getattr(cfg, "whisper_language", None),
                 cfg=cfg,
                 chat_model=cfg.llm_chat_model,
                 thinking=getattr(cfg, "dictation_thinking_enabled", False),

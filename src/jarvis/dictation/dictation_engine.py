@@ -615,6 +615,7 @@ class DictationEngine:
         voice_device: Optional[str] = None,
         filler_removal: bool = False,
         custom_dictionary: Optional[list] = None,
+        whisper_language: Optional[str] = None,
         cfg: Any = None,
         chat_model: str = "gemma4:e2b",
         thinking: bool = False,
@@ -634,6 +635,8 @@ class DictationEngine:
         self._filler_removal = filler_removal
         self._custom_dictionary = custom_dictionary or []
         self._cfg = cfg
+        # The language Whisper transcribes in, as for the listener; None: it detects.
+        self._whisper_language = whisper_language
         self._chat_model = chat_model
         self._thinking = thinking
 
@@ -1192,7 +1195,8 @@ class DictationEngine:
             return ""
         try:
             import mlx_whisper
-            result = mlx_whisper.transcribe(audio, path_or_hf_repo=repo, language=None)
+            result = mlx_whisper.transcribe(audio, path_or_hf_repo=repo,
+                                            language=self._whisper_language)
             text = result.get("text", "").strip() if isinstance(result, dict) else ""
             return text
         except Exception as exc:
@@ -1202,9 +1206,10 @@ class DictationEngine:
     def _transcribe_faster_whisper(self, model, audio) -> str:
         try:
             try:
-                segments, _info = model.transcribe(audio, language=None, vad_filter=False)
+                segments, _info = model.transcribe(audio, language=self._whisper_language,
+                                                   vad_filter=False)
             except TypeError:
-                segments, _info = model.transcribe(audio, language=None)
+                segments, _info = model.transcribe(audio, language=self._whisper_language)
             return " ".join(seg.text for seg in segments).strip()
         except Exception as exc:
             debug_log(f"faster-whisper transcription error: {exc}", "dictation")
