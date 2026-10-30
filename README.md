@@ -733,7 +733,7 @@ Get API key at [composio.dev](https://composio.dev)
 
 **Mac gets warm while Jarvis is active** - Enable **⚙️ Settings → ✨ Features → Low Power Mode**. This keeps voice recognition ready while avoiding background LLM warmup and shortening Ollama's idle residency window.
 
-**Need to cool down immediately** - Use the tray action **⚡ Stop Now (Skip Diary)**. It stops the voice daemon without running the final diary LLM pass. Regular **Stop Listening** still saves the diary before shutdown.
+**Need to cool down immediately** - Use the tray action **⚡ Stop Now (Skip Diary)**. It stops the voice daemon without running the final diary LLM pass. Regular **Stop Listening** still saves the diary before shutdown. Pick one or the other: once a stop is under way the tray shows **⏳ Stopping…** and both are greyed out until it finishes.
 
 **Mac is still warm after quitting** - If Jarvis starts Ollama for you, quitting Jarvis also stops that owned Ollama runtime. If Ollama was already running before Jarvis opened, Jarvis leaves it running so it does not interrupt your other local AI tools.
 
