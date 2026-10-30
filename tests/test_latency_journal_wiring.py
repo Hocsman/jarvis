@@ -344,7 +344,7 @@ def test_the_row_is_written_after_the_reply_has_been_queued(_print, db, journal)
     clock.now = 1001.0
     seen_while_speaking: list[int] = []
 
-    def speaking(reply):
+    def speaking(reply, **_kwargs):
         seen_while_speaking.append(len(db.recent_latency()))
 
     with patch("jarvis.reply.engine.run_reply_engine", return_value="hello"), \
@@ -370,7 +370,7 @@ def test_a_sound_that_starts_while_the_reply_is_queued_lands_in_the_row(_print, 
     )
     clock.now = 1001.0
 
-    def speaking(reply):
+    def speaking(reply, **_kwargs):
         clock.now = 1001.5
         tts_module._sound_started()
 

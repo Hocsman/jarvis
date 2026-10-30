@@ -44,7 +44,7 @@ A single process-wide journal, `get_latency_journal()`, is configured by each li
 
 - **Listener, on a transcript:** `note_heard(speech_end)` records the end of the utterance and when its transcript became ready.
 - **Listener, around the intent judge:** `note_judge(seconds, outcome)`.
-- **Listener, on dispatch:** `begin_turn(models)` opens the turn from those notes, and the reply engine's `on_stage` callback is handed to the journal. When the engine returns, `finish_turn(will_speak)` freezes the numbers with no I/O; the row is written by `flush()` once the reply has been queued for speech, so the write never sits between "reply ready" and "start speaking". `end_turn()` does both for a caller with nothing to do in between.
+- **Listener's reply thread, when the turn begins:** `begin_turn(models)` opens the turn from those notes, and the reply engine's `on_stage` callback is handed to the journal. When the engine returns, `finish_turn(will_speak)` freezes the numbers with no I/O; the row is written by `flush()` once the reply has been queued for speech, so the write never sits between "reply ready" and "start speaking". `end_turn()` does both for a caller with nothing to do in between.
 - **Reply engine:** announces its stages (`routing`, `planning`, `memory`, `tool`, `generating`), announces `generating` again before a model call that follows a tool result so that call is not booked to the tool, and calls `note_router_degraded()` when the router gave up this turn.
 - **Speech engines:** call `mark_first_sound()` once their audio stream is running, outside the audio locks; for a Kyutai item drawn on the talking face, once it is heard, so the first sound then includes the face's delay (`output/tts.spec.md`, "Kyutai"). This is not where `SPEAKING` is published: that happens when a chunk begins to be synthesised, before anything is audible, and marking there would understate the wait by the synthesis time of the first chunk. Only the first call of a turn counts.
 
@@ -67,6 +67,7 @@ The journal is a side channel. A database that cannot be written, a mark out of 
 
 - A transcript that returns early while a query is being collected (the assistant's own echo, an utterance the judge rejects) also moves the recorded end of speech and drops the judge note, so that row's early columns describe the last utterance heard, not the query.
 - A query dispatched while the previous reply is still playing (barging in with the wake word) can take the previous reply's next chunk for its first sound.
+- A query asked while a reply is being prepared or said waits its turn, and the loop goes on hearing meanwhile: its row takes the end of speech of the last utterance heard before its turn began, which can be a later sentence or her own echo.
 - Time is the wall clock the listener already uses; a clock set back during a turn gives zero, not a negative number.
 - The retention is applied when the daemon starts, so a daemon that stays up for weeks keeps more than `latency_journal_days` until its next start.
 

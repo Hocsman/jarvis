@@ -1,15 +1,15 @@
-"""One thread speaks, and it is always the listener's.
+"""One thread speaks, and it is the listener's reply thread.
 
 A click-approved action produces its reply on a resume worker. If that
-worker spoke directly, it would race the listener: the listener speaks
+worker spoke directly, it would race the reply thread: that thread speaks
 *outside* the block that holds the query lock, so both could be inside
 `track_tts_start` at once — two writes to the echo detector's record of
 what was last said, and two hot-window activations. The echo detector
 would then be comparing the next transcript against the wrong sentence,
 which is how a user's answer gets deleted as an echo.
 
-So a reply from elsewhere is queued, and the listener drains it on its
-own thread through the same speaking path it uses for its own replies.
+So a reply from elsewhere is queued, and the reply thread says it through
+the same speaking path it uses for her own replies.
 
 The hot window widens while a spoken question is waiting, because 3
 seconds is tuned for a follow-up and a person weighing whether to let
@@ -53,66 +53,33 @@ def listener():
     return obj
 
 
-# ── The drain has to be reached while the microphone is live ──────────
+# ── The drain does not wait on the microphone ──────────────────────
 
 
-def test_a_queued_reply_is_spoken_while_audio_is_flowing(listener):
-    """The failure this file previously could not see.
-
-    Every other test here calls `drain_reply_queue()` directly, which is
-    exactly why it never noticed that the consumer loop only reached the
-    drain from its `queue.Empty` branch. The audio callback feeds a frame
-    every 20 ms, so on a live microphone that branch never fires and a
-    click-approved action's narration was simply never said.
-
-    This drives the loop the way the loop actually runs: the queue always
-    has a frame, and the reply still has to come out.
-    """
+def test_a_queued_reply_is_said_by_the_reply_thread_on_its_own(listener):
+    """It was drained by the microphone loop, and only reached from its
+    idle branch, which on a live microphone never runs: a click-approved
+    action's narration was never said. The reply thread drains it on its
+    own, with no audio at all."""
     import queue as _queue
+    import threading
+    import time
 
-    spoken = []
-    listener.tts.speak.side_effect = lambda text, **kw: spoken.append(text)
+    listener._should_stop = False
+    listener._turns = _queue.Queue()
+    listener._turn_in_hand = None
+    listener._replies = None
+    spoken = threading.Event()
+    listener.tts.speak.side_effect = lambda text, **kw: spoken.set()
     listener.enqueue_reply("c'est fait")
 
-    # The consumer body, as `run` executes it under continuous audio.
-    audio = _queue.Queue()
-    for _ in range(5):
-        audio.put(b"\x00" * 320)
-
-    for _ in range(5):
-        listener.drain_reply_queue()
-        try:
-            audio.get_nowait()
-        except _queue.Empty:
-            break
-
-    assert spoken == ["c'est fait"]
-
-
-def test_the_drain_is_not_hidden_behind_an_idle_microphone():
-    """Structural, and deliberately so.
-
-    The behaviour above can be satisfied by a test harness that calls the
-    drain itself — which is how the defect survived. What matters is
-    where the real loop calls it from, and the only honest way to pin
-    that is to read the loop.
-    """
-    import inspect
-
-    from src.jarvis.listening.listener import VoiceListener
-
-    src = inspect.getsource(VoiceListener.run)
-    body = src.split("except queue.Empty:")
-    assert len(body) == 2, "the consumer loop changed shape; re-read it"
-
-    # Everything after the `except queue.Empty:` line up to `continue` is
-    # the idle-only branch. The drain must not live only there.
-    idle_branch = body[1].split("continue")[0]
-    assert "drain_reply_queue" not in idle_branch, (
-        "the drain is reachable only when no audio arrived, which on a "
-        "live microphone is never"
-    )
-    assert "drain_reply_queue" in src, "the loop no longer drains at all"
+    listener._start_replies()
+    try:
+        assert spoken.wait(5.0)
+    finally:
+        listener._should_stop = True
+        time.sleep(0.05)
+    assert listener.tts.speak.call_args.args[0] == "c'est fait"
 
 
 # ── One thing spoken at a time ────────────────────────────────────────
