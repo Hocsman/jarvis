@@ -83,7 +83,9 @@ After transcription, text passes through these stages in order:
 - **Clipboard-based paste** (`Ctrl+V` / `Cmd+V`) for text insertion — more
   reliable than character-by-character typing, handles Unicode.
 - **Shared Whisper model** via lazy reference (`lambda: voice_thread.model`)
-  and backend info — no double memory usage.
+  and backend info — no double memory usage. It transcribes in
+  `whisper_language` when one is named, as the listener does, and detects
+  the language otherwise.
 - **Separate `sounddevice.InputStream`** for dictation audio — avoids
   modifying the complex listener code.
 - **Pause flag** on the main listener to prevent dictation speech being

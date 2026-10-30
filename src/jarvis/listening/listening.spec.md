@@ -204,8 +204,10 @@ System is waiting for wake word activation.
 1. Start thinking beep immediately and publish the state LISTENING
 2. Wait for utterance to complete (user finishes speaking)
 3. Send transcript buffer + wake timestamp to intent judge
-4. If `directed=true` and `query` exists, dispatch to reply engine
+4. If `directed=true` and `query` exists, collect it, and hand it to the reply thread once he has stopped for `voice_collect_seconds`
 5. If rejected, stop the beep and publish IDLE
+
+**A sentence heard while a question is still being collected completes it.** Whichever path accepts it (the judge, the hot-window overrides, the text wake-word check), it is added to the question being collected, never put in its place, and she answers both: "Salut Yuba, comment tu vas ?" then "Tu m'entends Yuba ?" is one question.
 
 ### 2. Hot Window Mode
 
@@ -301,7 +303,7 @@ The intent judge synthesizes: `"what do you think about the weather tomorrow for
 
 ### Text Whisper Makes Out of Silence
 
-Whisper turns silence, breath and room noise into text: mostly the closing lines of videos and subtitle credits ("Thank you.", "ご視聴ありがとうございました", "Продолжение следует...", "Sous-titres réalisés par la communauté d'Amara.org"), often in a language nobody in the room speaks. The confidence filters below catch some of it, not all.
+Whisper turns silence, breath and room noise into text: mostly the closing lines of videos and subtitle credits ("Thank you.", "ご視聴ありがとうございました", "Продолжение следует...", "Sous-titres réalisés par la communauté d'Amara.org"), often in a language nobody in the room speaks. The confidence filters below catch some of it, not all, and naming the one language he speaks (`whisper_language`) stops the ones in other languages at the source.
 
 The judge's verdict carries `noise`: true when the current segment is such an invention rather than words someone said, and then it is not directed. Words a person said are never noise, however short, thankful, odd or misheard; in doubt the judge says false, and a model that leaves the field out has said false.
 
@@ -421,6 +423,7 @@ The listener feeds the latency journal (`src/jarvis/latency.py`, see `latency.sp
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `transcript_buffer_duration_sec` | 120 | Duration (seconds) for rolling ambient speech transcript. Provides conversation context so the intent judge can synthesise a complete query when someone involves Jarvis. Separate from dialogue memory. |
+| `whisper_language` | `""` | ISO-639-1 code of the language Whisper transcribes in, for the listener and dictation alike. Empty (or `auto`): it detects the language of each utterance, which a multilingual user needs and which lets it invent phrases out of silence in any language and spell a short word in another script ("Стоп."). Named, it transcribes only that language. |
 | `whisper_min_confidence` | 0.3 | Minimum `avg_logprob`-derived confidence score for a transcribed segment. Segments below this are discarded before the intent judge sees them. |
 | `whisper_no_speech_threshold` | 0.5 | Hard cutoff on Whisper's `no_speech_prob` field. Any segment at or above this value is discarded **regardless of `avg_logprob`** — Whisper can be confident about a hallucinated phrase even when no real speech is present (e.g. the "MBC 뉴스" hallucination on background noise). This filter runs before the `avg_logprob` check so it catches high-confidence hallucinations that would otherwise survive. Applies to both the faster-whisper and MLX backends. |
 

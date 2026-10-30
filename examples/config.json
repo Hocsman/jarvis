@@ -84,6 +84,7 @@
   "whisper_vad": true,
   "whisper_min_confidence": 0.3,
   "whisper_no_speech_threshold": 0.5,
+  "whisper_language": "",
   "whisper_min_audio_duration": 0.15,
   "whisper_min_word_length": 1,
   "vad_enabled": true,

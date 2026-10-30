@@ -1148,7 +1148,7 @@ class VoiceListener(threading.Thread):
                         self.state_manager.cancel_hot_window_activation()
                         self._transcript_buffer.mark_segment_processed(text_lower)
                         self._clear_audio_buffers()
-                        self.state_manager.start_collection(text_lower)
+                        self._collect(text_lower)
                         self._start_thinking_tune()
                         try:
                             print(f"\n✨ Working on it: {self.state_manager.get_pending_query()}")
@@ -1202,7 +1202,7 @@ class VoiceListener(threading.Thread):
                             self.state_manager.cancel_hot_window_activation()
                             self._transcript_buffer.mark_segment_processed(text_lower)
                             self._clear_audio_buffers()
-                            self.state_manager.start_collection(intent_judgment.query)
+                            self._collect(intent_judgment.query)
                             self._start_thinking_tune()
                             try:
                                 print(f"\n✨ Working on it: {self.state_manager.get_pending_query()}")
@@ -1279,7 +1279,7 @@ class VoiceListener(threading.Thread):
                         self._transcript_buffer.mark_segment_processed(text_lower)
                         self._clear_audio_buffers()
 
-                        self.state_manager.start_collection(hot_query)
+                        self._collect(hot_query)
 
                         # Start thinking tune and show processing message
                         self._start_thinking_tune()
@@ -1313,7 +1313,7 @@ class VoiceListener(threading.Thread):
                             self.state_manager.cancel_hot_window_activation()
                             self._transcript_buffer.mark_segment_processed(text_lower)
                             self._clear_audio_buffers()
-                            self.state_manager.start_collection(text_lower)
+                            self._collect(text_lower)
                             self._start_thinking_tune()
                             try:
                                 print(f"\n✨ Working on it: {self.state_manager.get_pending_query()}")
@@ -1343,7 +1343,7 @@ class VoiceListener(threading.Thread):
                         self.state_manager.cancel_hot_window_activation()
                         self._transcript_buffer.mark_segment_processed(text_lower)
                         self._clear_audio_buffers()
-                        self.state_manager.start_collection(text_lower)
+                        self._collect(text_lower)
                         self._start_thinking_tune()
                         try:
                             print(f"\n✨ Working on it: {self.state_manager.get_pending_query()}")
@@ -1385,7 +1385,7 @@ class VoiceListener(threading.Thread):
                             self._transcript_buffer.mark_segment_processed(text_lower)
 
                             self._clear_audio_buffers()
-                            self.state_manager.start_collection(text_lower)
+                            self._collect(text_lower)
                             self._start_thinking_tune()
                             try:
                                 print(f"\n✨ Working on it: {self.state_manager.get_pending_query()}")
@@ -1448,7 +1448,7 @@ class VoiceListener(threading.Thread):
                             self.state_manager.cancel_hot_window_activation()
                             self._transcript_buffer.mark_segment_processed(text_lower)
                             self._clear_audio_buffers()
-                            self.state_manager.start_collection(text_lower)
+                            self._collect(text_lower)
                             self._start_thinking_tune()
                             try:
                                 print(f"\n✨ Working on it: {self.state_manager.get_pending_query()}")
@@ -1496,7 +1496,7 @@ class VoiceListener(threading.Thread):
                             self.state_manager.cancel_hot_window_activation()
                             self._transcript_buffer.mark_segment_processed(text_lower)
                             self._clear_audio_buffers()
-                            self.state_manager.start_collection(text_lower)
+                            self._collect(text_lower)
                             self._start_thinking_tune()
                             try:
                                 print(f"\n✨ Working on it: {self.state_manager.get_pending_query()}")
@@ -1531,7 +1531,7 @@ class VoiceListener(threading.Thread):
             self._clear_audio_buffers()
 
             query_fragment = extract_query_after_wake(text_lower, wake_word, list(aliases))
-            self.state_manager.start_collection(query_fragment)
+            self._collect(query_fragment)
 
             # Start thinking tune and show processing message
             self._start_thinking_tune()
@@ -1713,6 +1713,20 @@ class VoiceListener(threading.Thread):
             shown = dropped.query[:50] + ("..." if len(dropped.query) > 50 else "")
             print(f"  ⏭️ Too many questions waiting, dropped: \"{shown}\"", flush=True)
         debug_log(f"handing query to the reply thread: '{query}'", "voice")
+
+    def _collect(self, query: str) -> None:
+        """Start collecting his question, or add to the one being collected:
+        a second sentence that reaches her before the first was handed over
+        completes it, and she answers both."""
+        if self.state_manager.is_collecting():
+            self.state_manager.add_to_collection(query)
+        else:
+            self.state_manager.start_collection(query)
+
+    def _whisper_language(self) -> Optional[str]:
+        """The language Whisper is told to hear, or None to let it detect."""
+        language = getattr(self.cfg, "whisper_language", "")
+        return language if isinstance(language, str) and language else None
 
     def _a_reply_is_on_its_way(self) -> bool:
         """Whether a turn is being prepared or said, or waits to be."""
@@ -2700,7 +2714,7 @@ class VoiceListener(threading.Thread):
                         _ = mlx_whisper.transcribe(
                             warmup_audio,
                             path_or_hf_repo=self._mlx_model_repo,
-                            language=None,
+                            language=self._whisper_language(),
                         )
                         debug_log(f"MLX Whisper model pre-loaded: repo={self._mlx_model_repo}", "voice")
 
@@ -2900,13 +2914,13 @@ class VoiceListener(threading.Thread):
                     try:
                         segments_iter, _ = self.model.transcribe(
                             warmup_audio,
-                            language=None,
+                            language=self._whisper_language(),
                             vad_filter=False,
                             condition_on_previous_text=not cpu_mode,
                             without_timestamps=cpu_mode,
                         )
                     except TypeError:
-                        segments_iter, _ = self.model.transcribe(warmup_audio, language=None)
+                        segments_iter, _ = self.model.transcribe(warmup_audio, language=self._whisper_language())
                     for _ in segments_iter:
                         pass
                     debug_log("faster-whisper warmup transcription complete", "voice")
@@ -3249,7 +3263,7 @@ class VoiceListener(threading.Thread):
                     result = mlx_whisper.transcribe(
                         audio,
                         path_or_hf_repo=self._mlx_model_repo,
-                        language=None,
+                        language=self._whisper_language(),
                     )
 
                 # Capture Whisper's auto-detected language (ISO-639-1) so
@@ -3314,12 +3328,12 @@ class VoiceListener(threading.Thread):
                 with self.transcribe_lock:
                     try:
                         segments, _info = self.model.transcribe(
-                            audio, language=None, vad_filter=False,
+                            audio, language=self._whisper_language(), vad_filter=False,
                             condition_on_previous_text=not cpu_mode,
                             without_timestamps=cpu_mode,
                         )
                     except TypeError:
-                        segments, _info = self.model.transcribe(audio, language=None)
+                        segments, _info = self.model.transcribe(audio, language=self._whisper_language())
                     segments_list = list(segments)
                 # Capture the detected language (faster-whisper exposes it
                 # on the info object). Guard against older API variants

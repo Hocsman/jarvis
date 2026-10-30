@@ -1109,6 +1109,41 @@ class TestEchoRejectionInHotWindow:
 # ---------------------------------------------------------------------------
 
 @pytest.mark.unit
+class TestASecondSentenceCompletesTheQuestion:
+    """A sentence that reaches her while his question is still being
+    collected completes it, and she answers both.
+
+    Field trace (2026-10-30): "Salut Yuba, comment tu vas ?" then "Tu
+    m'entends Yuba ?" inside the collection window. The second replaced the
+    first, and only "tu m'entends ?" was answered.
+    """
+
+    @patch("builtins.print")
+    def test_a_second_wake_word_sentence_adds_to_the_first(self, _print):
+        listener, _ = _create_listener()
+
+        listener._process_transcript("jarvis comment tu vas", utterance_energy=0.01)
+        listener._process_transcript("jarvis tu m'entends", utterance_energy=0.01)
+
+        query = _accepted_query(listener)
+        assert "comment tu vas" in query and "tu m'entends" in query
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_so_does_one_the_judge_accepts(self, _print):
+        listener, _ = _create_listener()
+        _install_intent_judge(listener, _make_judgment(directed=True, query="comment tu vas"))
+        listener._process_transcript("jarvis comment tu vas", utterance_energy=0.01)
+
+        _install_intent_judge(listener, _make_judgment(directed=True, query="tu m'entends"))
+        listener._process_transcript("jarvis tu m'entends", utterance_energy=0.01)
+
+        query = _accepted_query(listener)
+        assert "comment tu vas" in query and "tu m'entends" in query
+        listener.state_manager.stop()
+
+
+@pytest.mark.unit
 class TestWhatWhisperMakesOfSilence:
     """Whisper turns silence and room noise into the closing lines of videos:
     "Thank you.", "ご視聴ありがとうございました", "Продолжение следует...".

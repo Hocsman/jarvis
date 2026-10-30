@@ -1186,13 +1186,20 @@ class DictationEngine:
                 debug_log("no whisper model available", "dictation")
                 return ""
 
+    def _whisper_language(self) -> Optional[str]:
+        """The language Whisper is told to hear (`whisper_language`), or None
+        to let it detect, as the listener does."""
+        language = getattr(self._cfg, "whisper_language", "")
+        return language if isinstance(language, str) and language else None
+
     def _transcribe_mlx(self, audio) -> str:
         repo = self._mlx_repo_ref()
         if not repo:
             return ""
         try:
             import mlx_whisper
-            result = mlx_whisper.transcribe(audio, path_or_hf_repo=repo, language=None)
+            result = mlx_whisper.transcribe(audio, path_or_hf_repo=repo,
+                                            language=self._whisper_language())
             text = result.get("text", "").strip() if isinstance(result, dict) else ""
             return text
         except Exception as exc:
@@ -1202,9 +1209,10 @@ class DictationEngine:
     def _transcribe_faster_whisper(self, model, audio) -> str:
         try:
             try:
-                segments, _info = model.transcribe(audio, language=None, vad_filter=False)
+                segments, _info = model.transcribe(audio, language=self._whisper_language(),
+                                                   vad_filter=False)
             except TypeError:
-                segments, _info = model.transcribe(audio, language=None)
+                segments, _info = model.transcribe(audio, language=self._whisper_language())
             return " ".join(seg.text for seg in segments).strip()
         except Exception as exc:
             debug_log(f"faster-whisper transcription error: {exc}", "dictation")

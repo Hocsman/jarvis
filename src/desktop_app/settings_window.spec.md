@@ -153,6 +153,10 @@ The `whisper_model` dropdown lists every model in `SUPPORTED_WHISPER_MODELS`
 slider from, so a size picked in either one is listed by the other. An
 English-only id (`.en`) reads as its size name followed by "(English only)".
 
+`whisper_language` is a free text field on the same page: the two-letter
+code of the one language the user speaks, or empty to let Whisper detect
+it per sentence (`jarvis/listening/listening.spec.md`, Configuration).
+
 ### Features
 
 The Features category exposes user-facing runtime toggles that do not need a

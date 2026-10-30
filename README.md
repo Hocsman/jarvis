@@ -357,6 +357,7 @@ The settings are under **⚙️ Settings → 🔧 Advanced**:
 #### Language Modes
 - **Multilingual** (default, 99 languages): `"whisper_model": "medium"`
 - **English Only** (slightly better English accuracy): `"whisper_model": "medium.en"`
+- **One language you name**: `"whisper_language": "fr"` (Settings, *Whisper*, Language). Whisper then transcribes only that language, for voice and dictation: no more phrases invented out of silence in other languages, and a short word like "stop" is not spelled in another script. Leave it empty if you speak several languages to it.
 
 #### Model Sizes
 | Model | English | Multilingual | Download | VRAM | Speed |
