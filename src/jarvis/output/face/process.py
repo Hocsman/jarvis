@@ -29,9 +29,9 @@ STEPS = 10
 WARM_UP_SECONDS = 3.0
 WATCH_SECONDS = 2.0      # a viewer heartbeat younger than this means someone is watching
 KEEP_SECONDS = 5.0       # audio heard longer ago than this is forgotten
-# Her lips at rest: a frame whose audio is quieter than this is silence. Kyutai's
+# Her lips at rest: a frame whose audio has at most this RMS is silence. Kyutai's
 # speech sits near 0.07 RMS per frame and its silences near 0.0003.
-VOICE_RMS = 0.005
+SILENCE_RMS = 0.005
 LIPS_ATTACK_FRAMES = 2    # the lips start to follow her voice this many frames before it
 LIPS_RELEASE_FRAMES = 6   # and return to the portrait's over this many after it
 
@@ -85,8 +85,8 @@ class Renderer:
         self.late: Dict[int, int] = {}       # frames published after their stamp, per epoch
         self.skipped = 0
         self.quit = threading.Event()
-        self.frames_fed = 0                   # Ditto's own count of the frames it draws
-        self._since_voice = LIPS_RELEASE_FRAMES + 1
+        self.frames_fed = 0                   # frames fed to Ditto, which is how it names those it draws
+        self._since_voice = LIPS_RELEASE_FRAMES + 1   # frames since she was heard: past the release, at rest
 
     @classmethod
     def build(cls, portrait: str, framing: str) -> "Renderer":
@@ -153,7 +153,7 @@ class Renderer:
         voiced = []
         for k in range(ahead):
             frame = audio[(past + k) * per:(past + k + 1) * per]
-            voiced.append(frame.size > 0 and float(np.sqrt(np.mean(np.square(frame)))) > VOICE_RMS)
+            voiced.append(float(np.sqrt(np.mean(np.square(frame)))) > SILENCE_RMS)
         weights = []
         for k in range(tl.CHUNK_FRAMES):
             if voiced[k]:
@@ -196,6 +196,7 @@ class Renderer:
             _log(f"before this rest: {late} frames after their moment, {self.skipped} chunks skipped")
         self.skipped = 0
         self.epoch += 1
+        self._since_voice = LIPS_RELEASE_FRAMES + 1   # whoever watches next finds her lips at rest
 
     def tick(self, now: float) -> float:
         """One turn of the feeding loop; returns how long to sleep."""

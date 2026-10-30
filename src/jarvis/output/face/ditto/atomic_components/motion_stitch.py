@@ -1,10 +1,9 @@
 # Modified for Jarvis from antgroup/ditto-talkinghead (Apache-2.0, commit c3e47ee):
-# softmax in numpy, so scipy is not needed; vad_alpha moves the lip keypoints only.
+# softmax in numpy, so scipy is not needed; vad_alpha moves the lip keypoints only;
+# the stitch network is imported where it is built, so the controls load without PyTorch.
 import copy
 import random
 import numpy as np
-
-from ..models.stitch_network import StitchNetwork
 
 
 def softmax(x, axis=None):
@@ -63,8 +62,8 @@ def fade(x_d_info, dst, alpha, keys=None):
 
 
 def ctrl_vad(x_d_info, dst, alpha):
-    """Hold the lip keypoints ``alpha`` of the way to the driven expression
-    and the rest to ``dst``; every other keypoint stays as driven, so a
+    """Blend the lip keypoints: ``alpha`` of the driven expression and
+    ``1 - alpha`` of ``dst``. Every other keypoint stays as driven, so a
     silent face goes on blinking."""
     exp = x_d_info["exp"]
     exp_dst = dst["exp"]
@@ -293,6 +292,8 @@ class MotionStitch:
         self,
         stitch_network_cfg,
     ):
+        from ..models.stitch_network import StitchNetwork
+
         self.stitch_net = StitchNetwork(**stitch_network_cfg)
 
     def set_Nd(self, N_d=-1):

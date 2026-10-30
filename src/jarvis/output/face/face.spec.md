@@ -151,19 +151,23 @@ to the portrait's.
   After she is heard it falls to 0 over six frames, so a pause between two
   words keeps her mouth. It starts to rise two frames before she is heard
   again, read from the two frames of what follows that every chunk carries.
+  A rest ends the fall: whoever watches next finds her lips at rest.
 - **The lips only.** The weight moves the lip keypoints and nothing else: the
   rest of the expression stays as Ditto draws it, so in silence she goes on
   blinking and moving.
 - **Handed to Ditto** as the frame's `vad_alpha`, keyed by the frame's place
-  among those Ditto draws. Ditto draws one frame per frame fed, in order, which
-  the stamps rely on too, and takes each frame's entry as it draws it.
+  among those Ditto draws; a frame at 1 needs none, since Ditto reads a missing
+  one as 1. Ditto draws one frame per frame fed, in order, which the stamps
+  rely on too, so a chunk skipped takes no place; it takes each frame's entry
+  as it draws it.
 
 ## Interrupting
 
 `cut(at)` means she stops talking at `at`. The renderer drops every sample
 heard at or after `at`, so what it draws from then on is silence: her lips
-return to the portrait's (Her lips at rest). Frames drawn before the cut but stamped after it show words she will
-not say. The cut withdraws those already published, and the renderer refuses
+return to the portrait's (see Her lips at rest). Frames drawn before the cut
+but stamped after it show words she will not say. The cut withdraws those
+already published, and the renderer refuses
 to publish those still being drawn, whichever cut since they were drawn
 covers them: a second cut never brings back what an earlier one took. The
 face holds its last frame until the first frame drawn after the cut is due,
@@ -300,10 +304,12 @@ is checked by hand.
   frames and frames left inside Ditto at a rest never shown, frames after a
   cut refused, late frames counted, a chunk skipped while Ditto owes a frame already due, nothing
   fed while no one watches, `watched` reported as it changes, `failed` with
-  its reason; her lips held to the portrait's in silence and following her
-  voice while she is heard, the ramps either side, a pause between words,
-  each weight named by its frame's place in what Ditto draws, and Ditto's
-  `vad_alpha` moving the lip keypoints only.
+  its reason; her lips held to the portrait's in silence (her own noise floor
+  included) and following her voice while she is heard, the ramps either
+  side, a pause between words, her lips at rest after a rest, each weight
+  named by its frame's place in what Ditto draws (warm-up counted, a skipped
+  chunk not), and Ditto's `vad_alpha` moving the lip keypoints only, loaded
+  without PyTorch.
 - `tests/test_face_client.py`: the renderer process faked; `ready`,
   `watched` and `failed`, an impossible delay refused, a child that dies, cannot start or ignores quit, the packaged app
   refused, the portrait in the environment and not the command line, messages
