@@ -14,6 +14,7 @@ import sys
 import platform
 from collections import deque
 from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass
 from typing import Optional, TYPE_CHECKING, Any
 from datetime import datetime
 
@@ -65,6 +66,55 @@ def _open_input_stream(
         sd_backend=sd,
         lock=portaudio_lock,
     )
+
+
+# How much microphone audio the queue between the capture callback and the
+# listening loop holds. The loop still waits on Whisper and on the intent
+# judge; while it does, his words wait here instead of being dropped.
+AUDIO_BACKLOG_SECONDS = 30.0
+
+# While she only thinks, a stop word counts as a stop in an utterance of at
+# most this many words; longer, it is a sentence that happens to hold one.
+STOP_WORDS_WHILE_THINKING = 3
+
+# Questions asked while a reply is on its way wait their turn, this many at
+# most: past it the oldest is dropped, so a wake word repeated by a film or
+# a video cannot stack up replies that would run minutes later.
+MAX_WAITING_TURNS = 2
+
+
+def _vad_frame_ms(cfg) -> int:
+    """The VAD frame length: 10, 20 or 30 ms, 20 for anything else."""
+    frame_ms = int(getattr(cfg, "vad_frame_ms", 20))
+    if frame_ms in (10, 20, 30):
+        return frame_ms
+    debug_log(f"Unsupported VAD frame duration {frame_ms}; using 20 ms", "voice")
+    return 20
+
+
+@dataclass
+class _Turn:
+    """One query handed to the reply thread, with what was true when it was
+    handed over: the language he spoke, his exact words, when he stopped
+    speaking, and the stop count. A stop counted after it means it is
+    never said."""
+    query: str
+    language: Optional[str] = None
+    heard: Optional[str] = None
+    heard_at: float = 0.0
+    epoch: int = 0
+
+
+@dataclass
+class _AskedQuestion:
+    """A spoken question one of her replies ended on, and when he finished
+    hearing it (None until he has)."""
+    request_id: str
+    turn: _Turn
+    heard_at: Optional[float] = None
+
+    def heard(self) -> None:
+        self.heard_at = time.time()
 
 
 def is_whisper_hallucination(no_speech_prob: float, threshold: float) -> bool:
@@ -536,11 +586,10 @@ class VoiceListener(threading.Thread):
         self._first_utterance = True  # Suppress turn separator before the very first transcription
         # ISO-639-1 code Whisper detected for the most recent utterance.
         # Updated at every successful transcription site (MLX + faster-
-        # whisper) and consumed by `_dispatch_query` so downstream tools
-        # can pick locale-appropriate resources (e.g. tr.wikipedia.org).
-        # One-utterance-at-a-time voice flow means the read in
-        # `_dispatch_query` always matches the write from the Whisper
-        # call that produced the transcript.
+        # whisper) and read when a query is handed to the reply thread, so
+        # downstream tools can pick locale-appropriate resources (e.g.
+        # tr.wikipedia.org). The turn keeps its own copy: the loop goes on
+        # transcribing while the reply is prepared.
         self._last_detected_language: Optional[str] = None
 
         # Audio processing components
@@ -549,8 +598,35 @@ class VoiceListener(threading.Thread):
         self._mlx_model_repo: Optional[str] = None  # For MLX backend
         self.model: Optional[Any] = None  # WhisperModel for faster-whisper, None for MLX
         self.transcribe_lock = threading.Lock()  # Shared lock for Whisper model access
-        self._audio_q: queue.Queue = queue.Queue(maxsize=64)
+        # Entries are (time captured, block). Blocks are one VAD frame long.
+        self._audio_q: queue.Queue = queue.Queue(
+            maxsize=int(AUDIO_BACKLOG_SECONDS * 1000 / _vad_frame_ms(cfg)))
         self._pre_roll: deque = deque()
+        # When the frame being read was captured: the clock an utterance's
+        # start and end are read from, however late the loop reads it.
+        self._frame_captured_at = 0.0
+
+        # The reply thread: runs one handed-over query at a time, and is the
+        # only thread that speaks.
+        self._turns: queue.Queue = queue.Queue()
+        self._turn_in_hand: Optional[_Turn] = None
+        self._replies: Optional[threading.Thread] = None
+        # Turns handed over and not yet finished, the one in hand included.
+        self._replies_owed = 0
+        # Each stop counts one. A turn handed over before the count moved
+        # is never said.
+        self._stop_epoch = 0
+        # When the last utterance he was heard saying ended.
+        self._last_heard_at = 0.0
+        # The spoken question her last reply ended on, if it did.
+        self._asked: Optional[_AskedQuestion] = None
+        # The loop starts the tune and the reply thread stops it: a player
+        # replaced between the two would play on with nothing to stop it.
+        self._tune_lock = threading.Lock()
+        # Held while a sentence of a turn is handed to the speech engine,
+        # while a turn is stopped and while the turns owed are counted, so
+        # no sentence slips out after a stop.
+        self._speech_lock = threading.Lock()
 
         # Audio callback monitoring (for debugging)
         self._callback_count = 0
@@ -564,7 +640,7 @@ class VoiceListener(threading.Thread):
         self._silence_frames = 0
         self._utterance_frames: list = []
         self._samplerate = int(getattr(self.cfg, "sample_rate", 16000))
-        self._frame_samples = max(1, int(self._samplerate * 20 / 1000))
+        self._configure_frames()
         self._vad: Optional = None
 
         # Off unless he set the environment variable, and it says so when
@@ -573,13 +649,8 @@ class VoiceListener(threading.Thread):
         self._input_device_name = ""
         # How much of the current reply streaming already spoke. Read by
         # `_speak_reply` to know whether it has a tail to say or a whole
-        # reply, and reset there so a turn that never streamed behaves
-        # exactly as before.
+        # reply, and reset when the turn ends.
         self._streamed_chars = 0
-        # The language the user was heard in when the streamed reply began.
-        # Every part of that reply carries it, the tail included, so one
-        # reply is never spoken in two voices.
-        self._streamed_language: Optional[str] = None
         self._capture = UtteranceCapture.from_env()
         self._capture.announce()
 
@@ -626,26 +697,37 @@ class VoiceListener(threading.Thread):
         self._tune_player: Optional = None
 
     def stop(self) -> None:
-        """Stop the voice listener."""
+        """Stop the voice listener. No turn handed over is answered after
+        this: the reply thread finishes the engine call in hand, if any,
+        unheard."""
         self._should_stop = True
         self.state_manager.stop()
         self._stop_thinking_tune()
 
     def _start_thinking_tune(self) -> None:
         """Start the thinking tune when processing a query."""
-        if (self.cfg.tune_enabled and
-            self._tune_player is None and
-            (self.tts is None or not self.tts.is_speaking())):
-            from ..output.tune_player import TunePlayer
-            self._tune_player = TunePlayer(enabled=True)
-            self._tune_player.start_tune()
+        with self._tune_lock:
+            if (self.cfg.tune_enabled and
+                self._tune_player is None and
+                (self.tts is None or not self.tts.is_speaking())):
+                from ..output.tune_player import TunePlayer
+                self._tune_player = TunePlayer(enabled=True)
+                self._tune_player.start_tune()
 
     def _stop_thinking_tune(self) -> None:
         """Stop the thinking tune and revert the published state to IDLE."""
-        if self._tune_player is not None:
-            self._tune_player.stop_tune()
-            self._tune_player = None
+        with self._tune_lock:
+            player, self._tune_player = self._tune_player, None
+        if player is not None:
+            player.stop_tune()
             get_jarvis_state().set_state(JarvisState.IDLE)
+
+    def _drop_the_early_beep(self) -> None:
+        """An utterance turned out not to be for her: stop the beep it
+        started. While a reply is on its way the tune is that reply's, and
+        it plays on."""
+        if not self._a_reply_is_on_its_way():
+            self._stop_thinking_tune()
 
     def _silence_speech(self) -> None:
         """Stop her talking on a spoken stop.
@@ -666,17 +748,20 @@ class VoiceListener(threading.Thread):
         """Publish LISTENING as the assistant's state."""
         get_jarvis_state().set_state(JarvisState.LISTENING)
 
-    def _speak_as_it_comes(self):
-        """A token callback that speaks each sentence as it closes.
+    def _speak_as_it_comes(self, turn: _Turn):
+        """A token callback that speaks each sentence of ``turn`` as it
+        closes.
 
         Returns ``None`` when there is nothing to speak into, so the
-        caller can hand the engine no callback at all and keep today's
+        caller can hand the engine no callback at all and keep the
         buffered path.
 
         The chunks carry no completion callback: the reply's one callback
         is attached at the end by `_speak_reply`, because it opens the hot
         window and doing that mid-reply would take her own next sentence
-        for a follow-up.
+        for a follow-up. Every sentence carries the language he was heard
+        in when he asked, so one reply is never spoken in two voices, and
+        nothing more of the turn is said once it was stopped.
         """
         if not (self.tts and self.tts.enabled):
             return None
@@ -685,16 +770,15 @@ class VoiceListener(threading.Thread):
 
         decoupeur = SentenceStreamer()
         self._streamed_chars = 0
-        # Fixed before the first sentence: a transcript landing mid-reply
-        # moves `_last_detected_language`, and the rest of this reply must
-        # not change voice because of it.
-        self._streamed_language = langue = self._last_detected_language
 
         def _sur_jeton(delta: str) -> None:
             try:
                 for phrase in decoupeur.feed(delta):
-                    self.track_tts_start(phrase, continues=self._streamed_chars > 0)
-                    self.tts.speak(phrase, language=langue)
+                    with self._speech_lock:
+                        if self._turn_is_off(turn):
+                            return
+                        self.track_tts_start(phrase, continues=self._streamed_chars > 0)
+                        self.tts.speak(phrase, language=turn.language)
                     self._streamed_chars += len(phrase) + 1
             except Exception as e:
                 # Never let delivery break generation: the buffered path
@@ -753,6 +837,7 @@ class VoiceListener(threading.Thread):
         # the speech — there is a reply to read.
         if text and text.strip():
             self._last_transcript = text
+            self._last_heard_at = utterance_end_time or time.time()
             get_latency_journal().note_heard(utterance_end_time - trailing_silence)
 
         if not text or not text.strip():
@@ -760,7 +845,7 @@ class VoiceListener(threading.Thread):
             if self.state_manager.check_collection_timeout():
                 query = self.state_manager.clear_collection()
                 if query.strip():
-                    self._dispatch_query(query)
+                    self._hand_over(query)
 
             # Check hot window expiry
             self.state_manager.check_hot_window_expiry(self.cfg.voice_debug)
@@ -871,11 +956,13 @@ class VoiceListener(threading.Thread):
                     self._publish_listening_state()
                     debug_log("early beep: wake word detected", "voice")
 
-        # Echo rejection & stop commands — only while TTS is actively playing.
-        # After TTS finishes, the intent judge handles everything (echo detection,
-        # hot window follow-ups, etc.) using full transcript context + last TTS text.
-        if self.tts and self.tts.enabled and self.tts.is_speaking():
-            # Stop command detection (fast, text-based)
+        # Stop commands — while she speaks, and while a reply is on its way.
+        # Fast and text-based. While she only thinks, the stop has to be
+        # (nearly) all he said: a stop word inside a longer sentence is a
+        # question, "Jarvis, how do I stop the timer?", and waits its turn.
+        speaking = bool(self.tts and self.tts.enabled and self.tts.is_speaking())
+        if speaking or (self._a_reply_is_on_its_way()
+                        and len(text_lower.split()) <= STOP_WORDS_WHILE_THINKING):
             stop_commands = getattr(self.cfg, "stop_commands", ["stop", "quiet", "shush", "silence", "enough", "shut up"])
             # The threshold travels with the words. It was configurable,
             # exported and settable, and never reached this call, so
@@ -885,15 +972,15 @@ class VoiceListener(threading.Thread):
                 text_lower, stop_commands,
                 fuzzy_ratio=float(getattr(self.cfg, "stop_command_fuzzy_ratio", 0.8)),
             ):
-                debug_log(f"stop command detected during TTS: {text_lower} (energy: {utterance_energy:.4f})", "voice")
-                self._silence_speech()
-                try:
-                    while not self._audio_q.empty():
-                        self._audio_q.get_nowait()
-                except Exception:
-                    pass
+                debug_log(f"stop command detected ({'speaking' if speaking else 'thinking'}): "
+                          f"{text_lower} (energy: {utterance_energy:.4f})", "voice")
+                self._stop_the_replies()
                 return
 
+        # Echo rejection — only while TTS is actively playing. After TTS
+        # finishes, the intent judge handles everything (echo detection, hot
+        # window follow-ups, etc.) using full transcript context + last TTS text.
+        if speaking:
             # Echo rejection during active TTS
             should_reject = self.echo_detector.should_reject_as_echo(
                 text_lower, utterance_energy, True,
@@ -1071,9 +1158,10 @@ class VoiceListener(threading.Thread):
 
             if intent_judgment is not None:
                 # If judge says stop command, interrupt TTS
-                if intent_judgment.stop and self.tts and self.tts.is_speaking():
+                if intent_judgment.stop and (
+                        (self.tts and self.tts.is_speaking()) or self._a_reply_is_on_its_way()):
                     debug_log(f"🛑 Intent judge detected stop command", "voice")
-                    self._silence_speech()
+                    self._stop_the_replies()
                     return
 
                 # In the hot window, text Whisper made out of silence is
@@ -1088,7 +1176,7 @@ class VoiceListener(threading.Thread):
                     self._transcript_buffer.mark_segment_processed(text_lower)
                     print(f"  🔇 Heard (not speech): \"{text_lower[:50]}"
                           f"{'...' if len(text_lower) > 50 else ''}\"", flush=True)
-                    self._stop_thinking_tune()
+                    self._drop_the_early_beep()
                     return
 
                 # If directed with query, process it
@@ -1149,7 +1237,7 @@ class VoiceListener(threading.Thread):
                                 if query_echo_score >= 70:
                                     debug_log(f"🔇 Echo in hot window (directed, score={echo_score}): \"{text_lower}\"", "voice")
                                     print(f"  🔇 Heard (echo): \"{text_lower[:50]}{'...' if len(text_lower) > 50 else ''}\"", flush=True)
-                                    self._stop_thinking_tune()
+                                    self._drop_the_early_beep()
                                     return
                                 else:
                                     debug_log(
@@ -1183,7 +1271,7 @@ class VoiceListener(threading.Thread):
                             )
                             print("  ⏳ Sentence still going, waiting for the rest",
                                   flush=True)
-                            self._stop_thinking_tune()
+                            self._drop_the_early_beep()
                             return
 
                         debug_log(f"✅ Intent judge accepted ({intent_judgment.confidence}): \"{hot_query}\"", "voice")
@@ -1248,7 +1336,7 @@ class VoiceListener(threading.Thread):
                             if is_pure_echo:
                                 debug_log(f"🔇 Echo in hot window (directed/no-query, score={echo_score}): \"{text_lower}\"", "voice")
                                 print(f"  🔇 Heard (echo): \"{text_lower[:50]}{'...' if len(text_lower) > 50 else ''}\"", flush=True)
-                                self._stop_thinking_tune()
+                                self._drop_the_early_beep()
                                 return
 
                         debug_log(f"✅ Intent judge accepted (directed, high confidence, using actual text): \"{text_lower}\"", "voice")
@@ -1347,7 +1435,7 @@ class VoiceListener(threading.Thread):
                                 print(f"  🔇 Heard (echo): \"{text_lower[:50]}"
                                       f"{'...' if len(text_lower) > 50 else ''}\"",
                                       flush=True)
-                                self._stop_thinking_tune()
+                                self._drop_the_early_beep()
                                 return
                             # Mixed echo+speech — override the echo reasoning
                             print(f"  🧠 Intent override: accepting hot window speech (mixed echo+speech)", flush=True)
@@ -1390,7 +1478,7 @@ class VoiceListener(threading.Thread):
                             # Confirmed pure echo — early check should have caught
                             # this, but handle as safety net.
                             debug_log(f"🔇 Echo in hot window (score={echo_score}): \"{text_lower}\"", "voice")
-                            self._stop_thinking_tune()
+                            self._drop_the_early_beep()
                             return
 
                         if could_be_hot_window:
@@ -1418,7 +1506,7 @@ class VoiceListener(threading.Thread):
 
                         # Outside hot window — trust rejection
                         debug_log(f"🚫 Intent judge rejected (not directed, high confidence): \"{text_lower}\"", "voice")
-                        self._stop_thinking_tune()
+                        self._drop_the_early_beep()
                         return
                 else:
                     # For inconclusive results, fall through to wake word detection
@@ -1465,7 +1553,7 @@ class VoiceListener(threading.Thread):
             intent_info = f", intent={intent_judgment.directed}/{intent_judgment.confidence}"
 
         # Stop any early-started beep since we're not processing this input
-        self._stop_thinking_tune()
+        self._drop_the_early_beep()
 
         if received_during_tts:
             # User spoke during TTS but it wasn't a stop command - this is likely a response
@@ -1500,17 +1588,153 @@ class VoiceListener(threading.Thread):
             "chat": getattr(self.cfg, "llm_chat_model", None),
         }
 
-    def _dispatch_query(self, query: str) -> None:
-        """
-        Dispatch a complete query to the reply engine.
+    # ── The reply thread ──────────────────────────────────────────────
+    #
+    # A reply takes seconds to prepare and the microphone must be read
+    # meanwhile, so the loop hands a query over and goes back to listening,
+    # and this thread answers the queries one after the other. It is also
+    # the only thread that speaks, so the echo detector's record of what she
+    # last said has one writer.
 
-        Args:
-            query: Complete user query to process
-        """
-        debug_log(f"dispatching query: '{query}'", "voice")
+    def _start_replies(self) -> None:
+        """Start the reply thread, once."""
+        if self._replies is None or not self._replies.is_alive():
+            self._replies = threading.Thread(
+                target=self._reply_loop, daemon=True, name="voice-replies")
+            self._replies.start()
 
-        # Clear audio buffers to prevent stale audio from next query
+    def _reply_loop(self) -> None:
+        while not self._should_stop:
+            try:
+                turn = self._turns.get(timeout=0.1)
+            except queue.Empty:
+                turn = None
+            if turn is not None:
+                self._take_turn(turn)
+            try:
+                self.drain_reply_queue()
+            except Exception as e:
+                debug_log(f"reply thread: queued reply failed: {e}", "voice")
+
+    def _take_turn(self, turn: _Turn) -> None:
+        """Answer one handed-over query, once her voice has stopped: a reply
+        started while the last is still audible would replace the echo
+        detector's record of it, and that one's window would open over the
+        new one."""
+        with self._speech_lock:
+            self._turn_in_hand = turn
+        try:
+            while (self.tts is not None and self.tts.is_speaking()
+                   and not self._turn_is_off(turn)):
+                time.sleep(0.02)
+            if self._turn_is_off(turn):
+                debug_log(f"turn not answered, stopped: '{turn.query}'", "voice")
+            elif self._may_answer_now(turn):
+                self._dispatch_query(turn)
+        except Exception as e:
+            print(f"  ❌ Reply failed: {e}", flush=True)
+            debug_log(f"reply thread: turn failed: {e}", "voice")
+            self._stop_thinking_tune()
+            get_jarvis_state().set_state(JarvisState.IDLE)
+        finally:
+            with self._speech_lock:
+                self._turn_in_hand = None
+                self._replies_owed -= 1
+
+    def _turn_is_off(self, turn: _Turn) -> bool:
+        """A stop was heard, or the listener stopped, since it was handed over."""
+        return turn.epoch != self._stop_epoch or self._should_stop
+
+    def _may_answer_now(self, turn: _Turn) -> bool:
+        """Whether this turn may run now, given her spoken question.
+
+        A spoken question is answered by the next voice turn, and only
+        words heard after she asked it are an answer. A turn whose words he
+        said before he heard it is set aside, so the question waits for
+        what he says to it. A question he never heard (its reply was
+        stopped) is withdrawn, and the turn runs.
+        """
+        asked = self._asked
+        waiting = self._waiting_spoken_question()
+        if waiting is None or asked is None or asked.request_id != waiting.request_id:
+            return True
+        if asked.heard_at is None and self._turn_is_off(asked.turn):
+            from ..reply.engine import expire_waiting_question
+
+            expire_waiting_question(self.db, self.dialogue_memory,
+                                    why="its reply was stopped before he heard it")
+            print("  🙋 Her question was never heard: withdrawn", flush=True)
+            return True
+        heard_at = asked.heard_at if asked.heard_at is not None else time.time()
+        if turn.heard_at <= heard_at:
+            shown = turn.query[:50] + ("..." if len(turn.query) > 50 else "")
+            print(f"  ⏭️ Asked before her question, set aside: \"{shown}\"", flush=True)
+            debug_log(f"turn set aside, its words predate her question: '{turn.query}'", "voice")
+            return False
+        return True
+
+    def _waiting_spoken_question(self):
+        """The spoken question a voice turn could answer, if one waits."""
+        dm = self.dialogue_memory
+        if dm is None or not hasattr(dm, "peek_pending"):
+            return None
+        try:
+            from ..tools.confirmation import CHANNEL_PAROLE
+
+            waiting = dm.peek_pending()
+        except Exception as e:
+            debug_log(f"waiting question not read: {e}", "voice")
+            return None
+        if (waiting is None or getattr(waiting, "channel", None) != CHANNEL_PAROLE
+                or getattr(waiting, "origin", None) != "voix"):
+            return None
+        return waiting
+
+    def _hand_over(self, query: str) -> None:
+        """Give a complete query to the reply thread. Returns at once: a
+        query asked while another is being answered waits its turn."""
+        # The utterance just closed is consumed; what he says next is read
+        # from the audio queue as it comes.
         self._clear_audio_buffers()
+        with self._speech_lock:
+            turn = _Turn(query, self._last_detected_language,
+                         getattr(self, "_last_transcript", None),
+                         heard_at=self._last_heard_at, epoch=self._stop_epoch)
+            self._replies_owed += 1
+            dropped = None
+            if self._turns.qsize() >= MAX_WAITING_TURNS:
+                try:
+                    dropped = self._turns.get_nowait()
+                    self._replies_owed -= 1
+                except queue.Empty:
+                    pass
+            self._turns.put(turn)
+        if dropped is not None:
+            shown = dropped.query[:50] + ("..." if len(dropped.query) > 50 else "")
+            print(f"  ⏭️ Too many questions waiting, dropped: \"{shown}\"", flush=True)
+        debug_log(f"handing query to the reply thread: '{query}'", "voice")
+
+    def _a_reply_is_on_its_way(self) -> bool:
+        """Whether a turn is being prepared or said, or waits to be."""
+        return self._replies_owed > 0
+
+    def _stop_the_replies(self) -> None:
+        """A stop: nothing more of the reply in hand is said, the queries
+        waiting their turn are dropped, and so is a question still being
+        collected. The engine finishes the turn in hand on its own,
+        unheard; replies handed over by other features are kept."""
+        with self._speech_lock:
+            self._stop_epoch += 1
+            self._silence_speech()
+        if self.state_manager.is_collecting():
+            self.state_manager.clear_collection()
+        self._stop_thinking_tune()
+        debug_log("stopped: the reply in hand and the ones waiting are not said", "voice")
+
+    def _dispatch_query(self, turn: _Turn) -> None:
+        """Run one turn through the reply engine and say the reply."""
+        query = turn.query
+        debug_log(f"dispatching query: '{query}'", "voice")
 
         get_jarvis_state().set_state(JarvisState.THINKING)
         debug_log("state set to THINKING (dispatch_query)", "voice")
@@ -1521,48 +1745,78 @@ class VoiceListener(threading.Thread):
 
         journal = get_latency_journal()
         journal.begin_turn(self._latency_models())
+        waiting_before = self._waiting_spoken_question()
 
-        # Process the query (keep thinking tune playing during processing).
-        # Hold the shared voice+text query lock so a voice query and a text
-        # chat query cannot run the reply engine concurrently against the
-        # same dialogue memory. Voice blocks while a text query finishes
-        # rather than being dropped (see daemon.query_lock).
         try:
-            with query_lock():
-                reply = run_reply_engine(
-                    self.db, self.cfg, None, query, self.dialogue_memory,
-                    language=self._last_detected_language,
-                    origin="voix",
-                    heard=getattr(self, "_last_transcript", None),
-                    on_token=self._speak_as_it_comes(),
-                    on_stage=journal.on_stage,
-                )
-        except Exception as e:
-            # The apology below is not this turn's reply, so its sound must
-            # not be taken for the turn's first sound.
-            journal.finish_turn(will_speak=False)
-            # Log the error visibly - this should never happen silently
-            print(f"\n  ❌ Reply engine error: {e}", flush=True)
-            debug_log(f"reply engine exception: {e}", "voice")
-            self._stop_thinking_tune()
-            # Provide user feedback via TTS
-            if self.tts and self.tts.enabled:
-                self.tts.speak("Sorry, I encountered an error processing your request.")
-            journal.flush()
-            return
+            # Process the query (keep thinking tune playing during processing).
+            # Hold the shared voice+text query lock so a voice query and a text
+            # chat query cannot run the reply engine concurrently against the
+            # same dialogue memory. Voice blocks while a text query finishes
+            # rather than being dropped (see daemon.query_lock).
+            try:
+                with query_lock():
+                    if self._turn_is_off(turn):
+                        # Stopped while it waited for the lock: not run at all.
+                        reply = None
+                    else:
+                        reply = run_reply_engine(
+                            self.db, self.cfg, None, query, self.dialogue_memory,
+                            language=turn.language,
+                            origin="voix",
+                            heard=turn.heard,
+                            on_token=self._speak_as_it_comes(turn),
+                            on_stage=journal.on_stage,
+                        )
+            except Exception as e:
+                # The apology below is not this turn's reply, so its sound must
+                # not be taken for the turn's first sound.
+                journal.finish_turn(will_speak=False)
+                # Log the error visibly - this should never happen silently
+                print(f"\n  ❌ Reply engine error: {e}", flush=True)
+                debug_log(f"reply engine exception: {e}", "voice")
+                self._stop_thinking_tune()
+                # Provide user feedback via TTS
+                if self.tts and self.tts.enabled and not self._turn_is_off(turn):
+                    self.tts.speak("Sorry, I encountered an error processing your request.")
+                journal.flush()
+                return
 
-        # Frozen now, written once the reply is queued: the write must not sit
-        # between "reply ready" and "start speaking". A sound that starts in
-        # between completes the row from memory; one that starts later
-        # updates it.
-        will_speak = bool(reply and self.tts and getattr(self.tts, "enabled", False))
-        journal.finish_turn(will_speak=will_speak)
-        try:
-            self._speak_reply(reply)
+            asked = self._note_question_asked(turn, waiting_before)
+
+            # Frozen now, written once the reply is queued: the write must not sit
+            # between "reply ready" and "start speaking". A sound that starts in
+            # between completes the row from memory; one that starts later
+            # updates it.
+            try:
+                with self._speech_lock:
+                    off = self._turn_is_off(turn)
+                    will_speak = bool(reply and not off and self.tts
+                                      and getattr(self.tts, "enabled", False))
+                    journal.finish_turn(will_speak=will_speak)
+                    if off:
+                        debug_log("turn was stopped: nothing more of it is said", "voice")
+                    else:
+                        self._speak_reply(reply, on_spoken=asked.heard if asked else None,
+                                          language=turn.language)
+                if off:
+                    self._stop_thinking_tune()
+                    get_jarvis_state().set_state(JarvisState.IDLE)
+            finally:
+                journal.flush()
         finally:
-            journal.flush()
+            self._streamed_chars = 0
 
-    def _speak_reply(self, reply: Optional[str], on_spoken=None) -> None:
+    def _note_question_asked(self, turn: _Turn, waiting_before) -> Optional[_AskedQuestion]:
+        """The spoken question this turn's reply ends on, if it raised one."""
+        waiting = self._waiting_spoken_question()
+        if waiting is None or (waiting_before is not None
+                               and waiting_before.request_id == waiting.request_id):
+            return None
+        self._asked = _AskedQuestion(waiting.request_id, turn)
+        return self._asked
+
+    def _speak_reply(self, reply: Optional[str], on_spoken=None,
+                     language: Optional[str] = None) -> None:
         """Say one reply, and do the echo bookkeeping that goes with it.
 
         The only place anything is spoken. A sentence said without being
@@ -1571,7 +1825,8 @@ class VoiceListener(threading.Thread):
 
         ``on_spoken`` fires when the speech finished — not when it
         started, and not at all when it was interrupted, because
-        interrupted means unheard.
+        interrupted means unheard. ``language`` is the one the reply is
+        spoken in, each part of it.
         """
         if reply and self.tts and self.tts.enabled:
             # Stop thinking tune when TTS starts
@@ -1615,7 +1870,7 @@ class VoiceListener(threading.Thread):
                     self.track_tts_start(reste, continues=True)
                 self.tts.speak(reste, completion_callback=_on_tts_complete,
                                duration_callback=_on_duration_known,
-                               language=self._streamed_language)
+                               language=language)
                 return
 
             # Track TTS start for echo detection with actual text
@@ -1624,7 +1879,7 @@ class VoiceListener(threading.Thread):
 
             self.tts.speak(reply, completion_callback=_on_tts_complete,
                           duration_callback=_on_duration_known,
-                          language=self._last_detected_language)
+                          language=language)
         else:
             debug_log(f"no TTS output: reply={bool(reply)}, tts={bool(self.tts)}, enabled={getattr(self.tts, 'enabled', False) if self.tts else False}", "voice")
             # Stop thinking tune if no TTS response
@@ -1633,14 +1888,14 @@ class VoiceListener(threading.Thread):
     # ── Replies produced elsewhere ────────────────────────────────────
     #
     # A click-approved action runs on a resume worker. If that worker
-    # spoke directly it would race this thread, which speaks outside the
-    # block holding the query lock: two writes to the echo detector's
+    # spoke directly it would race the reply thread, which speaks outside
+    # the block holding the query lock: two writes to the echo detector's
     # record of what was last said, and two hot-window activations. The
     # detector would then compare the next transcript against the wrong
     # sentence, which is how a user's answer gets deleted as an echo.
 
     def enqueue_reply(self, text: Optional[str], on_spoken=None) -> bool:
-        """Hand a reply to this thread to speak. Safe from any thread.
+        """Hand a reply to the reply thread to speak. Safe from any thread.
 
         Returns whether it was taken. False is a *definitive* refusal —
         there is no engine that will ever say this — so the caller deals
@@ -1667,15 +1922,15 @@ class VoiceListener(threading.Thread):
         return True
 
     def drain_reply_queue(self) -> None:
-        """Say at most one queued reply. This thread only.
+        """Say at most one queued reply. The reply thread only.
 
         One at a time, and only while nothing is already being said. The
         echo detector holds the record of one reply (its text, its start
         and its exact duration), so a second reply started while the
         first is still audible would replace it, and the rest of the
         first would be compared against the wrong sentence. Whatever is
-        left waits for the next pass, which is at most one audio frame
-        away.
+        left waits for the reply thread's next pass, a few milliseconds
+        away when it has no query to run.
         """
         q = getattr(self, "_reply_queue", None)
         if q is None:
@@ -1689,7 +1944,8 @@ class VoiceListener(threading.Thread):
             text, on_spoken = q.get_nowait()
         except _queue.Empty:
             return
-        self._speak_reply(text, on_spoken=on_spoken)
+        # It has no utterance behind it: the language he was last heard in.
+        self._speak_reply(text, on_spoken=on_spoken, language=self._last_detected_language)
 
     def _sounds_like_her_name(self, text: str) -> bool:
         """Whether a segment about to be dropped is the user calling her.
@@ -1773,7 +2029,7 @@ class VoiceListener(threading.Thread):
             return 0.0
 
     def _clear_audio_buffers(self) -> None:
-        """Clear all audio buffers and reset speech state.
+        """Reset the utterance being built and the speech state.
 
         Call this on state transitions to prevent old audio from being
         incorrectly concatenated with new input.
@@ -1787,13 +2043,8 @@ class VoiceListener(threading.Thread):
         # Clear wake detection state
         self._wake_timestamp = None
 
-        # Drain the audio queue
-        try:
-            while not self._audio_q.empty():
-                self._audio_q.get_nowait()
-        except Exception:
-            pass
-
+        # The audio queue is left alone: what it holds was said after the
+        # utterance just handled, and is his next words, not stale audio.
         debug_log("audio buffers cleared", "voice")
 
     def _is_speech_frame(self, frame) -> bool:
@@ -2029,7 +2280,7 @@ class VoiceListener(threading.Thread):
         if self.state_manager.check_collection_timeout():
             query = self.state_manager.clear_collection()
             if query.strip():
-                self._dispatch_query(query)
+                self._hand_over(query)
 
         # Also check hot window expiry - this ensures the timeout is enforced
         # even when there's no audio being processed
@@ -2109,7 +2360,7 @@ class VoiceListener(threading.Thread):
                 return
             chunk = (indata.copy() if hasattr(indata, "copy") else indata)
             try:
-                self._audio_q.put_nowait(chunk)
+                self._audio_q.put_nowait((time.time(), chunk))
             except queue.Full:
                 self._audio_dropped += 1
         except Exception as exc:
@@ -2697,21 +2948,8 @@ class VoiceListener(threading.Thread):
                 print("     ⏳ Some models still warming — continuing anyway", flush=True)
 
         # Audio parameters
-        frame_ms = int(getattr(self.cfg, "vad_frame_ms", 20))
-        if frame_ms not in (10, 20, 30):
-            debug_log(f"Unsupported VAD frame duration {frame_ms}; using 20 ms", "voice")
-            frame_ms = 20
-        self._frame_samples = max(1, int(self._samplerate * frame_ms / 1000))
-        pre_roll_ms = int(getattr(self.cfg, "vad_pre_roll_ms", 240))
-        endpoint_silence_ms = int(getattr(self.cfg, "endpoint_silence_ms", 800))
-        max_utt_ms = int(getattr(self.cfg, "max_utterance_ms", 12000))
-        tts_max_utt_ms = int(getattr(self.cfg, "tts_max_utterance_ms", 3000))
-
-        pre_roll_max_frames = max(1, int(pre_roll_ms / frame_ms))
-        endpoint_silence_frames = max(1, int(endpoint_silence_ms / frame_ms))
-        # max_utt_frames will be calculated dynamically based on TTS state
-        normal_max_utt_frames = max(1, int(max_utt_ms / frame_ms))
-        tts_max_utt_frames = max(1, int(tts_max_utt_ms / frame_ms))
+        self._configure_frames()
+        frame_ms = self._frame_ms
 
         debug_log(f"audio params: sample_rate={self._samplerate}, frame_ms={frame_ms}, frame_samples={self._frame_samples}", "voice")
         debug_log(f"VAD: enabled={bool(self._vad is not None)}, aggressiveness={getattr(self.cfg, 'vad_aggressiveness', 2)}", "voice")
@@ -2846,26 +3084,22 @@ class VoiceListener(threading.Thread):
             # Awake and ready, waiting for the wake word
             get_jarvis_state().set_state(JarvisState.IDLE)
 
+            # Before the loop: a narration handed over by another thread is
+            # said by the reply thread whether or not anyone speaks.
+            self._start_replies()
+
             while not self._should_stop:
                 self._check_audio_health()
 
-                # Say anything another thread handed over — a
-                # click-approved action's narration. Here rather than on
-                # that thread, so only one thread ever speaks, and here
-                # rather than in the idle branch below: the audio callback
-                # delivers a frame every 20 ms, so on a live microphone
-                # the queue is never empty and that branch never runs.
-                self.drain_reply_queue()
-
                 try:
-                    item = self._audio_q.get(timeout=0.2)
+                    entry = self._audio_q.get(timeout=0.2)
                 except queue.Empty:
                     # Critical: Check timeouts even when no audio is being received
                     # This ensures hot window expiry fires reliably
                     self._check_query_timeout()
                     continue
 
-                if item is None:
+                if entry is None:
                     # Reset marker
                     self.is_speech_active = False
                     self._silence_frames = 0
@@ -2877,51 +3111,75 @@ class VoiceListener(threading.Thread):
                 if np is None:
                     continue
 
-                frame_timestamp = time.time()  # Timestamp for this batch of frames
-
+                captured_at, item = entry
                 for frame in self._audio_frames(item):
-                    is_voice = self._is_speech_frame(frame)
-                    self._speech_frames_seen += int(is_voice)
+                    self._take_frame(frame, captured_at)
 
-                    if not self.is_speech_active:
-                        if is_voice:
-                            self.is_speech_active = True
+    def _configure_frames(self) -> None:
+        """The frame length and the voice detector's limits, in frames."""
+        self._frame_ms = frame_ms = _vad_frame_ms(self.cfg)
+        self._frame_samples = max(1, int(self._samplerate * frame_ms / 1000))
+        pre_roll_ms = int(getattr(self.cfg, "vad_pre_roll_ms", 240))
+        endpoint_silence_ms = int(getattr(self.cfg, "endpoint_silence_ms", 800))
+        max_utt_ms = int(getattr(self.cfg, "max_utterance_ms", 12000))
+        tts_max_utt_ms = int(getattr(self.cfg, "tts_max_utterance_ms", 3000))
 
-                            # Backdate start time by pre-roll duration — the
-                            # actual speech onset was before VAD triggered.
-                            pre_roll_sec = len(self._pre_roll) * frame_ms / 1000.0
-                            utterance_start_time = time.time() - pre_roll_sec
+        self._pre_roll_max_frames = max(1, int(pre_roll_ms / frame_ms))
+        self._endpoint_silence_frames = max(1, int(endpoint_silence_ms / frame_ms))
+        # The maximum is picked per frame, by whether she is speaking.
+        self._normal_max_utt_frames = max(1, int(max_utt_ms / frame_ms))
+        self._tts_max_utt_frames = max(1, int(tts_max_utt_ms / frame_ms))
 
-                            # Track utterance timing for echo detection
-                            self.echo_detector.track_utterance_timing(utterance_start_time, 0.0)
+    def _take_frame(self, frame, captured_at: float) -> None:
+        """One frame through the voice detector. ``captured_at`` is when the
+        microphone delivered it: an utterance's start and end are read from
+        it, however late the loop gets to the frame."""
+        self._frame_captured_at = captured_at
+        is_voice = self._is_speech_frame(frame)
+        self._speech_frames_seen += int(is_voice)
 
-                            # Seed with pre-roll
-                            if self._pre_roll:
-                                self._utterance_frames.extend(list(self._pre_roll))
-                            self._utterance_frames.append(frame.copy())
-                            self._silence_frames = 0
-                        else:
-                            # Maintain pre-roll buffer
-                            self._pre_roll.append(frame.copy())
-                            while len(self._pre_roll) > pre_roll_max_frames:
-                                try:
-                                    self._pre_roll.popleft()
-                                except Exception:
-                                    break
-                    else:
-                        if is_voice:
-                            self._utterance_frames.append(frame.copy())
-                            self._silence_frames = 0
-                        else:
-                            self._silence_frames += 1
-                            # Use shorter timeout during TTS for quick stop command detection
-                            current_max_frames = tts_max_utt_frames if (self.tts and self.tts.is_speaking()) else normal_max_utt_frames
-                            if self._silence_frames >= endpoint_silence_frames or len(self._utterance_frames) >= current_max_frames:
-                                self._finalize_utterance()
-                                self._pre_roll.clear()
+        if not self.is_speech_active:
+            if is_voice:
+                self.is_speech_active = True
 
-                    # Check for query timeouts
-                    self._check_query_timeout()
+                # Backdate start time by pre-roll duration — the
+                # actual speech onset was before VAD triggered.
+                pre_roll_sec = len(self._pre_roll) * self._frame_ms / 1000.0
+                utterance_start_time = captured_at - pre_roll_sec
+
+                # Track utterance timing for echo detection
+                self.echo_detector.track_utterance_timing(utterance_start_time, 0.0)
+
+                # Seed with pre-roll
+                if self._pre_roll:
+                    self._utterance_frames.extend(list(self._pre_roll))
+                self._utterance_frames.append(frame.copy())
+                self._silence_frames = 0
+            else:
+                # Maintain pre-roll buffer
+                self._pre_roll.append(frame.copy())
+                while len(self._pre_roll) > self._pre_roll_max_frames:
+                    try:
+                        self._pre_roll.popleft()
+                    except Exception:
+                        break
+        else:
+            if is_voice:
+                self._utterance_frames.append(frame.copy())
+                self._silence_frames = 0
+            else:
+                self._silence_frames += 1
+                # Use shorter timeout during TTS for quick stop command detection
+                current_max_frames = (self._tts_max_utt_frames
+                                      if (self.tts and self.tts.is_speaking())
+                                      else self._normal_max_utt_frames)
+                if (self._silence_frames >= self._endpoint_silence_frames
+                        or len(self._utterance_frames) >= current_max_frames):
+                    self._finalize_utterance()
+                    self._pre_roll.clear()
+
+        # Check for query timeouts
+        self._check_query_timeout()
 
     def _trailing_silence_seconds(self) -> float:
         """The silence at the end of the utterance being closed, in seconds."""
@@ -2940,8 +3198,9 @@ class VoiceListener(threading.Thread):
             self._utterance_frames = []
             return
 
-        # Track when utterance ends - but don't overwrite global timing yet
-        utterance_end_time = time.time()
+        # When the frame that closed it was captured, which is when he
+        # stopped, however long the loop took to get to it.
+        utterance_end_time = self._frame_captured_at or time.time()
         # Read before the reset below: how long the detector waited in silence.
         trailing_silence = self._trailing_silence_seconds()
         utterance_start_time = self.echo_detector._utterance_start_time

@@ -59,8 +59,8 @@ If the stream ends with an unterminated tail, that tail is spoken as-is.
 
 A sentence closes only when something follows its punctuation, so the last
 sentence of a reply, and the only one of a short reply, is not spoken while
-the reply is generated: the listener speaks it as the tail once the engine
-returns. The latency journal relies on this (`jarvis/latency.spec.md`): the
+the reply is generated: the listener's reply thread speaks it as the tail
+once the engine returns. The latency journal relies on this (`jarvis/latency.spec.md`): the
 first sound of a short reply arrives after the engine returned.
 
 ## What must not change
@@ -72,10 +72,11 @@ next sentence in as a follow-up.
 
 **Interruption still stops everything.** `stop` mid-reply drops the
 queued chunks as well as the one playing, and cancels what has not been
-synthesised yet.
+synthesised yet. The reply may still be being written when she is
+stopped: nothing it streams afterwards is said, and neither is its tail.
 
 **One reply is spoken in one voice.** The language the user was heard in
-is read when the stream begins, and every chunk, the tail and the
+is read when the query is handed to the reply thread, and every chunk, the tail and the
 end-of-reply marker carries that same language to the engine (see
 `tts.spec.md`, "Which voice"). A transcript of something else landing
 mid-reply moves the detected language, and must not move the voice of the

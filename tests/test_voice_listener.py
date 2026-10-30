@@ -1099,12 +1099,13 @@ class TestSampleRateFallback:
                             get_calls = [0]
                             def fake_get(timeout=0.2):
                                 get_calls[0] += 1
+                                # (when captured, block), as the callback queues them.
                                 if get_calls[0] == 1:
                                     audio = np.zeros((17640, input_channels), dtype=np.float32)
                                     audio[:, -1] = .1 * input_channels
-                                    return audio
+                                    return 0.0, audio
                                 if get_calls[0] == 2:
-                                    return np.zeros((4410, input_channels), dtype=np.float32)
+                                    return 0.0, np.zeros((4410, input_channels), dtype=np.float32)
                                 listener._should_stop = True
                                 raise q.Empty()
 

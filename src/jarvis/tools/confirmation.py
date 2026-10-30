@@ -9,8 +9,8 @@ Nothing here blocks and nothing here executes. The gate raises a
 question and the turn ends; the answer arrives later, on its own thread,
 through `daemon.resolve_confirmation` or through the next utterance. That
 is not a stylistic choice: for voice, `run_reply_engine` runs on the
-listener's own audio thread, so a gate that waited for a spoken answer
-would silence the microphone that has to hear it.
+listener's reply thread, and the spoken answer is a later turn of that same
+thread, so a gate that waited for it would wait on itself.
 
 See policy.spec.md for the full contract.
 """

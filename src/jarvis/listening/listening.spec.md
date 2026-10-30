@@ -142,6 +142,22 @@ The intent judge receives full context and makes intelligent decisions:
 
 **Model residency (`keep_alive`):** Each intent-judge request asks Ollama to keep the model resident after the call. The default duration is 30 minutes, which avoids cold reloads between utterances. When `cfg.low_power_mode` is true, the duration is 1 minute so the model can unload soon after an active exchange. The trade-off is latency: low-power sessions can pay a cold-load cost after idle periods, while default sessions keep the judge model (default `gemma4:e2b`, ~2 GB) in RAM/VRAM during active voice use.
 
+### 4. The Microphone Is Always Read
+
+The capture callback stamps each block with the time it was captured and queues it. The listening loop reads the queue frame by frame, and an utterance's start and end are read from those stamps, so audio the loop reaches late still says when it was spoken: the echo detector, the hot window and the latency journal compare these times with when she spoke.
+
+**Replies run on a thread of their own.** Once a query is collected, the loop hands it over (`_hand_over`) and goes back to listening; the reply thread runs the queries one after the other, each through the reply engine and then out loud. While she prepares an answer and while she says it, what he says is still heard.
+
+- **A question asked while a reply is on its way waits its turn.** It is answered after the one in hand, never alongside it, and only once her voice has stopped: a reply started while the last is still audible would replace the echo detector's record of it, and that one's window would open over the new one. At most `MAX_WAITING_TURNS` (2) wait; past that the oldest is dropped with a console line, so a wake word repeated by a film cannot stack up replies that would run minutes later.
+- **A stop silences the reply.** Heard while a reply is being prepared, said or waits to be, a stop says nothing more of the reply in hand (no sentence streamed after it, no tail), drops the questions waiting behind it and a question still being collected, and interrupts the speech engine. Each stop is counted, and a turn handed over before the count moved is never said: one stopped while it waited for the query lock is not run at all. The engine finishes a turn already running on its own, unheard; its tools still run. Replies other features handed over are kept.
+- **What counts as a stop.** While she speaks, any utterance holding a stop command, as before; while she only thinks, an utterance of at most `STOP_WORDS_WHILE_THINKING` (3) words, because a stop word inside a longer sentence ("Jarvis, how do I stop the timer?") is a question, and waits its turn. A stop the intent judge reads out of a sentence counts the same.
+- **Her spoken question is answered by what he says to it.** A spoken question is settled by the next voice turn (`tools/policy.spec.md`), so a turn whose words he said before he finished hearing it is set aside, with a console line, and the question waits for his answer. A question he never heard, its reply having been stopped, is withdrawn as `expiré` before the next turn runs.
+- **Speech ignored while a reply is on its way leaves her thinking.** The thinking tune is that reply's: an utterance that is not for her does not stop it, and the published state stays THINKING.
+- **The reply thread is the only one that speaks.** Her answers and the replies other features hand over (`enqueue_reply`, "Speaking Something Produced Elsewhere") leave from it, so the echo detector's record of what she last said has one writer.
+- **The turn keeps what was true when he asked.** The language he was heard in, his exact words and when he stopped speaking travel with the query: the loop goes on transcribing while the reply is prepared.
+
+**The loop still waits on Whisper and on the intent judge.** The queue holds `AUDIO_BACKLOG_SECONDS` (30 s), with room to spare over the judge's default per-read deadline, so a stall delays his words instead of dropping them. Nothing empties it on a hand-over, an accepted utterance or a stop: what it holds was said after the utterance just handled. A block that finds the queue full is dropped and counted (`⚠️ Audio capture: queue full; N blocks dropped`). The judge may now run while the reply engine works; on one local Ollama the two can wait on each other.
+
 ## Startup & Model Warmup
 
 Before the listener announces "Listening!", it pre-loads every model the first engagement will need. All warmup output is grouped under a single `🔥 Warming up models...` header with indented child status lines, e.g.
@@ -216,9 +232,9 @@ After TTS finishes, allow wake-word-free follow-up.
 While TTS is playing, echo rejection and stop commands are handled with fast text-based checks (no LLM). This prevents self-loops where the mic picks up TTS output. After TTS finishes, the intent judge takes over.
 
 **Stop detection:**
-- Text-based: Check for "stop", "quiet", "shut up", etc.
-- Intent judge can also detect stop commands
-- However a stop is heard, the listener interrupts the engine, which drops the rest of the reply, and publishes IDLE: the interrupted reply is unheard, so its completion callback never fires and nothing else would take the published state out of SPEAKING (`state.spec.md`, `tts.spec.md` "Interrupting"). No hot window opens.
+- Text-based: Check for "stop", "quiet", "shut up", etc., while she speaks and while a reply is on its way (prepared, or waiting its turn); while she only thinks, in an utterance of at most three words
+- Intent judge can also detect stop commands, with the same effect
+- However a stop is heard, the listener interrupts the engine, which drops the rest of the reply, and publishes IDLE: the interrupted reply is unheard, so its completion callback never fires and nothing else would take the published state out of SPEAKING (`state.spec.md`, `tts.spec.md` "Interrupting"). No hot window opens. Nothing more of the reply being prepared is said, and the questions waiting their turn are dropped (see "The Microphone Is Always Read").
 
 **Echo handling:**
 - The detector times her words from when the listener handed her the reply,
@@ -434,14 +450,17 @@ stateDiagram-v2
     WakeWord: Listening for Wake Word
     HotWindow: Listening for Follow-up
     DuringTTS: TTS Playing
+    Thinking: Reply being prepared (the microphone is still read)
 
     WakeWord --> IntentJudge: Wake detected (text-based)
-    IntentJudge --> DuringTTS: Query dispatched, TTS starts
     IntentJudge --> WakeWord: Not directed / no query
     DuringTTS --> HotWindow: TTS ends + echo_tolerance
     HotWindow --> IntentJudge: Speech detected
     HotWindow --> WakeWord: Timer expires
     DuringTTS --> WakeWord: Stop command detected
+    IntentJudge --> Thinking: Query handed to the reply thread
+    Thinking --> DuringTTS: Her voice free, reply spoken
+    Thinking --> WakeWord: Stop command detected
 ```
 
 ## Audio Pipeline
@@ -470,7 +489,7 @@ If judge rejects and says noise, in hot window:
     → Not speech: mark processed, ignore, hot window untouched
 If judge.directed and judge.query:
     → Verify wake word present (wake word mode) or non-echo (hot window)
-    → Dispatch query to Reply Engine
+    → Hand the query to the reply thread (it waits its turn)
 If judge rejects but in hot window and non-echo:
     → Override rejection, dispatch as query
 ```
@@ -494,8 +513,8 @@ where an autoregressive decoder and a transducer part company, so a
 corpus of successes only would measure the easy half.
 
 The capture sits before the empty-transcript return and never raises:
-the listener's loop drains a 64-frame audio queue on a deadline, and a
-capture that threw would cost the sentence it was meant to record.
+the listener's loop reads the audio queue on a deadline, and a capture
+that threw would cost the sentence it was meant to record.
 
 `scripts/asr_bench.py` scores such a corpus across recognisers, reporting
 word and character error rates alongside recall on the declared keywords.
@@ -507,23 +526,24 @@ on a card runs on its own worker, and the sentence describing what
 happened has to be said out loud.
 
 That worker never speaks. It calls `enqueue_reply(text)`, and the
-listener says it on its own thread, through the same `_speak_reply` path
-it uses for its own replies. Two speakers would both write the echo
+listener's reply thread says it, through the same `_speak_reply` path it
+uses for her own replies. Two speakers would both write the echo
 detector's record of what was last said, and the next transcript would
 then be compared against the wrong sentence — which is how a user's
 answer gets deleted as an echo.
 
-**The drain runs at the top of the consumer loop**, before the audio
-`get`, not in its `queue.Empty` branch. The audio callback delivers a
-frame every `vad_frame_ms`, so on a live microphone the queue is never
-empty and an idle-only drain never runs at all.
+**The reply thread drains it on every pass**, between queries and
+whether or not anyone speaks, so a narration never waits on the
+microphone. A query being answered keeps it waiting until that reply has
+been handed to the speech engine. A stop leaves it queued: it is owed by
+another feature, and a reminder is a promise.
 
 **The language is the one last heard.** A reply from elsewhere has no
 utterance behind it, so it is spoken with the language the user was last
 heard in, and the engine's configured `response_language` outranks that
 (`tts.spec.md`, "Which language wins"). A reply of her own carries the
-language heard for it, fixed when the reply begins and shared by every
-sentence of it.
+language heard for it, fixed when the query is handed to the reply
+thread and shared by every sentence of it.
 
 **One reply per pass, and none while she is already speaking.** The echo
 detector holds the record of one reply at a time: the text she is
@@ -532,7 +552,8 @@ while the first is still audible would replace that record with the
 second's, and the rest of the first would be compared against the wrong
 sentence. Completion callbacks are not the constraint, since they travel
 with their own queue item (`tts.spec.md`, "The queue"). Anything still
-queued waits for the next pass, at most one frame away.
+queued waits for the reply thread's next pass, a few milliseconds away
+when no query is running.
 
 ## Fallback Behaviour
 

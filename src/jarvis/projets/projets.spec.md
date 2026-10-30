@@ -93,7 +93,7 @@ The report is then cleaned once, before anything else sees it: scrubbed of secre
 
 ## Delivering the report
 
-The tool returns at once, saying the job has started: the work takes minutes, and the reply engine runs on the listener's thread while holding the query lock, so waiting would leave Yuba deaf for the whole job. The reply she speaks says it has started, never that it is done.
+The tool returns at once, saying the job has started: the work takes minutes, and the reply engine runs on the listener's reply thread while holding the query lock, so waiting would hold every other reply, spoken or typed, for the whole job. The reply she speaks says it has started, never that it is done.
 
 When the job ends, the daemon delivers one message, written by code around Claude Code's report, which is quoted as its words:
 
