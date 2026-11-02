@@ -87,6 +87,16 @@ The project uses a micromamba environment at `.mamba_env/`. Always activate it b
 eval "$(micromamba.exe shell hook --shell bash)" && micromamba activate "$(git rev-parse --show-toplevel)/.mamba_env"
 ```
 
+### graphify (optional, per machine)
+
+graphify maps the code into a knowledge graph that the `## graphify` rules below query. It is a tool installed on each machine, not a project dependency, and `graphify-out/` is ignored: a fresh clone or a worktree has no graph, and those rules apply only once `graphify-out/graph.json` exists.
+
+- **Install**: the user installs it, at the version of the skill in `.claude/skills/graphify/.graphify_version`: `uv tool install graphifyy==0.9.82`. Never install or upgrade graphifyy yourself, and never into `.mamba_env`. If `graphify` is not on the PATH, say so and work without the graph.
+- **Refresh**: `graphify update .` from the repository root. It parses the code locally and calls no model, but it rebuilds the whole graph (about 20 s), so refresh once before the next query after code has changed, not after every edit.
+- **What leaves the machine**: `query`, `path`, `explain` and `update` stay local. `extract`, `cluster-only` and `label` read docs or name communities with a model: a provider key from the environment if one is set, otherwise the `claude` CLI. Run them only when the user asks, with `--code-only` and `--no-label`. Never feed graphify third-party content (`/graphify add`, `/graphify <url>`): the skill hands it to subagents that have a shell. Never run `graphify save-result`: the skill puts the answer inside double quotes, where the shell would run anything in backticks.
+- **Disk**: each day the graph changes, graphify keeps a dated copy of it in `graphify-out/YYYY-MM-DD/` (about 25 MB, never pruned). Delete the old ones, or set `GRAPHIFY_NO_BACKUP=1`.
+- **The `/graphify` skill** (Claude Code only) runs only when the user types `/graphify`. Its files are graphify's own: regenerate them rather than edit them, with `graphify install --project --platform windows` (the PowerShell variant kept here), then put `disable-model-invocation: true` back in the `SKILL.md` header and delete the `.bak` files left beside it. `LICENSE`, `LICENSE-MIT` and `NOTICE` are graphify's licence and stay. The same command rewrites the `## graphify` section below whole, so changes belong in this subsection, and it writes the hooks that point the agent at the graph into the ignored `.claude/settings.json`, on that machine only.
+
 ## graphify
 
 This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.

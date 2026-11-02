@@ -27,8 +27,11 @@ src/jarvis/_version.py
 # repository: a copy here can only have come from a leak, and must not ship.
 /yuba/
 
-# The code graph is rebuilt on each machine by `graphify update .`.
-/graphify-out/
+# The code graph is rebuilt on each machine by `graphify update .`, in the
+# folder it is run from. Reinstalling the graphify skill leaves a `.bak` of
+# each file it replaced.
+graphify-out/
+/.claude/skills/graphify/**/*.bak
 
 # The eval report quotes the model's replies to the developer's own runs;
 # it is written here by scripts/run_evals.sh and belongs to that machine.
