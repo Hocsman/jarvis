@@ -346,8 +346,11 @@ class Settings:
     transcript_buffer_duration_sec: float
 
     # Memory & Dialogue
-    # Drives both the short-term memory window and forced diary update interval
+    # The pause that ends a conversation, and the forced diary update interval
     dialogue_memory_timeout: float
+    # Characters of the current conversation the model reads word for word;
+    # 0 = what the chat model's window holds (see dialogue_context_budget)
+    dialogue_context_max_chars: int
     memory_enrichment_max_results: int
     memory_enrichment_source: str  # "all", "diary", or "graph"
     # The model that reads a question for the memory lookup's keywords and
@@ -1025,9 +1028,13 @@ def get_default_config() -> Dict[str, Any]:
         "transcript_buffer_duration_sec": 120.0,
 
         # Memory & Dialogue
-        # dialogue_memory_timeout drives the short-term memory window AND the forced
-        # diary update interval. After a diary update, enrichment retrieves older context.
+        # dialogue_memory_timeout is the pause that ends a conversation AND the
+        # forced diary update interval, so a long conversation is summarised as
+        # it goes. Its latest messages reach the model word for word, within
+        # dialogue_context_max_chars (0 = by the chat model's size); the diary's
+        # summary carries what was said before them.
         "dialogue_memory_timeout": 300.0,
+        "dialogue_context_max_chars": 0,
         "memory_enrichment_max_results": 3,
         "memory_enrichment_source": "all",  # "all", "diary", or "graph"
         # Empty = reuse the tool router's chain (tool_router_model →
@@ -1373,8 +1380,12 @@ def load_settings() -> Settings:
     # Transcript Buffer - ambient speech context for intent judge (separate from dialogue)
     transcript_buffer_duration_sec = float(merged.get("transcript_buffer_duration_sec", 120.0))
 
-    # Dialogue memory window and forced diary update share this duration
+    # The pause that ends a conversation and the forced diary update share this duration
     dialogue_memory_timeout = float(merged.get("dialogue_memory_timeout", 300.0))
+    try:
+        dialogue_context_max_chars = max(0, int(merged.get("dialogue_context_max_chars", 0) or 0))
+    except (TypeError, ValueError):
+        dialogue_context_max_chars = 0
     memory_enrichment_max_results = int(merged.get("memory_enrichment_max_results", 3))
     memory_enrichment_source = str(merged.get("memory_enrichment_source", "all")).lower()
     if memory_enrichment_source not in ("all", "diary", "graph"):
@@ -1628,6 +1639,7 @@ def load_settings() -> Settings:
 
         # Memory & Dialogue
         dialogue_memory_timeout=dialogue_memory_timeout,
+        dialogue_context_max_chars=dialogue_context_max_chars,
         memory_enrichment_max_results=memory_enrichment_max_results,
         memory_enrichment_source=memory_enrichment_source,
         memory_extractor_model=memory_extractor_model,

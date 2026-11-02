@@ -681,29 +681,51 @@ def _filter_contexts_by_time(
     return filtered
 
 
+# Characters of the current conversation the chat model reads word for word
+# when ``dialogue_context_max_chars`` is left at 0 (the reply side chooses,
+# ``reply.prompts.model_variants.dialogue_context_budget``). The small one
+# leaves room in an 8 192-token window for the system prompt and the tools.
+DIALOGUE_CONTEXT_CHARS_SMALL = 4_000
+DIALOGUE_CONTEXT_CHARS_LARGE = 16_000
+
+# Messages the diary summariser reads in one call. A pass with more
+# waiting asks again for the next ones.
+SUMMARY_WINDOW_MESSAGES = 10
+
+
 class DialogueMemory:
     """
-    In-memory storage for recent dialogue interactions.
-    Provides short-term context for the configured dialogue memory window.
+    In-memory storage for the current conversation.
 
     Thread-safe: uses a lock to protect against concurrent diary updates.
     Tracks saved messages by timestamp to prevent data loss when new messages
     arrive during diary update.
 
-    The dialogue memory window and the forced diary update interval share the
-    same duration (dialogue_memory_timeout). After a diary update, saved messages
-    older than this window are cleaned up; the enrichment feature retrieves any
-    relevant earlier context from the diary. The rolling transcript buffer is
+    A conversation is the run of messages with no pause of
+    ``dialogue_memory_timeout`` between two of them, the last one younger
+    than that. Its latest messages, within ``context_max_chars``, are what
+    the model reads word for word; when it began before them, the reply
+    engine adds the diary's summary of the days it spans. The forced diary
+    update runs on the same duration, so a long conversation is summarised
+    as it goes. After a diary update, the saved messages of conversations
+    that have ended are cleaned up. The rolling transcript buffer is
     separate (ambient speech for intent judging).
     """
 
-    def __init__(self, inactivity_timeout: float = 300.0, max_interactions: int = 20):
+    def __init__(
+        self,
+        inactivity_timeout: float = 300.0,
+        context_max_chars: int = DIALOGUE_CONTEXT_CHARS_SMALL,
+    ):
         """Initialize dialogue memory.
 
         The inactivity_timeout drives two unified durations:
-        - RECENT_WINDOW_SEC: how long messages are kept in memory for context
+        - CONVERSATION_GAP_SEC: the pause that ends a conversation
         - MAX_UNSAVED_AGE_SEC: how old unsaved messages can get before forcing
-          a diary update (same as the window, since enrichment covers older context)
+          a diary update, so a long conversation is summarised as it goes
+
+        ``context_max_chars`` bounds the characters of message text handed
+        to the model word for word (``dialogue_context_budget``).
         """
         self._messages: List[Tuple[float, str, str]] = []  # (timestamp, role, content)
         # Tool carryover: in-loop assistant-with-tool_calls + tool-role messages
@@ -719,9 +741,9 @@ class DialogueMemory:
         # ``has_recent_messages`` was False at turn start), and individual
         # entries can be invalidated on demand (e.g. ``invalidate_warm_profile``
         # on graph mutations). The timestamp is retained so callers may
-        # inspect entry age, but reads are NOT bounded by RECENT_WINDOW_SEC
-        # any more — long active conversations would otherwise see warm
-        # profile / router caches expire while the session is still going.
+        # inspect entry age, but reads are NOT bounded by age: a long active
+        # conversation would otherwise see warm profile / router caches
+        # expire while the session is still going.
         # LRU-bounded so per-query keys (router cache, enrichment extractor
         # cache) cannot grow without limit during long active sessions.
         # Reads bump recency; writes evict the least-recently-used entry
@@ -741,13 +763,15 @@ class DialogueMemory:
         # break interleave ordering between text and tool messages. We
         # bump the stored ts by a tiny epsilon so insertion order is
         # always preserved, while keeping wall-clock semantics close
-        # enough for the RECENT_WINDOW_SEC cutoff.
+        # enough for the pauses that end a conversation.
         self._last_ts: float = 0.0
         self._last_activity_time: float = time.time()
         self._inactivity_timeout = inactivity_timeout
-        # Unified window: context retention = forced diary update interval
-        self.RECENT_WINDOW_SEC = inactivity_timeout
+        # One duration: the pause that ends a conversation is the forced
+        # diary update interval.
+        self.CONVERSATION_GAP_SEC = inactivity_timeout
         self.MAX_UNSAVED_AGE_SEC = inactivity_timeout
+        self.context_max_chars = context_max_chars
         # Track the timestamp up to which messages have been saved to diary
         # Messages with timestamp <= this value have been processed
         self._last_saved_timestamp: float = 0.0
@@ -936,7 +960,7 @@ class DialogueMemory:
         breaks interleave ordering between text messages and tool turns
         when both land in the same tick. We bump by a 1µs epsilon so
         insertion order is always preserved while staying close enough
-        to wall-clock for ``RECENT_WINDOW_SEC`` filtering.
+        to wall-clock for measuring the pauses that end a conversation.
 
         Caller MUST hold ``_lock`` — ``_last_ts`` is shared mutable state.
         """
@@ -953,27 +977,98 @@ class DialogueMemory:
             self._messages.append((timestamp, role.strip(), content.strip()))
             self._last_activity_time = timestamp
 
+    # ------------------------------------------------------------------
+    # The current conversation
+    # ------------------------------------------------------------------
+
+    def _conversation_locked(self) -> List[Tuple[float, str, str]]:
+        """The messages of the conversation going on, oldest first: back
+        from the last one until a pause of ``CONVERSATION_GAP_SEC``. Empty
+        when the last message is that old. Caller holds ``_lock``."""
+        if not self._messages:
+            return []
+        if time.time() - self._messages[-1][0] >= self.CONVERSATION_GAP_SEC:
+            return []
+        start = len(self._messages) - 1
+        while (start > 0
+               and self._messages[start][0] - self._messages[start - 1][0]
+               < self.CONVERSATION_GAP_SEC):
+            start -= 1
+        return self._messages[start:]
+
+    def _word_for_word_from(self, conversation: List[Tuple[float, str, str]]) -> int:
+        """Where the part handed to the model word for word begins.
+
+        The latest messages whose text fits in ``context_max_chars``. A cut
+        opens on one of the user's messages, so the model never reads an
+        answer without the words it answered; a conversation that fits is
+        handed over whole, even when her words open it (a reminder said
+        aloud, a delegated job's report). The user's last message and what
+        followed it are kept whatever their length.
+
+        A message the diary has not read yet is not cut, since it would be
+        in neither the words handed over nor the summary; should the diary
+        keep failing, that stops at twice ``context_max_chars``.
+        """
+        n = len(conversation)
+        sizes = [len(content) for _, _, content in conversation]
+        users = [i for i, (_, role, _) in enumerate(conversation) if role == "user"]
+
+        def opening_on_the_user(i: int, *, forward: bool) -> int:
+            if forward:
+                later = [u for u in users if u >= i]
+                if later:
+                    return later[0]
+            earlier = [u for u in users if u <= i]
+            return earlier[-1] if earlier else i
+
+        within, used = n, 0
+        while within > 0 and used + sizes[within - 1] <= self.context_max_chars:
+            within -= 1
+            used += sizes[within]
+        if within == 0:
+            return 0
+        cut = opening_on_the_user(min(within, n - 1), forward=True)
+
+        unread = next(
+            (i for i, (ts, _, _) in enumerate(conversation) if ts > self._last_saved_timestamp),
+            n,
+        )
+        if unread < cut:
+            keep = opening_on_the_user(unread, forward=False)
+            if sum(sizes[keep:]) <= 2 * self.context_max_chars:
+                cut = keep
+        return cut
+
+    def _word_for_word_locked(self) -> List[Tuple[float, str, str]]:
+        conversation = self._conversation_locked()
+        if not conversation:
+            return []
+        return conversation[self._word_for_word_from(conversation):]
+
     def get_recent_messages(self) -> List[dict]:
-        """
-        Get recent messages (last 5 minutes) formatted for LLM API.
-
-        Returns:
-            List of message dictionaries with 'role' and 'content' keys
-        """
+        """The part of the current conversation the model reads word for
+        word, formatted for the LLM API (``role`` and ``content`` keys)."""
         with self._lock:
-            if not self._messages:
-                return []
+            return [
+                {"role": role, "content": content}
+                for _, role, content in self._word_for_word_locked()
+            ]
 
-            # Filter to last 5 minutes
-            cutoff = time.time() - self.RECENT_WINDOW_SEC
-            recent_messages = [msg for msg in self._messages if msg[0] >= cutoff]
-
-            return [{"role": role, "content": content} for _, role, content in recent_messages]
+    def earlier_part_start(self) -> Optional[float]:
+        """When the current conversation began, if that is before the part
+        handed to the model word for word; None when all of it fits, or
+        when no conversation is going on."""
+        with self._lock:
+            conversation = self._conversation_locked()
+            if not conversation or self._word_for_word_from(conversation) == 0:
+                return None
+            return conversation[0][0]
 
     # ------------------------------------------------------------------
     # Rewind (text chat)
     # ------------------------------------------------------------------
-    # Operates on the FULL in-memory conversation, not the recent window:
+    # Operates on the FULL in-memory conversation, not its word-for-word part:
     # a rewind rolls the conversation back to a chosen user turn. Nothing
     # here touches the diary or the disk.
 
@@ -1054,10 +1149,10 @@ class DialogueMemory:
         with self._lock:
             ts = self._next_ts()
             self._tool_turns.append((ts, scrubbed))
-            # Bound storage to a hard ceiling. Tool turns are NOT pruned
-            # by RECENT_WINDOW_SEC age any more; the engine clears them
-            # on new-conversation entry so an active session keeps its
-            # carryover regardless of how long ago each tool fired.
+            # Bound storage to a hard ceiling. Tool turns are not pruned
+            # by age; the engine clears them on new-conversation entry so
+            # an active session keeps its carryover regardless of how long
+            # ago each tool fired.
             if len(self._tool_turns) > self._tool_turns_max_storage:
                 self._tool_turns = self._tool_turns[-self._tool_turns_max_storage:]
 
@@ -1076,7 +1171,7 @@ class DialogueMemory:
     #
     # Lifetime contract:
     # - Entries persist for the lifetime of the active conversation;
-    #   they are NOT bounded by RECENT_WINDOW_SEC age. A long active
+    #   they are NOT bounded by age. A long active
     #   chat keeps the warm profile / router cache hot for hours.
     # - The reply engine wipes the cache when it detects a new
     #   conversation (i.e. ``has_recent_messages()`` was False at turn
@@ -1157,17 +1252,16 @@ class DialogueMemory:
         with self._lock:
             if not self._messages and not self._tool_turns:
                 return []
-            cutoff = time.time() - self.RECENT_WINDOW_SEC
             # Build timeline of (ts, payload) where payload is either a single
             # text message dict or a list of tool messages.
-            timeline: list = []
-            for ts, role, content in self._messages:
-                if ts >= cutoff:
-                    timeline.append((ts, "msg", {"role": role, "content": content}))
+            timeline: list = [
+                (ts, "msg", {"role": role, "content": content})
+                for ts, role, content in self._word_for_word_locked()
+            ]
             # Keep only the last N tool turns. Tool carryover lives for
-            # the conversation, not for RECENT_WINDOW_SEC: an active session
-            # past the window still benefits from the prior tool result.
-            # The engine clears ``_tool_turns`` on new-conversation entry.
+            # the conversation, not for its word-for-word part: an active
+            # session still benefits from the prior tool result. The engine
+            # clears ``_tool_turns`` on new-conversation entry.
             for ts, msgs in self._tool_turns[-max_tool_turns:]:
                 truncated: list[dict] = []
                 for m in msgs:
@@ -1196,10 +1290,12 @@ class DialogueMemory:
             return flat
 
     def has_recent_messages(self) -> bool:
-        """Check if there are any messages in the last 5 minutes."""
+        """Whether a conversation is going on: the last message is younger
+        than ``CONVERSATION_GAP_SEC``."""
         with self._lock:
-            cutoff = time.time() - self.RECENT_WINDOW_SEC
-            return any(ts >= cutoff for ts, _, _ in self._messages)
+            return bool(self._messages) and (
+                time.time() - self._messages[-1][0] < self.CONVERSATION_GAP_SEC
+            )
 
     def get_pending_chunks(self) -> List[str]:
         """Get unsaved messages as formatted chunks for diary update.
@@ -1215,7 +1311,9 @@ class DialogueMemory:
         chunks, _ = self.get_pending_chunks_with_snapshot()
         return chunks
 
-    def get_pending_chunks_with_snapshot(self) -> Tuple[List[str], float]:
+    def get_pending_chunks_with_snapshot(
+        self, limit: Optional[int] = None, up_to: Optional[float] = None,
+    ) -> Tuple[List[str], float]:
         """Return (pending_chunks, snapshot_timestamp) atomically.
 
         The snapshot is ``_last_ts`` — the highest timestamp assigned by
@@ -1225,21 +1323,31 @@ class DialogueMemory:
         the returned snapshot to ``mark_saved_up_to`` rather than computing
         their own ``time.time()`` snapshot, which can collide with ``_next_ts``
         on low-resolution clocks (Windows ~16ms tick).
+
+        ``limit`` returns only the oldest pending messages, and the snapshot
+        is then the last one's timestamp, so marking it saved leaves the
+        rest pending. ``up_to`` leaves out what came after that timestamp.
         """
         with self._lock:
             unsaved_messages = [
                 (ts, role, content) for ts, role, content in self._messages
-                if ts > self._last_saved_timestamp
+                if ts > self._last_saved_timestamp and (up_to is None or ts <= up_to)
             ]
+            snapshot = self._last_ts if up_to is None else up_to
+            if limit is not None and len(unsaved_messages) > limit:
+                unsaved_messages = unsaved_messages[:max(0, limit)]
+                snapshot = (unsaved_messages[-1][0] if unsaved_messages
+                            else self._last_saved_timestamp)
             chunks = [f"{role.title()}: {content}" for _, role, content in unsaved_messages]
-            return chunks, self._last_ts
+            return chunks, snapshot
 
-    def tools_in_pending_window(self) -> List[str]:
+    def tools_in_pending_window(self, up_to: Optional[float] = None) -> List[str]:
         """Names of the tools that ran while the pending chunks were made.
 
         The window is the one `get_pending_chunks_with_snapshot` returns —
-        everything past `_last_saved_timestamp` — so a lookup that was
-        already summarised cannot vouch for the next window's prose.
+        everything past `_last_saved_timestamp`, up to ``up_to`` when given —
+        so a lookup that was already summarised cannot vouch for the next
+        window's prose.
 
         Only the names cross. The payloads stay out of the diary, which is
         what `_tool_turns` was excluded from `get_pending_chunks` for in
@@ -1254,7 +1362,7 @@ class DialogueMemory:
         with self._lock:
             noms: List[str] = []
             for ts, msgs in self._tool_turns:
-                if ts <= self._last_saved_timestamp:
+                if ts <= self._last_saved_timestamp or (up_to is not None and ts > up_to):
                     continue
                 for m in msgs:
                     for tc in (m.get("tool_calls") or []):
@@ -1290,7 +1398,8 @@ class DialogueMemory:
                 return True
 
             # Edge case: very long conversation - force update if old messages exist
-            # This prevents context loss when a conversation exceeds the recent window
+            # A long conversation is summarised as it goes, so its earlier
+            # part is in the diary by the time it leaves the word-for-word part
             oldest_unsaved = None
             for ts, _, _ in self._messages:
                 if ts > self._last_saved_timestamp:
@@ -1334,19 +1443,76 @@ class DialogueMemory:
             return owed
 
     def _cleanup_old_messages(self) -> None:
-        """Remove messages that are both saved and older than the recent window.
+        """Remove the saved messages of conversations that have ended.
 
         Must be called while holding the lock.
         """
-        current_time = time.time()
         # Keep messages that are either:
-        # 1. Recent (within RECENT_WINDOW_SEC) - needed for LLM context
+        # 1. Part of the conversation going on - its start says when it
+        #    began, and its latest part is the model's context
         # 2. Not yet saved (timestamp > _last_saved_timestamp) - needed for diary
-        cutoff = current_time - self.RECENT_WINDOW_SEC
+        conversation = self._conversation_locked()
+        began = conversation[0][0] if conversation else float("inf")
         self._messages = [
             (ts, role, content) for ts, role, content in self._messages
-            if ts >= cutoff or ts > self._last_saved_timestamp
+            if ts >= began or ts > self._last_saved_timestamp
         ]
+
+
+# Where a sentence ends, by punctuation alone. A full-width stop closes one
+# on its own, as Chinese and Japanese put no space after it; an ASCII one
+# only when whitespace or the end follows, as it also marks decimals and
+# abbreviations (the rule `output/streaming.py` segments speech by).
+_SENTENCE_END = re.compile(r"[。！？]+|[.!?…]+(?=\s|$)")
+
+
+def _cut_at_sentence(text: str, max_chars: int) -> str:
+    """``text`` up to its last sentence end within ``max_chars``."""
+    if len(text) <= max_chars:
+        return text
+    ends = [m.end() for m in _SENTENCE_END.finditer(text) if m.end() <= max_chars]
+    if ends:
+        return text[:ends[-1]]
+    return text[:max_chars].rstrip() + "…"
+
+
+def earlier_in_conversation(db: Database, dialogue_memory: DialogueMemory) -> str:
+    """The diary's summary of the days the current conversation spans, when
+    it began before the part the model reads word for word; empty otherwise.
+
+    One ``[YYYY-MM-DD] summary`` line per stored row, oldest first, within
+    half the word-for-word budget. When they do not all fit, the latest
+    days win, being nearest the words handed over; the oldest that still
+    has room is cut at a sentence end. Read live: the diary is rewritten
+    every few minutes while the conversation lasts.
+    """
+    began = dialogue_memory.earlier_part_start()
+    if began is None:
+        return ""
+    first_day = datetime.fromtimestamp(began, timezone.utc).date().isoformat()
+    today = datetime.fromtimestamp(time.time(), timezone.utc).date().isoformat()
+    rows = db.get_conversation_summaries_between(first_day, today)
+    lines = [
+        f"[{row['date_utc']}] {row['summary'].strip()}"
+        for row in rows if (row["summary"] or "").strip()
+    ]
+    if not lines:
+        debug_log(f"earlier part: the conversation began {first_day} before the words "
+                  "handed over, and the diary holds nothing for it yet", "memory")
+        return ""
+    room = dialogue_memory.context_max_chars // 2
+    kept: List[str] = []
+    for line in reversed(lines):
+        if kept and len(line) > room and not any(
+            m.end() <= room for m in _SENTENCE_END.finditer(line)
+        ):
+            break
+        piece = _cut_at_sentence(line, room)
+        kept.insert(0, piece)
+        room -= len(piece) + 1
+        if room <= 0:
+            break
+    return "\n".join(kept)
 
 
 def generate_conversation_summary(
@@ -1371,7 +1537,8 @@ def generate_conversation_summary(
     Returns:
         Tuple of (summary, topics) where topics is comma-separated
     """
-    chunks_text = "\n".join(recent_chunks[-10:])  # Last 10 chunks to keep context manageable
+    # The diary pass hands over at most this many, oldest first.
+    chunks_text = "\n".join(recent_chunks[-SUMMARY_WINDOW_MESSAGES:])
 
     system_prompt = """You are a conversation summariser for a personal AI assistant. Your job is to create concise daily summaries of conversations that will be stored in a diary for future reference.
 
@@ -1876,38 +2043,58 @@ def update_diary_from_dialogue_memory(
         pending_chunks, snapshot_timestamp = (
             dialogue_memory.get_pending_chunks_with_snapshot()
         )
-        # Read in the same breath as the chunks and before the summary's
-        # LLM call marks them saved: afterwards the window is gone and the
-        # graph would have to guess what the transcript already knew.
-        tools_used = dialogue_memory.tools_in_pending_window()
         debug_log(f"diary update: got {len(pending_chunks)} pending chunks from dialogue_memory", "memory")
 
         if not pending_chunks:
             debug_log("diary update skipped: no pending chunks in dialogue_memory", "memory")
             return None
 
-        # Update the daily conversation summary
-        # This is the slow operation (LLM call) during which new messages might arrive
-        debug_log("calling update_daily_conversation_summary...", "memory")
-        summary_id = update_daily_conversation_summary(
-            db=db,
-            new_chunks=pending_chunks,
-            cfg=cfg,
-            source_app=source_app,
-            voice_debug=voice_debug,
-            timeout_sec=timeout_sec,
-            on_token=on_token,
-            thinking=thinking,
-        )
+        # The summariser reads SUMMARY_WINDOW_MESSAGES at a time, oldest
+        # first, and only what it has read is marked saved. A pass with more
+        # waiting asks again while its budget lasts; what is left stays
+        # pending for the next pass. New messages that arrived during
+        # summarisation are past the snapshot and remain pending too.
+        summary_id = None
+        tools_used: List[str] = []
+        while True:
+            batch, batch_end = dialogue_memory.get_pending_chunks_with_snapshot(
+                limit=SUMMARY_WINDOW_MESSAGES, up_to=snapshot_timestamp,
+            )
+            if not batch:
+                break
+            # The first call has the whole budget; a later one only what is left.
+            left = timeout_sec - (time.monotonic() - started)
+            if summary_id is not None and left <= 0:
+                debug_log(f"diary update: budget spent, {len(batch)}+ chunks left pending", "memory")
+                break
+            # Read before the batch is marked saved: afterwards the window
+            # is gone and the graph would have to guess what the transcript
+            # already knew.
+            batch_tools = dialogue_memory.tools_in_pending_window(up_to=batch_end)
 
-        debug_log(f"update_daily_conversation_summary returned: {summary_id}", "memory")
+            # The slow operation (LLM call) during which new messages might arrive
+            debug_log(f"calling update_daily_conversation_summary with {len(batch)} chunks...", "memory")
+            batch_id = update_daily_conversation_summary(
+                db=db,
+                new_chunks=batch,
+                cfg=cfg,
+                source_app=source_app,
+                voice_debug=voice_debug,
+                timeout_sec=timeout_sec if summary_id is None else left,
+                on_token=on_token,
+                thinking=thinking,
+            )
+            debug_log(f"update_daily_conversation_summary returned: {batch_id}", "memory")
+            if batch_id is None:
+                break
+            summary_id = batch_id
+            tools_used += [t for t in batch_tools if t not in tools_used]
+            dialogue_memory.mark_saved_up_to(batch_end)
+            debug_log(f"marked messages saved up to timestamp {batch_end}", "memory")
+            if batch_end >= snapshot_timestamp:
+                break
 
-        # Mark only the messages that existed at snapshot time as saved
-        # New messages that arrived during summarization remain pending
         if summary_id is not None:
-            dialogue_memory.mark_saved_up_to(snapshot_timestamp)
-            debug_log(f"marked messages saved up to timestamp {snapshot_timestamp}", "memory")
-
             # Graph memory (v2): extract facts and store in the node graph.
             # Non-blocking — if this fails, the diary update still succeeded.
             # Inside what is left of the pass's budget, so the graph never

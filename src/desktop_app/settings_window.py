@@ -460,8 +460,13 @@ def _build_field_metadata() -> List[FieldMeta]:
 
     # --- Memory & Dialogue ---
     f("dialogue_memory_timeout", "Memory & Diary Window",
-      "Duration for dialogue memory and forced diary updates",
+      "Pause that ends a conversation, and interval of the forced diary updates",
       "memory", "float", min_val=30, max_val=3600, step=30, suffix="s")
+    f("dialogue_context_max_chars", "Conversation Read Word for Word",
+      "Characters of the current conversation the model reads word for word; "
+      "what came before reaches it as the diary's summary (0 = what the model's "
+      "window holds: less for a model run on this machine)",
+      "memory", "int", min_val=0, max_val=64000, step=1000, suffix=" chars")
     f("memory_enrichment_max_results", "Enrichment Results",
       "Max memory results for context enrichment",
       "memory", "int", min_val=1, max_val=50)

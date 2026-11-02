@@ -162,7 +162,7 @@ Jarvis starts listening automatically — just say "Jarvis" and talk!
 
 ## Features
 
-- **Conversational Awareness** - Understands ongoing discussions. Ask "Jarvis, what do you think?" and it knows what you're talking about. Works naturally in multi-person conversations.
+- **Conversational Awareness** - Understands ongoing discussions. Ask "Jarvis, what do you think?" and it knows what you're talking about. Works naturally in multi-person conversations, and keeps the thread of a long one: the latest exchanges word for word, what came before through the diary it writes as you talk (how much it reads word for word: `dialogue_context_max_chars`, under **⚙️ Settings → 🧠 Memory & Dialogue**).
 - **Text Chat** - Type to Jarvis alongside voice. Voice and text share one conversation, so a follow-up typed in the chat window continues a voice discussion. Text never speaks. Open it from the tray menu (`💬 Chat`) while Jarvis is listening. The window is a frameless phone-style panel (drag it by its top bar, resize it from the corner grip) and shows a local status banner while Jarvis starts, stops, or needs to be restarted. Each sent message has a rewind (⟲) button that rolls the shared conversation back to that message and asks Jarvis again; that rewinds the voice context too, since they are one.
 - **Unlimited Memory** - Never forgets. Searches across all your conversation history. Memory Viewer GUI included.
 - **Adaptive Tone** - Automatically surgical for code, pragmatic for business, encouraging for wellbeing — no manual mode switching

@@ -53,6 +53,36 @@ def detect_model_size(model_name: Optional[str]) -> ModelSize:
     return ModelSize.LARGE
 
 
+def dialogue_context_budget(cfg) -> int:
+    """Characters of the current conversation the chat model reads word
+    for word: ``dialogue_context_max_chars``, or, left at 0, what its
+    window holds.
+
+    A model run at home gets the small budget whatever its size: Ollama
+    runs every chat model in an 8 192-token window, which the system
+    prompt and the tools share with the dialogue, and a local
+    OpenAI-compatible server's window is not known. A provider off home
+    gets the budget of the model's size.
+    """
+    from ...llm import chat_is_remote
+    from ...memory.conversation import (
+        DIALOGUE_CONTEXT_CHARS_LARGE,
+        DIALOGUE_CONTEXT_CHARS_SMALL,
+    )
+
+    try:
+        configured = int(getattr(cfg, "dialogue_context_max_chars", 0) or 0)
+    except (TypeError, ValueError):
+        configured = 0
+    if configured > 0:
+        return configured
+    if not chat_is_remote(cfg):
+        return DIALOGUE_CONTEXT_CHARS_SMALL
+    if detect_model_size(getattr(cfg, "llm_chat_model", None)) == ModelSize.SMALL:
+        return DIALOGUE_CONTEXT_CHARS_SMALL
+    return DIALOGUE_CONTEXT_CHARS_LARGE
+
+
 # =============================================================================
 # Large Model Prompts
 # =============================================================================

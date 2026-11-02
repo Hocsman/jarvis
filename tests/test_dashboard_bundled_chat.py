@@ -130,7 +130,7 @@ def engine(monkeypatch, qapp):
     monkeypatch.setattr("jarvis.reply.engine.run_reply_engine", scripted)
     monkeypatch.setattr(
         daemon, "_global_dialogue_memory",
-        DialogueMemory(inactivity_timeout=300, max_interactions=20),
+        DialogueMemory(inactivity_timeout=300),
     )
     monkeypatch.setattr(daemon, "_global_cfg", object())
     monkeypatch.setattr(daemon, "_global_db", object())
