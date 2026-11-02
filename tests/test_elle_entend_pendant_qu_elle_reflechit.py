@@ -630,6 +630,40 @@ def test_an_utterance_keeps_the_time_its_audio_was_captured(_print):
     listener.state_manager.stop()
 
 
+@patch("builtins.print")
+def test_his_question_goes_once_the_audio_holds_its_silence(_print):
+    """The silence that ends his question is counted in the audio the loop
+    reads, from the end of his words: neither Whisper nor the judge adds to
+    it, and audio read late, after a stall, still has his next words in
+    time to complete the question."""
+    listener, _tts = _create_listener()
+    cfg = listener.cfg
+    cfg.vad_frame_ms, cfg.vad_pre_roll_ms, cfg.endpoint_silence_ms = 20, 240, 200
+    cfg.max_utterance_ms, cfg.tts_max_utterance_ms = 12000, 3000
+    listener._configure_frames()
+    listener._is_speech_frame = lambda frame: False
+    listener.state_manager.voice_collect_seconds = 1.0
+    handed = []
+    listener._hand_over = handed.append
+    ended = time.time() - 10.0      # the loop is ten seconds behind
+    listener._process_transcript("jarvis quelle heure est-il", 0.01, ended - 1.0, ended)
+
+    step = listener._frame_ms / 1000.0
+    frames = iter(range(10_000))
+    for i in frames:
+        if i * step >= 0.9:
+            break
+        listener._take_frame(_frame(listener), ended + i * step)
+    assert not handed, "handed over before the audio held its silence"
+
+    for i in frames:
+        if i * step >= 1.1:
+            break
+        listener._take_frame(_frame(listener), ended + i * step)
+    assert handed == ["quelle heure est-il"]
+    listener.state_manager.stop()
+
+
 def test_a_stall_as_long_as_the_backlog_loses_nothing():
     """The loop still waits on the intent judge and on Whisper. The queue
     holds longer than that, so a stall delays his words instead of

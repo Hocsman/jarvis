@@ -9,18 +9,22 @@ The not-speech cases also run on any judge model: name one or more in
 alternating arms call by call (the order rotates each call, the cases are
 shuffled each round), and prints, per arm, how many inventions and how many
 of his words the listener would answer in the hot window, and how many would
-join a question it is still collecting; a row under 20 calls gets counts and
-no rate. Arms go through `MockConfig`, so a cloud model
-goes to the provider the `EVAL_LLM_*` variables name and is billed there,
-and a bare local tag runs on the local Ollama. Only these synthetic
-transcripts leave the machine. `EVAL_INTENT_JUDGE_ROUNDS` sets the rounds
-(4 by default).
+join a question it is still collecting, where a stop drops the question and
+is a miss either way; a row under 20 calls gets counts and no rate. A second
+test reads the collecting cases with the question shown, as the listener
+shows it, and hidden, the two alternating call by call on each arm (`-k
+shown` runs it alone). Arms go through `MockConfig`, so a cloud model goes
+to the provider the `EVAL_LLM_*` variables name and is billed there, and a
+bare local tag runs on the local Ollama. Only these synthetic transcripts
+leave the machine. `EVAL_INTENT_JUDGE_ROUNDS` sets the rounds (4 by
+default).
 
     EVAL_LLM_PROVIDER=anthropic EVAL_LLM_API_KEY_ENV=YUBA_ANTHROPIC_KEY \\
     EVAL_INTENT_JUDGE_ARMS="gemma4:e2b,claude-haiku-5-5" \\
       python -m pytest evals/test_intent_judge.py -k arms -s
 """
 
+import dataclasses
 import os
 import random
 
@@ -817,7 +821,8 @@ KNOWN_FAILING_CASES: set = {
     "french_video_outro_while_asking",
     "english_video_outro_while_asking",
     "english_outro_after_her_last_reply",
-    # Half the time: the field case itself, a subtitle credit with a number.
+    # Half the time or more: the field case itself, a subtitle credit with a
+    # number.
     "french_subtitle_number_while_asking",
 }
 
@@ -1125,8 +1130,9 @@ def _answered_in_the_hot_window(verdict) -> bool:
 
 def _joins_his_question(verdict) -> bool:
     """What the listener does with a verdict on a segment heard while his
-    question is collected: only a not-directed noise verdict keeps it out."""
-    return not (verdict.noise and not verdict.directed)
+    question is collected: a stop cancels the question, a not-directed noise
+    verdict keeps the segment out, and anything else joins it."""
+    return not verdict.stop and not (verdict.noise and not verdict.directed)
 
 
 def _taken(case, verdict) -> bool:
@@ -1136,12 +1142,52 @@ def _taken(case, verdict) -> bool:
     return _answered_in_the_hot_window(verdict)
 
 
+def _wrong(case, verdict) -> bool:
+    """Whether the listener would get the segment wrong. While his question
+    is collected a stop is wrong either way: it drops his question."""
+    return _taken(case, verdict) == case.expected_noise or (case.collecting and verdict.stop)
+
+
+def _without_his_question(case: NotSpeechCase) -> NotSpeechCase:
+    """A collecting case as the judge would read it if the listener did not
+    put the question back: its segments are processed, so it is not shown."""
+    return dataclasses.replace(case, segments=case.segments[:-2] + case.segments[-1:])
+
+
 def _judge_on(model: str):
     from jarvis.listening.intent_judge import IntentJudge, IntentJudgeConfig
 
     return IntentJudge(IntentJudgeConfig(
         assistant_name="Jarvis", model=model, cfg=MockConfig(), timeout_sec=30.0,
     ))
+
+
+def _warm_judges() -> dict:
+    """A judge per arm, each asked once unmeasured, so loading a model is
+    not scored as a miss."""
+    judges = {arm: _judge_on(arm) for arm in NOT_SPEECH_ARMS}
+    cold = [arm for arm, judge in judges.items()
+            if run_intent_judge_multi_segment(NOT_SPEECH_TEST_CASES[0], judge=judge) is None]
+    assert not cold, f"no answer to a warm-up from {cold}: check the model names and the provider"
+    return judges
+
+
+def _interleaved(arms: list, cases: list):
+    """Every case to every arm, the arms alternating call by call: their
+    order rotates each call and the cases are shuffled each round."""
+    rng = random.Random(0)
+    for rnd in range(NOT_SPEECH_ROUNDS):
+        order = list(cases)
+        rng.shuffle(order)
+        for i, case in enumerate(order):
+            turn = (i + rnd) % len(arms)
+            for arm in arms[turn:] + arms[:turn]:
+                yield case, arm
+
+
+def _rate(count: int, scored: int) -> str:
+    """A rate only where there are calls enough to mean one."""
+    return f" ({count / scored:.0%})" if scored >= 20 else ""
 
 
 class TestIntentJudgeKnowsSilenceFromSpeech:
@@ -1163,7 +1209,8 @@ class TestIntentJudgeKnowsSilenceFromSpeech:
             pytest.fail("Intent judge returned None")
 
         print(f"\nTest Case: {case.name} | current: \"{case.segments[-1][0]}\"")
-        print(f"Result: noise={result.noise}, directed={result.directed}, query='{result.query}'")
+        print(f"Result: noise={result.noise}, directed={result.directed}, stop={result.stop}, "
+              f"query='{result.query}'")
         print(f"Reasoning: {result.reasoning}")
 
         if case.expected_noise:
@@ -1173,6 +1220,8 @@ class TestIntentJudgeKnowsSilenceFromSpeech:
         else:
             ok = not result.noise
             msg = f"Expected his speech, got noise=True. Reasoning: {result.reasoning}"
+        if ok and case.collecting and result.stop:
+            ok, msg = False, f"A stop would drop his question. Reasoning: {result.reasoning}"
         if not ok and case.name in KNOWN_FAILING_CASES:
             pytest.xfail(f"Known gemma4:e2b limitation: {msg}")
         assert ok, msg
@@ -1182,45 +1231,35 @@ class TestIntentJudgeKnowsSilenceFromSpeech:
 class TestIntentJudgeNotSpeechArms:
 
     def test_arms_hear_the_same_segments_call_by_call(self, capsys):
-        judges = {arm: _judge_on(arm) for arm in NOT_SPEECH_ARMS}
-        # One unmeasured call each, so loading a model is not scored as a miss.
-        cold = [arm for arm, judge in judges.items()
-                if run_intent_judge_multi_segment(NOT_SPEECH_TEST_CASES[0], judge=judge) is None]
-        assert not cold, f"no answer to a warm-up from {cold}: check the model names and the provider"
-
+        judges = _warm_judges()
         kinds = {True: "inventions", False: "his words"}
         situations = {False: ("after her reply", "answered"), True: ("while he asks", "joined")}
-        tally = {(arm, situation, kind): [0, 0, 0, 0] for arm in NOT_SPEECH_ARMS
+        # taken, noise, stop, calls, no verdict
+        tally = {(arm, situation, kind): [0, 0, 0, 0, 0] for arm in NOT_SPEECH_ARMS
                  for situation, _ in situations.values() for kind in kinds.values()}
         misses = {arm: {} for arm in NOT_SPEECH_ARMS}   # case -> wrong outcomes
-        rng = random.Random(0)
-        for rnd in range(NOT_SPEECH_ROUNDS):
-            order = NOT_SPEECH_TEST_CASES + COLLECTING_TEST_CASES
-            rng.shuffle(order)
-            for i, case in enumerate(order):
-                turn = (i + rnd) % len(NOT_SPEECH_ARMS)
-                for arm in NOT_SPEECH_ARMS[turn:] + NOT_SPEECH_ARMS[:turn]:
-                    judges[arm]._last_error_time = 0.0   # one timeout must not mute the arm
-                    verdict = run_intent_judge_multi_segment(case, judge=judges[arm])
-                    situation = situations[case.collecting][0]
-                    row = tally[(arm, situation, kinds[case.expected_noise])]
-                    row[2] += 1
-                    if verdict is None:
-                        row[3] += 1
-                        continue
-                    taken = _taken(case, verdict)
-                    row[0] += int(taken)
-                    row[1] += int(verdict.noise)
-                    if taken == case.expected_noise:
-                        misses[arm][case.name] = misses[arm].get(case.name, 0) + 1
+        for case, arm in _interleaved(NOT_SPEECH_ARMS, NOT_SPEECH_TEST_CASES + COLLECTING_TEST_CASES):
+            judges[arm]._last_error_time = 0.0   # one timeout must not mute the arm
+            verdict = run_intent_judge_multi_segment(case, judge=judges[arm])
+            row = tally[(arm, situations[case.collecting][0], kinds[case.expected_noise])]
+            row[3] += 1
+            if verdict is None:
+                row[4] += 1
+                continue
+            row[0] += int(_taken(case, verdict))
+            row[1] += int(verdict.noise)
+            row[2] += int(case.collecting and verdict.stop)
+            if _wrong(case, verdict):
+                misses[arm][case.name] = misses[arm].get(case.name, 0) + 1
 
         lines = [""]
         verbs = dict(situations.values())
-        for (arm, situation, kind), (taken, noise, calls, silent) in tally.items():
+        for (arm, situation, kind), (taken, noise, stop, calls, silent) in tally.items():
             scored = calls - silent
-            rate = f" ({taken / scored:.0%})" if scored >= 20 else ""
+            stops = f", stop {stop}" if situation == situations[True][0] else ""
             lines.append(f"🧪 {arm:24} {situation:15} {kind:10}  {verbs[situation]} "
-                         f"{taken}/{scored}{rate}, noise {noise}/{scored}, no verdict {silent}")
+                         f"{taken}/{scored}{_rate(taken, scored)}, noise {noise}/{scored}"
+                         f"{stops}, no verdict {silent}")
         for arm, wrong in misses.items():
             for name, count in sorted(wrong.items()):
                 lines.append(f"   ↳ {arm}: {name} wrong {count}/{NOT_SPEECH_ROUNDS}")
@@ -1228,8 +1267,48 @@ class TestIntentJudgeNotSpeechArms:
             print("\n".join(lines))
 
         mute = [arm for arm in NOT_SPEECH_ARMS
-                if all(calls == silent for (who, _, _), (_, _, calls, silent) in tally.items()
-                       if who == arm)]
+                if all(row[3] == row[4] for (who, _, _), row in tally.items() if who == arm)]
+        assert not mute, f"no answer at all from {mute}: check the model names and the provider"
+
+    def test_his_question_shown_against_hidden_call_by_call(self, capsys):
+        """The listener puts the question being collected back before the
+        utterance it judges. Each arm reads every collecting case with the
+        question shown and with it hidden, as it is once its segments are
+        processed, the two alternating call by call."""
+        judges = _warm_judges()
+        kinds = {True: "inventions", False: "his words"}
+        variants = {"shown": lambda case: case, "hidden": _without_his_question}
+        arms = [(arm, variant) for arm in NOT_SPEECH_ARMS for variant in variants]
+        tally = {(arm, kind): [0, 0, 0, 0] for arm in arms   # joined, stop, calls, no verdict
+                 for kind in kinds.values()}
+        misses = {}   # (arm, case) -> wrong outcomes
+        for case, arm in _interleaved(arms, COLLECTING_TEST_CASES):
+            model, variant = arm
+            judges[model]._last_error_time = 0.0
+            verdict = run_intent_judge_multi_segment(variants[variant](case), judge=judges[model])
+            row = tally[(arm, kinds[case.expected_noise])]
+            row[2] += 1
+            if verdict is None:
+                row[3] += 1
+                continue
+            row[0] += int(_joins_his_question(verdict))
+            row[1] += int(verdict.stop)
+            if _wrong(case, verdict):
+                misses[(arm, case.name)] = misses.get((arm, case.name), 0) + 1
+
+        lines = [""]
+        for ((model, variant), kind), (joined, stop, calls, silent) in tally.items():
+            scored = calls - silent
+            lines.append(f"🧪 {model:24} question {variant:6} {kind:10}  joined "
+                         f"{joined}/{scored}{_rate(joined, scored)}, stop {stop}, "
+                         f"no verdict {silent}")
+        for ((model, variant), name), count in sorted(misses.items()):
+            lines.append(f"   ↳ {model} {variant}: {name} wrong {count}/{NOT_SPEECH_ROUNDS}")
+        with capsys.disabled():
+            print("\n".join(lines))
+
+        mute = [arm for arm in arms
+                if all(row[2] == row[3] for (who, _), row in tally.items() if who == arm)]
         assert not mute, f"no answer at all from {mute}: check the model names and the provider"
 
 

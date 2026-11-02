@@ -72,17 +72,20 @@ class StateManager:
         """Check if hot window is currently active."""
         return self.get_state() == ListeningState.HOT_WINDOW
 
-    def start_collection(self, initial_text: str = "") -> None:
+    def start_collection(self, initial_text: str = "", heard_at: Optional[float] = None) -> None:
         """
         Start query collection mode.
 
         Args:
             initial_text: Optional initial text to seed the collection
+            heard_at: When his words ended, on the clock the audio was
+                captured by; now if not given. The collection's silence is
+                counted from there.
         """
         with self._state_lock:
             self._state = ListeningState.COLLECTING
             self._pending_query = initial_text.strip()
-            self._last_voice_time = time.time()
+            self._last_voice_time = time.time() if heard_at is None else heard_at
             self._collect_start_time = self._last_voice_time
 
         start_time_str = datetime.fromtimestamp(self._collect_start_time).strftime('%H:%M:%S.%f')[:-3]
@@ -91,19 +94,20 @@ class StateManager:
         get_jarvis_state().set_state(JarvisState.LISTENING)
         debug_log("state set to LISTENING (collection started)", "state")
 
-    def add_to_collection(self, text: str) -> None:
+    def add_to_collection(self, text: str, heard_at: Optional[float] = None) -> None:
         """
         Add text to current collection.
 
         Args:
             text: Text to append to pending query
+            heard_at: When his words ended, as for ``start_collection``.
         """
         if not self.is_collecting():
             return
 
         with self._state_lock:
             self._pending_query = (self._pending_query + " " + text).strip()
-            self._last_voice_time = time.time()
+            self._last_voice_time = time.time() if heard_at is None else heard_at
 
         debug_log(f"added to collection: '{text}' -> '{self._pending_query}'", "state")
 
@@ -139,9 +143,13 @@ class StateManager:
 
         return query
 
-    def check_collection_timeout(self) -> bool:
+    def check_collection_timeout(self, now: Optional[float] = None) -> bool:
         """
         Check if collection should timeout due to silence or max duration.
+
+        Args:
+            now: When the audio being read was captured; the wall clock if
+                not given. Audio read late is measured in its own time.
 
         Returns:
             True if collection should be finalized
@@ -149,7 +157,7 @@ class StateManager:
         if not self.is_collecting():
             return False
 
-        current_time = time.time()
+        current_time = time.time() if now is None else now
         silence_timeout = current_time - self._last_voice_time >= self.voice_collect_seconds
         max_timeout = current_time - self._collect_start_time >= self.max_collect_seconds
 
