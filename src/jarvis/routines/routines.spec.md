@@ -309,7 +309,9 @@ appended, and `RoutineScope.allows` would refuse them anyway.
 The warm profile block and open goals block are withheld unless the
 routine's block says `mémoire: oui`. Every line of them is a line of the
 user's private life leaving the machine while they sleep, and a routine
-does not need to know who they are to summarise their mail.
+does not need to know who they are to summarise their mail. The diary's
+summary of a long conversation (`reply.spec.md`, Recent Dialogue Context)
+is withheld even then: a routine is not a conversation.
 
 An attended turn — no `scope` — is untouched by all of this.
 

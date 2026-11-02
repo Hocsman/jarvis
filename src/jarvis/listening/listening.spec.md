@@ -265,8 +265,8 @@ class TranscriptBuffer:
 ### Memory Alignment
 
 - **Transcript buffer** (`transcript_buffer_duration_sec`): Rolling raw ambient speech. Separate and potentially longer — in group conversations, 2+ minutes of context lets the intent judge synthesise a complete query with relevant information when someone decides to involve Jarvis later in the conversation.
-- **Short-term memory** (`dialogue_memory_timeout`): Processed Jarvis interactions (user queries + assistant responses). This window also drives the forced diary update interval.
-- **Long-term memory (diary):** Forced update when unsaved messages reach `dialogue_memory_timeout` age. Enrichment retrieves any relevant earlier context from the diary.
+- **Short-term memory** (`dialogue_memory_timeout`): Processed Jarvis interactions (user queries + assistant responses) of the current conversation, which a pause of `dialogue_memory_timeout` ends. Its latest part reaches the model word for word, within `dialogue_context_max_chars`, and its earlier part as the diary's summary (`reply.spec.md`, Recent Dialogue Context). The same duration drives the forced diary update interval.
+- **Long-term memory (diary):** Forced update when unsaved messages reach `dialogue_memory_timeout` age, so a long conversation is summarised as it goes. Enrichment retrieves any relevant context from other conversations.
 
 ### Methods
 

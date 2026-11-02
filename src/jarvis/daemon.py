@@ -172,7 +172,8 @@ def set_diary_update_callbacks(
 
 
 def get_hot_window_messages() -> list:
-    """Return the hot window messages from the shared dialogue memory.
+    """Return the part of the current conversation the model reads word for
+    word, from the shared dialogue memory.
 
     Used by the chat window to populate its transcript with any prior voice
     or text turns that are still warm in memory. Returns [] if memory is
@@ -1385,9 +1386,11 @@ def main() -> None:
 
     # Initialize dialogue memory with timeout
     print("💾 Initializing dialogue memory...", flush=True)
+    from .reply.prompts.model_variants import dialogue_context_budget
+
     _global_dialogue_memory = DialogueMemory(
         inactivity_timeout=cfg.dialogue_memory_timeout,
-        max_interactions=20
+        context_max_chars=dialogue_context_budget(cfg),
     )
     print("✓ Dialogue memory initialized", flush=True)
 

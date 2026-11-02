@@ -658,7 +658,7 @@ def db():
 def dialogue_memory():
     """Provide a dialogue memory instance for unit tests."""
     from jarvis.memory.conversation import DialogueMemory
-    return DialogueMemory(inactivity_timeout=300, max_interactions=20)
+    return DialogueMemory(inactivity_timeout=300)
 
 
 @pytest.fixture

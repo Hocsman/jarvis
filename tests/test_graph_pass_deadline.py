@@ -179,7 +179,7 @@ def a_window_with_a_lookup(monkeypatch):
     from jarvis import daemon
     from jarvis.memory.conversation import DialogueMemory
 
-    memory = DialogueMemory(inactivity_timeout=300, max_interactions=20)
+    memory = DialogueMemory(inactivity_timeout=300)
     memory.add_message("user", "Who directed Possessor?")
     memory.record_tool_turn([
         {"role": "tool", "tool_name": "webSearch", "content": "Brandon Cronenberg"},

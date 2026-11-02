@@ -525,8 +525,9 @@ class TestChat:
         ]
 
     def test_a_history_opening_on_an_old_tool_round_trip_keeps_its_result_as_text(self):
-        """Tool carry-over outlives the text it followed: past five minutes
-        the history can open on an assistant call. The turn before the
+        """Tool carry-over outlives the text it followed: once the dialogue
+        handed over has moved past it, the history can open on an assistant
+        call. The turn before the
         first user message goes, so its result has no call left to answer."""
         server = _Server(_text("ok"))
 
