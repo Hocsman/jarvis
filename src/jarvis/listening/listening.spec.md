@@ -134,7 +134,7 @@ The intent judge receives full context and makes intelligent decisions:
 - Sees pre-wake-word context → can understand "...what do YOU think, Jarvis?"
 - Extracts clean query → removes filler words, false starts
 
-**Gating:** The judge is called only when there is an engagement signal — (a) a wake word was detected in the current utterance, (b) the utterance falls inside (or pending) a hot window, or (c) TTS is currently speaking. Pure ambient speech skips the judge entirely. This keeps the synchronous audio loop from blocking up to `intent_judge_timeout_sec` on every background utterance, which would otherwise freeze the UI when Ollama is slow or contended.
+**Gating:** The judge is called only when there is an engagement signal — (a) a wake word was detected in the current utterance, (b) the utterance falls inside (or pending) a hot window, (c) TTS is currently speaking, or (d) his question is still being collected and nothing else took the utterance, where only its `stop` and `noise` are read (see "Text Whisper Makes Out of Silence"). Pure ambient speech skips the judge entirely. This keeps the synchronous audio loop from blocking up to `intent_judge_timeout_sec` on every background utterance, which would otherwise freeze the UI when Ollama is slow or contended.
 
 **Alias normalisation:** Before the transcript is sent to the judge, every configured wake-word alias in each segment is replaced with the primary assistant name (case-insensitive, word-boundary-aware). Aliases are Whisper mishearings of the wake word (e.g. "Jervis", "Jaivis" for "Jarvis"); without this step the small judge model sees the alias, doesn't know it refers to the assistant, and can decide the user is addressing a different person. Normalisation happens at prompt-build time only — the raw transcript buffer is untouched.
 
@@ -144,7 +144,7 @@ The intent judge receives full context and makes intelligent decisions:
 
 ### 4. The Microphone Is Always Read
 
-The capture callback stamps each block with the time it was captured and queues it. The listening loop reads the queue frame by frame, and an utterance's start and end are read from those stamps, so audio the loop reaches late still says when it was spoken: the echo detector, the hot window and the latency journal compare these times with when she spoke.
+The capture callback stamps each block with the time it was captured and queues it. The listening loop reads the queue frame by frame, and an utterance's start and end are read from those stamps, so audio the loop reaches late still says when it was spoken: the echo detector, the hot window and the latency journal compare these times with when she spoke, and the silence that ends a question being collected is counted in them.
 
 **Replies run on a thread of their own.** Once a query is collected, the loop hands it over (`_hand_over`) and goes back to listening; the reply thread runs the queries one after the other, each through the reply engine and then out loud. While she prepares an answer and while she says it, what he says is still heard.
 
@@ -154,7 +154,7 @@ The capture callback stamps each block with the time it was captured and queues 
 - **Her spoken question is answered by what he says to it.** A spoken question is settled by the next voice turn (`tools/policy.spec.md`), so a turn whose words he said before he finished hearing it is set aside, with a console line, and the question waits for his answer. A question he never heard, its reply having been stopped, is withdrawn as `expiré` before the next turn runs.
 - **Speech ignored while a reply is on its way leaves her thinking.** The thinking tune is that reply's: an utterance that is not for her does not stop it, and the published state stays THINKING.
 - **The reply thread is the only one that speaks.** Her answers and the replies other features hand over (`enqueue_reply`, "Speaking Something Produced Elsewhere") leave from it, so the echo detector's record of what she last said has one writer.
-- **The turn keeps what was true when he asked.** The language he was heard in, his exact words and when he stopped speaking travel with the query: the loop goes on transcribing while the reply is prepared.
+- **The turn keeps what was true when he asked.** The language he was heard in, his exact words and when he stopped speaking travel with the query: the loop goes on transcribing while the reply is prepared. His exact words are the last utterance collected into it, whole; one left out, such as a phrase Whisper made out of silence, does not answer for him.
 
 **The loop still waits on Whisper and on the intent judge.** The queue holds `AUDIO_BACKLOG_SECONDS` (30 s), with room to spare over the judge's default per-read deadline, so a stall delays his words instead of dropping them. Nothing empties it on a hand-over, an accepted utterance or a stop: what it holds was said after the utterance just handled. A block that finds the queue full is dropped and counted (`⚠️ Audio capture: queue full; N blocks dropped`). The judge may now run while the reply engine works; on one local Ollama the two can wait on each other.
 
@@ -207,7 +207,7 @@ System is waiting for wake word activation.
 4. If `directed=true` and `query` exists, collect it, and hand it to the reply thread once he has stopped for `voice_collect_seconds`
 5. If rejected, stop the beep and publish IDLE
 
-**A sentence heard while a question is still being collected completes it**, in this mode and in the hot window. Every path that accepts an utterance adds it to the question being collected, never puts it in its place, and she answers both: "Salut Yuba, comment tu vas ?" then "Tu m'entends Yuba ?" is one question. A collection that keeps being completed still ends after `voice_max_collect_seconds`. Whatever joins it is marked processed, like every accepted segment, so the judge never sees it again as context it could restate. A stop heard while it is collected cancels it instead (see "The Microphone Is Always Read").
+**A sentence heard while a question is still being collected completes it**, in this mode and in the hot window. Every path that accepts an utterance adds it to the question being collected, never puts it in its place, and she answers both: "Salut Yuba, comment tu vas ?" then "Tu m'entends Yuba ?" is one question. A collection that keeps being completed still ends after `voice_max_collect_seconds`. The silence that ends it is counted from the end of the last utterance collected, in the time its audio was captured: neither Whisper nor the judge adds to the wait, and audio the loop reads late, after a stall, is measured in its own time, so his next words still complete the question. Whatever joins it is marked processed, like every accepted segment, so the judge never sees it again as context it could restate. A stop heard while it is collected cancels it instead (see "The Microphone Is Always Read"). What he adds needs no wake word, so Whisper's inventions reach the question too: one the judge calls noise is left out (see "Text Whisper Makes Out of Silence").
 
 ### 2. Hot Window Mode
 
@@ -308,10 +308,16 @@ Whisper turns silence, breath and room noise into text: mostly the closing lines
 The judge's verdict carries `noise`: true when the current segment is such an invention rather than words someone said, and then it is not directed. Words a person said are never noise, however short, thankful, odd or misheard; in doubt the judge says false, and a model that leaves the field out has said false.
 
 - **In the hot window nothing overrides it.** A not-directed verdict with `noise` on an utterance that could be a hot-window follow-up is final: the listener marks the segment processed, so the judge never sees it again as context, prints `🔇 Heard (not speech)`, stops the thinking beep and returns. No hot-window override runs (non-echo speech, an echo verdict with words she did not say and a voice, the grace after the window), because they exist to keep his words, and a hallucination produces words nobody said that the energy test can still take for a voice while she is speaking.
-- **Outside it the verdict changes nothing.** The judge only runs there on a wake word or while she speaks, and Whisper does not invent her name, so a doubtful verdict still falls through to the text wake-word check as any other.
+- **While his question is collected it does not join it.** An utterance heard then that no other path took (no wake word, no hot window) would complete his question with no wake word, as a follow-up would, so it is judged as one, in hot-window mode. A verdict already given on it in hot-window mode is used as it is; one given in wake-word mode, while she speaks, read it without the question and without a follow-up's rules, so the judge is asked again. The question collected so far is put back in the transcript, just before the utterance judged: its segments are processed, and an addition read without it, misheard ("et pour à près de main aussi"), looks like something Whisper invented. Only `stop` and `noise` are read, never a query, so the question shown cannot be restated into one.
+  - A stop cancels the question, as a stop word does.
+  - Not directed and `noise`, the segment is marked processed, `🔇 Heard (not speech)` is printed and it is left out. The thinking tune of his question plays on, and the collection's silence is still counted from the end of his last words, so a phantom never holds his question back.
+  - Any other verdict, or none, completes the question. With none, the judge's unavailability is printed.
+  - Utterances of three words or fewer are judged here even while she speaks, though the judge skips them in her speech otherwise: Whisper's inventions are that short.
+  - It costs a judge call for each utterance that gets this far while a question is collected, and a second one when the first was given in wake-word mode.
+- **Elsewhere the verdict changes nothing.** The judge only runs there on a wake word or while she speaks, and Whisper does not invent her name, so a doubtful verdict still falls through to the text wake-word check as any other.
 - **His side wins a contradiction.** A verdict that says both `noise` and directed is treated as directed.
 - **The window stays open.** Like an echo, a noise verdict does not touch the hot window, so his real follow-up after it is still a follow-up.
-- **Fails open.** With no verdict (judge unavailable) or a model that never sets `noise`, the hot window behaves as without it.
+- **Fails open.** With no verdict (judge unavailable) or a model that never sets `noise`, the hot window and the question being collected behave as without it.
 
 How well it works is the judge model's: a small local model can miss what a larger one catches, and a miss is answered as before. `evals/test_intent_judge.py` holds the inventions and the real follow-ups it is measured on (`TestIntentJudgeKnowsSilenceFromSpeech` on the suite's small model, `EVAL_INTENT_JUDGE_ARMS` on any), and `docs/llm_contexts.md` the measurement.
 
@@ -424,7 +430,7 @@ The listener feeds the latency journal (`src/jarvis/latency.py`, see `latency.sp
 |---------|---------|-------------|
 | `transcript_buffer_duration_sec` | 120 | Duration (seconds) for rolling ambient speech transcript. Provides conversation context so the intent judge can synthesise a complete query when someone involves Jarvis. Separate from dialogue memory. |
 | `whisper_language` | `""` | Code of the one language Whisper transcribes in, for the listener and dictation alike, from `WHISPER_LANGUAGES` (Whisper's own list; "fr-FR" reads as "fr"). Empty (or `auto`): it detects the language of each utterance, which a multilingual user needs and which lets it invent phrases out of silence in any language and spell a short word in another script ("Стоп."). Named, it transcribes only that language, and that is the language reported for each utterance. A code Whisper does not know, or a language other than English with an English-only (`.en`) model, is announced once and read as empty: passed on, it would fail every transcription or report the wrong language. |
-| `voice_collect_seconds` | 4.5 | Silence after which the question being collected is handed to the reply thread. |
+| `voice_collect_seconds` | 4.5 | Silence after which the question being collected is handed to the reply thread, counted from the end of the last utterance collected, in the time its audio was captured. |
 | `voice_max_collect_seconds` | 180.0 | Longest a question is collected, however often it is completed. |
 | `whisper_min_confidence` | 0.3 | Minimum `avg_logprob`-derived confidence score for a transcribed segment. Segments below this are discarded before the intent judge sees them. |
 | `whisper_no_speech_threshold` | 0.5 | Hard cutoff on Whisper's `no_speech_prob` field. Any segment at or above this value is discarded **regardless of `avg_logprob`** — Whisper can be confident about a hallucinated phrase even when no real speech is present (e.g. the "MBC 뉴스" hallucination on background noise). This filter runs before the `avg_logprob` check so it catches high-confidence hallucinations that would otherwise survive. Applies to both the faster-whisper and MLX backends. |
@@ -497,6 +503,11 @@ If judge.directed and judge.query:
     → Collect it (added to a question being collected), then hand it to the reply thread (it waits its turn)
 If judge rejects but in hot window and non-echo:
     → Override rejection, collect it as a query
+If nothing above took it and a question is being collected:
+    → Judge it as a follow-up, his question before it (unless already judged as one)
+    → Stop: cancel the question
+    → Noise, not directed: mark processed, leave it out, silence clock untouched
+    → Otherwise: mark processed, add it to the question
 ```
 
 ## Keeping a Copy of an Utterance

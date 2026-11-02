@@ -24,7 +24,7 @@ from .echo_detection import EchoDetector
 from .state_manager import StateManager, ListeningState
 from ..utils.audio_lock import portaudio_lock
 from .wake_detection import is_wake_word_detected, extract_query_after_wake, is_stop_command
-from .transcript_buffer import TranscriptBuffer
+from .transcript_buffer import TranscriptBuffer, TranscriptSegment
 from .whisper_turbo import is_faster_whisper_turbo_supported
 from .intent_judge import (
     IntentJudge,
@@ -618,6 +618,9 @@ class VoiceListener(threading.Thread):
         self._stop_epoch = 0
         # When the last utterance he was heard saying ended.
         self._last_heard_at = 0.0
+        # The utterance being handled, whole, and when it ended. It becomes
+        # his last words only if it is collected.
+        self._hearing: tuple = (None, 0.0)
         # The spoken question her last reply ended on, if it did.
         self._asked: Optional[_AskedQuestion] = None
         # The loop starts the tune and the reply thread stops it: a player
@@ -834,21 +837,16 @@ class VoiceListener(threading.Thread):
         # Kept whole. When a spoken question is waiting, the answer is
         # read from this rather than from the query the intent judge
         # extracts, because at that moment there is no request to find in
-        # the speech — there is a reply to read.
+        # the speech — there is a reply to read. Only what is collected
+        # becomes his last words (`_collect`): an utterance left out, such
+        # as a phrase Whisper made out of silence, must not answer for him.
+        heard_at = utterance_end_time or time.time()
         if text and text.strip():
-            self._last_transcript = text
-            self._last_heard_at = utterance_end_time or time.time()
+            self._hearing = (text, heard_at)
             get_latency_journal().note_heard(utterance_end_time - trailing_silence)
 
         if not text or not text.strip():
-            # Check for timeouts
-            if self.state_manager.check_collection_timeout():
-                query = self.state_manager.clear_collection()
-                if query.strip():
-                    self._hand_over(query)
-
-            # Check hot window expiry
-            self.state_manager.check_hot_window_expiry(self.cfg.voice_debug)
+            self._check_query_timeout(heard_at)
             return
 
         text_lower = text.strip().lower()
@@ -1047,10 +1045,13 @@ class VoiceListener(threading.Thread):
         # Intent judge — the single decision-maker for all post-TTS input.
         # Gets full transcript context, last TTS text, and hot window state.
         # Handles: echo detection, wake word queries, hot window follow-ups.
-        # During active TTS, skip short utterances (<=3 words) as those are
-        # handled by stop command detection above.
+        # During active TTS, this block skips short utterances (<=3 words)
+        # as those are handled by stop command detection above. While his
+        # question is collected, Priority 5 still judges them: Whisper's
+        # inventions are that short ("Sous-titrage ST' 501").
         is_speaking_now = self.tts and self.tts.is_speaking()
         intent_judgment = None
+        judged_as_a_follow_up = False
 
         # Determine if this could be a hot window follow-up.
         # Only use formal hot window state — no time-based grace period.
@@ -1076,15 +1077,17 @@ class VoiceListener(threading.Thread):
         #   2. We are in (or pending) a hot window following TTS
         #   3. TTS is currently speaking (intent judge can catch responses / stops
         #      that the fast text-based stop command check missed)
+        #   4. His question is still being collected: Priority 5 asks, once
+        #      nothing else has taken the utterance
         has_engagement_signal = (
             self._wake_timestamp is not None
             or could_be_hot_window
             or is_speaking_now
         )
 
-        if not has_engagement_signal:
+        if not has_engagement_signal and not self.state_manager.is_collecting():
             debug_log(
-                f"skipping intent judge — no wake word, no hot window, no TTS "
+                f"skipping intent judge — no wake word, no hot window, no TTS, no question collected "
                 f"(ambient: \"{text_lower[:40]}{'...' if len(text_lower) > 40 else ''}\")",
                 "voice",
             )
@@ -1101,6 +1104,7 @@ class VoiceListener(threading.Thread):
             and has_engagement_signal
             and self._intent_judge is not None
         ):
+            judged_as_a_follow_up = could_be_hot_window
             # Get recent transcript segments for context (full buffer)
             context_segments = self._transcript_buffer.get_last_seconds(self._buffer_duration)
 
@@ -1542,12 +1546,44 @@ class VoiceListener(threading.Thread):
                 pass
             return
 
-        # Priority 5: Collection mode handling. Marked processed like every
-        # accepted segment: left visible, the judge could restate it in a
-        # later query and it would be collected twice.
+        # Priority 5: Collection mode handling. What he adds to his question
+        # needs no wake word, as in the hot window, so Whisper's inventions
+        # get this far too. The judge reads it as it reads a follow-up, with
+        # his question before it; a verdict given above in wake-word mode
+        # saw neither, so it is asked again. A stop it reads cancels the
+        # question, a noise verdict leaves the utterance out, and anything
+        # else completes the question. A phantom leaves the collection's
+        # silence clock alone, so his question still goes when he stops.
+        # Marked processed either way: left visible, the judge could restate
+        # it in a later query.
         if self.state_manager.is_collecting():
+            if not judged_as_a_follow_up and self._intent_judge is not None:
+                intent_judgment = self._judge_timed(
+                    segments=self._after_his_question(
+                        self._transcript_buffer.get_last_seconds(self._buffer_duration),
+                        text_lower),
+                    wake_timestamp=None,
+                    last_tts_text=self.echo_detector._last_tts_text or "",
+                    last_tts_finish_time=self.echo_detector._last_tts_finish_time or 0.0,
+                    in_hot_window=True,
+                    current_text=text_lower,
+                )
+                if intent_judgment is None:
+                    reason = self._intent_judge.last_failure_reason or "no segments or unavailable"
+                    print(f"  🧠 Intent judge: unavailable ({reason})", flush=True)
+                    debug_log(f"intent judge returned None while collecting — it joins ({reason})", "voice")
             self._transcript_buffer.mark_segment_processed(text_lower)
-            self.state_manager.add_to_collection(text_lower)
+            if intent_judgment is not None and intent_judgment.stop:
+                debug_log(f"🛑 Intent judge detected stop command while collecting", "voice")
+                self._stop_the_replies()
+                return
+            if (intent_judgment is not None and intent_judgment.noise
+                    and not intent_judgment.directed):
+                debug_log(f"🔇 Not speech while collecting (judge): \"{text_lower}\"", "voice")
+                print(f"  🔇 Heard (not speech): \"{text_lower[:50]}"
+                      f"{'...' if len(text_lower) > 50 else ''}\"", flush=True)
+                return
+            self._collect(text_lower)
             return
 
         # Priority 6: Non-wake input (ignore)
@@ -1569,6 +1605,22 @@ class VoiceListener(threading.Thread):
                 pass
         else:
             debug_log(f"input ignored (no wake word{intent_info}): {text_lower}", "voice")
+
+    def _after_his_question(self, segments: list, current_text: str) -> list:
+        """The transcript with the question being collected put back before
+        the utterance being judged. Its segments are processed, so the judge
+        would not see them, and an addition read alone, misheard ("et pour à
+        près de main aussi"), looks like something Whisper invented. Priority
+        5 reads only the verdict's stop and noise, never a query, so the
+        question cannot be restated."""
+        asked = self.state_manager.get_pending_query()
+        if not asked:
+            return segments
+        at = next((i for i in range(len(segments) - 1, -1, -1)
+                   if segments[i].text.lower() == current_text), len(segments))
+        when = segments[at].start_time if at < len(segments) else time.time()
+        question = TranscriptSegment(text=asked, start_time=when, end_time=when)
+        return [*segments[:at], question, *segments[at:]]
 
     def _judge_timed(self, **kwargs):
         """Ask the intent judge, and tell the latency journal how long it took
@@ -1721,11 +1773,14 @@ class VoiceListener(threading.Thread):
     def _collect(self, query: str) -> None:
         """Start collecting his question, or add to the one being collected:
         a second sentence that reaches her before the first was handed over
-        completes it, and she answers both."""
+        completes it, and she answers both. The utterance being handled
+        becomes his last words, and the collection's silence is counted from
+        when it ended, so neither Whisper nor the judge adds to it."""
+        self._last_transcript, self._last_heard_at = self._hearing
         if self.state_manager.is_collecting():
-            self.state_manager.add_to_collection(query)
+            self.state_manager.add_to_collection(query, heard_at=self._last_heard_at)
         else:
-            self.state_manager.start_collection(query)
+            self.state_manager.start_collection(query, heard_at=self._last_heard_at)
 
     def _something_to_stop(self) -> bool:
         """A reply on its way, or his question still being collected."""
@@ -2292,9 +2347,13 @@ class VoiceListener(threading.Thread):
 
         return False
 
-    def _check_query_timeout(self) -> None:
-        """Check if there's a pending query that has timed out, and check hot window expiry."""
-        if self.state_manager.check_collection_timeout():
+    def _check_query_timeout(self, now: Optional[float] = None) -> None:
+        """Check if there's a pending query that has timed out, and check hot
+        window expiry. ``now`` is when the audio being read was captured: the
+        collection's silence is counted in that time, so audio the loop
+        reads late, after a stall, still has his next words in time to
+        complete the question. With no audio to read, the wall clock."""
+        if self.state_manager.check_collection_timeout(now):
             query = self.state_manager.clear_collection()
             if query.strip():
                 self._hand_over(query)
@@ -3195,8 +3254,8 @@ class VoiceListener(threading.Thread):
                     self._finalize_utterance()
                     self._pre_roll.clear()
 
-        # Check for query timeouts
-        self._check_query_timeout()
+        # Check for query timeouts, in the time this frame was captured
+        self._check_query_timeout(captured_at)
 
     def _trailing_silence_seconds(self) -> float:
         """The silence at the end of the utterance being closed, in seconds."""
