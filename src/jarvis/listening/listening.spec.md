@@ -134,7 +134,7 @@ The intent judge receives full context and makes intelligent decisions:
 - Sees pre-wake-word context → can understand "...what do YOU think, Jarvis?"
 - Extracts clean query → removes filler words, false starts
 
-**Gating:** The judge is called only when there is an engagement signal — (a) a wake word was detected in the current utterance, (b) the utterance falls inside (or pending) a hot window, or (c) TTS is currently speaking. Pure ambient speech skips the judge entirely. This keeps the synchronous audio loop from blocking up to `intent_judge_timeout_sec` on every background utterance, which would otherwise freeze the UI when Ollama is slow or contended.
+**Gating:** The judge is called only when there is an engagement signal — (a) a wake word was detected in the current utterance, (b) the utterance falls inside (or pending) a hot window, (c) TTS is currently speaking, or (d) his question is still being collected and nothing else took the utterance, where only its `noise` verdict is read (see "Text Whisper Makes Out of Silence"). Pure ambient speech skips the judge entirely. This keeps the synchronous audio loop from blocking up to `intent_judge_timeout_sec` on every background utterance, which would otherwise freeze the UI when Ollama is slow or contended.
 
 **Alias normalisation:** Before the transcript is sent to the judge, every configured wake-word alias in each segment is replaced with the primary assistant name (case-insensitive, word-boundary-aware). Aliases are Whisper mishearings of the wake word (e.g. "Jervis", "Jaivis" for "Jarvis"); without this step the small judge model sees the alias, doesn't know it refers to the assistant, and can decide the user is addressing a different person. Normalisation happens at prompt-build time only — the raw transcript buffer is untouched.
 
@@ -207,7 +207,7 @@ System is waiting for wake word activation.
 4. If `directed=true` and `query` exists, collect it, and hand it to the reply thread once he has stopped for `voice_collect_seconds`
 5. If rejected, stop the beep and publish IDLE
 
-**A sentence heard while a question is still being collected completes it**, in this mode and in the hot window. Every path that accepts an utterance adds it to the question being collected, never puts it in its place, and she answers both: "Salut Yuba, comment tu vas ?" then "Tu m'entends Yuba ?" is one question. A collection that keeps being completed still ends after `voice_max_collect_seconds`. Whatever joins it is marked processed, like every accepted segment, so the judge never sees it again as context it could restate. A stop heard while it is collected cancels it instead (see "The Microphone Is Always Read").
+**A sentence heard while a question is still being collected completes it**, in this mode and in the hot window. Every path that accepts an utterance adds it to the question being collected, never puts it in its place, and she answers both: "Salut Yuba, comment tu vas ?" then "Tu m'entends Yuba ?" is one question. A collection that keeps being completed still ends after `voice_max_collect_seconds`. Whatever joins it is marked processed, like every accepted segment, so the judge never sees it again as context it could restate. A stop heard while it is collected cancels it instead (see "The Microphone Is Always Read"). What he adds needs no wake word, so Whisper's inventions reach the question too: one the judge calls noise is left out (see "Text Whisper Makes Out of Silence").
 
 ### 2. Hot Window Mode
 
@@ -308,10 +308,11 @@ Whisper turns silence, breath and room noise into text: mostly the closing lines
 The judge's verdict carries `noise`: true when the current segment is such an invention rather than words someone said, and then it is not directed. Words a person said are never noise, however short, thankful, odd or misheard; in doubt the judge says false, and a model that leaves the field out has said false.
 
 - **In the hot window nothing overrides it.** A not-directed verdict with `noise` on an utterance that could be a hot-window follow-up is final: the listener marks the segment processed, so the judge never sees it again as context, prints `🔇 Heard (not speech)`, stops the thinking beep and returns. No hot-window override runs (non-echo speech, an echo verdict with words she did not say and a voice, the grace after the window), because they exist to keep his words, and a hallucination produces words nobody said that the energy test can still take for a voice while she is speaking.
-- **Outside it the verdict changes nothing.** The judge only runs there on a wake word or while she speaks, and Whisper does not invent her name, so a doubtful verdict still falls through to the text wake-word check as any other.
+- **While his question is collected it does not join it.** An utterance heard then that no other path took (no wake word, no hot window) would complete his question with no wake word, as a follow-up would, so it is judged as one: in hot-window mode, the judge asked only if it has not been for this utterance already. The question collected so far is put back in the transcript, just before the utterance judged: its segments are processed, and an addition read without it, misheard ("et pour à près de main aussi"), looks like something Whisper invented. Only the `noise` verdict is read, so the question shown cannot be restated into a query. Not directed and `noise`, the segment is marked processed, `🔇 Heard (not speech)` is printed and it is left out; the thinking tune of his question plays on, and the collection's silence clock is not reset, so his question goes `voice_collect_seconds` after his last words, not after Whisper's. Any other verdict completes the question. It costs a judge call for each utterance heard while a question is collected.
+- **Elsewhere the verdict changes nothing.** The judge only runs there on a wake word or while she speaks, and Whisper does not invent her name, so a doubtful verdict still falls through to the text wake-word check as any other.
 - **His side wins a contradiction.** A verdict that says both `noise` and directed is treated as directed.
 - **The window stays open.** Like an echo, a noise verdict does not touch the hot window, so his real follow-up after it is still a follow-up.
-- **Fails open.** With no verdict (judge unavailable) or a model that never sets `noise`, the hot window behaves as without it.
+- **Fails open.** With no verdict (judge unavailable) or a model that never sets `noise`, the hot window and the question being collected behave as without it.
 
 How well it works is the judge model's: a small local model can miss what a larger one catches, and a miss is answered as before. `evals/test_intent_judge.py` holds the inventions and the real follow-ups it is measured on (`TestIntentJudgeKnowsSilenceFromSpeech` on the suite's small model, `EVAL_INTENT_JUDGE_ARMS` on any), and `docs/llm_contexts.md` the measurement.
 
@@ -497,6 +498,10 @@ If judge.directed and judge.query:
     → Collect it (added to a question being collected), then hand it to the reply thread (it waits its turn)
 If judge rejects but in hot window and non-echo:
     → Override rejection, collect it as a query
+If nothing above took it and a question is being collected:
+    → Judge it as a follow-up (unless already judged)
+    → Noise: mark processed, leave it out, silence clock untouched
+    → Otherwise: mark processed, add it to the question
 ```
 
 ## Keeping a Copy of an Utterance

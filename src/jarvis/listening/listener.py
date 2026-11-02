@@ -24,7 +24,7 @@ from .echo_detection import EchoDetector
 from .state_manager import StateManager, ListeningState
 from ..utils.audio_lock import portaudio_lock
 from .wake_detection import is_wake_word_detected, extract_query_after_wake, is_stop_command
-from .transcript_buffer import TranscriptBuffer
+from .transcript_buffer import TranscriptBuffer, TranscriptSegment
 from .whisper_turbo import is_faster_whisper_turbo_supported
 from .intent_judge import (
     IntentJudge,
@@ -1051,6 +1051,7 @@ class VoiceListener(threading.Thread):
         # handled by stop command detection above.
         is_speaking_now = self.tts and self.tts.is_speaking()
         intent_judgment = None
+        asked_the_judge = False
 
         # Determine if this could be a hot window follow-up.
         # Only use formal hot window state — no time-based grace period.
@@ -1101,6 +1102,7 @@ class VoiceListener(threading.Thread):
             and has_engagement_signal
             and self._intent_judge is not None
         ):
+            asked_the_judge = True
             # Get recent transcript segments for context (full buffer)
             context_segments = self._transcript_buffer.get_last_seconds(self._buffer_duration)
 
@@ -1542,11 +1544,32 @@ class VoiceListener(threading.Thread):
                 pass
             return
 
-        # Priority 5: Collection mode handling. Marked processed like every
-        # accepted segment: left visible, the judge could restate it in a
-        # later query and it would be collected twice.
+        # Priority 5: Collection mode handling. What he adds to his question
+        # needs no wake word, as in the hot window, so Whisper's inventions
+        # get this far too. The judge reads it as it reads a follow-up, and
+        # only its noise verdict counts here: anything else completes the
+        # question. A phantom leaves the collection's silence clock alone,
+        # so his question still goes when he stops. Marked processed either
+        # way: left visible, the judge could restate it in a later query.
         if self.state_manager.is_collecting():
+            if not asked_the_judge and self._intent_judge is not None:
+                intent_judgment = self._judge_timed(
+                    segments=self._after_his_question(
+                        self._transcript_buffer.get_last_seconds(self._buffer_duration),
+                        text_lower),
+                    wake_timestamp=None,
+                    last_tts_text=self.echo_detector._last_tts_text or "",
+                    last_tts_finish_time=self.echo_detector._last_tts_finish_time or 0.0,
+                    in_hot_window=True,
+                    current_text=text_lower,
+                )
             self._transcript_buffer.mark_segment_processed(text_lower)
+            if (intent_judgment is not None and intent_judgment.noise
+                    and not intent_judgment.directed):
+                debug_log(f"🔇 Not speech while collecting (judge): \"{text_lower}\"", "voice")
+                print(f"  🔇 Heard (not speech): \"{text_lower[:50]}"
+                      f"{'...' if len(text_lower) > 50 else ''}\"", flush=True)
+                return
             self.state_manager.add_to_collection(text_lower)
             return
 
@@ -1569,6 +1592,21 @@ class VoiceListener(threading.Thread):
                 pass
         else:
             debug_log(f"input ignored (no wake word{intent_info}): {text_lower}", "voice")
+
+    def _after_his_question(self, segments: list, current_text: str) -> list:
+        """The transcript with the question being collected put back before
+        the utterance being judged. Its segments are processed, so the judge
+        would not see them, and an addition read alone, misheard ("et pour à
+        près de main aussi"), looks like something Whisper invented. Only the
+        noise verdict is read here, so the question cannot be restated."""
+        asked = self.state_manager.get_pending_query()
+        if not asked:
+            return segments
+        at = next((i for i in range(len(segments) - 1, -1, -1)
+                   if segments[i].text.lower() == current_text), len(segments))
+        when = segments[at].start_time if at < len(segments) else time.time()
+        question = TranscriptSegment(text=asked, start_time=when, end_time=when)
+        return [*segments[:at], question, *segments[at:]]
 
     def _judge_timed(self, **kwargs):
         """Ask the intent judge, and tell the latency journal how long it took

@@ -1313,6 +1313,136 @@ class TestWhatWhisperMakesOfSilence:
         listener.state_manager.stop()
 
 
+@pytest.mark.unit
+class TestWhatWhisperMakesOfSilenceWhileHeAsks:
+    """While his question is still being collected, what he adds needs no
+    wake word, so Whisper's inventions reach the question too. The judge
+    says which are not speech, and those are left out.
+
+    Field trace (2026-11-02): "Hey Yuba, comment tu vas ? Ça va aujourd'hui ?"
+    then "Sous-titrage ST' 501" made out of silence inside the collection
+    window. It joined the question, and she asked him what "sous-titrage
+    st' 501" was.
+    """
+
+    def _asking(self, **kwargs):
+        listener, _ = _create_listener(**kwargs)
+        listener.cfg.tune_enabled = True
+        listener._process_transcript("jarvis comment tu vas", utterance_energy=0.01)
+        assert listener.state_manager.is_collecting()
+        return listener
+
+    def _hear(self, listener, text):
+        # What the audio loop does before handing the text over.
+        now = time.time()
+        listener._transcript_buffer.add(text, now - 1.0, now, 0.01)
+        listener._process_transcript(text, utterance_energy=0.01)
+
+    @patch("builtins.print")
+    def test_a_phrase_nobody_said_does_not_join_his_question(self, _print):
+        listener = self._asking()
+        _install_intent_judge(listener, _make_judgment(
+            directed=False, confidence="high", noise=True,
+            reasoning="subtitle credit produced from silence"))
+
+        self._hear(listener, "sous-titrage st' 501")
+
+        assert listener.state_manager.is_collecting()
+        assert "sous-titrage" not in _accepted_query(listener)
+        assert "comment tu vas" in _accepted_query(listener)
+        assert _is_beeping(listener), "the tune of his question stopped"
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_his_second_sentence_still_joins_it(self, _print):
+        listener = self._asking()
+        _install_intent_judge(listener, _make_judgment(
+            directed=True, query="ça va aujourd'hui ?", confidence="high"))
+
+        self._hear(listener, "ça va aujourd'hui ?")
+
+        query = _accepted_query(listener)
+        assert "comment tu vas" in query and "ça va aujourd'hui" in query
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_so_does_one_the_judge_calls_undirected_speech(self, _print):
+        """Only the noise verdict counts here: he needs no wake word to
+        finish his own question."""
+        listener = self._asking()
+        _install_intent_judge(listener, _make_judgment(
+            directed=False, confidence="high", noise=False, reasoning="no wake word"))
+
+        self._hear(listener, "et demain aussi")
+
+        assert "et demain aussi" in _accepted_query(listener)
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_with_no_verdict_it_joins_as_before(self, _print):
+        listener = self._asking()
+        _install_intent_judge(listener, None)
+
+        self._hear(listener, "et demain aussi")
+
+        assert "et demain aussi" in _accepted_query(listener)
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_the_phantom_does_not_hold_his_question_back(self, _print):
+        """His question goes once he has been silent for the collection's
+        silence, whatever Whisper made of that silence."""
+        listener = self._asking()
+        listener.state_manager.voice_collect_seconds = 0.3
+        _install_intent_judge(listener, _make_judgment(
+            directed=False, confidence="high", noise=True,
+            reasoning="subtitle credit produced from silence"))
+
+        time.sleep(0.2)
+        self._hear(listener, "sous-titrage st' 501")
+        time.sleep(0.15)
+
+        assert listener.state_manager.check_collection_timeout()
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_the_judge_reads_it_after_his_question(self, _print):
+        """His question is processed, so the transcript no longer shows it,
+        and a misheard addition read alone looks like noise."""
+        listener = self._asking()
+        judge = _install_intent_judge(listener, _make_judgment(
+            directed=True, query="et pour après-demain aussi", confidence="high"))
+
+        self._hear(listener, "et pour à près de main aussi")
+
+        shown = IntentJudge()._build_user_prompt(**{
+            k: v for k, v in judge.judge.call_args.kwargs.items()
+            if k in ("segments", "wake_timestamp", "last_tts_text",
+                     "last_tts_finish_time", "in_hot_window", "current_text")})
+        assert shown.index("comment tu vas") < shown.index("et pour à près de main aussi")
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_the_phantom_is_no_context_for_what_he_says_next(self, _print):
+        listener = self._asking()
+        _install_intent_judge(listener, _make_judgment(
+            directed=False, confidence="high", noise=True,
+            reasoning="subtitle credit produced from silence"))
+        self._hear(listener, "sous-titrage st' 501")
+
+        judge = _install_intent_judge(listener, _make_judgment(
+            directed=True, query="ça va aujourd'hui ?", confidence="high"))
+        self._hear(listener, "ça va aujourd'hui ?")
+
+        shown = IntentJudge()._build_user_prompt(**{
+            k: v for k, v in judge.judge.call_args.kwargs.items()
+            if k in ("segments", "wake_timestamp", "last_tts_text",
+                     "last_tts_finish_time", "in_hot_window", "current_text")})
+        assert "sous-titrage" not in shown
+        assert "ça va aujourd'hui" in shown
+        listener.state_manager.stop()
+
+
 # ---------------------------------------------------------------------------
 # Tests: Hot window boundary enforcement
 # ---------------------------------------------------------------------------
