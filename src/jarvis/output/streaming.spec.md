@@ -33,7 +33,9 @@ only the last sentence, and every guard downstream reads it:
 - `_carries_speech_she_did_not_say`, which decides whether to override an
   echo verdict, whether a stripped remainder is speech, and, through
   `_not_her_echo`, which transcripts the judge is shown "(during TTS)" and
-  which no hot-window override takes.
+  which no hot-window override takes, with a verdict or without one. Its
+  word test also tells which words of a hot-window utterance are hers when
+  the listener asks whether a wake word in it can only be his.
 
 An echo of sentence one, arriving while sentence three is being spoken,
 would be compared against sentence three, match nothing, and be taken for

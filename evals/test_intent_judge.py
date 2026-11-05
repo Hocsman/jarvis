@@ -41,6 +41,7 @@ from dataclasses import dataclass
 from typing import Optional, List, Union
 
 from helpers import JUDGE_MODEL, JUDGE_BASE_URL, MockConfig, is_judge_llm_available
+from jarvis.listening.listener import _carries_speech_she_did_not_say
 
 NOT_SPEECH_ARMS = [a.strip() for a in os.environ.get("EVAL_INTENT_JUDGE_ARMS", "").split(",") if a.strip()]
 NOT_SPEECH_ROUNDS = int(os.environ.get("EVAL_INTENT_JUDGE_ROUNDS", "4") or 4)
@@ -1166,28 +1167,39 @@ class TestIntentJudgeMultiSegment:
                 )
 
 
-def _answered_in_the_hot_window(verdict) -> bool:
+def _answered_in_the_hot_window(case, verdict) -> bool:
     """What the listener does in the hot window with a verdict on a segment
     it did not mark as possibly hers: it dispatches a directed one, and its
     overrides take any rejection that does not say noise, whatever the
-    confidence. An echo verdict is overridden only on words she did not say
-    spoken in a voice; there is no audio here, so the voice is granted."""
-    return verdict.directed or not verdict.noise
+    confidence. A rejection whose reasoning says echo is overridden only on
+    words she did not say, spoken in a voice: the words are weighed here as
+    the listener weighs them, and his words carry a voice where text Whisper
+    makes of silence carries none. The cases carry no wake word, so the
+    wake-word check never takes the decision."""
+    if verdict.directed:
+        return True
+    if verdict.noise:
+        return False
+    if "echo" in (verdict.reasoning or "").lower():
+        return (not case.expected_noise
+                and _carries_speech_she_did_not_say(case.segments[-1][0], case.last_tts_text))
+    return True
 
 
-def _answered_when_marked(verdict) -> bool:
+def _answered_when_marked(case, verdict) -> bool:
     """What the listener does in the hot window with a verdict on a segment
     it marked "(during TTS)", words that could be hers: no override takes
-    them, so only a directed verdict with a query is dispatched."""
+    them, and the cases carry no wake word, so only a directed verdict with
+    a query is dispatched."""
     return verdict.directed and bool(verdict.query)
 
 
-def _answered_on_an_unsure_verdict(verdict) -> bool:
+def _answered_on_an_unsure_verdict(case, verdict) -> bool:
     """Answered in the hot window on a verdict below high confidence that
     extracted no query: what weighing the judge's unsure verdicts as its
     sure ones lets through. A directed verdict with a query is dispatched
     whatever its confidence."""
-    return (_answered_in_the_hot_window(verdict) and verdict.confidence != "high"
+    return (_answered_in_the_hot_window(case, verdict) and verdict.confidence != "high"
             and not (verdict.directed and verdict.query))
 
 
@@ -1202,7 +1214,7 @@ def _taken(case, verdict) -> bool:
     """Whether the listener would act on the segment as his words."""
     if case.collecting:
         return _joins_his_question(verdict)
-    return _answered_in_the_hot_window(verdict)
+    return _answered_in_the_hot_window(case, verdict)
 
 
 def _wrong(case, verdict) -> bool:
@@ -1312,7 +1324,7 @@ class TestIntentJudgeNotSpeechArms:
             row[0] += int(_taken(case, verdict))
             row[1] += int(verdict.noise)
             row[2] += int(case.collecting and verdict.stop)
-            row[5] += int(not case.collecting and _answered_on_an_unsure_verdict(verdict))
+            row[5] += int(not case.collecting and _answered_on_an_unsure_verdict(case, verdict))
             if _wrong(case, verdict):
                 misses[arm][case.name] = misses[arm].get(case.name, 0) + 1
 
@@ -1403,7 +1415,7 @@ class TestIntentJudgeNotSpeechArms:
                 row[4] += 1
                 continue
             row[0] += int(verdict.directed)
-            row[1] += int(answered_when[variant](verdict))
+            row[1] += int(answered_when[variant](shown, verdict))
             row[2] += int(verdict.noise)
             if not verdict.directed:
                 misses[(arm, case.name)] = misses.get((arm, case.name), 0) + 1

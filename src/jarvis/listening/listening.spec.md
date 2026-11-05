@@ -217,7 +217,7 @@ After TTS finishes, allow wake-word-free follow-up.
 
 **Duration:** Configurable (default: 3 seconds)
 
-**Behaviour:** Speech first passes through an early fuzzy echo check (rapidfuzz `partial_ratio`, threshold 70, with word-count guard to avoid catching mixed echo+speech). Pure echo is silently rejected **without calling the intent judge** — this keeps echo rejection instant and prevents it from blocking the audio loop. The hot window timer is **not** reset on echo rejection. Non-echo speech is sent to the intent judge, and if the judge rejects it, the rejection is overridden: non-echo speech in the hot window is accepted as a follow-up query. An echo verdict is overridden only on positive evidence (see "Overriding an echo verdict takes positive evidence"). Words that could be her own voice coming back, the ones the judge is shown "(during TTS)" (see "During TTS"), are taken by no override: whatever words the judge finds for leaving them out, a rejection that does not say echo or a directed verdict with no query, they are set aside as an echo verdict that stands sets them, with `🔇 Heard (echo)`. The listener decides it on the text as it stands once an echo prefix is stripped. In the hot window the judge's confidence changes none of this: a verdict it is unsure of goes through the same overrides as one it is sure of, a directed verdict with no query takes what he said whatever its confidence, and every path a verdict takes there ends in a console line that says what became of the utterance, a stop aside: that one she obeys out loud. The judge's confidence is "low" whenever its answer leaves it out. The wake word is his call in the hot window as outside it: an utterance carrying it that the verdict extracts no query from, her reply coming back whole aside, goes to the wake-word check, which answers what follows the wake word, so a quiet answer of his that could be hers is still answered when he names her. Outside the hot window, a verdict below high confidence leaves the decision to the wake-word check. Speech, not text: a segment the judge calls noise is not speech, and nothing overrides that verdict (see "Text Whisper Makes Out of Silence").
+**Behaviour:** Speech first passes through an early fuzzy echo check (rapidfuzz `partial_ratio`, threshold 70, with word-count guard to avoid catching mixed echo+speech). Pure echo is rejected with `🔇 Heard (echo)` **without calling the intent judge** — this keeps echo rejection instant and prevents it from blocking the audio loop. The early check stands aside while she speaks (see "During TTS") and while the thinking tune plays; with the tune playing, pure echo heard in the hot window reaches the judge, and the checks after its verdict set it aside with the same line. The hot window timer is **not** reset on echo rejection. Non-echo speech is sent to the intent judge, and if the judge rejects it, the rejection is overridden: non-echo speech in the hot window is accepted as a follow-up query. An echo verdict is overridden only on positive evidence (see "Overriding an echo verdict takes positive evidence"). Words that could be her own voice coming back, the ones the judge is shown "(during TTS)" (see "During TTS"), are taken by no override: whatever words the judge finds for leaving them out, a rejection that does not say echo or a directed verdict with no query, they are set aside as an echo verdict that stands sets them, with `🔇 Heard (echo)`. The listener decides it on the text as it stands once an echo prefix is stripped. In the hot window the judge's confidence changes none of this: a verdict it is unsure of goes through the same overrides as one it is sure of, a directed verdict with no query takes what he said whatever its confidence, and every path a verdict takes there ends in a console line that says what became of the utterance, a stop aside: that one she obeys out loud. The judge's confidence is "low" whenever its answer leaves it out. The wake word is his call in the hot window as outside it, where it can only be his: an utterance carrying such a wake word that the verdict extracts no query from, her reply coming back whole aside, goes to the wake-word check, which answers what was heard with the wake word taken out, so a quiet answer of his that could be hers is still answered when he names her. A wake word can only be his when the wake-word check finds it in the utterance, finds none in her reply, and still finds it once the words of her reply are taken out. Her reply can name her, or say a word the check takes for her name ("avis" for "Jarvis"; with the default aliases, common words such as "jours" or "chairs" too), and coming back that word can take any spelling Whisper gives her name, so after such a reply no wake word heard can be told from hers, his quiet answer naming her included: it is set aside with the other words that could be hers. Whisper can also bend a word of hers into one ("servi" heard "servis", close to the alias "jervis"): that word is still hers as long as it stays as close to hers as the word test of "Overriding an echo verdict takes positive evidence" asks, and so is his wake word when it comes that close to a word of hers ("jarvis" to the "avis" of her "d'avis"). Two of her words merged into one ("Dave is" heard "Davis") or a sound spelled another way ("à vie" heard "avis") go beyond that test and pass for his. With no verdict (a timeout, or the judge's back-off after a connection error) the hot window tells his words from hers as it does behind a verdict: her reply coming back whole is set aside with `🔇 Heard (echo)`, and so are words that could be hers, unless they carry a wake word that can only be his, which leaves the decision to the wake-word check; anything else is his and is answered as he said it, a wake word in it included. Outside the hot window, a verdict below high confidence leaves the decision to the wake-word check. Speech, not text: a segment the judge calls noise is not speech, and nothing overrides that verdict (see "Text Whisper Makes Out of Silence").
 
 **Mixed echo+speech handling:** When Whisper merges TTS echo and user speech into one chunk (e.g. mic picks up TTS then user speaks), the word-count guard detects the extra content and lets it through to the intent judge. The judge extracts the user's actual query from the mixed transcript. Post-judge echo checks also use the word-count guard and verify the judge's extracted query isn't itself echo before rejecting.
 
@@ -244,7 +244,9 @@ While TTS is playing, echo rejection and stop commands are handled with fast tex
   back by its delay (`output/tts.spec.md`, "Kyutai").
 - A transcript that could be her own voice coming back is flagged
   `is_during_tts=true`, shown to the judge as "(during TTS)", and the judge
-  never extracts a query from it. Timing says when it could be hers: heard
+  is told never to extract a query from it. A verdict that extracts one
+  anyway is answered, as any directed verdict with a query is (see "Hot
+  Window Mode"). Timing says when it could be hers: heard
   while she speaks, or started (the voice detector's pre-roll included)
   before her last word plus `echo_tolerance`.
 - Timing does not decide alone. His answer to a question she ends her reply
@@ -331,7 +333,7 @@ The judge's verdict carries `noise`: true when the current segment is such an in
 - **Elsewhere the verdict changes nothing.** The judge only runs there on a wake word or while she speaks, and Whisper does not invent her name, so a doubtful verdict still falls through to the text wake-word check as any other.
 - **His side wins a contradiction.** A verdict that says both `noise` and directed is treated as directed.
 - **The window stays open.** Like an echo, a noise verdict does not touch the hot window, so his real follow-up after it is still a follow-up.
-- **Fails open.** With no verdict (judge unavailable) or a model that never sets `noise`, the hot window and the question being collected behave as without it.
+- **Fails open.** With no verdict (judge unavailable) or a model that never sets `noise`, nothing is left out as noise: the hot window and the question being collected behave as without this rule. In the hot window, words that could be hers are still set aside (see "Hot Window Mode").
 
 How well it works is the judge model's: a small local model can miss what a larger one catches, and a miss is answered as before. `evals/test_intent_judge.py` holds the inventions and the real follow-ups it is measured on (`TestIntentJudgeKnowsSilenceFromSpeech` on the suite's small model, `EVAL_INTENT_JUDGE_ARMS` on any), and `docs/llm_contexts.md` the measurement.
 
@@ -401,7 +403,12 @@ The fuzzy check acts as a fast, reliable safety net. The intent judge provides d
    The same two proofs decide which transcripts are flagged as possibly hers
    (`is_during_tts`, see "During TTS"), so the judge is not told in the first
    place that words with both are her echo, and no hot-window override takes
-   words without them that were heard in her time.
+   words without them that were heard in her time, whether the judge gave a
+   verdict or none. A wake word among those words is weighed with them,
+   unless it can only be his (see "Hot Window Mode"): a verdict that
+   extracts nothing from an utterance carrying such a wake word is not
+   weighed here at all, wherever in the hot window it was heard, and the
+   wake-word check decides.
 
 Example:
 ```
@@ -468,7 +475,7 @@ a guard that ate an emphatic repeat would cost real sentences. Each
 hallucination that survives costs an intent-judge call on the cloud model
 to be told it is not directed.
 
-Note: the intent judge has no enable flag. A connection error puts it in a 30-second back-off during which `judge()` returns without calling the backend; the listener still takes its no-verdict path, so the hot-window override keeps the follow-up and the unavailability is printed to standard output. Outside a hot window, text-based wake detection answers as usual. A request that outlives `intent_judge_timeout_sec` gives no verdict either, without the back-off, so the next engagement asks the judge again. The audio loop waits at most that long for a server that goes quiet; as with every request timeout here it is the HTTP client's connection and per-read wait, not a wall-clock cap on the whole exchange.
+Note: the intent judge has no enable flag. A connection error puts it in a 30-second back-off during which `judge()` returns without calling the backend; the listener still takes its no-verdict path, so in the hot window his follow-up is kept, words that could be hers are set aside with `🔇 Heard (echo)` (see "Hot Window Mode"), and the unavailability is printed to standard output. Outside a hot window, text-based wake detection answers as usual. A request that outlives `intent_judge_timeout_sec` gives no verdict either, without the back-off, so the next engagement asks the judge again. The audio loop waits at most that long for a server that goes quiet; as with every request timeout here it is the HTTP client's connection and per-read wait, not a wall-clock cap on the whole exchange.
 
 ## State Transitions
 
@@ -512,16 +519,20 @@ Wake Detection Check:
     └→ Text contains wake word? → Start thinking beep + publish LISTENING
     ↓
 If wake detected OR in hot window:
-    → Fuzzy echo check (partial_ratio ≥ 70 = echo → reject + reset timer)
+    → Fuzzy echo check, unless she speaks or the thinking tune plays (partial_ratio ≥ 70 = echo → 🔇 Heard (echo), hot window timer untouched)
     → Send buffer + context to Intent Judge
     ↓
+If no verdict, in hot window:
+    → Her reply coming back whole: 🔇 Heard (echo)
+    → Words that could be hers: 🔇 Heard (echo), unless they carry a wake word that can only be his: wake-word check, as below
+    → Otherwise: collect what he said as a query
 If judge rejects and says noise, in hot window:
     → Not speech: mark processed, ignore, hot window untouched
 If judge.directed and judge.query:
     → Verify wake word present (wake word mode) or non-echo (hot window)
     → Collect it (added to a question being collected), then hand it to the reply thread (it waits its turn)
-If no query extracted, in hot window, and the wake word is in it (not her reply coming back whole):
-    → Wake-word check: collect what follows the wake word
+If no query extracted, in hot window, and a wake word that can only be his (found in the utterance, none in her reply, still found once her words are taken out; not her reply coming back whole):
+    → Wake-word check: collect what was heard, the wake word taken out
 If judge.directed without a query, or rejects, in hot window, at any confidence:
     → Words that could be hers (heard in her time, without words she did not say in a voice): 🔇 Heard (echo)
     → Otherwise, not pure echo: collect what he said as a query
@@ -600,7 +611,7 @@ When components are unavailable, the system degrades gracefully:
 
 | Component | Unavailable Behaviour |
 |-----------|---------------------|
-| Intent Judge | Simple text-based wake word + query extraction; hot window override still applies |
+| Intent Judge | Simple text-based wake word + query extraction; in the hot window his words are still kept and words that could be hers set aside |
 | 16 kHz sample rate | Stream at device native rate, resample to 16 kHz for Whisper |
 | Transcript Buffer | Process each utterance independently |
 | `large-v3-turbo` on faster-whisper older than 1.1.0 | Load `large-v3` instead and say so (`⚠️ large-v3-turbo is not supported…`). MLX always runs it |
