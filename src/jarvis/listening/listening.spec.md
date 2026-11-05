@@ -125,7 +125,13 @@ Instead of extracting post-wake-word audio, we:
 
 ### 2. Text-Based Wake Detection
 
-Wake word detection operates on the rolling transcript buffer. When Whisper produces text, it is checked for the configured wake word and aliases using fuzzy matching (`rapidfuzz`). This supports arbitrary wake words in any language.
+Wake word detection operates on the rolling transcript buffer. When Whisper produces text, it is checked for the configured wake word and aliases. This supports arbitrary wake words in any language.
+
+**Names are whole words.** The wake word and each alias are names, found only where they stand as whole words: neither end of the name runs on into a letter, a digit or a combining mark of the word around it, in any alphabet. "Charismatique" does not hold the alias "charis", nor "mañana" the name "ana", whether its "ñ" is written as one character or as an "n" and a combining tilde. Punctuation around a name is no part of a word ("Jarvis, …", "…, Jarvis ?", "«Jarvis»"). The words of a name of several words ("jar is") are found whatever the spacing between them, and not when its last word starts a longer one ("jar isolé"). The exception is text that does not mark where its words end: Chinese characters, kana and Hangul (whose particles join the name before them), and the scripts of South-East Asia (Thai, Lao, Khmer, Myanmar, the Tai scripts). There a name is found among the words around it. A name configured empty is found nowhere.
+
+**Close spellings.** Failing a whole-word match, each token of the text, split on whitespace and stripped of the punctuation at its ends, is compared with every name using difflib's `SequenceMatcher`, and a ratio of at least `wake_fuzzy_ratio` (0.78 by default) counts as the name: "jarvas" for "jarvis". A whole token is weighed against a whole name, so a name inside a much longer word scores low ("charismatique", 0.63 against "charis"), but a word one letter away from a short name passes ("charisme", 0.86 against "charis"), and so do ordinary words close to a short alias ("jours", 0.80 against "joris"; "avis", 0.89 against "javis").
+
+**Taking the name out.** When the wake word is what decides that he is speaking to her, the words where a name stands whole are taken out of what he said, with the spacing around them, and every other word is kept as it was heard: "Jarvis, est-elle charismatique ?" is answered as "est-elle charismatique ?". Commas, full stops, question and exclamation marks, semicolons and colons left at the start of what remains are dropped. A token that matched only as a close spelling stays in.
 
 ### 3. Context-Aware Intent Judge
 
@@ -198,7 +204,7 @@ On small models, a caveat line is appended above a more involved example to set 
 System is waiting for wake word activation.
 
 **Triggers:**
-- Text-based detection finds wake word (or aliases) in transcript
+- Text-based detection finds the wake word or an alias in the transcript, as whole words or as a close spelling (see "Text-Based Wake Detection")
 
 **On trigger:**
 1. Start thinking beep immediately and publish the state LISTENING
@@ -426,7 +432,7 @@ Judge output: {"directed": true, "query": "Ni hao", "reasoning": "New speech dir
 
 To minimise perceived latency, audio and visual feedback starts **immediately after Whisper transcription**, before the intent judge runs. The visual half is the assistant's shared state (`src/jarvis/state.py`, see `state.spec.md`), which whatever shows the assistant to the user reads:
 
-- **Wake word mode:** If the transcribed text contains the wake word (fuzzy-matched), start the thinking beep and publish LISTENING.
+- **Wake word mode:** If the transcribed text carries the wake word, as "Text-Based Wake Detection" finds it, start the thinking beep and publish LISTENING.
 - **Hot window:** If voice started during an active (or pending) hot window, start the thinking beep and publish LISTENING.
 - **No trigger:** If neither condition is met, no feedback is given.
 
