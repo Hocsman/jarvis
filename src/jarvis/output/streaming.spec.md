@@ -48,14 +48,11 @@ the chunk.
 
 What is recorded when she starts speaking is recorded once, at her first
 sentence, and kept for the rest of the reply: the start of her speech,
-from which echo windows are timed, and the floor of the voice proof, the
-microphone's level that an utterance must exceed `energy_spike_threshold`
-times over (twice by default) to count as someone speaking
+from which echo windows are timed, and the floor of the voice proof
 (`listening/listening.spec.md`, "Overriding an echo verdict takes positive
-evidence"). A later sentence is queued while the microphone hears her say
-the one before. A floor read then is her own voice, and his soft answer
-right after her last word, under the bar it sets, would be taken for her
-echo.
+evidence"). A later sentence can be queued while the microphone hears her
+say an earlier one: a floor read then would be her own voice, and his
+soft answer right after her last word would be taken for her echo.
 
 ## Segmentation
 
@@ -126,7 +123,8 @@ than a lost answer.
 - The floor of the voice proof is the one read when the first chunk was
   queued: later chunks, queued while the microphone hears her, leave it
   alone, and his soft answer right after her last word still counts as a
-  voice. A new reply reads it again.
+  voice, while her own words coming back as she stops are still set aside
+  as hers. A new reply reads it again.
 - The hot window opens once, after the last chunk.
 - A stop during chunk one leaves chunks two and three unspoken.
 - Every chunk and the tail of a reply carry the same language, even when

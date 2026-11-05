@@ -83,11 +83,11 @@ class EchoDetector:
                 forward on each chunk would let a late echo look like
                 fresh speech.
 
-                Nor is the floor read again. A later chunk is queued while
-                the microphone hears her say the one before: a floor read
-                then is her own voice, and his soft answer right after her
-                last word, under the bar it sets, would be taken for her
-                echo.
+                Nor is the floor read again. A later chunk can be queued
+                while the microphone hears her say an earlier one: a floor
+                read then would be her own voice, and his soft answer right
+                after her last word, under the bar it sets, would be taken
+                for her echo.
             start_delay: How much later than usual her voice will be heard
                 (a talking face holds it back by its delay). Her words are
                 timed from that much later.

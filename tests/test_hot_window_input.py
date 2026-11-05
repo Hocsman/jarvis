@@ -1808,6 +1808,9 @@ _HER_STREAMED_REPLY = ("La réunion de lundi est confirmée. "
 # He answers softly: above the bar the room's floor sets, well below her
 # voice coming back through the speakers.
 _HIS_SOFT_VOICE = 1.5
+# That reply coming back decimated by Whisper as she stops, every word still
+# hers: the contiguous echo check misses it.
+_HER_STREAMED_WORDS_DECIMATED = "réunion lundi collègue documents autre question"
 
 
 def _the_microphone_hears(listener, level: float) -> None:
@@ -1846,23 +1849,24 @@ class TestHisAnswerAfterAReplySpokenAsItWasWritten:
     """She speaks a long reply as she writes it, sentence by sentence, and
     he answers its closing question at once, softly.
 
-    The voice proof weighs his answer against twice the floor recorded when
-    she started speaking (listening.spec.md, "Overriding an echo verdict
-    takes positive evidence"). Each later sentence of such a reply is queued
-    while the microphone hears her say the one before: a floor read then is
-    her voice, and his soft answer right after her last word, under twice
-    that, would be shown to the judge as her echo and set aside."""
+    The voice proof weighs his answer against `energy_spike_threshold` times
+    the floor recorded when she started speaking (listening.spec.md,
+    "Overriding an echo verdict takes positive evidence"). A later sentence
+    of such a reply can be queued while the microphone hears her say an
+    earlier one: a floor read then is her voice, and his soft answer right
+    after her last word, under the bar it sets, would be shown to the judge
+    as her echo and set aside."""
 
     def _her_reply_ends(self):
         listener, _ = _create_listener(echo_tolerance=0.1, hot_window_seconds=0.2)
         last_word = _she_streams(listener, _HER_STREAMED_REPLY)
         assert _wait_for_hot_window_active(listener)
-        _judge_that_reads_the_marker(listener)
         return listener, last_word
 
     @patch("builtins.print")
     def test_his_soft_answer_is_answered(self, _print):
         listener, last_word = self._her_reply_ends()
+        _judge_that_reads_the_marker(listener)
 
         _whisper_hears(listener, _HIS_QUESTION, started=_just_after(listener, last_word),
                        level=_level(listener, _HIS_SOFT_VOICE))
@@ -1875,12 +1879,33 @@ class TestHisAnswerAfterAReplySpokenAsItWasWritten:
         """The control: the floor her reply started with still holds a
         phrase Whisper makes of the room just after her under the bar."""
         listener, last_word = self._her_reply_ends()
+        _judge_that_reads_the_marker(listener)
 
         _whisper_hears(listener, "Merci.", started=_just_after(listener, last_word),
                        level=_level(listener, _ROOM_NOISE))
 
         assert _accepted_query(listener) == ""
         assert _console_says_heard_as_her_echo(mock_print, "merci.")
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_her_own_words_coming_back_then_are_not(self, mock_print):
+        """Her echo as she stops, decimated by Whisper so that the text check
+        misses it. At her own level it clears the bar the room's floor sets,
+        so only its words show it is hers: it is still shown to the judge as
+        hers and set aside."""
+        listener, last_word = self._her_reply_ends()
+        judge = _judge_that_reads_the_marker(listener)
+        heard = _HER_STREAMED_WORDS_DECIMATED
+        assert (fuzz.partial_ratio(heard, _HER_STREAMED_REPLY.lower())
+                < EchoDetector.PURE_ECHO_THRESHOLD)
+
+        _whisper_hears(listener, heard, started=last_word - 1.5,
+                       level=_level(listener, _HER_VOICE))
+
+        assert "during TTS" in _current_line_shown_to(judge)
+        assert _accepted_query(listener) == ""
+        assert _console_says_heard_as_her_echo(mock_print, heard)
         listener.state_manager.stop()
 
 
