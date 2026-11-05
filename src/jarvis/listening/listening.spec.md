@@ -217,7 +217,7 @@ After TTS finishes, allow wake-word-free follow-up.
 
 **Duration:** Configurable (default: 3 seconds)
 
-**Behaviour:** Speech first passes through an early fuzzy echo check (rapidfuzz `partial_ratio`, threshold 70, with word-count guard to avoid catching mixed echo+speech). Pure echo is silently rejected **without calling the intent judge** — this keeps echo rejection instant and prevents it from blocking the audio loop. The hot window timer is **not** reset on echo rejection. Non-echo speech is sent to the intent judge, and if the judge rejects it with high confidence, the rejection is overridden: non-echo speech in the hot window is accepted as a follow-up query. A rejection at medium or low confidence falls through to the wake-word check, which a follow-up does not pass. Speech, not text: a segment the judge calls noise is not speech, and nothing overrides that verdict (see "Text Whisper Makes Out of Silence").
+**Behaviour:** Speech first passes through an early fuzzy echo check (rapidfuzz `partial_ratio`, threshold 70, with word-count guard to avoid catching mixed echo+speech). Pure echo is silently rejected **without calling the intent judge** — this keeps echo rejection instant and prevents it from blocking the audio loop. The hot window timer is **not** reset on echo rejection. Non-echo speech is sent to the intent judge, and if the judge rejects it, the rejection is overridden: non-echo speech in the hot window is accepted as a follow-up query. An echo verdict is overridden only on positive evidence (see "Overriding an echo verdict takes positive evidence"). In the hot window the judge's confidence changes none of this: a verdict it is unsure of goes through the same overrides as one it is sure of, a directed verdict with no query takes what he said whatever its confidence, and every path a verdict takes there ends in a console line that says what became of the utterance. The judge's confidence is "low" whenever its answer leaves it out. Outside the hot window, a verdict below high confidence leaves the decision to the wake-word check. Speech, not text: a segment the judge calls noise is not speech, and nothing overrides that verdict (see "Text Whisper Makes Out of Silence").
 
 **Mixed echo+speech handling:** When Whisper merges TTS echo and user speech into one chunk (e.g. mic picks up TTS then user speaks), the word-count guard detects the extra content and lets it through to the intent judge. The judge extracts the user's actual query from the mixed transcript. Post-judge echo checks also use the word-count guard and verify the judge's extracted query isn't itself echo before rejecting.
 
@@ -242,7 +242,18 @@ While TTS is playing, echo rejection and stop commands are handled with fast tex
 - The detector times her words from when the listener handed her the reply,
   plus the speech engine's `voice_delay()`: a talking face holds her voice
   back by its delay (`output/tts.spec.md`, "Kyutai").
-- Transcripts during TTS are flagged with `is_during_tts=true`
+- A transcript that could be her own voice coming back is flagged
+  `is_during_tts=true`, shown to the judge as "(during TTS)", and the judge
+  never extracts a query from it. Timing says when it could be hers: heard
+  while she speaks, or started (the voice detector's pre-roll included)
+  before her last word plus `echo_tolerance`.
+- Timing does not decide alone. His answer to a question she ends her reply
+  on often starts within that tolerance, so an utterance that carries words
+  she did not say, loud enough to have been spoken (the two proofs of
+  "Overriding an echo verdict takes positive evidence"), is never flagged,
+  whatever its timing. Her own words coming back, however Whisper bends
+  them, and a phrase Whisper makes of the quiet right after her keep the
+  flag: the first carries no words she did not say, the second no voice.
 - Intent judge uses this context to identify echo
 
 ## Rolling Transcript Buffer
@@ -256,7 +267,7 @@ class TranscriptSegment:
     start_time: float      # Unix timestamp when speech started
     end_time: float        # Unix timestamp when speech ended
     energy: float          # Audio energy level
-    is_during_tts: bool    # Whether TTS was playing during this segment
+    is_during_tts: bool    # Could be her own voice coming back (see "Echo handling")
 
 class TranscriptBuffer:
     max_duration_sec: float = 120.0  # Ambient speech context for intent judging
@@ -384,6 +395,10 @@ The fuzzy check acts as a fast, reliable safety net. The intent judge provides d
    zero, which is the listener's "not measured" value rather than a claim
    of silence.
 
+   The same two proofs decide which transcripts are flagged as possibly hers
+   (`is_during_tts`, see "During TTS"), so the judge is not told in the first
+   place that words with both are her echo.
+
 Example:
 ```
 TTS: "The weather is sunny and 72 degrees"
@@ -487,7 +502,7 @@ Speech Detected → Accumulate Frames
     ↓
 Silence Timeout → Whisper Transcription
     ↓
-Add to Transcript Buffer (with timestamps)
+Add to Transcript Buffer (with timestamps; flagged "(during TTS)" when it could be her echo)
     ↓
 Wake Detection Check:
     └→ Text contains wake word? → Start thinking beep + publish LISTENING
@@ -501,8 +516,9 @@ If judge rejects and says noise, in hot window:
 If judge.directed and judge.query:
     → Verify wake word present (wake word mode) or non-echo (hot window)
     → Collect it (added to a question being collected), then hand it to the reply thread (it waits its turn)
-If judge rejects but in hot window and non-echo:
+If judge rejects but in hot window and non-echo, at any confidence:
     → Override rejection, collect it as a query
+    → An echo verdict: only on words she did not say, in a voice; otherwise 🔇 Heard (echo)
 If nothing above took it and a question is being collected:
     → Judge it as a follow-up, his question before it (unless already judged as one)
     → Stop: cancel the question

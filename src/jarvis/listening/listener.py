@@ -909,17 +909,14 @@ class VoiceListener(threading.Thread):
                         # genuine user speech. The threshold lives on the echo
                         # detector so every salvage site shares one policy.
                         # The stripper removes the part it recognised; the
-                        # remainder is only speech if it carries words she
-                        # did not say. Left as "whatever is left over", a
-                        # decimated tail of her own sentence rides through
-                        # as a query.
+                        # remainder is only speech if it is not her echo
+                        # (`_not_her_echo`). Left as "whatever is left
+                        # over", a decimated tail of her own sentence rides
+                        # through as a query.
                         min_words = self.echo_detector.min_salvage_words
                         if (salvaged != text_lower
                                 and len(salvaged.split()) >= min_words
-                                and _carries_speech_she_did_not_say(
-                                    salvaged, self.echo_detector._last_tts_text or "")
-                                and self.echo_detector.utterance_carries_a_voice(
-                                    utterance_energy)):
+                                and self._not_her_echo(salvaged, utterance_energy)):
                             debug_log(
                                 f"salvaged user speech from hot-window echo+speech "
                                 f"chunk: '{salvaged}'",
@@ -1184,6 +1181,14 @@ class VoiceListener(threading.Thread):
                     self._drop_the_early_beep()
                     return
 
+                # In the hot window a verdict the judge is unsure of weighs
+                # what a sure one does: both go through the paths below, and
+                # each of them says on the console what became of the
+                # utterance. Outside it, an unsure verdict leaves the
+                # decision to the wake word. The judge's confidence is "low"
+                # whenever its answer leaves it out.
+                decisive = intent_judgment.confidence == "high" or could_be_hot_window
+
                 # If directed with query, process it
                 if intent_judgment.directed and intent_judgment.query:
                     # In wake word mode, verify the wake word is actually present
@@ -1294,11 +1299,11 @@ class VoiceListener(threading.Thread):
                             pass
                         return
 
-                # If directed with high confidence but no extracted query, use actual text
+                # If directed, decisively (see above), but no extracted query, use actual text
                 # Per spec: "Hot window input should reflect what the user actually said"
                 # This handles cases where intent judge correctly identifies directed speech
                 # but fails to extract/synthesize a query (e.g., conversational follow-ups)
-                if intent_judgment.directed and intent_judgment.confidence == "high":
+                if intent_judgment.directed and decisive:
                     # In wake word mode, verify the wake word is actually present
                     if not could_be_hot_window:
                         wake_word = getattr(self.cfg, "wake_word", "jarvis")
@@ -1314,7 +1319,7 @@ class VoiceListener(threading.Thread):
                             )
                             # Fall through to wake word check
                         else:
-                            debug_log(f"✅ Intent judge accepted (directed, high confidence, using actual text): \"{text_lower}\"", "voice")
+                            debug_log(f"✅ Intent judge accepted (directed, {intent_judgment.confidence} confidence, using actual text): \"{text_lower}\"", "voice")
                             self.state_manager.cancel_hot_window_activation()
                             self._transcript_buffer.mark_segment_processed(text_lower)
                             self._clear_audio_buffers()
@@ -1344,7 +1349,7 @@ class VoiceListener(threading.Thread):
                                 self._drop_the_early_beep()
                                 return
 
-                        debug_log(f"✅ Intent judge accepted (directed, high confidence, using actual text): \"{text_lower}\"", "voice")
+                        debug_log(f"✅ Intent judge accepted (directed, {intent_judgment.confidence} confidence, using actual text): \"{text_lower}\"", "voice")
                         self.state_manager.cancel_hot_window_activation()
                         self._transcript_buffer.mark_segment_processed(text_lower)
                         self._clear_audio_buffers()
@@ -1356,8 +1361,8 @@ class VoiceListener(threading.Thread):
                             pass
                         return
 
-                # If not directed with high confidence, check reasoning before rejecting
-                if not intent_judgment.directed and intent_judgment.confidence == "high":
+                # If not directed, decisively (see above), check reasoning before rejecting
+                if not intent_judgment.directed and decisive:
                     # Surgical fix: If intent judge claims "echo" but echo system already cleared
                     # this utterance (we reached here, meaning Priority 2 didn't reject), don't
                     # trust the LLM's echo reasoning - fall through to wake word detection instead.
@@ -1418,25 +1423,15 @@ class VoiceListener(threading.Thread):
                                 )
                             # The judge read this as her own echo and said
                             # so. Overriding that verdict takes proof the
-                            # user spoke, not the failure of a contiguous
-                            # ratio to find its match in a decimated echo.
-                            # Two proofs, because either alone was fooled.
-                            # Text alone answered "yes, new words" to a
-                            # hallucinated "Thank you." over her French
-                            # reply, and she answered it. Energy alone
-                            # cannot tell his voice from a door slamming.
-                            # A barge-in is words she did not say, spoken
-                            # loudly enough to have been spoken.
-                            if is_pure_echo or not (
-                                _carries_speech_she_did_not_say(
-                                    text_lower, last_tts_text or "")
-                                and self.echo_detector.utterance_carries_a_voice(
-                                    utterance_energy)
-                            ):
+                            # user spoke (`_not_her_echo`), not the failure
+                            # of a contiguous ratio to find its match in a
+                            # decimated echo.
+                            if is_pure_echo or not self._not_her_echo(
+                                    text_lower, utterance_energy):
                                 debug_log(
-                                    f"🔇 Echo in hot window (echo reasoning confirmed, "
-                                    f"score={echo_score}, nothing she did not say): "
-                                    f"\"{text_lower}\"", "voice")
+                                    f"🔇 Echo in hot window (echo verdict stands, "
+                                    f"score={echo_score}, no words she did not say "
+                                    f"in a voice): \"{text_lower}\"", "voice")
                                 print(f"  🔇 Heard (echo): \"{text_lower[:50]}"
                                       f"{'...' if len(text_lower) > 50 else ''}\"",
                                       flush=True)
@@ -1483,6 +1478,8 @@ class VoiceListener(threading.Thread):
                             # Confirmed pure echo — early check should have caught
                             # this, but handle as safety net.
                             debug_log(f"🔇 Echo in hot window (score={echo_score}): \"{text_lower}\"", "voice")
+                            print(f"  🔇 Heard (echo): \"{text_lower[:50]}"
+                                  f"{'...' if len(text_lower) > 50 else ''}\"", flush=True)
                             self._drop_the_early_beep()
                             return
 
@@ -1510,7 +1507,7 @@ class VoiceListener(threading.Thread):
                             return
 
                         # Outside hot window — trust rejection
-                        debug_log(f"🚫 Intent judge rejected (not directed, high confidence): \"{text_lower}\"", "voice")
+                        debug_log(f"🚫 Intent judge rejected (not directed, {intent_judgment.confidence} confidence): \"{text_lower}\"", "voice")
                         self._drop_the_early_beep()
                         return
                 else:
@@ -1605,6 +1602,21 @@ class VoiceListener(threading.Thread):
                 pass
         else:
             debug_log(f"input ignored (no wake word{intent_info}): {text_lower}", "voice")
+
+    def _not_her_echo(self, heard: str, utterance_energy: float) -> bool:
+        """True when *heard* cannot be only her own voice coming back: it
+        carries words she did not say, loud enough to have been spoken.
+
+        Two proofs, because either alone is fooled. Text alone takes a
+        "Thank you." that Whisper makes of the room over her French reply
+        for new words; energy alone takes a door slamming for a voice.
+        Together they are still fooled by such an invention while she
+        speaks, since her own voice clears the energy bar: that one the
+        judge names noise, and nothing overrides a noise verdict.
+        """
+        return (_carries_speech_she_did_not_say(
+                    heard, self.echo_detector._last_tts_text or "")
+                and self.echo_detector.utterance_carries_a_voice(utterance_energy))
 
     def _after_his_question(self, segments: list, current_text: str) -> list:
         """The transcript with the question being collected put back before
@@ -3435,15 +3447,25 @@ class VoiceListener(threading.Thread):
             self.state_manager.check_hot_window_expiry(self.cfg.voice_debug)
             return
 
-        # Add to transcript buffer for context-aware processing
-        # Mark as "during TTS" if utterance STARTED during TTS (not just if TTS is still speaking now)
-        # This ensures mixed echo+user speech gets properly marked for intent judge
+        # Add to transcript buffer for context-aware processing.
+        # The "during TTS" mark tells the judge the words may be her own
+        # voice coming back, which it never extracts. Timing says when that
+        # can be: while she speaks, or for an utterance that started (the
+        # voice detector's pre-roll included) before her last word plus the
+        # echo tolerance. His answer to her question often starts inside
+        # that tolerance, so timing does not decide alone: words she did not
+        # say, loud enough to have been spoken, are never marked.
         if self.tts is not None and self.tts.is_speaking():
-            is_during_tts = True
+            in_her_time = True
         else:
             tts_finish_time = self.echo_detector._last_tts_finish_time
             echo_tolerance = self.echo_detector.echo_tolerance
-            is_during_tts = (tts_finish_time > 0 and utterance_start_time > 0 and utterance_start_time < tts_finish_time + echo_tolerance)
+            in_her_time = (tts_finish_time > 0 and utterance_start_time > 0
+                           and utterance_start_time < tts_finish_time + echo_tolerance)
+        is_during_tts = in_her_time and not self._not_her_echo(text, utterance_energy)
+        if in_her_time and not is_during_tts:
+            debug_log(f"🗣️ not marked as her echo (words she did not say, and a voice): "
+                      f"\"{text[:60]}\"", "voice")
         self._transcript_buffer.add(
             text=text,
             start_time=utterance_start_time,
