@@ -390,6 +390,16 @@ The fuzzy check acts as a fast, reliable safety net. The intent judge provides d
    applies to this question in the post-TTS cooldown. Either test alone
    was fooled — text by a hallucination, energy by a door slamming.
 
+   The floor is read once per reply, when her first sentence is queued:
+   the mean level of the last 50 frames the microphone read (a second at
+   the default 20 ms frame). It holds for the whole reply. A reply spoken
+   as it is written (`output/streaming.spec.md`) queues each later sentence
+   while the microphone hears her say the one before; a floor read then
+   would be her own voice, and his soft answer right after her last word
+   would fall under the bar it sets. The thinking tune plays until her
+   reply is handed over, so the floor counts it when the microphone hears
+   it.
+
    Both together are still fooled by a hallucination while she speaks,
    since her own voice clears the energy bar. That one the judge names:
    a verdict that calls the utterance noise is never overridden (see "Text

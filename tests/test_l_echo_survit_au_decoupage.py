@@ -14,7 +14,9 @@ and be taken for the user. She would answer her own earlier sentences —
 the failure fixed on 2026-08-16, reintroduced by the feature that
 followed it.
 
-So one reply accumulates, and a new reply starts over.
+So one reply accumulates, and a new reply starts over. What is recorded
+when she starts speaking, the start time and the floor of the voice proof,
+is the first chunk's and holds for the whole reply.
 """
 
 from __future__ import annotations
@@ -95,3 +97,47 @@ def test_the_start_time_is_the_first_chunk_not_the_last():
     d.track_tts_start(DEUX, continues=True)
 
     assert d._tts_start_time == debut
+
+
+FLOOR = 0.005       # the room, as she starts speaking
+HER_VOICE = 0.03    # her previous sentence, heard through the speakers
+
+
+def _soft_voice(d):
+    """A voice above the bar the room's floor sets, below her own."""
+    return FLOOR * d.energy_spike_threshold * 1.5
+
+
+def test_the_floor_is_the_first_chunks_not_the_last():
+    """The voice proof weighs an utterance against the floor recorded when
+    she started speaking. A later chunk is queued while the microphone hears
+    her say the one before: a floor read then is her voice, and his soft
+    answer would not clear twice that."""
+    d = EchoDetector()
+    d.track_tts_start(UNE, baseline_energy=FLOOR)
+    d.track_tts_start(DEUX, baseline_energy=HER_VOICE, continues=True)
+    d.track_tts_start(TROIS, baseline_energy=HER_VOICE, continues=True)
+
+    assert d.utterance_carries_a_voice(_soft_voice(d)) is True
+
+
+def test_a_new_reply_reads_the_floor_again():
+    """The control: the floor holds across the chunks of one reply, not
+    across replies."""
+    d = EchoDetector()
+    d.track_tts_start(UNE, baseline_energy=FLOOR)
+
+    d.track_tts_start("Je ne sais pas.", baseline_energy=HER_VOICE, continues=False)
+
+    assert d.utterance_carries_a_voice(_soft_voice(d)) is False
+
+
+def test_a_chunk_with_no_reply_before_it_records_the_floor():
+    """A chunk said to continue a reply that never started starts one, its
+    floor included: with no floor the voice proof would take the room's own
+    level for a voice for the whole reply."""
+    d = EchoDetector()
+
+    d.track_tts_start(DEUX, baseline_energy=FLOOR, continues=True)
+
+    assert d.utterance_carries_a_voice(FLOOR) is False

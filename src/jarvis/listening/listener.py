@@ -810,7 +810,9 @@ class VoiceListener(threading.Thread):
     def track_tts_start(self, tts_text: str, continues: bool = False) -> None:
         """Called when TTS starts speaking."""
         if self.tts and self.tts.enabled:
-            # Calculate baseline energy from recent audio samples
+            # The microphone's mean level over its recent frames. The
+            # detector takes it as the voice proof's floor when this text
+            # starts a reply; a later sentence keeps its reply's floor.
             baseline_energy = 0.0045  # default
             if self._recent_audio_energy:
                 baseline_energy = sum(self._recent_audio_energy) / len(self._recent_audio_energy)

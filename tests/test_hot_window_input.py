@@ -1798,6 +1798,93 @@ class TestHisAnswerTheMomentHerReplyEnds:
 
 
 # ---------------------------------------------------------------------------
+# Tests: His answer after a reply she spoke as she wrote it
+# ---------------------------------------------------------------------------
+
+# A reply long enough to be spoken sentence by sentence, ending on a question.
+_HER_STREAMED_REPLY = ("La réunion de lundi est confirmée. "
+                       "Votre collègue apportera les documents imprimés. "
+                       "Avez-vous une autre question ?")
+# He answers softly: above the bar the room's floor sets, well below her
+# voice coming back through the speakers.
+_HIS_SOFT_VOICE = 1.5
+
+
+def _the_microphone_hears(listener, level: float) -> None:
+    """Two seconds of audio at *level*, 20 ms frames, through the audio
+    loop's own voice detector, which keeps the recent levels the floor is
+    read from."""
+    for _ in range(100):
+        listener._is_speech_frame(np.full(320, level, dtype=np.float32))
+
+
+def _she_streams(listener, reply: str) -> float:
+    """She says *reply* as she writes it, the way the reply thread does: each
+    sentence is queued as it closes, the first while the room is quiet and
+    each later one while the microphone hears her say the one before, then
+    the tail once the reply is written. The end-of-reply callback the tail
+    carries stamps her last word and schedules the hot window. Returns when
+    her voice stopped."""
+    listener.tts.voice_delay.return_value = 0.0
+    _the_microphone_hears(listener, _FLOOR)
+    on_token = listener._speak_as_it_comes(_Turn("question"))
+    queued = 0
+    for i in range(0, len(reply), 9):
+        on_token(reply[i:i + 9])
+        if listener.tts.speak.call_count > queued:
+            queued = listener.tts.speak.call_count
+            _the_microphone_hears(listener, _level(listener, _HER_VOICE))
+    listener._speak_reply(reply)
+    assert queued >= 2, "the reply was not spoken sentence by sentence"
+    last_word = time.time()
+    listener.tts.speak.call_args.kwargs["completion_callback"]()
+    return last_word
+
+
+@pytest.mark.unit
+class TestHisAnswerAfterAReplySpokenAsItWasWritten:
+    """She speaks a long reply as she writes it, sentence by sentence, and
+    he answers its closing question at once, softly.
+
+    The voice proof weighs his answer against twice the floor recorded when
+    she started speaking (listening.spec.md, "Overriding an echo verdict
+    takes positive evidence"). Each later sentence of such a reply is queued
+    while the microphone hears her say the one before: a floor read then is
+    her voice, and his soft answer right after her last word, under twice
+    that, would be shown to the judge as her echo and set aside."""
+
+    def _her_reply_ends(self):
+        listener, _ = _create_listener(echo_tolerance=0.1, hot_window_seconds=0.2)
+        last_word = _she_streams(listener, _HER_STREAMED_REPLY)
+        assert _wait_for_hot_window_active(listener)
+        _judge_that_reads_the_marker(listener)
+        return listener, last_word
+
+    @patch("builtins.print")
+    def test_his_soft_answer_is_answered(self, _print):
+        listener, last_word = self._her_reply_ends()
+
+        _whisper_hears(listener, _HIS_QUESTION, started=_just_after(listener, last_word),
+                       level=_level(listener, _HIS_SOFT_VOICE))
+
+        assert "lyon" in _accepted_query(listener).lower()
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_a_phrase_made_of_the_quiet_then_is_not_answered(self, mock_print):
+        """The control: the floor her reply started with still holds a
+        phrase Whisper makes of the room just after her under the bar."""
+        listener, last_word = self._her_reply_ends()
+
+        _whisper_hears(listener, "Merci.", started=_just_after(listener, last_word),
+                       level=_level(listener, _ROOM_NOISE))
+
+        assert _accepted_query(listener) == ""
+        assert _console_says_heard_as_her_echo(mock_print, "merci.")
+        listener.state_manager.stop()
+
+
+# ---------------------------------------------------------------------------
 # Tests: A hesitant verdict in the hot window
 # ---------------------------------------------------------------------------
 
