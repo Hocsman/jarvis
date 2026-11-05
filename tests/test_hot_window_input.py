@@ -11,14 +11,20 @@ but use real StateManager and EchoDetector instances to avoid coupling to intern
 
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
+import numpy as np
 import pytest
+from rapidfuzz import fuzz
 
 from conftest import _created_listeners
+from jarvis.listening.echo_detection import EchoDetector
 from jarvis.listening.state_manager import StateManager, ListeningState
 from jarvis.listening.intent_judge import IntentJudge, IntentJudgment
 from jarvis.listening.listener import _Turn
+from jarvis.listening.wake_detection import is_wake_word_detected
+from jarvis.config import get_default_config
 
 
 # ---------------------------------------------------------------------------
@@ -562,7 +568,7 @@ class TestEchoAndUserSpeechInSameChunk:
     @patch("builtins.print")
     def test_judge_returns_none_hot_window_speech_still_accepted(self, _print):
         """When the intent judge times out or errors (returns None), hot window
-        speech that passes the echo check should still be accepted.
+        speech carrying words she did not say, in a voice, is still accepted.
 
         Real scenario: user speaks during hot window, Whisper delivers mixed
         echo+speech, intent judge times out on the long transcript. The beep
@@ -598,7 +604,7 @@ class TestEchoAndUserSpeechInSameChunk:
         query = _accepted_query(listener)
         assert query != "", (
             "Hot window speech should be accepted even when intent judge "
-            "times out — the early echo check already cleared it"
+            "times out — it carries words she did not say, in a voice"
         )
         assert "stalin" in query.lower() or "communism" in query.lower()
         listener.state_manager.stop()
@@ -1112,6 +1118,853 @@ class TestEchoRejectionInHotWindow:
 
         # Non-echo speech in hot window is accepted via override
         assert _accepted_query(listener) == "did you see the game last night"
+        listener.state_manager.stop()
+
+
+# ---------------------------------------------------------------------------
+# Tests: His answer, begun the moment her reply ends
+# ---------------------------------------------------------------------------
+
+# The microphone's level when she started speaking, and how loud each source
+# reaches it, as multiples of the bar the echo detector sets over that floor.
+_FLOOR = 0.005
+_HIS_VOICE = 5.0
+_HER_VOICE = 3.0     # her reply through the speakers clears the bar too
+_ROOM_NOISE = 0.5
+
+_HER_REPLY = "Bien reçu, Monsieur. Je reste à votre écoute : que souhaitez-vous savoir ce soir ?"
+_HIS_QUESTION = "quel temps fera-t-il demain matin à lyon ?"
+# Her reply coming back decimated by Whisper, words dropped and others bent,
+# nearly all of them still hers: the contiguous echo check misses it.
+_HER_WORDS_DECIMATED = "reçu monsieur reste écoute souhaitez vous soir"
+# Her reply when it names her, and when it says a word the wake-word check
+# takes for her name, each coming back decimated as she stops.
+_HER_REPLY_NAMING_HER = ("Bien reçu, Monsieur, ici Jarvis. Je reste à votre écoute : "
+                         "que souhaitez-vous savoir ce soir ?")
+_HER_NAME_DECIMATED = "reçu monsieur jarvis reste écoute souhaitez vous soir"
+_HER_REPLY_WITH_A_WORD_LIKE_HER_NAME = (
+    "Bien reçu, Monsieur. À mon avis, il vaut mieux partir tôt demain matin pour "
+    "éviter les bouchons. Qu'en pensez-vous ?")
+_A_WORD_LIKE_HER_NAME_DECIMATED = "reçu monsieur mon avis mieux partir matin éviter bouchons pensez"
+# Her reply holds no word the wake-word check takes for her name, and
+# coming back Whisper bends one of hers into one: "servi" heard "servis",
+# close to the alias "jervis".
+_HER_REPLY_WITH_A_WORD_WHISPER_BENDS = (
+    "Le dîner est servi, Monsieur. Voulez-vous que je baisse un peu la lumière du salon ?")
+_A_WORD_BENT_INTO_HER_NAME = "dîner servis monsieur voulez baisse peu lumière salon"
+
+
+def _with_the_default_aliases(listener):
+    """The wake word as configured by default, with its aliases: the
+    spellings Whisper gives her name."""
+    listener.cfg.wake_aliases = list(get_default_config()["wake_aliases"])
+    return listener
+
+
+def _the_judge_gave_no_verdict(mock_print) -> bool:
+    """Whether the console says the judge gave no verdict, as the listener
+    says it before deciding without one."""
+    return any("Intent judge: unavailable" in line for line in _console_lines(mock_print))
+
+
+def _level(listener, multiple: float) -> float:
+    detector = listener.echo_detector
+    return _FLOOR * detector.energy_spike_threshold * multiple
+
+
+def _just_after(listener, last_word: float) -> float:
+    """When his answer starts if he answers at once: inside the echo
+    tolerance after her last word, the voice detector's pre-roll counted."""
+    return last_word + listener.echo_detector.echo_tolerance / 3
+
+
+def _she_says(listener, reply: str) -> float:
+    """She says *reply* to its last word: the end-of-reply callback stamps
+    it and schedules the hot window. Returns when her voice stopped."""
+    listener.echo_detector.track_tts_start(reply, baseline_energy=_FLOOR)
+    last_word = time.time()
+    _simulate_tts_finish(listener)
+    return last_word
+
+
+def _whisper_hears(listener, text: str, *, started: float, level: float) -> None:
+    """One utterance through the audio loop's own path, from the voice
+    detector closing it to the decision: it started at *started* on the
+    capture clock (pre-roll included), closes now, its audio sits at
+    *level*, and Whisper (faked) makes *text* of it."""
+    cfg = listener.cfg
+    cfg.whisper_min_audio_duration, cfg.whisper_min_confidence = 0.15, 0.3
+    cfg.whisper_no_speech_threshold = 0.5
+    listener._whisper_backend, listener._whisper_device = "faster-whisper", "cuda"
+    listener.model = MagicMock()
+    listener.model.transcribe.return_value = (
+        [SimpleNamespace(text=f" {text}", avg_logprob=-0.1, no_speech_prob=0.01)],
+        SimpleNamespace(language="fr"))
+    listener.echo_detector.track_utterance_timing(started, 0.0)
+    listener._frame_captured_at = time.time()
+    listener._utterance_frames = [np.full(320, level, dtype=np.float32) for _ in range(50)]
+    listener.is_speech_active = True
+    listener._finalize_utterance()
+
+
+def _current_line(prompt: str) -> str:
+    """The line of a judge prompt that holds the utterance being judged."""
+    return next((line for line in prompt.splitlines()
+                 if "CURRENT - JUDGE THIS" in line), "")
+
+
+def _judge_that_reads_the_marker(listener, on_hers=None):
+    """A judge that reads the prompt the real judge builds, so it sees what
+    the model sees: a current segment shown "(during TTS)" gets *on_hers*,
+    anything else in the hot window is his. By default *on_hers* is what
+    the prompt asks for, her echo, never extracted. Field trace: the echo
+    verdict came at a confidence below "high"."""
+    if on_hers is None:
+        on_hers = _make_judgment(
+            directed=False, confidence="medium",
+            reasoning="the current segment is marked (during TTS), an echo "
+                      "of the assistant's own speech, never extracted")
+
+    def judge(**kwargs):
+        current = _current_line(IntentJudge()._build_user_prompt(**kwargs))
+        assert current, kwargs
+        if "during TTS" in current:
+            return on_hers
+        return _make_judgment(directed=True, query=kwargs["current_text"],
+                              reasoning="his follow-up in the hot window")
+
+    mock_judge = MagicMock()
+    mock_judge.available = True
+    mock_judge.last_failure_reason = ""
+    mock_judge.judge.side_effect = judge
+    listener._intent_judge = mock_judge
+    return mock_judge
+
+
+def _current_line_shown_to(judge) -> str:
+    """The line of the last prompt that holds the utterance being judged."""
+    return _current_line(_prompt_shown_to(judge))
+
+
+def _console_lines(mock_print) -> list:
+    return [" ".join(str(arg) for arg in call.args) for call in mock_print.call_args_list]
+
+
+def _console_says_what_became_of(mock_print, heard: str) -> bool:
+    """Whether a console line, other than the transcription's own "📝 Heard",
+    quotes *heard*, as far as the console quotes it: what she did with it,
+    not only that it was heard."""
+    quoted = heard.lower()[:50]
+    return any(quoted in line.lower() and "📝" not in line
+               for line in _console_lines(mock_print))
+
+
+def _console_says_heard_as_her_echo(mock_print, heard: str) -> bool:
+    """Whether the console says *heard* was set aside as her own echo."""
+    quoted = heard.lower()[:50]
+    return any("🔇 Heard (echo)" in line and quoted in line.lower()
+               for line in _console_lines(mock_print))
+
+
+@pytest.mark.unit
+class TestHisAnswerTheMomentHerReplyEnds:
+    """She ends her reply on a question and he answers at once, without the
+    wake word, as people do.
+
+    Field trace (2026-11-05): his question began within the echo tolerance
+    of her last word, counting the voice detector's pre-roll, so it was shown
+    to the judge "(during TTS)". The judge's prompt says such a segment is
+    her echo and never extracted; it said so, he was not answered, and
+    nothing on the console said why. The early text check had cleared it:
+    hardly a word of it was hers.
+    """
+
+    def _her_reply_ends(self, reply=_HER_REPLY):
+        # The window outlasts the echo tolerance, as every configuration's
+        # does, kept short so that waiting for it to close stays quick.
+        listener, _ = _create_listener(echo_tolerance=0.1, hot_window_seconds=0.2)
+        last_word = _she_says(listener, reply)
+        assert _wait_for_hot_window_active(listener)
+        return listener, last_word
+
+    @patch("builtins.print")
+    def test_his_answer_is_answered(self, _print):
+        listener, last_word = self._her_reply_ends()
+        _judge_that_reads_the_marker(listener)
+        # As in the field, his words reach the judge after the window closed.
+        assert _wait_for_hot_window_expiry(listener)
+
+        _whisper_hears(listener, _HIS_QUESTION, started=_just_after(listener, last_word),
+                       level=_level(listener, _HIS_VOICE))
+
+        assert "lyon" in _accepted_query(listener).lower()
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_her_own_words_coming_back_then_are_not(self, _print):
+        """Her echo, decimated by Whisper so that the text check misses it.
+        It began while she spoke and closed as she stopped."""
+        listener, last_word = self._her_reply_ends()
+        _judge_that_reads_the_marker(listener)
+        assert (fuzz.partial_ratio(_HER_WORDS_DECIMATED, _HER_REPLY.lower())
+                < EchoDetector.PURE_ECHO_THRESHOLD)
+
+        _whisper_hears(listener, _HER_WORDS_DECIMATED, started=last_word - 1.5,
+                       level=_level(listener, _HER_VOICE))
+
+        assert _accepted_query(listener) == ""
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_a_phrase_made_of_the_quiet_then_is_not_answered(self, mock_print):
+        """Room noise just after her reply, which Whisper turns into a short
+        thank-you: words she did not say, and nobody's voice. It is not
+        answered, and the console says so."""
+        listener, last_word = self._her_reply_ends()
+        _judge_that_reads_the_marker(listener)
+
+        _whisper_hears(listener, "Merci.", started=_just_after(listener, last_word),
+                       level=_level(listener, _ROOM_NOISE))
+
+        assert _accepted_query(listener) == ""
+        assert _console_says_what_became_of(mock_print, "merci.")
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("heard, starts, level", [
+        # Her own words coming back as she stops, decimated by Whisper.
+        (_HER_WORDS_DECIMATED, "while she spoke", _HER_VOICE),
+        # What Whisper makes of the quiet right after her.
+        ("Merci.", "just after", _ROOM_NOISE),
+    ], ids=["her-words", "made-of-the-quiet"])
+    @pytest.mark.parametrize("verdict", [
+        _make_judgment(directed=False, confidence=confidence,
+                       reasoning="the assistant's own speech, marked during TTS")
+        for confidence in ("high", "medium", "low")
+    ] + [
+        _make_judgment(directed=True, query="", confidence=confidence,
+                       reasoning="hot window, nothing to extract")
+        for confidence in ("high", "medium", "low")
+    ], ids=[f"{kind}-{confidence}" for kind in ("rejected", "directed-without-query")
+            for confidence in ("high", "medium", "low")])
+    @patch("builtins.print")
+    def test_what_could_be_hers_is_not_answered_whatever_the_judge_says(
+            self, mock_print, verdict, heard, starts, level):
+        """The judge is shown these words "(during TTS)" and leaves them out
+        in its own words: a rejection that never says "echo", or directed
+        with nothing to extract. The listener knows they could be hers, and
+        no override takes them."""
+        listener, last_word = self._her_reply_ends()
+        _judge_that_reads_the_marker(listener, on_hers=verdict)
+        started = last_word - 1.5 if starts == "while she spoke" else _just_after(listener, last_word)
+
+        _whisper_hears(listener, heard, started=started, level=_level(listener, level))
+
+        assert _accepted_query(listener) == ""
+        assert _console_says_heard_as_her_echo(mock_print, heard)
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("reply, heard", [
+        (_HER_REPLY_NAMING_HER, _HER_NAME_DECIMATED),
+        (_HER_REPLY_WITH_A_WORD_LIKE_HER_NAME, _A_WORD_LIKE_HER_NAME_DECIMATED),
+    ], ids=["her-name", "a-word-like-her-name"])
+    @pytest.mark.parametrize("verdict", [
+        _make_judgment(directed=False, confidence=confidence, reasoning=reasoning)
+        for reasoning in ("an echo of the assistant's own speech",
+                          "the assistant's own speech, marked during TTS")
+        for confidence in ("high", "low")
+    ] + [
+        _make_judgment(directed=True, query="", confidence=confidence,
+                       reasoning="hot window, nothing to extract")
+        for confidence in ("high", "low")
+    ], ids=[f"{kind}-{confidence}" for kind in ("echo", "rejected", "directed-without-query")
+            for confidence in ("high", "low")])
+    @patch("builtins.print")
+    def test_her_own_words_carrying_the_wake_word_are_not_answered(
+            self, mock_print, verdict, reply, heard):
+        """Her reply named her, or said a word the wake-word check takes for
+        her name, and comes back decimated as she stops. The wake word in it
+        is hers, so it proves nothing: the words are set aside as hers,
+        whatever the judge's words for leaving them out."""
+        listener, last_word = self._her_reply_ends(reply)
+        _judge_that_reads_the_marker(listener, on_hers=verdict)
+        cfg = listener.cfg
+        assert is_wake_word_detected(heard, cfg.wake_word, cfg.wake_aliases, cfg.wake_fuzzy_ratio)
+        assert fuzz.partial_ratio(heard, reply.lower()) < EchoDetector.PURE_ECHO_THRESHOLD
+
+        _whisper_hears(listener, heard, started=last_word - 1.5, level=_level(listener, _HER_VOICE))
+
+        assert _accepted_query(listener) == ""
+        assert _console_says_heard_as_her_echo(mock_print, heard)
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("verdict", [
+        None,   # the judge's own reading of the mark: her echo
+        _make_judgment(directed=False, confidence="medium",
+                       reasoning="the assistant's own speech, marked during TTS"),
+        _make_judgment(directed=True, query="", confidence="low",
+                       reasoning="hot window, nothing to extract"),
+    ], ids=["echo", "rejected", "directed-without-query"])
+    @patch("builtins.print")
+    def test_his_quiet_answer_with_the_wake_word_is_answered(self, _print, verdict):
+        """He answers at once but quietly, below the voice bar, so the words
+        could be hers and the judge is shown them as hers. He said the wake
+        word, though, a word she did not say, and the wake word decides, as
+        outside the window: what he said is answered, the wake word taken
+        out."""
+        listener, last_word = self._her_reply_ends()
+        _judge_that_reads_the_marker(listener, on_hers=verdict)
+
+        _whisper_hears(listener, f"Jarvis, {_HIS_QUESTION}",
+                       started=_just_after(listener, last_word), level=_level(listener, 0.8))
+
+        answered = _accepted_query(listener)
+        assert "lyon" in answered and "jarvis" not in answered
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("reply, heard, starts, level", [
+        (_HER_REPLY, _HER_WORDS_DECIMATED, "while she spoke", _HER_VOICE),
+        (_HER_REPLY, "Merci.", "just after", _ROOM_NOISE),
+        (_HER_REPLY_NAMING_HER, _HER_NAME_DECIMATED, "while she spoke", _HER_VOICE),
+    ], ids=["her-words", "made-of-the-quiet", "her-name"])
+    @patch("builtins.print")
+    def test_with_no_verdict_what_could_be_hers_is_not_answered(
+            self, mock_print, reply, heard, starts, level):
+        """The judge gives no verdict: a timeout, or its back-off after a
+        connection error. The listener keeps his words without it, not words
+        that could be hers, her name among them, and the console says so."""
+        listener, last_word = self._her_reply_ends(reply)
+        _install_intent_judge(listener, None).last_failure_reason = "timeout"
+        started = last_word - 1.5 if starts == "while she spoke" else _just_after(listener, last_word)
+
+        _whisper_hears(listener, heard, started=started, level=_level(listener, level))
+
+        assert _the_judge_gave_no_verdict(mock_print)
+        assert _accepted_query(listener) == ""
+        assert _console_says_heard_as_her_echo(mock_print, heard)
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_with_no_verdict_her_words_are_read_against_the_reply_they_came_from(
+            self, mock_print):
+        """A reply waiting its turn starts while the judge is thinking, and
+        the judge then gives no verdict. Her decimated words, her name among
+        them, are still read against the reply they came from."""
+        listener, last_word = self._her_reply_ends(_HER_REPLY_NAMING_HER)
+        mock_judge = _install_intent_judge(listener, None)
+        mock_judge.last_failure_reason = "timeout"
+
+        def judge(**_kwargs):
+            listener.echo_detector.track_tts_start(
+                "La réunion de demain est déplacée à neuf heures.", baseline_energy=_FLOOR)
+            return None
+
+        mock_judge.judge.side_effect = judge
+
+        _whisper_hears(listener, _HER_NAME_DECIMATED, started=last_word - 1.5,
+                       level=_level(listener, _HER_VOICE))
+
+        assert _the_judge_gave_no_verdict(mock_print)
+        assert _accepted_query(listener) == ""
+        assert _console_says_heard_as_her_echo(mock_print, _HER_NAME_DECIMATED)
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("verdict", [
+        _make_judgment(directed=False, confidence="medium",
+                       reasoning="an echo of the assistant's own speech"),
+        _make_judgment(directed=False, confidence="medium",
+                       reasoning="the assistant's own speech, marked during TTS"),
+        _make_judgment(directed=True, query="", confidence="low",
+                       reasoning="hot window, nothing to extract"),
+    ], ids=["echo", "rejected", "directed-without-query"])
+    @patch("builtins.print")
+    def test_her_name_is_read_against_the_reply_the_judge_was_shown(self, mock_print, verdict):
+        """A reply waiting its turn starts while the judge is thinking, and
+        replaces the reply her echo would be compared with. Her decimated
+        words, her name among them, are read against the reply the judge was
+        shown, which named her: the wake word in them is hers, and they are
+        set aside as hers."""
+        listener, last_word = self._her_reply_ends(_HER_REPLY_NAMING_HER)
+        mock_judge = _install_intent_judge(listener, verdict)
+
+        def judge(**_kwargs):
+            listener.echo_detector.track_tts_start(
+                "La réunion de demain est déplacée à neuf heures.", baseline_energy=_FLOOR)
+            return verdict
+
+        mock_judge.judge.side_effect = judge
+
+        _whisper_hears(listener, _HER_NAME_DECIMATED, started=last_word - 1.5,
+                       level=_level(listener, _HER_VOICE))
+
+        assert _accepted_query(listener) == ""
+        assert _console_says_heard_as_her_echo(mock_print, _HER_NAME_DECIMATED)
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_a_query_extracted_from_words_shown_as_hers_is_answered(self, _print):
+        """His quiet answer just after her last word could be hers, and the
+        judge is shown it "(during TTS)". A judge that extracts a query from
+        it anyway is answered, as any directed verdict with a query is: the
+        mark informs the judge, it does not overrule it."""
+        listener, last_word = self._her_reply_ends()
+        extracted = "quel temps fera-t-il demain matin"
+        _judge_that_reads_the_marker(listener, on_hers=_make_judgment(
+            directed=True, query=extracted, confidence="medium",
+            reasoning="his follow-up, whatever the mark says"))
+
+        _whisper_hears(listener, _HIS_QUESTION, started=_just_after(listener, last_word),
+                       level=_level(listener, 0.8))
+
+        assert _accepted_query(listener) == extracted
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_with_no_verdict_his_answer_is_answered(self, _print):
+        listener, last_word = self._her_reply_ends()
+        _install_intent_judge(listener, None).last_failure_reason = "timeout"
+
+        _whisper_hears(listener, _HIS_QUESTION, started=_just_after(listener, last_word),
+                       level=_level(listener, _HIS_VOICE))
+
+        assert "lyon" in _accepted_query(listener).lower()
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_with_no_verdict_his_quiet_answer_naming_her_is_answered(self, _print):
+        """With no verdict, his quiet answer could be hers, but the wake word
+        in it can only be his: it hands his words to the wake-word check, as
+        it does behind a verdict, which answers them with the wake word
+        taken out."""
+        listener, last_word = self._her_reply_ends()
+        _install_intent_judge(listener, None).last_failure_reason = "timeout"
+
+        _whisper_hears(listener, f"Jarvis, {_HIS_QUESTION}",
+                       started=_just_after(listener, last_word), level=_level(listener, 0.8))
+
+        answered = _accepted_query(listener)
+        assert "lyon" in answered and "jarvis" not in answered
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_with_no_verdict_his_words_holding_an_alias_are_answered_as_said(self, _print):
+        """With no verdict, his words heard in a voice are answered as he
+        said them, a word of his holding one of the wake word's aliases
+        ("charismatique" holds "charis") included."""
+        listener, last_word = self._her_reply_ends()
+        _with_the_default_aliases(listener)
+        _install_intent_judge(listener, None).last_failure_reason = "timeout"
+        heard = "Est-elle charismatique ?"
+        cfg = listener.cfg
+        assert is_wake_word_detected(heard.lower(), cfg.wake_word, cfg.wake_aliases,
+                                     cfg.wake_fuzzy_ratio)
+
+        _whisper_hears(listener, heard, started=_just_after(listener, last_word),
+                       level=_level(listener, _HIS_VOICE))
+
+        assert _accepted_query(listener) == heard.lower()
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("verdict", [
+        _make_judgment(directed=False, confidence="medium", reasoning="background conversation"),
+        _make_judgment(directed=False, confidence="high",
+                       reasoning="an echo of the assistant's own speech"),
+        _make_judgment(directed=True, query="", confidence="low",
+                       reasoning="hot window, nothing to extract"),
+        None,
+    ], ids=["rejected", "echo", "directed-without-query", "no-verdict"])
+    @patch("builtins.print")
+    def test_his_answer_holding_a_word_like_her_name_is_answered(self, mock_print, verdict):
+        """"Changé d'avis" holds "avis", a word the wake-word check takes for
+        her name on its own, not inside "d'avis" as it reads the utterance.
+        His answer is answered, and the console says so."""
+        listener, last_word = self._her_reply_ends()
+        _install_intent_judge(listener, verdict).last_failure_reason = "timeout"
+        heard = "Non, j'ai changé d'avis."
+
+        _whisper_hears(listener, heard, started=_just_after(listener, last_word),
+                       level=_level(listener, _HIS_VOICE))
+
+        assert "changé" in _accepted_query(listener)
+        assert _console_says_what_became_of(mock_print, heard)
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("spelling", ["chavis", "joris"])
+    @pytest.mark.parametrize("judged", [True, False], ids=["echo-verdict", "no-verdict"])
+    @patch("builtins.print")
+    def test_her_name_coming_back_in_another_spelling_is_not_answered(
+            self, mock_print, judged, spelling):
+        """Her reply named her, and her name comes back in one of the
+        spellings Whisper gives it, the ones the wake word's aliases list.
+        After a reply holding the wake word, no wake word heard can be told
+        from hers: the words are set aside as hers."""
+        listener, last_word = self._her_reply_ends(_HER_REPLY_NAMING_HER)
+        _with_the_default_aliases(listener)
+        if judged:
+            _judge_that_reads_the_marker(listener)
+        else:
+            _install_intent_judge(listener, None).last_failure_reason = "timeout"
+        heard = _HER_NAME_DECIMATED.replace("jarvis", spelling)
+        cfg = listener.cfg
+        assert is_wake_word_detected(heard, cfg.wake_word, cfg.wake_aliases, cfg.wake_fuzzy_ratio)
+        assert (fuzz.partial_ratio(heard, _HER_REPLY_NAMING_HER.lower())
+                < EchoDetector.PURE_ECHO_THRESHOLD)
+
+        _whisper_hears(listener, heard, started=last_word - 1.5, level=_level(listener, _HER_VOICE))
+
+        assert _accepted_query(listener) == ""
+        assert _console_says_heard_as_her_echo(mock_print, heard)
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("judged", [True, False], ids=["echo-verdict", "no-verdict"])
+    @patch("builtins.print")
+    def test_a_word_of_hers_bent_into_her_name_is_not_answered(self, mock_print, judged):
+        """Her reply holds no word the wake-word check takes for her name,
+        but coming back Whisper bends one of hers into one. It is still her
+        word: the words are set aside as hers."""
+        reply, heard = _HER_REPLY_WITH_A_WORD_WHISPER_BENDS, _A_WORD_BENT_INTO_HER_NAME
+        listener, last_word = self._her_reply_ends(reply)
+        _with_the_default_aliases(listener)
+        if judged:
+            _judge_that_reads_the_marker(listener)
+        else:
+            _install_intent_judge(listener, None).last_failure_reason = "timeout"
+        cfg = listener.cfg
+        assert is_wake_word_detected(heard, cfg.wake_word, cfg.wake_aliases, cfg.wake_fuzzy_ratio)
+        assert not is_wake_word_detected(reply.lower(), cfg.wake_word, cfg.wake_aliases,
+                                         cfg.wake_fuzzy_ratio)
+        assert fuzz.partial_ratio(heard, reply.lower()) < EchoDetector.PURE_ECHO_THRESHOLD
+
+        _whisper_hears(listener, heard, started=last_word - 1.5, level=_level(listener, _HER_VOICE))
+
+        assert _accepted_query(listener) == ""
+        assert _console_says_heard_as_her_echo(mock_print, heard)
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("spelling", ["Jarvis", "Jervis"])
+    @pytest.mark.parametrize("judged", [True, False], ids=["echo-verdict", "no-verdict"])
+    @patch("builtins.print")
+    def test_after_a_reply_holding_a_word_like_her_name_his_quiet_wake_word_is_weighed_as_hers(
+            self, mock_print, judged, spelling):
+        """Her reply said "avis", which the wake-word check takes for her
+        name. Coming back, that word could take any spelling Whisper gives
+        her name, so after such a reply no wake word heard can be told from
+        hers, in whichever spelling it is heard. His quiet answer naming her
+        is weighed as her words: set aside, and the console says so."""
+        listener, last_word = self._her_reply_ends(_HER_REPLY_WITH_A_WORD_LIKE_HER_NAME)
+        if judged:
+            _judge_that_reads_the_marker(listener)
+        else:
+            _install_intent_judge(listener, None).last_failure_reason = "timeout"
+        heard = f"{spelling}, {_HIS_QUESTION}"
+        cfg = listener.cfg
+        assert is_wake_word_detected(heard.lower(), cfg.wake_word, cfg.wake_aliases,
+                                     cfg.wake_fuzzy_ratio)
+
+        _whisper_hears(listener, heard, started=_just_after(listener, last_word),
+                       level=_level(listener, 0.8))
+
+        assert _accepted_query(listener) == ""
+        assert _console_says_heard_as_her_echo(mock_print, heard)
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("reply", [
+        _HER_REPLY_NAMING_HER, _HER_REPLY_WITH_A_WORD_LIKE_HER_NAME,
+    ], ids=["her-name", "a-word-like-her-name"])
+    @pytest.mark.parametrize("verdict", [
+        _make_judgment(directed=False, confidence="medium", reasoning="background conversation"),
+        _make_judgment(directed=False, confidence="high",
+                       reasoning="an echo of the assistant's own speech"),
+        _make_judgment(directed=True, query="", confidence="low",
+                       reasoning="hot window, nothing to extract"),
+        None,
+    ], ids=["rejected", "echo", "directed-without-query", "no-verdict"])
+    @patch("builtins.print")
+    def test_after_a_reply_holding_her_name_his_answer_in_his_voice_is_answered(
+            self, _print, verdict, reply):
+        """After a reply holding her name, or a word the wake-word check
+        takes for it, the wake word he says decides nothing. His answer
+        naming her, heard in his voice, is still his: it is answered as any
+        answer of his in the hot window is."""
+        listener, last_word = self._her_reply_ends(reply)
+        _install_intent_judge(listener, verdict).last_failure_reason = "timeout"
+
+        _whisper_hears(listener, f"Jarvis, {_HIS_QUESTION}",
+                       started=_just_after(listener, last_word),
+                       level=_level(listener, _HIS_VOICE))
+
+        assert "lyon" in _accepted_query(listener)
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_after_her_time_his_quiet_words_are_his(self, _print):
+        """Once the echo tolerance has passed, her voice is no longer coming
+        back: quiet words heard then are his, and a rejection in other words
+        than echo does not set them aside."""
+        listener, _ = _create_listener(echo_tolerance=0.02, hot_window_seconds=3.0)
+        last_word = _she_says(listener, _HER_REPLY)
+        assert _wait_for_hot_window_active(listener)
+        _install_intent_judge(listener, _make_judgment(
+            directed=False, confidence="medium", reasoning="background conversation"))
+        started = last_word + 10 * listener.echo_detector.echo_tolerance
+        while time.time() < started + 0.05:
+            time.sleep(0.01)
+
+        _whisper_hears(listener, "Oui, vas-y.", started=started, level=_level(listener, 0.8))
+
+        assert "vas" in _accepted_query(listener)
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_his_words_after_her_tail_are_read_without_it(self, _print):
+        """Whisper joins the tail of her reply, heard as she stops, to his
+        question. Once the tail is stripped, what is left is read on its
+        own: his words, which a rejection does not set aside."""
+        listener, last_word = self._her_reply_ends()
+        _install_intent_judge(listener, _make_judgment(
+            directed=False, confidence="medium", reasoning="background conversation"))
+        heard = "je reste à votre écoute que souhaitez-vous savoir ce soir ? la météo à lyon"
+
+        _whisper_hears(listener, heard, started=last_word - 1.0, level=_level(listener, _HIS_VOICE))
+
+        answered = _accepted_query(listener)
+        assert "météo" in answered and "écoute" not in answered
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_the_judge_is_shown_his_answer_as_his(self, _print):
+        listener, last_word = self._her_reply_ends()
+        judge = _judge_that_reads_the_marker(listener)
+
+        _whisper_hears(listener, _HIS_QUESTION, started=_just_after(listener, last_word),
+                       level=_level(listener, _HIS_VOICE))
+
+        current = _current_line_shown_to(judge)
+        assert "lyon" in current.lower() and "during TTS" not in current
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("heard, starts, level", [
+        (_HER_WORDS_DECIMATED, "while she spoke", _HER_VOICE),
+        ("Merci.", "just after", _ROOM_NOISE),
+    ], ids=["her-words", "made-of-the-quiet"])
+    @patch("builtins.print")
+    def test_the_judge_is_still_shown_what_could_be_hers_as_hers(
+            self, _print, heard, starts, level):
+        listener, last_word = self._her_reply_ends()
+        judge = _judge_that_reads_the_marker(listener)
+        started = last_word - 1.5 if starts == "while she spoke" else _just_after(listener, last_word)
+
+        _whisper_hears(listener, heard, started=started, level=_level(listener, level))
+
+        assert "during TTS" in _current_line_shown_to(judge)
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_his_words_over_hers_are_shown_as_his(self, _print):
+        """He talks while she is still speaking: her voice clears the bar
+        too, but the words are not hers."""
+        listener, _ = _create_listener(tts_speaking=True)
+        listener.echo_detector.track_tts_start(_HER_REPLY, baseline_energy=_FLOOR)
+        judge = _install_intent_judge(listener, _make_judgment(
+            directed=False, reasoning="no wake word"))
+
+        _whisper_hears(listener, "Non, je parlais de Lyon, pas de Paris.",
+                       started=time.time() - 1.0, level=_level(listener, _HIS_VOICE))
+
+        current = _current_line_shown_to(judge)
+        assert "lyon" in current.lower() and "during TTS" not in current
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_her_own_words_heard_while_she_still_speaks_stay_hers(self, _print):
+        """Her voice clears the bar while she speaks, so only her words keep
+        the mark there. Asked about later, he is shown them as hers."""
+        listener, tts = _create_listener(
+            tts_speaking=True, echo_tolerance=0.1, hot_window_seconds=0.2)
+        listener.echo_detector.track_tts_start(_HER_REPLY, baseline_energy=_FLOOR)
+        judge = _judge_that_reads_the_marker(listener)
+        _whisper_hears(listener, _HER_WORDS_DECIMATED, started=time.time() - 1.0,
+                       level=_level(listener, _HER_VOICE))
+
+        tts.is_speaking.return_value = False
+        _simulate_tts_finish(listener)
+        assert _wait_for_hot_window_active(listener)
+        _whisper_hears(listener, _HIS_QUESTION, started=time.time(),
+                       level=_level(listener, _HIS_VOICE))
+
+        her_line = next(line for line in _prompt_shown_to(judge).splitlines()
+                        if "souhaitez vous soir" in line)
+        assert "during TTS" in her_line
+        listener.state_manager.stop()
+
+
+# ---------------------------------------------------------------------------
+# Tests: A hesitant verdict in the hot window
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+class TestAHesitantVerdictInTheHotWindow:
+    """In the hot window a rejection the judge is unsure of is no stronger
+    than one it is sure of: it goes through the same overrides, so his words
+    are kept, hers are set aside, and either way the console says which.
+    The judge's confidence is "low" whenever its answer leaves it out."""
+
+    def _in_the_hot_window(self):
+        listener, _ = _create_listener(echo_tolerance=0.02, hot_window_seconds=3.0)
+        _she_says(listener, _HER_REPLY)
+        assert _wait_for_hot_window_active(listener)
+        return listener
+
+    @pytest.mark.parametrize("confidence", ["medium", "low"])
+    @patch("builtins.print")
+    def test_a_hesitant_rejection_of_his_words_is_overridden(self, _print, confidence):
+        listener = self._in_the_hot_window()
+        _install_intent_judge(listener, _make_judgment(
+            directed=False, confidence=confidence, reasoning="background conversation"))
+
+        listener._process_transcript(_HIS_QUESTION,
+                                     utterance_energy=_level(listener, _HIS_VOICE))
+
+        assert _accepted_query(listener) == _HIS_QUESTION
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("confidence", ["medium", "low"])
+    @patch("builtins.print")
+    def test_a_hesitant_echo_verdict_on_his_words_is_overridden(self, _print, confidence):
+        listener = self._in_the_hot_window()
+        _install_intent_judge(listener, _make_judgment(
+            directed=False, confidence=confidence, reasoning="echo of the assistant"))
+
+        listener._process_transcript(_HIS_QUESTION,
+                                     utterance_energy=_level(listener, _HIS_VOICE))
+
+        assert _accepted_query(listener) == _HIS_QUESTION
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("confidence", ["medium", "low"])
+    @patch("builtins.print")
+    def test_a_hesitant_echo_verdict_on_her_words_is_said(self, mock_print, confidence):
+        listener = self._in_the_hot_window()
+        assert (fuzz.partial_ratio(_HER_WORDS_DECIMATED, _HER_REPLY.lower())
+                < EchoDetector.PURE_ECHO_THRESHOLD)
+        _install_intent_judge(listener, _make_judgment(
+            directed=False, confidence=confidence, reasoning="echo of the assistant"))
+
+        listener._process_transcript(_HER_WORDS_DECIMATED,
+                                     utterance_energy=_level(listener, _HER_VOICE))
+
+        assert _accepted_query(listener) == ""
+        assert _console_says_what_became_of(mock_print, _HER_WORDS_DECIMATED)
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("confidence", ["medium", "low"])
+    @patch("builtins.print")
+    def test_a_hesitant_directed_verdict_without_a_query_takes_his_words(
+            self, _print, confidence):
+        listener = self._in_the_hot_window()
+        _install_intent_judge(listener, _make_judgment(
+            directed=True, query="", confidence=confidence, reasoning="follow-up"))
+
+        listener._process_transcript(_HIS_QUESTION,
+                                     utterance_energy=_level(listener, _HIS_VOICE))
+
+        assert _accepted_query(listener) == _HIS_QUESTION
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_her_own_words_the_early_check_did_not_see_are_said(self, mock_print):
+        """She is thinking about his next question while the window is
+        still open, so the early echo check stands aside, and the judge
+        rejects her own words without calling them echo."""
+        listener = self._in_the_hot_window()
+        listener._tune_player = MagicMock()
+        listener._tune_player.is_playing.return_value = True
+        _install_intent_judge(listener, _make_judgment(
+            directed=False, confidence="medium", reasoning="background conversation"))
+        heard = "bien reçu, monsieur. je reste à votre écoute"
+
+        listener._process_transcript(heard, utterance_energy=_level(listener, _HER_VOICE))
+
+        assert _accepted_query(listener) == ""
+        assert _console_says_what_became_of(mock_print, heard)
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_with_no_verdict_her_reply_coming_back_whole_is_said(self, mock_print):
+        """She is thinking about his next question while the window is still
+        open, so the early echo check stands aside, and the judge gives no
+        verdict. Her reply, which named her, comes back whole: it is set
+        aside as hers, and the console says so."""
+        listener, _ = _create_listener(echo_tolerance=0.02, hot_window_seconds=3.0)
+        _she_says(listener, _HER_REPLY_NAMING_HER)
+        assert _wait_for_hot_window_active(listener)
+        listener._tune_player = MagicMock()
+        listener._tune_player.is_playing.return_value = True
+        _install_intent_judge(listener, None).last_failure_reason = "timeout"
+        heard = "bien reçu, monsieur, ici jarvis. je reste à votre écoute"
+
+        listener._process_transcript(heard, utterance_energy=_level(listener, _HER_VOICE))
+
+        assert _the_judge_gave_no_verdict(mock_print)
+        assert _accepted_query(listener) == ""
+        assert _console_says_heard_as_her_echo(mock_print, heard)
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("directed", [False, True], ids=["rejected", "directed-without-query"])
+    @pytest.mark.parametrize("confidence", ["high", "medium", "low"])
+    @patch("builtins.print")
+    def test_a_wake_word_with_nothing_extracted_is_left_to_the_wake_word(
+            self, _print, confidence, directed):
+        """He says the wake word in the hot window and the judge extracts
+        nothing: the wake-word check decides, as outside the window, and
+        answers what he said, the wake word taken out."""
+        listener = self._in_the_hot_window()
+        _install_intent_judge(listener, _make_judgment(
+            directed=directed, query="", confidence=confidence, reasoning="unclear"))
+
+        listener._process_transcript(f"jarvis {_HIS_QUESTION}",
+                                     utterance_energy=_level(listener, _HIS_VOICE))
+
+        answered = _accepted_query(listener)
+        assert "lyon" in answered and "jarvis" not in answered
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_an_echo_verdict_is_read_against_the_reply_the_judge_was_shown(self, mock_print):
+        """A reply waiting its turn starts while the judge is thinking, and
+        replaces the reply her echo would be compared with. The verdict is
+        about the reply the judge was shown, so her decimated words are
+        still read against that one."""
+        listener = self._in_the_hot_window()
+        verdict = _make_judgment(directed=False, confidence="high",
+                                 reasoning="echo of the assistant")
+
+        def judge(**_kwargs):
+            listener.echo_detector.track_tts_start(
+                "La réunion de demain est déplacée à neuf heures.", baseline_energy=_FLOOR)
+            return verdict
+
+        mock_judge = _install_intent_judge(listener, verdict)
+        mock_judge.judge.side_effect = judge
+
+        listener._process_transcript(_HER_WORDS_DECIMATED,
+                                     utterance_energy=_level(listener, _HER_VOICE))
+
+        assert _accepted_query(listener) == ""
+        assert _console_says_heard_as_her_echo(mock_print, _HER_WORDS_DECIMATED)
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_outside_it_a_hesitant_rejection_still_leaves_it_to_the_wake_word(self, _print):
+        """Outside the hot window nothing changes: an unsure rejection falls
+        to the wake-word check, which a wake word passes."""
+        listener, _ = _create_listener()
+        _install_intent_judge(listener, _make_judgment(
+            directed=False, confidence="medium", reasoning="unclear"))
+
+        listener._process_transcript("jarvis quelle heure est-il à lyon",
+                                     utterance_energy=_level(listener, _HIS_VOICE))
+
+        assert "heure" in _accepted_query(listener)
         listener.state_manager.stop()
 
 

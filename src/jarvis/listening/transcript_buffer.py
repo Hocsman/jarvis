@@ -23,7 +23,7 @@ class TranscriptSegment:
     start_time: float                  # Unix timestamp when speech started
     end_time: float                    # Unix timestamp when speech ended
     energy: float = 0.0                # Audio energy level
-    is_during_tts: bool = False        # Whether TTS was playing during this segment
+    is_during_tts: bool = False        # Could be her own voice coming back (listening.spec.md, "Echo handling")
     processed: bool = False            # Whether a query was already extracted from this segment
 
     def __post_init__(self):
@@ -80,7 +80,8 @@ class TranscriptBuffer:
             start_time: Unix timestamp when speech started
             end_time: Unix timestamp when speech ended
             energy: Audio energy level of the segment
-            is_during_tts: Whether TTS was playing during this segment
+            is_during_tts: Whether the segment could be her own voice coming
+                back; the listener decides (listening.spec.md, "Echo handling")
         """
         if not text or not text.strip():
             return
