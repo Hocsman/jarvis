@@ -217,11 +217,11 @@ After TTS finishes, allow wake-word-free follow-up.
 
 **Duration:** Configurable (default: 3 seconds)
 
-**Behaviour:** Speech first passes through an early fuzzy echo check (rapidfuzz `partial_ratio`, threshold 70, with word-count guard to avoid catching mixed echo+speech). Pure echo is silently rejected **without calling the intent judge** — this keeps echo rejection instant and prevents it from blocking the audio loop. The hot window timer is **not** reset on echo rejection. Non-echo speech is sent to the intent judge, and if the judge rejects it, the rejection is overridden: non-echo speech in the hot window is accepted as a follow-up query. An echo verdict is overridden only on positive evidence (see "Overriding an echo verdict takes positive evidence"). In the hot window the judge's confidence changes none of this: a verdict it is unsure of goes through the same overrides as one it is sure of, a directed verdict with no query takes what he said whatever its confidence, and every path a verdict takes there ends in a console line that says what became of the utterance. The judge's confidence is "low" whenever its answer leaves it out. Outside the hot window, a verdict below high confidence leaves the decision to the wake-word check. Speech, not text: a segment the judge calls noise is not speech, and nothing overrides that verdict (see "Text Whisper Makes Out of Silence").
+**Behaviour:** Speech first passes through an early fuzzy echo check (rapidfuzz `partial_ratio`, threshold 70, with word-count guard to avoid catching mixed echo+speech). Pure echo is silently rejected **without calling the intent judge** — this keeps echo rejection instant and prevents it from blocking the audio loop. The hot window timer is **not** reset on echo rejection. Non-echo speech is sent to the intent judge, and if the judge rejects it, the rejection is overridden: non-echo speech in the hot window is accepted as a follow-up query. An echo verdict is overridden only on positive evidence (see "Overriding an echo verdict takes positive evidence"). Words that could be her own voice coming back, the ones the judge is shown "(during TTS)" (see "During TTS"), are taken by no override: whatever words the judge finds for leaving them out, a rejection that does not say echo or a directed verdict with no query, they are set aside as an echo verdict that stands sets them, with `🔇 Heard (echo)`. The listener decides it on the text as it stands once an echo prefix is stripped. In the hot window the judge's confidence changes none of this: a verdict it is unsure of goes through the same overrides as one it is sure of, a directed verdict with no query takes what he said whatever its confidence, and every path a verdict takes there ends in a console line that says what became of the utterance, a stop aside: that one she obeys out loud. The judge's confidence is "low" whenever its answer leaves it out. The wake word is his call in the hot window as outside it: an utterance carrying it that the verdict extracts no query from, her reply coming back whole aside, goes to the wake-word check, which answers what follows the wake word, so a quiet answer of his that could be hers is still answered when he names her. Outside the hot window, a verdict below high confidence leaves the decision to the wake-word check. Speech, not text: a segment the judge calls noise is not speech, and nothing overrides that verdict (see "Text Whisper Makes Out of Silence").
 
 **Mixed echo+speech handling:** When Whisper merges TTS echo and user speech into one chunk (e.g. mic picks up TTS then user speaks), the word-count guard detects the extra content and lets it through to the intent judge. The judge extracts the user's actual query from the mixed transcript. Post-judge echo checks also use the word-count guard and verify the judge's extracted query isn't itself echo before rejecting.
 
-**Early salvage for echo-prefixed follow-ups:** Before the early fuzzy check rejects a chunk as pure echo, the listener calls `cleanup_leading_echo` to strip any TTS-tail prefix. If exact-word cleanup fails (for example because Whisper mis-transcribed the first echo word — *"explores"* → *"laws"* — breaking the word-level comparison), the listener falls back to `salvage_after_echo_tail`, which scans heard-text word boundaries right-to-left looking for the rightmost 5-word window that fuzzy-matches the TTS tail (`partial_ratio >= 85`) and keeps everything after it. This preserves short follow-ups (*"Who made it?"*) that the existing fuzzy-prefix salvage would otherwise truncate by one word because it prefers the shortest suffix. If the surviving remainder has at least `EchoDetector.min_salvage_words` words (default 3), it replaces the transcript segment text and is treated as the user's follow-up. The same minimum-word threshold is shared by the during-TTS and post-TTS merged-chunk salvage paths so the policy is consistent across all three sites.
+**Early salvage for echo-prefixed follow-ups:** Before the early fuzzy check rejects a chunk as pure echo, the listener calls `cleanup_leading_echo` to strip any TTS-tail prefix. If exact-word cleanup fails (for example because Whisper mis-transcribed the first echo word — *"explores"* → *"laws"* — breaking the word-level comparison), the listener falls back to `salvage_after_echo_tail`, which scans heard-text word boundaries right-to-left looking for the rightmost 5-word window that fuzzy-matches the TTS tail (`partial_ratio >= 85`) and keeps everything after it. This preserves short follow-ups (*"Who made it?"*) that the existing fuzzy-prefix salvage would otherwise truncate by one word because it prefers the shortest suffix. If the surviving remainder has at least `EchoDetector.min_salvage_words` words (default 3) and carries words she did not say in a voice (the two proofs of "Overriding an echo verdict takes positive evidence"), it replaces the transcript segment text and is treated as the user's follow-up. The same minimum-word threshold is shared by the during-TTS and post-TTS merged-chunk salvage paths, which keep a remainder on that count alone; in the hot window the overrides still set it aside when it could be hers.
 
 **Timestamp-based detection:** `was_speech_during_hot_window(utterance_start_time, utterance_end_time)` compares the utterance's time range against the hot window's time span (from schedule to expiry). This eliminates race conditions between slow Whisper transcription and the expiry timer — if the user started speaking during the window, it counts as hot window input regardless of when the transcript arrives. Also handles **overlapping utterances** where VAD triggered during TTS (mic picking up echo) but the utterance extended into the hot window period.
 
@@ -251,9 +251,12 @@ While TTS is playing, echo rejection and stop commands are handled with fast tex
   on often starts within that tolerance, so an utterance that carries words
   she did not say, loud enough to have been spoken (the two proofs of
   "Overriding an echo verdict takes positive evidence"), is never flagged,
-  whatever its timing. Her own words coming back, however Whisper bends
-  them, and a phrase Whisper makes of the quiet right after her keep the
-  flag: the first carries no words she did not say, the second no voice.
+  whatever its timing. Her own words coming back keep the flag, as long as
+  Whisper bends no more of them than that test allows (40% of the words
+  heard without a close match in her reply), and so does a phrase Whisper
+  makes of the quiet right after her: the first carries no words she did
+  not say, the second no voice. While she speaks her own voice clears the
+  energy bar, so there the flag rests on the words alone.
 - Intent judge uses this context to identify echo
 
 ## Rolling Transcript Buffer
@@ -368,7 +371,7 @@ Echo detection uses a layered approach for reliability:
 
 The fuzzy check acts as a fast, reliable safety net. The intent judge provides deeper understanding but may be unreliable with smaller models (e.g. gemma4).
 
-3. **Overriding an echo verdict takes positive evidence.** When the judge says an utterance is her own echo, that verdict stands unless the utterance carries words she did not say: the share of heard words with no close match in the last TTS text must exceed 40%. The override exists for barge-in, and barge-in is what that measures.
+3. **Overriding an echo verdict takes positive evidence.** When the judge says an utterance is her own echo, that verdict stands unless the utterance carries words she did not say: the share of heard words with no close match in her reply must exceed 40%. Her reply is the one the judge was shown: a reply that starts while the judge is thinking does not change what its verdict is weighed against. The override exists for barge-in, and barge-in is what that measures.
 
    Absence of a fuzzy match is not evidence of speech. `partial_ratio` looks for a contiguous window, so an echo Whisper decimated — words dropped from the middle, others corrupted — stops matching and used to read as new content, which had her run a full turn on her own voice. Per word nothing separates the two: `même` against `semaine` scores what a genuinely new word scores. Over the whole utterance it separates cleanly, and stably — measured on real transcripts, the two echoes sat at 0% and 18% and barge-in at 62% and 100%, unchanged whether the per-word bar is 70, 80 or 90.
 
@@ -397,7 +400,8 @@ The fuzzy check acts as a fast, reliable safety net. The intent judge provides d
 
    The same two proofs decide which transcripts are flagged as possibly hers
    (`is_during_tts`, see "During TTS"), so the judge is not told in the first
-   place that words with both are her echo.
+   place that words with both are her echo, and no hot-window override takes
+   words without them that were heard in her time.
 
 Example:
 ```
@@ -516,8 +520,11 @@ If judge rejects and says noise, in hot window:
 If judge.directed and judge.query:
     → Verify wake word present (wake word mode) or non-echo (hot window)
     → Collect it (added to a question being collected), then hand it to the reply thread (it waits its turn)
-If judge rejects but in hot window and non-echo, at any confidence:
-    → Override rejection, collect it as a query
+If no query extracted, in hot window, and the wake word is in it (not her reply coming back whole):
+    → Wake-word check: collect what follows the wake word
+If judge.directed without a query, or rejects, in hot window, at any confidence:
+    → Words that could be hers (heard in her time, without words she did not say in a voice): 🔇 Heard (echo)
+    → Otherwise, not pure echo: collect what he said as a query
     → An echo verdict: only on words she did not say, in a voice; otherwise 🔇 Heard (echo)
 If nothing above took it and a question is being collected:
     → Judge it as a follow-up, his question before it (unless already judged as one)

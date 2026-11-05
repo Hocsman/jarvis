@@ -31,7 +31,9 @@ only the last sentence, and every guard downstream reads it:
 - the fuzzy `partial_ratio` safety net,
 - the intent judge, which receives it as context,
 - `_carries_speech_she_did_not_say`, which decides whether to override an
-  echo verdict and whether a stripped remainder is speech.
+  echo verdict, whether a stripped remainder is speech, and, through
+  `_not_her_echo`, which transcripts the judge is shown "(during TTS)" and
+  which no hot-window override takes.
 
 An echo of sentence one, arriving while sentence three is being spoken,
 would be compared against sentence three, match nothing, and be taken for

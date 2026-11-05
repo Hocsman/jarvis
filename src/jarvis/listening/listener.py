@@ -880,15 +880,7 @@ class VoiceListener(threading.Thread):
                 # intent judge which can extract the user's speech.
                 last_tts_text = self.echo_detector._last_tts_text or ""
                 if last_tts_text:
-                    echo_score = fuzz.partial_ratio(
-                        text_lower, last_tts_text.lower()
-                    )
-                    tts_words = len(last_tts_text.split())
-                    text_words = len(text_lower.split())
-                    is_pure_echo = (
-                        echo_score >= self.echo_detector.PURE_ECHO_THRESHOLD
-                        and text_words <= max(tts_words * 1.3, tts_words + 3)
-                    )
+                    is_pure_echo, echo_score = self._is_pure_echo(text_lower, last_tts_text)
                     if is_pure_echo:
                         # Before rejecting, try to salvage user speech appended
                         # after the echo prefix. Whisper commonly merges the tail
@@ -942,10 +934,7 @@ class VoiceListener(threading.Thread):
                 debug_log("early beep: hot window active", "voice")
             else:
                 # Not in hot window — check for wake word
-                wake_word = getattr(self.cfg, "wake_word", "jarvis")
-                aliases = list(set(getattr(self.cfg, "wake_aliases", [])) | {wake_word})
-                fuzzy_ratio = float(getattr(self.cfg, "wake_fuzzy_ratio", 0.78))
-                if is_wake_word_detected(text_lower, wake_word, aliases, fuzzy_ratio):
+                if self._carries_the_wake_word(text_lower):
                     self._wake_timestamp = utterance_start_time
                     self._start_thinking_tune()
                     self._publish_listening_state()
@@ -1109,6 +1098,15 @@ class VoiceListener(threading.Thread):
             last_tts_text = self.echo_detector._last_tts_text or ""
             last_tts_finish_time = self.echo_detector._last_tts_finish_time or 0.0
 
+            # Words that could be her own voice coming back, as the "(during
+            # TTS)" mark has it, read on the text as it stands once a
+            # stripped echo prefix is gone. No hot-window override takes
+            # them, whatever the judge's words for leaving them out.
+            could_be_hers = (could_be_hot_window
+                             and self._in_her_time(utterance_start_time)
+                             and not self._not_her_echo(text_lower, utterance_energy,
+                                                        spoken=last_tts_text))
+
             intent_judgment = self._judge_timed(
                 segments=context_segments,
                 wake_timestamp=self._wake_timestamp,
@@ -1132,18 +1130,8 @@ class VoiceListener(threading.Thread):
                 # Hot window fallback: if the early echo check already cleared
                 # this text, accept it even without the judge's verdict.
                 if could_be_hot_window:
-                    last_tts_text_fb = self.echo_detector._last_tts_text or ""
-                    is_pure_echo = False
-                    if last_tts_text_fb:
-                        echo_score = fuzz.partial_ratio(
-                            text_lower, last_tts_text_fb.lower()
-                        )
-                        tts_words = len(last_tts_text_fb.split())
-                        text_words = len(text_lower.split())
-                        is_pure_echo = (
-                            echo_score >= 70
-                            and text_words <= max(tts_words * 1.3, tts_words + 3)
-                        )
+                    is_pure_echo, _ = self._is_pure_echo(
+                        text_lower, self.echo_detector._last_tts_text or "")
                     if not is_pure_echo:
                         print(f"  🧠 Intent fallback: accepting hot window speech", flush=True)
                         debug_log(f"✅ Hot window fallback (judge unavailable): \"{text_lower}\"", "voice")
@@ -1189,16 +1177,27 @@ class VoiceListener(threading.Thread):
                 # whenever its answer leaves it out.
                 decisive = intent_judgment.confidence == "high" or could_be_hot_window
 
+                # The wake word is his call, in the hot window as outside it.
+                # A verdict that extracts nothing from an utterance carrying
+                # it, her reply coming back whole aside, leaves the decision
+                # to the wake-word check, which answers what follows the
+                # wake word. The overrides below would set a quiet answer of
+                # his aside as words that could be hers.
+                if (could_be_hot_window
+                        and not (intent_judgment.directed and intent_judgment.query)
+                        and not self._is_pure_echo(text_lower, last_tts_text)[0]
+                        and self._carries_the_wake_word(text_lower)):
+                    debug_log(f"🔔 wake word in the hot window, the wake-word check decides: "
+                              f"\"{text_lower}\"", "voice")
+                    decisive = False
+
                 # If directed with query, process it
                 if intent_judgment.directed and intent_judgment.query:
                     # In wake word mode, verify the wake word is actually present
                     # The LLM sometimes hallucinates wake words that don't exist
                     if not could_be_hot_window:
-                        wake_word = getattr(self.cfg, "wake_word", "jarvis")
-                        aliases = list(set(getattr(self.cfg, "wake_aliases", [])) | {wake_word})
-                        has_wake_word = self._wake_timestamp is not None or is_wake_word_detected(
-                            text_lower, wake_word, aliases
-                        )
+                        has_wake_word = (self._wake_timestamp is not None
+                                         or self._carries_the_wake_word(text_lower))
                         if not has_wake_word:
                             print(f"  🧠 Intent override: no wake word found, ignoring", flush=True)
                             debug_log(
@@ -1226,34 +1225,23 @@ class VoiceListener(threading.Thread):
                         # Only reject PURE echo — if the heard text is significantly
                         # longer than TTS, it contains user speech mixed with echo
                         # and the intent judge's extraction should be used instead.
-                        if last_tts_text:
-                            echo_score = fuzz.partial_ratio(
-                                text_lower, last_tts_text.lower()
+                        is_pure_echo, echo_score = self._is_pure_echo(text_lower, last_tts_text)
+                        if is_pure_echo:
+                            # Also check judge's extracted query — if it matches
+                            # TTS too, it's genuinely pure echo. If the query is
+                            # different, the judge extracted real user speech.
+                            query_echo_score = fuzz.partial_ratio(
+                                intent_judgment.query.lower(),
+                                last_tts_text.lower()
                             )
-                            tts_words = len(last_tts_text.split())
-                            text_words = len(text_lower.split())
-                            is_pure_echo = (
-                                echo_score >= 70
-                                and text_words <= max(tts_words * 1.3, tts_words + 3)
+                            if query_echo_score >= self.echo_detector.PURE_ECHO_THRESHOLD:
+                                self._heard_as_her_echo(
+                                    text_lower, f"directed, score={echo_score}")
+                                return
+                            debug_log(
+                                f"echo in text (score={echo_score}) but judge extracted "
+                                f"non-echo query: \"{intent_judgment.query}\"", "voice"
                             )
-                            if is_pure_echo:
-                                # Also check judge's extracted query — if it matches
-                                # TTS too, it's genuinely pure echo. If the query is
-                                # different, the judge extracted real user speech.
-                                query_echo_score = fuzz.partial_ratio(
-                                    intent_judgment.query.lower(),
-                                    last_tts_text.lower()
-                                )
-                                if query_echo_score >= 70:
-                                    debug_log(f"🔇 Echo in hot window (directed, score={echo_score}): \"{text_lower}\"", "voice")
-                                    print(f"  🔇 Heard (echo): \"{text_lower[:50]}{'...' if len(text_lower) > 50 else ''}\"", flush=True)
-                                    self._drop_the_early_beep()
-                                    return
-                                else:
-                                    debug_log(
-                                        f"echo in text (score={echo_score}) but judge extracted "
-                                        f"non-echo query: \"{intent_judgment.query}\"", "voice"
-                                    )
 
                         # The intent judge is explicitly designed to prune echo
                         # and extract the actual user query — always prefer its
@@ -1306,11 +1294,8 @@ class VoiceListener(threading.Thread):
                 if intent_judgment.directed and decisive:
                     # In wake word mode, verify the wake word is actually present
                     if not could_be_hot_window:
-                        wake_word = getattr(self.cfg, "wake_word", "jarvis")
-                        aliases = list(set(getattr(self.cfg, "wake_aliases", [])) | {wake_word})
-                        has_wake_word = self._wake_timestamp is not None or is_wake_word_detected(
-                            text_lower, wake_word, aliases
-                        )
+                        has_wake_word = (self._wake_timestamp is not None
+                                         or self._carries_the_wake_word(text_lower))
                         if not has_wake_word:
                             print(f"  🧠 Intent override: no wake word found, ignoring", flush=True)
                             debug_log(
@@ -1331,23 +1316,17 @@ class VoiceListener(threading.Thread):
                                 pass
                             return
                     else:
-                        # Hot window — echo check before accepting
-                        # Only reject pure echo (similar word count to TTS)
-                        if last_tts_text:
-                            echo_score = fuzz.partial_ratio(
-                                text_lower, last_tts_text.lower()
-                            )
-                            tts_words = len(last_tts_text.split())
-                            text_words = len(text_lower.split())
-                            is_pure_echo = (
-                                echo_score >= 70
-                                and text_words <= max(tts_words * 1.3, tts_words + 3)
-                            )
-                            if is_pure_echo:
-                                debug_log(f"🔇 Echo in hot window (directed/no-query, score={echo_score}): \"{text_lower}\"", "voice")
-                                print(f"  🔇 Heard (echo): \"{text_lower[:50]}{'...' if len(text_lower) > 50 else ''}\"", flush=True)
-                                self._drop_the_early_beep()
-                                return
+                        # Hot window: with nothing extracted, what he said
+                        # is the query, unless it is her reply coming back
+                        # whole or words that could be hers. Shown those
+                        # "(during TTS)", a judge saying directed and
+                        # extracting nothing is leaving them out.
+                        is_pure_echo, echo_score = self._is_pure_echo(text_lower, last_tts_text)
+                        if is_pure_echo or could_be_hers:
+                            self._heard_as_her_echo(
+                                text_lower, f"directed/no-query, score={echo_score}, "
+                                            f"could be hers: {could_be_hers}")
+                            return
 
                         debug_log(f"✅ Intent judge accepted (directed, {intent_judgment.confidence} confidence, using actual text): \"{text_lower}\"", "voice")
                         self.state_manager.cancel_hot_window_activation()
@@ -1363,16 +1342,17 @@ class VoiceListener(threading.Thread):
 
                 # If not directed, decisively (see above), check reasoning before rejecting
                 if not intent_judgment.directed and decisive:
-                    # Surgical fix: If intent judge claims "echo" but echo system already cleared
-                    # this utterance (we reached here, meaning Priority 2 didn't reject), don't
-                    # trust the LLM's echo reasoning - fall through to wake word detection instead.
-                    # The echo system does actual text similarity matching; the LLM sometimes
-                    # hallucinates echo matches that don't exist.
+                    # A rejection whose reasoning says "echo" is the judge
+                    # taking the words for her own voice coming back. The
+                    # early echo check let them through, so the verdict is
+                    # weighed: just after the window it is overridden (the
+                    # grace below), in the hot window only on proof that he
+                    # spoke, and elsewhere the wake-word check decides.
                     reasoning_lower = (intent_judgment.reasoning or "").lower()
                     if "echo" in reasoning_lower:
                         debug_log(
-                            f"⚠️ Intent judge claimed echo but echo system cleared - "
-                            f"checking if near hot window: \"{text_lower}\"",
+                            f"⚠️ Intent judge says echo, the early check did not: "
+                            f"\"{text_lower}\"",
                             "voice"
                         )
                         # Check if utterance started shortly after hot window expired
@@ -1408,41 +1388,26 @@ class VoiceListener(threading.Thread):
                         # The grace period above only checks utterance_start_time
                         # which is negative for overlapping utterances.
                         if could_be_hot_window:
-                            # Verify it's not pure echo before overriding
-                            echo_score = 0
-                            is_pure_echo = False
-                            if last_tts_text:
-                                echo_score = fuzz.partial_ratio(
-                                    text_lower, last_tts_text.lower()
-                                )
-                                tts_words = len(last_tts_text.split())
-                                text_words = len(text_lower.split())
-                                is_pure_echo = (
-                                    echo_score >= 70
-                                    and text_words <= max(tts_words * 1.3, tts_words + 3)
-                                )
                             # The judge read this as her own echo and said
                             # so. Overriding that verdict takes proof the
                             # user spoke (`_not_her_echo`), not the failure
                             # of a contiguous ratio to find its match in a
-                            # decimated echo.
+                            # decimated echo, against the reply the judge
+                            # was shown.
+                            is_pure_echo, echo_score = self._is_pure_echo(
+                                text_lower, last_tts_text)
                             if is_pure_echo or not self._not_her_echo(
-                                    text_lower, utterance_energy):
-                                debug_log(
-                                    f"🔇 Echo in hot window (echo verdict stands, "
-                                    f"score={echo_score}, no words she did not say "
-                                    f"in a voice): \"{text_lower}\"", "voice")
-                                print(f"  🔇 Heard (echo): \"{text_lower[:50]}"
-                                      f"{'...' if len(text_lower) > 50 else ''}\"",
-                                      flush=True)
-                                self._drop_the_early_beep()
+                                    text_lower, utterance_energy, spoken=last_tts_text):
+                                self._heard_as_her_echo(
+                                    text_lower, f"echo verdict stands, score={echo_score}, "
+                                                f"no words she did not say in a voice")
                                 return
-                            # Mixed echo+speech — override the echo reasoning
-                            print(f"  🧠 Intent override: accepting hot window speech (mixed echo+speech)", flush=True)
+                            print(f"  🧠 Intent override: accepting hot window speech "
+                                  f"(words she did not say, in a voice)", flush=True)
                             debug_log(
-                                f"⚡ Overriding echo reasoning in hot window "
-                                f"(echo_score={echo_score}, text longer than TTS): "
-                                f"\"{text_lower}\"",
+                                f"⚡ Overriding the echo verdict in hot window "
+                                f"(echo_score={echo_score}, words she did not say, "
+                                f"in a voice): \"{text_lower}\"",
                                 "voice"
                             )
                             self.state_manager.cancel_hot_window_activation()
@@ -1460,27 +1425,16 @@ class VoiceListener(threading.Thread):
                         debug_log(f"⏭️ Not near hot window ({time_after_hot_window:.2f}s after), falling through to wake word check", "voice")
                         # Continue to wake word detection below
                     else:
-                        # Check if text is pure echo of TTS output
-                        echo_score = 0
-                        is_pure_echo = False
-                        if last_tts_text:
-                            echo_score = fuzz.partial_ratio(
-                                text_lower, last_tts_text.lower()
-                            )
-                            tts_words = len(last_tts_text.split())
-                            text_words = len(text_lower.split())
-                            is_pure_echo = (
-                                echo_score >= 70
-                                and text_words <= max(tts_words * 1.3, tts_words + 3)
-                            )
+                        is_pure_echo, echo_score = self._is_pure_echo(text_lower, last_tts_text)
 
-                        if could_be_hot_window and is_pure_echo:
-                            # Confirmed pure echo — early check should have caught
-                            # this, but handle as safety net.
-                            debug_log(f"🔇 Echo in hot window (score={echo_score}): \"{text_lower}\"", "voice")
-                            print(f"  🔇 Heard (echo): \"{text_lower[:50]}"
-                                  f"{'...' if len(text_lower) > 50 else ''}\"", flush=True)
-                            self._drop_the_early_beep()
+                        # Her reply coming back whole, which the early check
+                        # should have caught, or words that could be hers,
+                        # rejected in other words than "echo": no override
+                        # takes them.
+                        if could_be_hot_window and (is_pure_echo or could_be_hers):
+                            self._heard_as_her_echo(
+                                text_lower, f"rejected, score={echo_score}, "
+                                            f"could be hers: {could_be_hers}")
                             return
 
                         if could_be_hot_window:
@@ -1511,15 +1465,14 @@ class VoiceListener(threading.Thread):
                         self._drop_the_early_beep()
                         return
                 else:
-                    # For inconclusive results, fall through to wake word detection
-                    debug_log(f"⏭️ Intent judge inconclusive ({intent_judgment.confidence}), checking wake word", "voice")
+                    # Not decisive (see above): the wake word decides
+                    debug_log(f"⏭️ Intent judge leaves it to the wake word ({intent_judgment.confidence}), checking wake word", "voice")
 
         # Priority 4: Wake word detection (fallback when intent judge unavailable/inconclusive)
         wake_word = getattr(self.cfg, "wake_word", "jarvis")
         aliases = set(getattr(self.cfg, "wake_aliases", [])) | {wake_word}
-        fuzzy_ratio = float(getattr(self.cfg, "wake_fuzzy_ratio", 0.78))
 
-        wake_detected = is_wake_word_detected(text_lower, wake_word, list(aliases), fuzzy_ratio)
+        wake_detected = self._carries_the_wake_word(text_lower)
         debug_log(f"wake word check: '{wake_word}' in '{text_lower}' → {wake_detected}", "voice")
 
         if wake_detected:
@@ -1603,9 +1556,14 @@ class VoiceListener(threading.Thread):
         else:
             debug_log(f"input ignored (no wake word{intent_info}): {text_lower}", "voice")
 
-    def _not_her_echo(self, heard: str, utterance_energy: float) -> bool:
+    def _not_her_echo(self, heard: str, utterance_energy: float,
+                      spoken: Optional[str] = None) -> bool:
         """True when *heard* cannot be only her own voice coming back: it
         carries words she did not say, loud enough to have been spoken.
+
+        *spoken* is what she said: by default the reply the echo detector
+        holds now. A decision on the judge's verdict passes the reply the
+        judge was shown, which a reply starting during its call replaces.
 
         Two proofs, because either alone is fooled. Text alone takes a
         "Thank you." that Whisper makes of the room over her French reply
@@ -1614,9 +1572,48 @@ class VoiceListener(threading.Thread):
         speaks, since her own voice clears the energy bar: that one the
         judge names noise, and nothing overrides a noise verdict.
         """
-        return (_carries_speech_she_did_not_say(
-                    heard, self.echo_detector._last_tts_text or "")
+        if spoken is None:
+            spoken = self.echo_detector._last_tts_text or ""
+        return (_carries_speech_she_did_not_say(heard, spoken)
                 and self.echo_detector.utterance_carries_a_voice(utterance_energy))
+
+    def _in_her_time(self, utterance_start_time: float) -> bool:
+        """Whether an utterance can hold her own voice coming back: she is
+        speaking, or it started (the voice detector's pre-roll included)
+        before her last word plus the echo tolerance."""
+        if self.tts is not None and self.tts.is_speaking():
+            return True
+        finish = self.echo_detector._last_tts_finish_time
+        return (finish > 0 and utterance_start_time > 0
+                and utterance_start_time < finish + self.echo_detector.echo_tolerance)
+
+    def _is_pure_echo(self, heard: str, spoken: str) -> tuple:
+        """Whether *heard* is her reply *spoken* coming back whole: one
+        contiguous match (`partial_ratio`) at the detector's pure-echo
+        threshold, and not so much longer than her reply that words of his
+        must follow it. Returns the verdict and the score."""
+        if not spoken:
+            return False, 0
+        score = fuzz.partial_ratio(heard, spoken.lower())
+        her_words = len(spoken.split())
+        return (score >= self.echo_detector.PURE_ECHO_THRESHOLD
+                and len(heard.split()) <= max(her_words * 1.3, her_words + 3)), score
+
+    def _carries_the_wake_word(self, text_lower: str) -> bool:
+        """Whether the wake word or one of its aliases is in *text_lower*,
+        matched as the configured fuzzy ratio allows."""
+        wake_word = getattr(self.cfg, "wake_word", "jarvis")
+        aliases = set(getattr(self.cfg, "wake_aliases", [])) | {wake_word}
+        fuzzy_ratio = float(getattr(self.cfg, "wake_fuzzy_ratio", 0.78))
+        return is_wake_word_detected(text_lower, wake_word, list(aliases), fuzzy_ratio)
+
+    def _heard_as_her_echo(self, text_lower: str, why: str) -> None:
+        """Set an utterance aside as her own voice coming back once the
+        judge has given its verdict in the hot window, and say so."""
+        debug_log(f"🔇 Echo in hot window ({why}): \"{text_lower}\"", "voice")
+        print(f"  🔇 Heard (echo): \"{text_lower[:50]}"
+              f"{'...' if len(text_lower) > 50 else ''}\"", flush=True)
+        self._drop_the_early_beep()
 
     def _after_his_question(self, segments: list, current_text: str) -> list:
         """The transcript with the question being collected put back before
@@ -2046,11 +2043,7 @@ class VoiceListener(threading.Thread):
         segment decides nothing: everything downstream still applies.
         """
         try:
-            from .wake_detection import is_wake_word_detected
-
-            wake = getattr(self.cfg, "wake_word", "jarvis")
-            aliases = list(set(getattr(self.cfg, "wake_aliases", [])) | {wake})
-            return is_wake_word_detected((text or "").lower(), wake, aliases)
+            return self._carries_the_wake_word((text or "").lower())
         except Exception:
             return False
 
@@ -3455,13 +3448,7 @@ class VoiceListener(threading.Thread):
         # echo tolerance. His answer to her question often starts inside
         # that tolerance, so timing does not decide alone: words she did not
         # say, loud enough to have been spoken, are never marked.
-        if self.tts is not None and self.tts.is_speaking():
-            in_her_time = True
-        else:
-            tts_finish_time = self.echo_detector._last_tts_finish_time
-            echo_tolerance = self.echo_detector.echo_tolerance
-            in_her_time = (tts_finish_time > 0 and utterance_start_time > 0
-                           and utterance_start_time < tts_finish_time + echo_tolerance)
+        in_her_time = self._in_her_time(utterance_start_time)
         is_during_tts = in_her_time and not self._not_her_echo(text, utterance_energy)
         if in_her_time and not is_during_tts:
             debug_log(f"🗣️ not marked as her echo (words she did not say, and a voice): "

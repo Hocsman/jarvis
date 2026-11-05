@@ -9,15 +9,18 @@ The not-speech cases also run on any judge model: name one or more in
 alternating arms call by call (the order rotates each call, the cases are
 shuffled each round), and prints, per arm, how many inventions and how many
 of his words the listener would answer in the hot window (and how many of
-those only because it overrides a rejection below high confidence), and how
-many would join a question it is still collecting, where a stop drops the
-question and is a miss either way; a row under 20 calls gets counts and no
-rate. A second test reads the collecting cases with the question shown, as
-the listener shows it, and hidden, the two alternating call by call on each
-arm (`-k shown` runs it alone). A third reads his answer to a question she
-ended her reply on, begun the moment she stops, unmarked, as the listener
-shows it, and marked "(during TTS)", alternating the same way (`-k
-unmarked` runs it alone). Arms go through `MockConfig`, so a cloud model
+those on a verdict below high confidence that extracted no query, which the
+hot window weighs as a sure one), and how many would join a question it is
+still collecting, where a stop drops the question and is a miss either way;
+a row under 20 calls gets counts and no rate. A second test reads the
+collecting cases with the question shown, as the listener shows it, and
+hidden, the two alternating call by call on each arm (`-k shown` runs it
+alone). A third reads his answer to a question she ended her reply on,
+begun the moment she stops, unmarked, as the listener shows it when he is
+heard in a voice, and marked "(during TTS)", as it shows an answer too
+quiet to prove he spoke, which it answers only on a directed verdict with
+a query, alternating the same way (`-k unmarked` runs it alone). Arms go
+through `MockConfig`, so a cloud model
 goes to the provider the `EVAL_LLM_*` variables name and is billed there,
 and a bare local tag runs on the local Ollama. Only these synthetic
 transcripts leave the machine. `EVAL_INTENT_JUDGE_ROUNDS` sets the rounds
@@ -751,8 +754,9 @@ def _while_asking(before, asked, current):
 
 # Her reply ends on a question and he answers at once, his first word within
 # the echo tolerance of her last. The listener shows his answer to the judge
-# unmarked, since it carries words she did not say, in a voice; timing alone
-# would mark it "(during TTS)", which the prompt says never to extract.
+# unmarked when it carries words she did not say, in a voice; an answer too
+# quiet to prove that is marked "(during TTS)", which the prompt says never
+# to extract.
 _FR_ASKS_BACK = "Bien reçu, Monsieur. Je reste à votre écoute : que souhaitez-vous savoir ce soir ?"
 _EN_ASKS_BACK = "Done. Is there anything else you would like to know tonight?"
 _FR_EARLIER = "Note que la réunion est déplacée à jeudi."
@@ -1163,20 +1167,28 @@ class TestIntentJudgeMultiSegment:
 
 
 def _answered_in_the_hot_window(verdict) -> bool:
-    """What the listener does with a verdict on a segment that is not her
-    echo, in the hot window: it dispatches a directed one, and its overrides
-    take any rejection that does not say noise, whatever the confidence. An
-    echo verdict is overridden only on words she did not say spoken in a
-    voice; there is no audio here, so the voice is granted."""
+    """What the listener does in the hot window with a verdict on a segment
+    it did not mark as possibly hers: it dispatches a directed one, and its
+    overrides take any rejection that does not say noise, whatever the
+    confidence. An echo verdict is overridden only on words she did not say
+    spoken in a voice; there is no audio here, so the voice is granted."""
     return verdict.directed or not verdict.noise
 
 
-def _answered_on_an_unsure_rejection(verdict) -> bool:
-    """Answered in the hot window although the judge rejected it below high
-    confidence: what taking its unsure rejections as seriously as its sure
-    ones lets through."""
-    return (_answered_in_the_hot_window(verdict) and not verdict.directed
-            and verdict.confidence != "high")
+def _answered_when_marked(verdict) -> bool:
+    """What the listener does in the hot window with a verdict on a segment
+    it marked "(during TTS)", words that could be hers: no override takes
+    them, so only a directed verdict with a query is dispatched."""
+    return verdict.directed and bool(verdict.query)
+
+
+def _answered_on_an_unsure_verdict(verdict) -> bool:
+    """Answered in the hot window on a verdict below high confidence that
+    extracted no query: what weighing the judge's unsure verdicts as its
+    sure ones lets through. A directed verdict with a query is dispatched
+    whatever its confidence."""
+    return (_answered_in_the_hot_window(verdict) and verdict.confidence != "high"
+            and not (verdict.directed and verdict.query))
 
 
 def _joins_his_question(verdict) -> bool:
@@ -1285,7 +1297,7 @@ class TestIntentJudgeNotSpeechArms:
         judges = _warm_judges()
         kinds = {True: "inventions", False: "his words"}
         situations = {False: ("after her reply", "answered"), True: ("while he asks", "joined")}
-        # taken, noise, stop, calls, no verdict, answered on an unsure rejection
+        # taken, noise, stop, calls, no verdict, answered on an unsure verdict
         tally = {(arm, situation, kind): [0, 0, 0, 0, 0, 0] for arm in NOT_SPEECH_ARMS
                  for situation, _ in situations.values() for kind in kinds.values()}
         misses = {arm: {} for arm in NOT_SPEECH_ARMS}   # case -> wrong outcomes
@@ -1300,7 +1312,7 @@ class TestIntentJudgeNotSpeechArms:
             row[0] += int(_taken(case, verdict))
             row[1] += int(verdict.noise)
             row[2] += int(case.collecting and verdict.stop)
-            row[5] += int(not case.collecting and _answered_on_an_unsure_rejection(verdict))
+            row[5] += int(not case.collecting and _answered_on_an_unsure_verdict(verdict))
             if _wrong(case, verdict):
                 misses[arm][case.name] = misses[arm].get(case.name, 0) + 1
 
@@ -1309,7 +1321,7 @@ class TestIntentJudgeNotSpeechArms:
         for (arm, situation, kind), (taken, noise, stop, calls, silent, unsure) in tally.items():
             scored = calls - silent
             stops = f", stop {stop}" if situation == situations[True][0] else ""
-            unsure_part = f" ({unsure} on an unsure rejection)" if situation == situations[False][0] else ""
+            unsure_part = f" ({unsure} on an unsure verdict)" if situation == situations[False][0] else ""
             lines.append(f"🧪 {arm:24} {situation:15} {kind:10}  {verbs[situation]} "
                          f"{taken}/{scored}{_rate(taken, scored)}{unsure_part}, noise {noise}/{scored}"
                          f"{stops}, no verdict {silent}")
@@ -1366,12 +1378,16 @@ class TestIntentJudgeNotSpeechArms:
 
     def test_his_answer_unmarked_against_marked_call_by_call(self, capsys):
         """His answer to her question, begun the moment she stops. Each arm
-        reads every case unmarked, as the listener shows it, and marked
-        "(during TTS)", as timing alone would mark it, the two alternating
-        call by call. Directed is the judge taking it as his; answered is
-        what the listener then does in the hot window."""
+        reads every case unmarked, as the listener shows it when he is heard
+        in a voice, and marked "(during TTS)", as it shows an answer too
+        quiet to prove he spoke, the two alternating call by call. Directed
+        is the judge taking it as his; answered is what the listener then
+        does in the hot window, where a marked one is answered only on a
+        directed verdict with a query."""
         judges = _warm_judges()
         variants = {"unmarked": lambda case: case, "marked": _marked_as_hers}
+        answered_when = {"unmarked": _answered_in_the_hot_window,
+                         "marked": _answered_when_marked}
         arms = [(arm, variant) for arm in NOT_SPEECH_ARMS for variant in variants]
         tally = {arm: [0, 0, 0, 0, 0] for arm in arms}   # directed, answered, noise, calls, no verdict
         misses = {}   # (arm, case) -> not directed
@@ -1387,7 +1403,7 @@ class TestIntentJudgeNotSpeechArms:
                 row[4] += 1
                 continue
             row[0] += int(verdict.directed)
-            row[1] += int(_answered_in_the_hot_window(verdict))
+            row[1] += int(answered_when[variant](verdict))
             row[2] += int(verdict.noise)
             if not verdict.directed:
                 misses[(arm, case.name)] = misses.get((arm, case.name), 0) + 1

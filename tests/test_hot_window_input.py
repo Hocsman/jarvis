@@ -1131,11 +1131,21 @@ _HER_VOICE = 3.0     # her reply through the speakers clears the bar too
 _ROOM_NOISE = 0.5
 
 _HER_REPLY = "Bien reçu, Monsieur. Je reste à votre écoute : que souhaitez-vous savoir ce soir ?"
+_HIS_QUESTION = "quel temps fera-t-il demain matin à lyon ?"
+# Her reply coming back decimated by Whisper, words dropped and others bent,
+# nearly all of them still hers: the contiguous echo check misses it.
+_HER_WORDS_DECIMATED = "reçu monsieur reste écoute souhaitez vous soir"
 
 
 def _level(listener, multiple: float) -> float:
     detector = listener.echo_detector
     return _FLOOR * detector.energy_spike_threshold * multiple
+
+
+def _just_after(listener, last_word: float) -> float:
+    """When his answer starts if he answers at once: inside the echo
+    tolerance after her last word, the voice detector's pre-roll counted."""
+    return last_word + listener.echo_detector.echo_tolerance / 3
 
 
 def _she_says(listener, reply: str) -> float:
@@ -1167,22 +1177,29 @@ def _whisper_hears(listener, text: str, *, started: float, level: float) -> None
     listener._finalize_utterance()
 
 
-def _judge_that_reads_the_marker(listener, echo_confidence: str = "medium"):
-    """A judge that does what its prompt tells it: a current segment shown
-    "(during TTS)" is her echo and is never extracted; anything else in the
-    hot window is his. It reads the prompt the real judge builds, so it sees
-    what the model sees. Field trace: the echo verdict came at a confidence
-    below "high"."""
+def _current_line(prompt: str) -> str:
+    """The line of a judge prompt that holds the utterance being judged."""
+    return next((line for line in prompt.splitlines()
+                 if "CURRENT - JUDGE THIS" in line), "")
+
+
+def _judge_that_reads_the_marker(listener, on_hers=None):
+    """A judge that reads the prompt the real judge builds, so it sees what
+    the model sees: a current segment shown "(during TTS)" gets *on_hers*,
+    anything else in the hot window is his. By default *on_hers* is what
+    the prompt asks for, her echo, never extracted. Field trace: the echo
+    verdict came at a confidence below "high"."""
+    if on_hers is None:
+        on_hers = _make_judgment(
+            directed=False, confidence="medium",
+            reasoning="the current segment is marked (during TTS), an echo "
+                      "of the assistant's own speech, never extracted")
+
     def judge(**kwargs):
-        prompt = IntentJudge()._build_user_prompt(**kwargs)
-        current = next((line for line in prompt.splitlines()
-                        if "CURRENT - JUDGE THIS" in line), "")
-        assert current, prompt
+        current = _current_line(IntentJudge()._build_user_prompt(**kwargs))
+        assert current, kwargs
         if "during TTS" in current:
-            return _make_judgment(
-                directed=False, confidence=echo_confidence,
-                reasoning="the current segment is marked (during TTS), an echo "
-                          "of the assistant's own speech, never extracted")
+            return on_hers
         return _make_judgment(directed=True, query=kwargs["current_text"],
                               reasoning="his follow-up in the hot window")
 
@@ -1196,18 +1213,27 @@ def _judge_that_reads_the_marker(listener, echo_confidence: str = "medium"):
 
 def _current_line_shown_to(judge) -> str:
     """The line of the last prompt that holds the utterance being judged."""
-    return next((line for line in _prompt_shown_to(judge).splitlines()
-                 if "CURRENT - JUDGE THIS" in line), "")
+    return _current_line(_prompt_shown_to(judge))
+
+
+def _console_lines(mock_print) -> list:
+    return [" ".join(str(arg) for arg in call.args) for call in mock_print.call_args_list]
 
 
 def _console_says_what_became_of(mock_print, heard: str) -> bool:
     """Whether a console line, other than the transcription's own "📝 Heard",
-    quotes *heard*: what she did with it, not only that it was heard."""
-    for call in mock_print.call_args_list:
-        line = " ".join(str(arg) for arg in call.args)
-        if heard.lower() in line.lower() and "📝" not in line:
-            return True
-    return False
+    quotes *heard*, as far as the console quotes it: what she did with it,
+    not only that it was heard."""
+    quoted = heard.lower()[:50]
+    return any(quoted in line.lower() and "📝" not in line
+               for line in _console_lines(mock_print))
+
+
+def _console_says_heard_as_her_echo(mock_print, heard: str) -> bool:
+    """Whether the console says *heard* was set aside as her own echo."""
+    quoted = heard.lower()[:50]
+    return any("🔇 Heard (echo)" in line and quoted in line.lower()
+               for line in _console_lines(mock_print))
 
 
 @pytest.mark.unit
@@ -1226,7 +1252,7 @@ class TestHisAnswerTheMomentHerReplyEnds:
     def _her_reply_ends(self):
         # The window outlasts the echo tolerance, as every configuration's
         # does, kept short so that waiting for it to close stays quick.
-        listener, _ = _create_listener(echo_tolerance=0.3, hot_window_seconds=0.5)
+        listener, _ = _create_listener(echo_tolerance=0.1, hot_window_seconds=0.2)
         last_word = _she_says(listener, _HER_REPLY)
         assert _wait_for_hot_window_active(listener)
         return listener, last_word
@@ -1238,23 +1264,22 @@ class TestHisAnswerTheMomentHerReplyEnds:
         # As in the field, his words reach the judge after the window closed.
         assert _wait_for_hot_window_expiry(listener)
 
-        _whisper_hears(listener, "Quel temps fera-t-il demain matin à Lyon ?",
-                       started=last_word + 0.1, level=_level(listener, _HIS_VOICE))
+        _whisper_hears(listener, _HIS_QUESTION, started=_just_after(listener, last_word),
+                       level=_level(listener, _HIS_VOICE))
 
         assert "lyon" in _accepted_query(listener).lower()
         listener.state_manager.stop()
 
     @patch("builtins.print")
     def test_her_own_words_coming_back_then_are_not(self, _print):
-        """Her echo, decimated by Whisper so that the text check misses it:
-        words dropped and others bent, nearly all of them still hers. It
-        began while she spoke and closed as she stopped."""
+        """Her echo, decimated by Whisper so that the text check misses it.
+        It began while she spoke and closed as she stopped."""
         listener, last_word = self._her_reply_ends()
         _judge_that_reads_the_marker(listener)
-        heard = "reçu monsieur reste écoute souhaitez vous soir"
-        assert fuzz.partial_ratio(heard, _HER_REPLY.lower()) < EchoDetector.PURE_ECHO_THRESHOLD
+        assert (fuzz.partial_ratio(_HER_WORDS_DECIMATED, _HER_REPLY.lower())
+                < EchoDetector.PURE_ECHO_THRESHOLD)
 
-        _whisper_hears(listener, heard, started=last_word - 1.5,
+        _whisper_hears(listener, _HER_WORDS_DECIMATED, started=last_word - 1.5,
                        level=_level(listener, _HER_VOICE))
 
         assert _accepted_query(listener) == ""
@@ -1268,11 +1293,60 @@ class TestHisAnswerTheMomentHerReplyEnds:
         listener, last_word = self._her_reply_ends()
         _judge_that_reads_the_marker(listener)
 
-        _whisper_hears(listener, "Merci.", started=last_word + 0.1,
+        _whisper_hears(listener, "Merci.", started=_just_after(listener, last_word),
                        level=_level(listener, _ROOM_NOISE))
 
         assert _accepted_query(listener) == ""
         assert _console_says_what_became_of(mock_print, "merci.")
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("heard, starts, level", [
+        # Her own words coming back as she stops, decimated by Whisper.
+        (_HER_WORDS_DECIMATED, "while she spoke", _HER_VOICE),
+        # What Whisper makes of the quiet right after her.
+        ("Merci.", "just after", _ROOM_NOISE),
+    ], ids=["her-words", "made-of-the-quiet"])
+    @pytest.mark.parametrize("verdict", [
+        _make_judgment(directed=False, confidence=confidence,
+                       reasoning="the assistant's own speech, marked during TTS")
+        for confidence in ("high", "medium", "low")
+    ] + [
+        _make_judgment(directed=True, query="", confidence=confidence,
+                       reasoning="hot window, nothing to extract")
+        for confidence in ("high", "medium", "low")
+    ], ids=[f"{kind}-{confidence}" for kind in ("rejected", "directed-without-query")
+            for confidence in ("high", "medium", "low")])
+    @patch("builtins.print")
+    def test_what_could_be_hers_is_not_answered_whatever_the_judge_says(
+            self, mock_print, verdict, heard, starts, level):
+        """The judge is shown these words "(during TTS)" and leaves them out
+        in its own words: a rejection that never says "echo", or directed
+        with nothing to extract. The listener knows they could be hers, and
+        no override takes them."""
+        listener, last_word = self._her_reply_ends()
+        _judge_that_reads_the_marker(listener, on_hers=verdict)
+        started = last_word - 1.5 if starts == "while she spoke" else _just_after(listener, last_word)
+
+        _whisper_hears(listener, heard, started=started, level=_level(listener, level))
+
+        assert _accepted_query(listener) == ""
+        assert _console_says_heard_as_her_echo(mock_print, heard)
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_his_quiet_answer_with_the_wake_word_is_answered(self, _print):
+        """He answers at once but quietly, below the voice bar, so the words
+        could be hers and the judge is shown them as hers. He said the wake
+        word, though, and the wake word decides, as outside the window: what
+        follows it is answered."""
+        listener, last_word = self._her_reply_ends()
+        _judge_that_reads_the_marker(listener)
+
+        _whisper_hears(listener, f"Jarvis, {_HIS_QUESTION}",
+                       started=_just_after(listener, last_word), level=_level(listener, 0.8))
+
+        answered = _accepted_query(listener)
+        assert "lyon" in answered and "jarvis" not in answered
         listener.state_manager.stop()
 
     @patch("builtins.print")
@@ -1280,27 +1354,25 @@ class TestHisAnswerTheMomentHerReplyEnds:
         listener, last_word = self._her_reply_ends()
         judge = _judge_that_reads_the_marker(listener)
 
-        _whisper_hears(listener, "Quel temps fera-t-il demain matin à Lyon ?",
-                       started=last_word + 0.1, level=_level(listener, _HIS_VOICE))
+        _whisper_hears(listener, _HIS_QUESTION, started=_just_after(listener, last_word),
+                       level=_level(listener, _HIS_VOICE))
 
         current = _current_line_shown_to(judge)
         assert "lyon" in current.lower() and "during TTS" not in current
         listener.state_manager.stop()
 
-    @pytest.mark.parametrize("heard, started_after, level", [
-        # Her own words coming back as she stops, decimated by Whisper.
-        ("reçu monsieur reste écoute souhaitez vous soir", -1.5, _HER_VOICE),
-        # What Whisper makes of the quiet right after her.
-        ("Merci.", 0.1, _ROOM_NOISE),
+    @pytest.mark.parametrize("heard, starts, level", [
+        (_HER_WORDS_DECIMATED, "while she spoke", _HER_VOICE),
+        ("Merci.", "just after", _ROOM_NOISE),
     ], ids=["her-words", "made-of-the-quiet"])
     @patch("builtins.print")
     def test_the_judge_is_still_shown_what_could_be_hers_as_hers(
-            self, _print, heard, started_after, level):
+            self, _print, heard, starts, level):
         listener, last_word = self._her_reply_ends()
         judge = _judge_that_reads_the_marker(listener)
+        started = last_word - 1.5 if starts == "while she spoke" else _just_after(listener, last_word)
 
-        _whisper_hears(listener, heard, started=last_word + started_after,
-                       level=_level(listener, level))
+        _whisper_hears(listener, heard, started=started, level=_level(listener, level))
 
         assert "during TTS" in _current_line_shown_to(judge)
         listener.state_manager.stop()
@@ -1321,14 +1393,32 @@ class TestHisAnswerTheMomentHerReplyEnds:
         assert "lyon" in current.lower() and "during TTS" not in current
         listener.state_manager.stop()
 
+    @patch("builtins.print")
+    def test_her_own_words_heard_while_she_still_speaks_stay_hers(self, _print):
+        """Her voice clears the bar while she speaks, so only her words keep
+        the mark there. Asked about later, he is shown them as hers."""
+        listener, tts = _create_listener(
+            tts_speaking=True, echo_tolerance=0.1, hot_window_seconds=0.2)
+        listener.echo_detector.track_tts_start(_HER_REPLY, baseline_energy=_FLOOR)
+        judge = _judge_that_reads_the_marker(listener)
+        _whisper_hears(listener, _HER_WORDS_DECIMATED, started=time.time() - 1.0,
+                       level=_level(listener, _HER_VOICE))
+
+        tts.is_speaking.return_value = False
+        _simulate_tts_finish(listener)
+        assert _wait_for_hot_window_active(listener)
+        _whisper_hears(listener, _HIS_QUESTION, started=time.time(),
+                       level=_level(listener, _HIS_VOICE))
+
+        her_line = next(line for line in _prompt_shown_to(judge).splitlines()
+                        if "souhaitez vous soir" in line)
+        assert "during TTS" in her_line
+        listener.state_manager.stop()
+
 
 # ---------------------------------------------------------------------------
 # Tests: A hesitant verdict in the hot window
 # ---------------------------------------------------------------------------
-
-_HIS_QUESTION = "quel temps fera-t-il demain matin à lyon ?"
-_HER_WORDS_DECIMATED = "reçu monsieur reste écoute souhaitez vous soir"
-
 
 @pytest.mark.unit
 class TestAHesitantVerdictInTheHotWindow:
@@ -1415,6 +1505,48 @@ class TestAHesitantVerdictInTheHotWindow:
 
         assert _accepted_query(listener) == ""
         assert _console_says_what_became_of(mock_print, heard)
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("confidence", ["high", "medium", "low"])
+    @patch("builtins.print")
+    def test_a_rejected_wake_word_is_left_to_the_wake_word(self, _print, confidence):
+        """He says the wake word in the hot window and the judge extracts
+        nothing: the wake-word check decides, as outside the window, and
+        answers what follows the wake word."""
+        listener = self._in_the_hot_window()
+        _install_intent_judge(listener, _make_judgment(
+            directed=False, confidence=confidence, reasoning="unclear"))
+
+        listener._process_transcript(f"jarvis {_HIS_QUESTION}",
+                                     utterance_energy=_level(listener, _HIS_VOICE))
+
+        answered = _accepted_query(listener)
+        assert "lyon" in answered and "jarvis" not in answered
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_an_echo_verdict_is_read_against_the_reply_the_judge_was_shown(self, mock_print):
+        """A reply waiting its turn starts while the judge is thinking, and
+        replaces the reply her echo would be compared with. The verdict is
+        about the reply the judge was shown, so her decimated words are
+        still read against that one."""
+        listener = self._in_the_hot_window()
+        verdict = _make_judgment(directed=False, confidence="high",
+                                 reasoning="echo of the assistant")
+
+        def judge(**_kwargs):
+            listener.echo_detector.track_tts_start(
+                "La réunion de demain est déplacée à neuf heures.", baseline_energy=_FLOOR)
+            return verdict
+
+        mock_judge = _install_intent_judge(listener, verdict)
+        mock_judge.judge.side_effect = judge
+
+        listener._process_transcript(_HER_WORDS_DECIMATED,
+                                     utterance_energy=_level(listener, _HER_VOICE))
+
+        assert _accepted_query(listener) == ""
+        assert _console_says_heard_as_her_echo(mock_print, _HER_WORDS_DECIMATED)
         listener.state_manager.stop()
 
     @patch("builtins.print")

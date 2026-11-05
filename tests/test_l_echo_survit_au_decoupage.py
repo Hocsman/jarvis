@@ -5,7 +5,8 @@ reply sentence by sentence through that call would leave it holding only
 the last sentence spoken, and everything downstream reads it: the fuzzy
 `partial_ratio` net, the intent judge that receives it as context, and
 `_carries_speech_she_did_not_say`, which decides whether to override an
-echo verdict and whether a stripped remainder is speech.
+echo verdict, whether a stripped remainder is speech, and which
+transcripts the judge is shown "(during TTS)".
 
 An echo of the first sentence, reaching the microphone while the third is
 being spoken, would then be compared against the third, match nothing,
