@@ -1519,10 +1519,15 @@ class VoiceListener(threading.Thread):
             query_fragment = extract_query_after_wake(text_lower, wake_word, list(aliases))
             self._collect(query_fragment)
 
-            # Start thinking tune and show processing message
+            # Start thinking tune and show processing message. Her name with
+            # nothing after it is a question with nothing in it yet: she
+            # waits for it, and `_check_query_timeout` ends the wait.
             self._start_thinking_tune()
+            pending = self.state_manager.get_pending_query()
+            if not pending:
+                debug_log("wake word with nothing after it: waiting for his question", "voice")
             try:
-                print(f"\n✨ Working on it: {self.state_manager.get_pending_query()}")
+                print(f"\n✨ Working on it: {pending}" if pending else "\n👂 Waiting for your question...")
             except Exception:
                 pass
             return
@@ -2420,10 +2425,34 @@ class VoiceListener(threading.Thread):
             query = self.state_manager.clear_collection()
             if query.strip():
                 self._hand_over(query)
+            else:
+                self._nothing_after_the_wake_word()
 
         # Also check hot window expiry - this ensures the timeout is enforced
         # even when there's no audio being processed
         self.state_manager.check_hot_window_expiry(self.cfg.voice_debug)
+
+    def _nothing_after_the_wake_word(self) -> None:
+        """His silence ran out on a question with nothing in it: her name
+        alone, then nothing. Nothing is handed over, the console says so, and
+        the published state goes back to what she is doing. A reply on its
+        way owns the tune, which plays on; otherwise the tune was this
+        question's, and it stops."""
+        reply_on_its_way = self._a_reply_is_on_its_way()
+        if not reply_on_its_way:
+            self._stop_thinking_tune()
+        if self.tts is not None and self.tts.is_speaking():
+            state = JarvisState.SPEAKING
+        elif reply_on_its_way:
+            state = JarvisState.THINKING
+        else:
+            state = JarvisState.IDLE
+        get_jarvis_state().set_state(state)
+        debug_log(f"nothing after the wake word: nothing handed over, state {state.value}", "voice")
+        try:
+            print("💤 Nothing after the wake word, returning to wake word mode\n", flush=True)
+        except Exception:
+            pass
 
     def _reset_audio_health(self, now=None):
         now = time.monotonic() if now is None else now

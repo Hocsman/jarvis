@@ -11,6 +11,7 @@ but use real StateManager and EchoDetector instances to avoid coupling to intern
 
 import threading
 import time
+import unicodedata
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
@@ -2386,6 +2387,133 @@ class TestWhatWhisperMakesOfSilenceWhileHeAsks:
         shown = _prompt_shown_to(judge)
         assert "sous-titrage" not in shown
         assert "ça va aujourd'hui" in shown
+        listener.state_manager.stop()
+
+
+def _starts_with_an_emoji(line: str) -> bool:
+    """Whether a console line opens on an emoji once its leading spaces and
+    newlines are set aside: every line he reads says first what it is about."""
+    shown = line.lstrip()
+    return bool(shown) and unicodedata.category(shown[0]) == "So"
+
+
+@pytest.mark.unit
+class TestHerNameAloneThenSilence:
+    """He says only her name, "Jarvis ?", and nothing after it: a question
+    with nothing in it yet. She waits for it as for any question, and when
+    nothing comes the wait ends where he can see it: a console line says so,
+    the thinking tune stops and she is idle again. A quiet "Jarvis ?" heard
+    in her time, which the judge gives no verdict on, comes to the same wait
+    through the hot window.
+    """
+
+    def _his_silence_runs_out(self, listener):
+        """The audio loop reads on in silence until his question's silence
+        has lasted as long as any question's does."""
+        listener._check_query_timeout(time.time() + listener.state_manager.voice_collect_seconds)
+
+    @patch("builtins.print")
+    def test_the_console_says_she_waits_for_his_question(self, mock_print):
+        """Not a question announced with nothing after it."""
+        listener, _ = _create_listener()
+
+        listener._process_transcript("Jarvis ?", utterance_energy=0.01)
+
+        lines = _console_lines(mock_print)
+        assert lines and all(_starts_with_an_emoji(line) for line in lines), lines
+        assert not any(line.strip().endswith(":") for line in lines), lines
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("tune", [True, False], ids=["tune", "no-tune"])
+    @patch("builtins.print")
+    def test_the_wait_ends_where_he_can_see_it(self, mock_print, tune):
+        from jarvis.state import JarvisState, get_jarvis_state
+
+        listener, _ = _create_listener()
+        listener.cfg.tune_enabled = tune
+        get_jarvis_state().set_state(JarvisState.IDLE)
+        listener._process_transcript("Jarvis ?", utterance_energy=0.01)
+        assert listener.state_manager.is_collecting()
+        mock_print.reset_mock()
+
+        self._his_silence_runs_out(listener)
+
+        assert not listener.state_manager.is_collecting()
+        assert listener._turns.empty(), "a question with nothing in it was answered"
+        assert not _is_beeping(listener), "the thinking tune plays on"
+        assert get_jarvis_state().state == JarvisState.IDLE
+        lines = _console_lines(mock_print)
+        assert lines, "the wait ended with nothing on the console"
+        assert all(_starts_with_an_emoji(line) for line in lines), lines
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_through_the_hot_window_the_wait_ends_the_same_way(self, mock_print):
+        """Just after her reply, a quiet "Jarvis ?" could be her own voice,
+        and the judge gives no verdict on it. She did not say the wake word,
+        so the wake-word check decides, and it finds nothing after it."""
+        from jarvis.state import JarvisState, get_jarvis_state
+
+        listener, _ = _create_listener(echo_tolerance=0.1, hot_window_seconds=0.2)
+        listener.cfg.tune_enabled = True
+        last_word = _she_says(listener, _HER_REPLY)
+        assert _wait_for_hot_window_active(listener)
+        _install_intent_judge(listener, None).last_failure_reason = "timeout"
+        _whisper_hears(listener, "Jarvis ?", started=_just_after(listener, last_word),
+                       level=_level(listener, 0.8))
+        assert _the_judge_gave_no_verdict(mock_print)
+        assert listener.state_manager.is_collecting()
+        assert _accepted_query(listener) == ""
+        mock_print.reset_mock()
+
+        self._his_silence_runs_out(listener)
+
+        assert listener._turns.empty(), "a question with nothing in it was answered"
+        assert not _is_beeping(listener), "the thinking tune plays on"
+        assert get_jarvis_state().state == JarvisState.IDLE
+        lines = _console_lines(mock_print)
+        assert lines, "the wait ended with nothing on the console"
+        assert all(_starts_with_an_emoji(line) for line in lines), lines
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_if_she_is_speaking_when_it_ends_she_is_shown_speaking(self, mock_print):
+        """She began to speak while he was silent. The tune was the
+        question's own and never plays over her voice."""
+        from jarvis.state import JarvisState, get_jarvis_state
+
+        listener, tts = _create_listener()
+        listener.cfg.tune_enabled = True
+        listener._process_transcript("Jarvis ?", utterance_energy=0.01)
+        tts.is_speaking.return_value = True
+        mock_print.reset_mock()
+
+        self._his_silence_runs_out(listener)
+
+        assert listener._turns.empty(), "a question with nothing in it was answered"
+        assert not _is_beeping(listener), "the thinking tune plays over her voice"
+        assert get_jarvis_state().state == JarvisState.SPEAKING
+        lines = _console_lines(mock_print)
+        assert lines and all(_starts_with_an_emoji(line) for line in lines), lines
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_what_he_says_before_his_silence_runs_out_is_answered(self, _print):
+        listener, _ = _create_listener()
+        listener.cfg.tune_enabled = True
+        listener._process_transcript("Jarvis ?", utterance_energy=0.01)
+        collect = listener.state_manager.voice_collect_seconds
+
+        listener._check_query_timeout(time.time() + collect / 2)
+        assert listener.state_manager.is_collecting(), "she gave up before his silence ran out"
+        assert _is_beeping(listener)
+
+        ended = time.time()
+        listener._transcript_buffer.add(_HIS_QUESTION, ended - 1.0, ended, 0.01)
+        listener._process_transcript(_HIS_QUESTION, 0.01, ended - 1.0, ended)
+        listener._check_query_timeout(ended + collect)
+
+        assert listener._turns.get_nowait().query == _HIS_QUESTION
         listener.state_manager.stop()
 
 

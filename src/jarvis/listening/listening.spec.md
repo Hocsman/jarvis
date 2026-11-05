@@ -207,6 +207,8 @@ System is waiting for wake word activation.
 4. If `directed=true` and `query` exists, collect it, and hand it to the reply thread once he has stopped for `voice_collect_seconds`
 5. If rejected, stop the beep and publish IDLE
 
+**Her name with nothing after it opens a question with nothing in it yet.** When the wake-word check finds nothing after the wake word ("Jarvis ?" alone), she waits for his question as for any other: the console says `👂 Waiting for your question...` rather than announcing a query, the thinking tune plays and LISTENING is published, and what he says before his silence has lasted `voice_collect_seconds` is his question. When the silence runs out with nothing collected, nothing is handed over and the wait ends where he can see it: `💤 Nothing after the wake word, returning to wake word mode` is printed, and the published state goes back to what she is doing. While she speaks she is SPEAKING; while a reply of hers is on its way she is THINKING, and the tune, which is that reply's, plays on; otherwise the tune stops and she is IDLE. The hot window comes to the same wait when a wake word that can only be his leaves the decision to the wake-word check (see "Hot Window Mode").
+
 **A sentence heard while a question is still being collected completes it**, in this mode and in the hot window. Every path that accepts an utterance adds it to the question being collected, never puts it in its place, and she answers both: "Salut Yuba, comment tu vas ?" then "Tu m'entends Yuba ?" is one question. A collection that keeps being completed still ends after `voice_max_collect_seconds`. The silence that ends it is counted from the end of the last utterance collected, in the time its audio was captured: neither Whisper nor the judge adds to the wait, and audio the loop reads late, after a stall, is measured in its own time, so his next words still complete the question. Whatever joins it is marked processed, like every accepted segment, so the judge never sees it again as context it could restate. A stop heard while it is collected cancels it instead (see "The Microphone Is Always Read"). What he adds needs no wake word, so Whisper's inventions reach the question too: one the judge calls noise is left out (see "Text Whisper Makes Out of Silence").
 
 ### 2. Hot Window Mode
@@ -430,7 +432,7 @@ To minimise perceived latency, audio and visual feedback starts **immediately af
 - **Hot window:** If voice started during an active (or pending) hot window, start the thinking beep and publish LISTENING.
 - **No trigger:** If neither condition is met, no feedback is given.
 
-If the intent judge later rejects the query (and no hot window override applies), the beep is stopped and the state reverts to IDLE. This brief false-positive beep is acceptable — users prefer immediate acknowledgement over delayed but perfect accuracy.
+If the intent judge later rejects the query (and no hot window override applies), the beep is stopped and the state reverts to IDLE. So it is when her name alone is followed by nothing until his silence runs out, unless she is speaking or a reply of hers is on its way (see "Wake Word Mode"). This brief false-positive beep is acceptable — users prefer immediate acknowledgement over delayed but perfect accuracy.
 
 **LISTENING is not published early during TTS** — the beep is suppressed while TTS is playing to avoid self-triggering.
 
@@ -542,6 +544,10 @@ If nothing above took it and a question is being collected:
     → Stop: cancel the question
     → Noise, not directed: mark processed, leave it out, silence clock untouched
     → Otherwise: mark processed, add it to the question
+When his silence has lasted voice_collect_seconds:
+    → Something collected: hand it to the reply thread
+    → Nothing collected (her name alone): 💤 Nothing after the wake word, nothing handed over;
+      published state back to SPEAKING, THINKING (the reply's tune plays on) or IDLE (tune stopped)
 ```
 
 ## Keeping a Copy of an Utterance

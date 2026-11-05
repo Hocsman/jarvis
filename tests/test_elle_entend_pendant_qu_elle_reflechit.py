@@ -325,6 +325,34 @@ def test_what_others_say_while_she_thinks_leaves_her_thinking(_print):
 
 
 @patch("builtins.print")
+def test_her_name_alone_while_she_thinks_leaves_her_thinking(_print):
+    """He says only her name while she prepares a reply, then nothing. The
+    wait for his question ends with nothing to answer: the tune is that
+    reply's and plays on, and she is shown thinking again."""
+    from jarvis.state import JarvisState, get_jarvis_state
+
+    engine = _Engine()
+    listener, _tts, patcher = _listener_with(engine)
+    tune = MagicMock()
+    try:
+        listener._hand_over("quelle heure est-il")
+        assert engine.started.wait(WAIT)
+        listener._tune_player = tune
+        listener._process_transcript("Jarvis ?", utterance_energy=0.01)
+        assert listener.state_manager.is_collecting()
+
+        listener._check_query_timeout(time.time() + listener.state_manager.voice_collect_seconds)
+
+        assert get_jarvis_state().state == JarvisState.THINKING
+        assert not tune.stop_tune.called
+        assert listener._turns.empty(), "a question with nothing in it was handed over"
+    finally:
+        listener._tune_player = None
+        engine.release.set()
+        _stop(listener, patcher)
+
+
+@patch("builtins.print")
 def test_what_he_says_next_stays_in_the_queue_when_a_query_is_handed_over(_print):
     """The queue holds what he said after the utterance just handled: his
     next words, not stale audio."""
