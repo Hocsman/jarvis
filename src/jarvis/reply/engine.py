@@ -382,9 +382,11 @@ def resolve_tool_router_model(cfg) -> str:
 
     Resolution order: explicit `tool_router_model` → `intent_judge_model` →
     `llm_chat_model`. Routing is a small classification job (the same
-    shape as intent judging), so reusing the judge model gives a small, fast
-    default that is already warm on wake-word paths — the chat model is only
-    a last resort because its weights are expensive to page in mid-reply.
+    shape as intent judging), so reusing the judge model gives a small
+    default — the chat model is only a last resort because its weights are
+    expensive to page in mid-reply. On local Ollama a shared model is
+    loaded again on each exchange, since the judge's calls ask for another
+    context size than the router's (``selection.spec.md``, Router warm-up).
 
     Extracted as a helper so the resolution order can be unit-tested and so
     the listener's warmup path (listener.py) stays in sync with the reply
@@ -1539,7 +1541,8 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         # keyword strategy (``routed_tools.degraded``) answered in its place.
         # Pinning that pick for the rest of the conversation would keep a
         # weaker allow-list than the router would give on its next try.
-        # The same holds for the "fall open to all tools" answer, which
+        # The same holds for an answer equal to the whole catalogue (the
+        # embedding strategy's when the query's embedding fails), which
         # also pins ``allowed_tools`` to the full catalogue, overwhelms the
         # planner (which then paraphrases tool steps as prose), and starves
         # a small chat model into producing the empty-reply fallback.

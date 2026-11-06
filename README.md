@@ -313,7 +313,9 @@ Leave `embedding_provider` empty to use the same provider as chat. When no embed
 
 Jarvis favours fast first responses by default: it warms Whisper, the chat
 model, the intent judge and the tool router (on the tool list it reads for
-every request) before announcing that it is listening. On Macs or
+every request, when the router has a model of its own) before announcing that
+it is listening, and asks Ollama to keep those models loaded for 30 minutes,
+or longer if `OLLAMA_KEEP_ALIVE` tells Ollama to. On Macs or
 laptops where heat and battery matter more than instant first-token latency,
 enable **⚙️ Settings → ✨ Features → Low Power Mode**.
 
@@ -324,7 +326,7 @@ enable **⚙️ Settings → ✨ Features → Low Power Mode**.
 ```
 
 Low Power Mode skips LLM startup warmup and shortens Ollama model residency for
-the intent judge from 30 minutes to 1 minute. Whisper still warms so voice input
+the intent judge to 1 minute. Whisper still warms so voice input
 is ready. The first LLM-backed request after startup or idle may be slower.
 
 **Latency journal.** To find out where the time goes in a spoken exchange,
@@ -396,7 +398,7 @@ What gets past them, typically a subtitle credit or the closing line of a video 
 
 **LLM Intent Judge** - Jarvis uses `gemma4:e2b` for intelligent voice intent classification (echo detection, query extraction, stop commands). This model is automatically installed alongside your chosen chat model during setup. The intent judge cannot be disabled but gracefully falls back to simpler text matching if Ollama is unavailable.
 
-**Tool Router** - When `"tool_selection_strategy": "llm"` (the default), Jarvis asks a small LLM to pick which tools are relevant for each query, shrinking the tool catalogue the chat model sees. By default this routing call reuses the intent-judge model: it's already warm and small enough not to stall the turn. Override with `"tool_router_model": "<name>"` to dedicate a different model to routing. The memory lookup, which reads each question for keywords and dates ("last Thursday"), rides the same model unless `"memory_extractor_model"` names its own (also under **⚙️ Settings → 🧠 Memory & Dialogue**). Small models misread dates, so a stronger model helps there; a name your provider serves (`vendor/model`, or a Claude model ID on Anthropic) sends the question to it. The routing call (and the memory lookup) stops waiting after `"tool_router_timeout_sec"` (15 s by default) of silence from the server, and routing then falls back to keyword matching for that turn (a request that shares no word with any tool gets only the essential tools and a tool search, never the whole list), so a provider that goes quiet cannot hold the reply for minutes. Lower it if your router model normally answers in a second or two, but keep it above about three times the slower of the two calls, because the memory lookup shares it. Raise it if you pin a large local model for routing, or turn on low-power mode (which skips the warm-up, so the first call has to load the model). Other strategies: `"keyword"` (fast, no LLM), `"embedding"` (nomic-embed-text), `"all"` (no filtering).
+**Tool Router** - When `"tool_selection_strategy": "llm"` (the default), Jarvis asks a small LLM to pick which tools are relevant for each query, shrinking the tool catalogue the chat model sees. By default this routing call reuses the intent-judge model, which is small. On Ollama, though, the judge and the router ask for different context sizes, so a shared model is loaded again on every exchange and the router is not warmed at startup; name a dedicated small model with `"tool_router_model": "<name>"` to avoid both. The memory lookup, which reads each question for keywords and dates ("last Thursday"), rides the same model unless `"memory_extractor_model"` names its own (also under **⚙️ Settings → 🧠 Memory & Dialogue**). Small models misread dates, so a stronger model helps there; a name your provider serves (`vendor/model`, or a Claude model ID on Anthropic) sends the question to it. The routing call (and the memory lookup) stops waiting after `"tool_router_timeout_sec"` (15 s by default) of silence from the server, and routing then falls back to keyword matching for that turn (a request that shares no word with any tool gets only the essential tools and a tool search, never the whole list), so a provider that goes quiet cannot hold the reply for minutes. Known limitation: a large chat model uses that tool search to find what it needs, but a small one such as `gemma4:e2b` does not, so on such a turn it answers without the tool it needed. Lower it if your router model normally answers in a second or two, but keep it above about three times the slower of the two calls, because the memory lookup shares it. Raise it if you pin a large local model for routing, or turn on low-power mode (which skips the warm-up, so the first call has to load the model). Other strategies: `"keyword"` (fast, no LLM; it matches whole English words of the tool descriptions, so a request worded otherwise, or in another language, gets only the essential tools and a tool search), `"embedding"` (nomic-embed-text), `"all"` (no filtering).
 
 **Task-list Planner** - Before the agentic loop, Jarvis runs a short planning pass that decomposes multi-step queries into an ordered list of sub-tasks. For small models (`gemma4:e2b` class), each planned step is directly resolved to a concrete tool call without relying on the chat model to re-plan turn-by-turn. This significantly improves multi-step reliability. Config options:
 

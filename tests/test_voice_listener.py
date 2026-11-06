@@ -1765,6 +1765,8 @@ class TestRouterWarmup:
                 t.join(timeout=5.0)
 
     def test_a_router_of_its_own_is_warmed_on_the_routers_prompt(self):
+        from jarvis.listening.intent_judge import _ollama_keep_alive_for_power_mode
+
         listener = _make_listener_for_warmup(chat_model="llama3.1", judge_model="gemma4:e2b")
         listener.cfg.tool_selection_strategy = "llm"
         listener.cfg.tool_router_model = "qwen2.5:3b"
@@ -1775,22 +1777,28 @@ class TestRouterWarmup:
         assert listener._llm_warmup_results["router"] == ("qwen2.5:3b", True)
         (model, keep_alive, prompt), = backend.warmed
         assert model == "qwen2.5:3b"
-        assert keep_alive == "30m"
+        assert keep_alive == _ollama_keep_alive_for_power_mode(listener.cfg)
         assert prompt is not None
         assert prompt[0] == _router_system_prompt(listener.cfg, backend)
 
-    def test_a_router_that_shares_the_judges_model_is_still_warmed_on_its_prompt(self):
-        """Loading the shared model computes nothing: the router's prompt is
-        its own, and only its own warm-up reads it."""
+    @pytest.mark.parametrize("shared", ["judge", "chat"])
+    def test_a_router_that_shares_a_model_rides_that_models_warm_up(self, shared):
+        """The judge's and the chat model's calls ask Ollama for another
+        context size than the router's, and Ollama loads the model again for
+        it: a prompt computed for the router would be gone before its first
+        call. The shared model's own warm-up covers the router, and no second
+        request goes to the same model."""
         listener = _make_listener_for_warmup(chat_model="llama3.1", judge_model="gemma4:e2b")
         listener.cfg.tool_selection_strategy = "llm"
-        listener.cfg.tool_router_model = ""
+        listener.cfg.tool_router_model = "" if shared == "judge" else "llama3.1"
+        shared_model = "gemma4:e2b" if shared == "judge" else "llama3.1"
         backend = _RouterWarmSpy()
 
         self._warm(listener, backend)
 
-        assert listener._llm_warmup_results["router"] == ("gemma4:e2b", True)
-        assert [(m, p is not None) for m, _, p in backend.warmed] == [("gemma4:e2b", True)]
+        assert backend.warmed == []
+        assert listener._llm_warmup_results["router"] == (shared_model, True)
+        assert listener._llm_warmup_results[shared] == (shared_model, True)
 
     def test_no_router_warm_up_outside_the_llm_strategy(self):
         listener = _make_listener_for_warmup(chat_model="llama3.1", judge_model="gemma4:e2b")

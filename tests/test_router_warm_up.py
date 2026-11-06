@@ -203,6 +203,81 @@ def test_the_start_up_warm_up_covers_what_the_reply_engines_router_call_sends(
             assert f"- {name}:" in shared, f"{name} is read again by the first call"
 
 
+def _invented_mcp_tools():
+    from jarvis.tools.registry import ToolSpec
+
+    return {
+        "lights__turn_on": ToolSpec(
+            "lights__turn_on", "Turn on a smart home light in a named room.",
+            {"type": "object", "properties": {"room": {"type": "string"}}},
+        ),
+        "notes__append": ToolSpec(
+            "notes__append", "Append a line to a plain-text notebook.",
+            {"type": "object", "properties": {"line": {"type": "string"}}},
+        ),
+    }
+
+
+@pytest.mark.unit
+def test_the_start_up_warm_up_covers_the_mcp_tools_the_reply_engines_router_call_sends(
+    mock_config, db, dialogue_memory
+):
+    """MCP tools are most of a large catalogue, and the warm-up reads them
+    from the start-up cache apart from the engine."""
+    from jarvis.reply.engine import run_reply_engine, warm_up_tool_router
+
+    backend = _RecordingBackend(answer="getWeather")
+    mock_config.tool_selection_strategy = "llm"
+    mock_config.tool_router_model = "router-model"
+    mock_config.mcps = {"lights": {"command": "lights-server"}, "notes": {"command": "notes-server"}}
+    mcp = _invented_mcp_tools()
+
+    with patch("jarvis.reply.engine.get_auxiliary_backend", return_value=backend), \
+         patch("jarvis.tools.registry.get_cached_mcp_tools", return_value=mcp):
+        assert warm_up_tool_router(mock_config, timeout_sec=5.0, keep_alive="30m") is True
+        with patch("jarvis.reply.engine.plan_query", return_value=[]), \
+             patch("jarvis.reply.engine.chat_with_messages",
+                   return_value={"message": {"content": "Il fait beau.", "role": "assistant"}}), \
+             patch("jarvis.reply.engine.extract_search_params_for_memory",
+                   return_value={"keywords": []}):
+            run_reply_engine(
+                db=db, cfg=mock_config, tts=None, text="what is the weather in Paris",
+                dialogue_memory=dialogue_memory,
+            )
+
+    warmed = backend.warmed[0]
+    router_calls = [a for a in backend.asked if a["system"] == warmed["prompt"][0]]
+    assert router_calls, "the reply engine's router call never came"
+    assert all(f"- {name}:" in router_calls[0]["user"] for name in mcp), (
+        "the engine's router call does not carry the MCP tools, so the test proves nothing"
+    )
+    shared = _shared_opening(warmed, router_calls[0])
+    for name in mcp:
+        assert f"- {name}:" in shared, f"{name} is read again by the first call"
+
+
+@pytest.mark.unit
+def test_an_mcp_cache_that_cannot_be_read_still_warms_the_builtins(mock_config):
+    """Start-up never stops on a warm-up: the router is warmed on what can
+    be read."""
+    from jarvis.reply.engine import warm_up_tool_router
+    from jarvis.tools.registry import offered_builtin_tools
+    from jarvis.tools.selection import _ALWAYS_INCLUDED
+
+    backend = _RecordingBackend()
+    mock_config.tool_router_model = "router-model"
+    mock_config.mcps = {"lights": {"command": "lights-server"}}
+
+    with patch("jarvis.reply.engine.get_auxiliary_backend", return_value=backend), \
+         patch("jarvis.tools.registry.get_cached_mcp_tools", side_effect=RuntimeError("locked")):
+        assert warm_up_tool_router(mock_config, timeout_sec=5.0, keep_alive="30m") is True
+
+    _, user = backend.warmed[0]["prompt"]
+    for name in offered_builtin_tools(mock_config):
+        if name not in _ALWAYS_INCLUDED:
+            assert f"- {name}:" in user
+
+
 @pytest.mark.unit
 def test_there_is_nothing_to_warm_without_a_router_model(mock_config):
     from jarvis.reply.engine import warm_up_tool_router

@@ -58,6 +58,33 @@ class TestToolSearchTool:
         assert result.success is True
         assert "no additional tools" in (result.reply_text or "").lower()
 
+    def test_a_search_that_matches_nothing_says_so(self, mock_config):
+        """A search that comes back with only the tools every turn already
+        offers found nothing. Listing `forget` and `remember` as hits would
+        hand the model a write to the user's memory as the answer to a
+        question about something else."""
+        mock_config.tool_selection_strategy = "keyword"
+        tool = ToolSearchTool()
+
+        result = tool.run({"query": "zzyzx qwvx"}, _ctx(mock_config))
+
+        assert result.success is True
+        assert result.reply_text == "No additional tools found for that description."
+
+    def test_the_tools_every_turn_offers_are_not_listed_as_found(self, mock_config):
+        from jarvis.tools.selection import _ALWAYS_INCLUDED
+
+        tool = ToolSearchTool()
+        with patch(
+            "jarvis.tools.builtin.tool_search.select_tools",
+            return_value=["getWeather", "stop", "forget", "remember"],
+        ):
+            result = tool.run({"query": "weather tomorrow"}, _ctx(mock_config))
+
+        listed = [line.split(":", 1)[0] for line in (result.reply_text or "").splitlines()]
+        assert listed == ["getWeather"]
+        assert not set(listed) & set(_ALWAYS_INCLUDED)
+
     def test_select_tools_exception_returns_error(self, mock_config):
         tool = ToolSearchTool()
         with patch(
