@@ -407,6 +407,49 @@ def test_a_pick_the_router_made_keeps_the_plain_label(
     assert "->keyword" not in printed
 
 
+@pytest.mark.unit
+def test_a_router_that_gave_up_on_a_sentence_no_tool_shares_does_not_hand_over_the_catalogue(
+    mock_config, db, dialogue_memory
+):
+    """The router expired and the keyword strategy matched nothing: the chat
+    model is offered the always-included tools and the means to look for
+    more, never every tool there is."""
+    from unittest.mock import MagicMock
+
+    from jarvis.reply.engine import run_reply_engine
+    from jarvis.tools.registry import offered_builtin_tools
+    from jarvis.tools.selection import _ALWAYS_INCLUDED
+
+    gave_up = MagicMock()
+    gave_up.direct.return_value = None  # what both backends return on a timeout
+    offered: list[list[str]] = []
+
+    def chat(*args, **kwargs):
+        offered.append([t["function"]["name"] for t in (kwargs.get("tools") or [])])
+        return {"message": {"content": "Je regarde.", "role": "assistant"}}
+
+    mock_config.tool_selection_strategy = "llm"
+    mock_config.tool_router_model = "router-model"
+    # A large chat model takes its tools natively, so they are what it is sent.
+    mock_config.llm_chat_model = "gpt-oss:20b"
+    catalogue = offered_builtin_tools(mock_config)
+
+    with patch("jarvis.reply.engine.plan_query", return_value=[]), \
+         patch("jarvis.reply.engine.chat_with_messages", side_effect=chat), \
+         patch("jarvis.reply.engine.extract_search_params_for_memory",
+               return_value={"keywords": []}), \
+         patch("jarvis.reply.engine.get_auxiliary_backend", return_value=gave_up):
+        run_reply_engine(
+            db=db, cfg=mock_config, tts=None, text="Какая завтра погода?",
+            dialogue_memory=dialogue_memory,
+        )
+
+    assert offered, "the chat model was never called, so the test proves nothing"
+    expected = {t for t in _ALWAYS_INCLUDED if t in catalogue} | {"toolSearchTool"}
+    assert set(offered[0]) == expected
+    assert len(offered[0]) < len(catalogue)
+
+
 # ── 5. A judge that never answers leaves the no-verdict path ──────────
 
 

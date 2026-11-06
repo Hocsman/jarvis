@@ -1723,6 +1723,99 @@ class TestLlmWarmup:
         judge_warm.assert_not_called()
 
 
+class _RouterWarmSpy:
+    """A router backend that records warm-ups and answers router calls."""
+
+    def __init__(self):
+        self.warmed: list = []
+        self.asked: list = []
+
+    def warm_up(self, model, timeout_sec=60.0, keep_alive="30m", prompt=None):
+        self.warmed.append((model, keep_alive, prompt))
+        return True
+
+    def direct(self, chat_model, system_prompt, user_content, timeout_sec=10.0, **_):
+        self.asked.append((chat_model, system_prompt, user_content))
+        return "none"
+
+
+def _router_system_prompt(cfg, backend) -> str:
+    """The system prompt a router call sends, read off a real call."""
+    from jarvis.tools.registry import offered_builtin_tools
+    from jarvis.tools.selection import ToolSelectionStrategy, select_tools
+
+    select_tools(
+        "hello", offered_builtin_tools(cfg), {},
+        strategy=ToolSelectionStrategy.LLM, llm_backend=backend, llm_model="m",
+    )
+    return backend.asked[-1][1]
+
+
+class TestRouterWarmup:
+    """Under the `llm` strategy the router is warmed on its own prompt."""
+
+    def _warm(self, listener, backend):
+        with patch(
+            "jarvis.listening.listener.warm_up_chat_model", return_value=True
+        ), patch(
+            "jarvis.listening.intent_judge.warm_up_chat_model", return_value=True
+        ), patch("jarvis.reply.engine.get_auxiliary_backend", return_value=backend):
+            threads = listener._start_llm_warmup()
+            for t in threads:
+                t.join(timeout=5.0)
+
+    def test_a_router_of_its_own_is_warmed_on_the_routers_prompt(self):
+        listener = _make_listener_for_warmup(chat_model="llama3.1", judge_model="gemma4:e2b")
+        listener.cfg.tool_selection_strategy = "llm"
+        listener.cfg.tool_router_model = "qwen2.5:3b"
+        backend = _RouterWarmSpy()
+
+        self._warm(listener, backend)
+
+        assert listener._llm_warmup_results["router"] == ("qwen2.5:3b", True)
+        (model, keep_alive, prompt), = backend.warmed
+        assert model == "qwen2.5:3b"
+        assert keep_alive == "30m"
+        assert prompt is not None
+        assert prompt[0] == _router_system_prompt(listener.cfg, backend)
+
+    def test_a_router_that_shares_the_judges_model_is_still_warmed_on_its_prompt(self):
+        """Loading the shared model computes nothing: the router's prompt is
+        its own, and only its own warm-up reads it."""
+        listener = _make_listener_for_warmup(chat_model="llama3.1", judge_model="gemma4:e2b")
+        listener.cfg.tool_selection_strategy = "llm"
+        listener.cfg.tool_router_model = ""
+        backend = _RouterWarmSpy()
+
+        self._warm(listener, backend)
+
+        assert listener._llm_warmup_results["router"] == ("gemma4:e2b", True)
+        assert [(m, p is not None) for m, _, p in backend.warmed] == [("gemma4:e2b", True)]
+
+    def test_no_router_warm_up_outside_the_llm_strategy(self):
+        listener = _make_listener_for_warmup(chat_model="llama3.1", judge_model="gemma4:e2b")
+        listener.cfg.tool_selection_strategy = "keyword"
+        listener.cfg.tool_router_model = "qwen2.5:3b"
+        backend = _RouterWarmSpy()
+
+        self._warm(listener, backend)
+
+        assert "router" not in listener._llm_warmup_results
+        assert backend.warmed == []
+
+    def test_low_power_mode_does_not_warm_the_router(self):
+        listener = _make_listener_for_warmup(
+            chat_model="llama3.1", judge_model="gemma4:e2b", low_power_mode=True
+        )
+        listener.cfg.tool_selection_strategy = "llm"
+        listener.cfg.tool_router_model = "qwen2.5:3b"
+        backend = _RouterWarmSpy()
+
+        self._warm(listener, backend)
+
+        assert backend.warmed == []
+
+
 class TestWhisperWarmup:
     """Tests for the faster-whisper warmup transcribe."""
 

@@ -84,7 +84,7 @@ from .planner import (
     is_search_memory_step,
     resolve_next_tool_call as _resolve_plan_step,
 )
-from ..tools.selection import router_timeout_sec, select_tools, ToolSelectionStrategy
+from ..tools.selection import router_timeout_sec, select_tools, warm_up_router, ToolSelectionStrategy
 import json
 import re
 import uuid
@@ -398,6 +398,36 @@ def resolve_tool_router_model(cfg) -> str:
         if candidate:
             return candidate
     return ""
+
+
+def warm_up_tool_router(cfg, timeout_sec: float, keep_alive: str) -> bool:
+    """Warm the tool router on the prompt its first call will send.
+
+    Resolved the way :func:`run_reply_engine` resolves the router's call:
+    the model from :func:`resolve_tool_router_model`, its backend from
+    ``get_auxiliary_backend``, the builtins this configuration offers and
+    the MCP tools discovered at start-up. ``keep_alive`` is the residency
+    the listener asks every start-up warm-up for. See
+    :func:`jarvis.tools.selection.warm_up_router`.
+    """
+    model = resolve_tool_router_model(cfg)
+    if not model:
+        return False
+    mcp_tools: dict = {}
+    if getattr(cfg, "mcps", {}):
+        try:
+            from ..tools.registry import get_cached_mcp_tools
+            mcp_tools = get_cached_mcp_tools()
+        except Exception as e:
+            debug_log(f"router warm-up: MCP tools unavailable, warming the builtins only: {e}", "planning")
+    return warm_up_router(
+        offered_builtin_tools(cfg),
+        mcp_tools,
+        llm_backend=get_auxiliary_backend(cfg, model),
+        llm_model=model,
+        timeout_sec=timeout_sec,
+        keep_alive=keep_alive,
+    )
 
 
 def resolve_memory_extractor_model(cfg) -> str:

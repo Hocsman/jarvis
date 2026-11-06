@@ -102,6 +102,25 @@ class TestRedactingBackendScrubs:
         spy = _SpyBackend()
         assert RedactingBackend(spy).list_models() == ["m"]
 
+    @pytest.mark.unit
+    def test_a_warm_up_prompt_is_scrubbed_as_direct_scrubs_it(self) -> None:
+        """A warm-up prompt is the opening of a later ``direct`` call, so it
+        leaves scrubbed, and scrubbed the same way, or the two differ."""
+        warmed: Dict[str, Any] = {}
+
+        class _WarmSpy(_SpyBackend):
+            def warm_up(self, model, timeout_sec=60.0, keep_alive="30m", prompt=None):
+                warmed.update(model=model, keep_alive=keep_alive, prompt=prompt)
+                return True
+
+        spy = _WarmSpy()
+        backend = RedactingBackend(spy)
+        backend.direct("m", _DIRTY, _DIRTY)
+
+        assert backend.warm_up("m", keep_alive="1m", prompt=(_DIRTY, _DIRTY)) is True
+        assert warmed["prompt"] == (spy.calls["direct"]["system"], spy.calls["direct"]["user"])
+        assert warmed["keep_alive"] == "1m"
+
 
 # ── Factory wiring ──────────────────────────────────────────────────────
 
