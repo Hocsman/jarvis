@@ -11,6 +11,7 @@ from stdin (see ``client.HEADER``), and publishes frames to shared memory
 
 import argparse
 import collections
+import itertools
 import json
 import os
 import sys
@@ -84,6 +85,7 @@ class Renderer:
         self.epoch = 0
         self.late: Dict[int, int] = {}       # frames published after their stamp, per epoch
         self.skipped = 0
+        self._skipping = 0                    # chunks skipped in a row, until Ditto catches up
         self.quit = threading.Event()
         self.frames_fed = 0                   # frames fed to Ditto, which is how it names those it draws
         self._since_voice = LIPS_RELEASE_FRAMES + 1   # frames since she was heard: past the release, at rest
@@ -183,18 +185,25 @@ class Renderer:
         self.feeder.fed(start)
 
     def _behind(self, now: float) -> bool:
-        """Whether a frame Ditto still owes should already be on screen."""
-        for due in self.due:
+        """Whether a frame Ditto could already have drawn should already be on screen.
+
+        Ditto hands a chunk's frames back only once the next chunk is fed, so
+        the last chunk's frames are not owed yet: counting them would skip
+        every chunk after a stall, and they would never come out."""
+        drawable = len(self.due) - tl.CHUNK_FRAMES
+        for due in itertools.islice(self.due, max(drawable, 0)):
             if due.epoch == self.epoch and due.publish:
                 return now > due.stamp + 1 / tl.FPS
         return False
 
     def _rest(self) -> None:
-        """Feeding stops: frames still inside Ditto will not be shown."""
+        """Feeding stops: frames still inside Ditto will not be shown, and
+        those already published are withdrawn."""
+        self.frames.withdraw_all()
         late = self.late.pop(self.epoch, 0)
         if late or self.skipped:
             _log(f"before this rest: {late} frames after their moment, {self.skipped} chunks skipped")
-        self.skipped = 0
+        self.skipped = self._skipping = 0
         self.epoch += 1
         self._since_voice = LIPS_RELEASE_FRAMES + 1   # whoever watches next finds her lips at rest
 
@@ -216,9 +225,15 @@ class Renderer:
             return min(step.wait, 0.05)
         if self._behind(now):
             # Ditto is behind: frames for this chunk would come too late to show.
+            if not self._skipping:
+                _log("Ditto fell behind: skipping chunks until it catches up")
+            self._skipping += 1
             self.skipped += 1
             self.feeder.fed(step.feed)
             return 0.0
+        if self._skipping:
+            _log(f"Ditto caught up after {self._skipping} chunks skipped")
+            self._skipping = 0
         self._feed(step.feed, publish=True)
         return 0.0
 

@@ -132,7 +132,9 @@ The face costs the GPU nothing while no one can see it.
 - Otherwise it rests, whatever audio it is handed: no chunk, no frame, no GPU
   work. A viewer who arrives while she speaks sees her from the next chunk
   that can still be drawn on time.
-- Frames still inside Ditto when it rests are never published.
+- Frames still inside Ditto when it rests are never published, and those
+  already published are withdrawn: whoever watches next never sees a frame
+  from before the rest, however long a front end holds her last frame.
 - The renderer tells its handle each time that changes (`watched`), and
   Kyutai holds her voice back for the face only while someone watches:
   with nobody watching she speaks at once.
@@ -270,10 +272,15 @@ is off until the daemon starts again, and nothing she says depends on it.
 
 A frame that comes after its stamp is not a failure: a front end shows the
 newest frame due and skips the rest. When Ditto falls behind, so that a frame
-it still owes should already be on screen, the renderer skips the chunk that
-falls due rather than queue it behind, so the face catches up with the voice
-instead of trailing it. It counts the frames it published after their stamp
-and the chunks it skipped, and logs both when it rests.
+it could already have drawn should already be on screen, the renderer skips
+the chunk that falls due rather than queue it behind, so the face catches up
+with the voice instead of trailing it. Ditto hands a chunk's frames back only
+once the next chunk is fed, so the last chunk's frames are never counted as
+owed: counting them would skip every chunk after the GPU was taken elsewhere
+for a moment, and the face would never come back while someone watched. The
+renderer logs when it starts skipping and when it catches up, counts the
+frames it published after their stamp and the chunks it skipped, and logs
+both when it rests.
 
 ## Configuration
 

@@ -129,6 +129,12 @@ class FrameWriter:
                     struct.pack_into("<Q", self._buf, off, 0)
             return self._generation
 
+    def withdraw_all(self) -> None:
+        """Withdraw every frame published: none of them may be shown again."""
+        with self._lock:
+            for slot in range(SLOTS):
+                struct.pack_into("<Q", self._buf, _slot_offset(slot), 0)
+
     def beat(self, now: float) -> None:
         struct.pack_into("<d", self._buf, _OFF_RENDERER, now)
 
