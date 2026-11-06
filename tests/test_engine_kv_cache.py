@@ -292,17 +292,21 @@ def test_tool_search_widening_reinjects_context_cleanly(
 # every reply write the whole prompt again.
 
 _REPLY_PROFILE_FACT = "Lives in Annecy, by the lake."
+_REPLY_PROFILE_EMAIL = "lucien.varenne@example.org"
 
 
 def _anthropic_replies(engine_mod, cfg, db, dialogue_memory, questions, plans, times,
                        picks=("stop", "forget", "remember")):
     """Run one reply per question through the real engine and the real
-    Anthropic backend, on an in-memory transport; return the request bodies."""
+    Anthropic backend behind the secret scrub that always wraps it
+    (``auto_redact_before_cloud``), on an in-memory transport; return the
+    request bodies."""
     import json
 
     import httpx2
 
     from jarvis.llm import AnthropicBackend
+    from jarvis.llm.redacting import RedactingBackend
 
     sent: list = []
 
@@ -315,8 +319,8 @@ def _anthropic_replies(engine_mod, cfg, db, dialogue_memory, questions, plans, t
             "usage": {"input_tokens": 3, "output_tokens": 2},
         })
 
-    backend = AnthropicBackend(
-        api_key="sk-ant-test", http_client=httpx2.Client(transport=httpx2.MockTransport(answer)))
+    backend = RedactingBackend(AnthropicBackend(
+        api_key="sk-ant-test", http_client=httpx2.Client(transport=httpx2.MockTransport(answer))))
     now = {}
     with ExitStack() as stack:
         stack.enter_context(patch.object(engine_mod, "get_llm_backend", return_value=backend))
@@ -340,7 +344,9 @@ def _anthropic_cfg(mock_config):
 
     mock_config.llm_provider = "anthropic"
     mock_config.llm_chat_model = "claude-haiku-5-5"
-    MemoryCore.for_config(mock_config).remember(SECTION_PROFILE, _REPLY_PROFILE_FACT)
+    core = MemoryCore.for_config(mock_config)
+    core.remember(SECTION_PROFILE, _REPLY_PROFILE_FACT)
+    core.remember(SECTION_PROFILE, f"Writes from {_REPLY_PROFILE_EMAIL}.")
     return mock_config
 
 
@@ -348,8 +354,11 @@ def _anthropic_cfg(mock_config):
 def test_the_next_reply_reads_back_what_the_last_one_cached(mock_config, db, dialogue_memory):
     """Two replies a minute apart, with different plans: the first system
     block, which ends on a breakpoint, is the same in both, so the second
-    reads it from the cache. It holds the persona and his profile; the plan
-    and the time are not in it."""
+    reads it from the cache. It holds the persona and his profile, scrubbed
+    as everything sent to the cloud is; the plan and the time are not in
+    it."""
+    import json
+
     from jarvis.reply import engine as engine_mod
 
     sent = _anthropic_replies(
@@ -367,6 +376,8 @@ def test_the_next_reply_reads_back_what_the_last_one_cached(mock_config, db, dia
     assert head["cache_control"] == {"type": "ephemeral"}
     assert head["text"].startswith("Persona:")
     assert _REPLY_PROFILE_FACT in head["text"]
+    assert "[REDACTED_EMAIL]" in head["text"]
+    assert _REPLY_PROFILE_EMAIL not in json.dumps(sent)
     for request, time_line in zip(sent, ["Thursday 21:14", "Thursday 21:15"]):
         assert "ACTION PLAN" not in request["system"][0]["text"]
         assert time_line not in request["system"][0]["text"]

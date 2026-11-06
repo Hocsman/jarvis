@@ -140,12 +140,12 @@ def _to_turns(
     """The engine's messages as ``(system, marks, turns, replayed)``.
 
     Every system message joins the top-level system prompt, and its cache
-    marks (``CACHE_MARKS``) become ``marks``, offsets into that prompt. A tool result
-    answers the call it names in the turn just before it, and a user
-    message the engine tagged with a tool's name answers that tool's call
-    (the approval path replays a granted call that way, see
-    ``is_tool_message`` in ``memory/conversation.py``); any other result is
-    plain text. ``kept_turn(call_id)`` returns an assistant turn to send
+    marks (``CACHE_MARKS``) become ``marks``, offsets into that prompt. A
+    tool result answers the call it names in the turn just before it, and
+    a user message the engine tagged with a tool's name answers that
+    tool's call (the approval path replays a granted call that way, see
+    ``is_tool_message`` in ``memory/conversation.py``); any other result
+    is plain text. ``kept_turn(call_id)`` returns an assistant turn to send
     back exactly as the API returned it (thinking blocks and signatures
     included), or ``None``.
     """
