@@ -274,6 +274,27 @@ def test_the_same_call_after_a_failure_is_not_run_again():
 
 
 @pytest.mark.unit
+def test_the_same_call_after_a_refusal_is_not_run_again():
+    """A call the gate refused is refused again if it reaches the gate
+    again; the model is pointed at the refusal instead."""
+    cfg = _mock_cfg()
+    chat = [
+        _call("getWeather", {"location": "Ambrel"}, "n1"),
+        _call("getWeather", {"location": "Ambrel"}, "n2"),
+        _answer("You have not allowed me to check the weather."),
+    ]
+
+    _, ran, _ = _run(
+        cfg=cfg, text="weather in Ambrel?", chat=chat, tools=["getWeather"],
+        outcome=lambda a: ToolExecutionResult(
+            success=False, refused=True,
+            reply_text="getWeather is not allowed for this assistant."),
+    )
+
+    assert len(ran) == 1
+
+
+@pytest.mark.unit
 def test_the_same_call_is_caught_however_many_calls_ran_in_between():
     """The calls of the whole reply are kept, not the last few."""
     cfg = _mock_cfg()

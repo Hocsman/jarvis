@@ -7,9 +7,8 @@ tool had already returned two results in that reply, and the routine told
 the user it could not read one of his projects.
 
 The engine half is pinned by `tests/test_distinct_calls_of_one_tool.py`:
-with a count by tool name, the third folder is never read whatever the
-model does, so there is no "before" arm to sample. What only a live model
-shows is the other half:
+whether a planned folder can be read at all is the engine's decision, not
+the model's. What only a live model shows is the other half:
 
 - it calls the tool once per planned folder, on that folder;
 - it stops: no identical call, never more calls than the turn budget;
