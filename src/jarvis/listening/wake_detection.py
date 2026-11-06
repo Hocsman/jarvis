@@ -47,6 +47,21 @@ def _names(wake_word: str, aliases: List[str]) -> List[str]:
     return sorted(names, key=len, reverse=True)
 
 
+def _is_a_mark(ch: str) -> bool:
+    """Whether *ch* is punctuation or a symbol, in any script."""
+    return unicodedata.category(ch)[0] in ("P", "S")
+
+
+def _without_end_marks(token: str) -> str:
+    """*token* with the punctuation and symbols at either end taken off."""
+    start, end = 0, len(token)
+    while start < end and _is_a_mark(token[start]):
+        start += 1
+    while end > start and _is_a_mark(token[end - 1]):
+        end -= 1
+    return token[start:end]
+
+
 def _occurrences(text: str, name: str) -> Iterator[Tuple[int, int]]:
     """Every (start, end) where *name* occurs in *text*, overlapping ones
     included, the words of a name of several words apart by any spacing."""
@@ -107,21 +122,21 @@ def is_wake_word_detected(text_lower: str, wake_word: str, aliases: List[str], f
         debug_log(f"wake word: '{inside_a_word}' only inside a longer word, not her name: "
                   f"\"{text_lower}\"", "wake")
 
-    # Combine wake word and aliases
-    all_aliases = set(aliases) | {wake_word}
-
-    # Fuzzy matching for close variations
+    # Close spellings: each token stripped of the punctuation and symbols at
+    # its ends, weighed against every name. A token that was only marks is
+    # nothing.
+    names = _names(wake_word, aliases)
     try:
-        heard_tokens = [t.strip(".,!?;:()[]{}\"'`).-_/") for t in text_lower.split() if t.strip()]
+        heard_tokens = [token for token in (_without_end_marks(t) for t in text_lower.split()) if token]
         for token in heard_tokens:
-            for alias in all_aliases:
-                ratio = difflib.SequenceMatcher(a=alias, b=token).ratio()
+            for name in names:
+                ratio = difflib.SequenceMatcher(a=name, b=token).ratio()
                 if ratio >= fuzzy_ratio:
-                    debug_log(f"wake word fuzzy match: '{alias}' ~ '{token}' (ratio: {ratio:.3f})", "wake")
+                    debug_log(f"wake word fuzzy match: '{name}' ~ '{token}' (ratio: {ratio:.3f})", "wake")
                     return True
     except Exception:
         pass
-    
+
     return False
 
 
