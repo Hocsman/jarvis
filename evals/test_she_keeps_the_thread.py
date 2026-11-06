@@ -42,7 +42,6 @@ from __future__ import annotations
 import functools
 import itertools
 import os
-import sys
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -51,10 +50,9 @@ from unittest.mock import patch
 
 import pytest
 
-ROUNDS = int(os.environ.get("EVAL_KEEPS_THE_THREAD_ROUNDS", "0") or 0)
+from helpers import rate, to_terminal
 
-# Below this many calls an arm's rate says nothing (CLAUDE.md, sample sizes).
-_MIN_CALLS_FOR_A_RATE = 20
+ROUNDS = int(os.environ.get("EVAL_KEEPS_THE_THREAD_ROUNDS", "0") or 0)
 
 # The evening's rhythm.
 _SECONDS_PER_EXCHANGE = 40
@@ -363,14 +361,6 @@ def _carries(reply: str, case: ThreadCase) -> bool:
     return any(_fold(word) in folded for word in case.expect)
 
 
-def _to_terminal(capsys, lines: List[str]) -> None:
-    from jarvis.utils.console import force_utf8_stream
-
-    with capsys.disabled():
-        force_utf8_stream(sys.stdout)
-        print("\n".join(lines), flush=True)
-
-
 def _minutes(after: int) -> int:
     return round((after + 1) * _SECONDS_PER_EXCHANGE / 60)
 
@@ -449,10 +439,6 @@ class TestBeforeAndAfter:
         calls = {key: 0 for key in keys}
         misses: List[str] = []
 
-        def rate(got: int, n: int) -> str:
-            return f"{got}/{n} ({100 * got / n:.0f} %)" if n >= _MIN_CALLS_FOR_A_RATE \
-                else f"{got}/{n}   (under {_MIN_CALLS_FOR_A_RATE} calls: counts only)"
-
         def total(table, *, arm, distance=None):
             return sum(v for (name, d, _), v in table.items()
                        if name == arm and distance in (None, d))
@@ -473,7 +459,7 @@ class TestBeforeAndAfter:
                             misses.append(
                                 f"{name} / {distance} / {case.id}: {reply[:120]!r}"
                             )
-                _to_terminal(capsys, [f"⏱️ round {rnd + 1}/{ROUNDS} done"])
+                to_terminal(capsys, [f"⏱️ round {rnd + 1}/{ROUNDS} done"])
         finally:
             lines = [f"📊 She keeps the thread: {len(CASES)} cases x "
                      f"{len(after)} distances x {ROUNDS} rounds, "
@@ -494,7 +480,7 @@ class TestBeforeAndAfter:
                         lines.append(f"         💬 {case.id:<26} {hits[key]}/{calls[key]}")
             for miss in misses:
                 lines.append(f"      ❌ {miss}")
-            _to_terminal(capsys, [""] + lines)
+            to_terminal(capsys, [""] + lines)
 
         assert total(hits, arm="conversation") > total(hits, arm="five minutes"), (
             "The whole conversation recalled no more than its last five minutes."

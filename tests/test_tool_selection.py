@@ -857,3 +857,25 @@ class TestUrlCue:
             llm_model="test",
         )
         assert "fetchWebPage" not in result
+
+
+# ---------------------------------------------------------------------------
+# A tool's name in a sentence
+# ---------------------------------------------------------------------------
+
+class TestAToolNameInASentence:
+    """A search for a tool's exact name finds it, but that is
+    ``toolSearchTool``'s doing (builtin/tool_search.spec.md, Name cue), not
+    ``select_tools``'s. The pre-loop router reads what the user said, and a
+    word of it that happens to be a tool's name is no request for the tool:
+    the sentence gets what the router makes of it."""
+
+    @pytest.mark.unit
+    def test_a_spoken_word_that_is_a_tool_name_does_not_offer_the_tool(self):
+        backend = _llm_backend(return_value="none")
+        result = select_tools(
+            "j'ai vu un screenshot marrant hier soir", _builtin(), {},
+            strategy=ToolSelectionStrategy.LLM,
+            llm_backend=backend, llm_model="test",
+        )
+        assert "screenshot" not in result

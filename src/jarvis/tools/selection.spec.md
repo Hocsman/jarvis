@@ -48,6 +48,14 @@ degraded keyword fallback, and mutates the list in place so a `ToolSelection`
 keeps its `degraded` flag. A dotted word that is not an address
 (`requirements.txt`) does not trigger it.
 
+A tool's name in the query is no cue here: `select_tools` reads what the user
+said, and a word of it that happens to be a tool's name ("j'ai vu un
+screenshot marrant") is no request for the tool. A search for a tool's exact
+name is `toolSearchTool`'s business (`builtin/tool_search.spec.md`, Name
+cue): the name matching lives in `builtin/tool_search.py`, and the only
+thing it takes from here is `_LLM_MAX_SELECTED`, which caps the names it
+finds as it caps the router's picks.
+
 ### Keyword Strategy
 
 1. Build a keyword index per tool from its `name` (camelCase split) and `description` (lowercased, stop-words removed).

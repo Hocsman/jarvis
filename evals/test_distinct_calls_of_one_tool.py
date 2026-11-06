@@ -57,6 +57,7 @@ from unittest.mock import patch
 import pytest
 
 from conftest import requires_judge_llm
+from helpers import rate
 
 ROUNDS = int(os.environ.get("EVAL_DISTINCT_CALLS_ROUNDS", "3") or 3)
 
@@ -96,10 +97,6 @@ _NOT_RUN_AGAIN = "Not run again"
 
 def _norm(path: str) -> str:
     return str(path or "").replace("/", "\\").rstrip("\\").casefold()
-
-
-def _rate(count: int, runs: int) -> str:
-    return f" ({count / runs:.0%})" if runs >= 20 else ""
 
 
 def _one_run(cfg, db, memory) -> dict:
@@ -217,8 +214,8 @@ def _measure(cfg) -> None:
             print("      " + (reply or "(no reply)").replace("\n", "\n      "))
 
     print(f"\n📊 {cfg.llm_chat_model}, {ROUNDS} run(s):"
-          f"\n   📂 read all three planned folders: {read_all}/{ROUNDS}{_rate(read_all, ROUNDS)}"
-          f"\n   🗣️ reply grounded in each listing: {grounded}/{ROUNDS}{_rate(grounded, ROUNDS)}"
+          f"\n   📂 read all three planned folders: {rate(read_all, ROUNDS)}"
+          f"\n   🗣️ reply grounded in each listing: {rate(grounded, ROUNDS)}"
           f" (no verdict {unjudged})"
           f"\n   🧮 calls: {emitted} emitted by the model, {dispatched} dispatched from the plan,"
           f" {not_run_again} identical ones answered without running;"
@@ -339,7 +336,6 @@ def test_the_suite_small_model_stops_when_a_tool_keeps_finding_nothing(mock_conf
     spread = ", ".join(f"{k} with {n} call(s)" for n, k in sorted(by_runs.items()))
     print(f"\n📊 {mock_config.llm_chat_model}, {total} replies:"
           f"\n   🔁 calls of the one tool per reply: {spread} (turn budget {budget})"
-          f"\n   🛑 replies ending on the max-turn digest: {max_turn_endings}/{total}"
-          f"{_rate(max_turn_endings, total)}")
+          f"\n   🛑 replies ending on the max-turn digest: {rate(max_turn_endings, total)}")
 
     assert max_turn_endings == 0, "a reply ran out of turns calling a tool that finds nothing"

@@ -46,7 +46,7 @@ from unittest.mock import patch, MagicMock
 from dataclasses import dataclass
 from typing import Optional, List, Union
 
-from helpers import JUDGE_MODEL, JUDGE_BASE_URL, MockConfig, is_judge_llm_available
+from helpers import JUDGE_MODEL, JUDGE_BASE_URL, MockConfig, is_judge_llm_available, rate, to_terminal
 from jarvis.listening.listener import _carries_speech_she_did_not_say
 
 NOT_SPEECH_ARMS = [a.strip() for a in os.environ.get("EVAL_INTENT_JUDGE_ARMS", "").split(",") if a.strip()]
@@ -1409,11 +1409,6 @@ def _interleaved(arms: list, cases: list):
                 yield case, arm
 
 
-def _rate(count: int, scored: int) -> str:
-    """A rate only where there are calls enough to mean one."""
-    return f" ({count / scored:.0%})" if scored >= 20 else ""
-
-
 class TestIntentJudgeKnowsSilenceFromSpeech:
     """The hot-window overrides never reverse a not-directed ``noise``
     verdict, and such a segment does not join a question being collected, so
@@ -1484,13 +1479,12 @@ class TestIntentJudgeNotSpeechArms:
             stops = f", stop {stop}" if situation == situations[True][0] else ""
             unsure_part = f" ({unsure} on an unsure verdict)" if situation == situations[False][0] else ""
             lines.append(f"🧪 {arm:24} {situation:15} {kind:10}  {verbs[situation]} "
-                         f"{taken}/{scored}{_rate(taken, scored)}{unsure_part}, noise {noise}/{scored}"
+                         f"{rate(taken, scored)}{unsure_part}, noise {noise}/{scored}"
                          f"{stops}, no verdict {silent}")
         for arm, wrong in misses.items():
             for name, count in sorted(wrong.items()):
                 lines.append(f"   ↳ {arm}: {name} wrong {count}/{NOT_SPEECH_ROUNDS}")
-        with capsys.disabled():
-            print("\n".join(lines))
+        to_terminal(capsys, lines)
 
         mute = [arm for arm in NOT_SPEECH_ARMS
                 if all(row[3] == row[4] for (who, _, _), row in tally.items() if who == arm)]
@@ -1526,12 +1520,11 @@ class TestIntentJudgeNotSpeechArms:
         for ((model, variant), kind), (joined, stop, calls, silent) in tally.items():
             scored = calls - silent
             lines.append(f"🧪 {model:24} question {variant:6} {kind:10}  joined "
-                         f"{joined}/{scored}{_rate(joined, scored)}, stop {stop}, "
+                         f"{rate(joined, scored)}, stop {stop}, "
                          f"no verdict {silent}")
         for ((model, variant), name), count in sorted(misses.items()):
             lines.append(f"   ↳ {model} {variant}: {name} wrong {count}/{NOT_SPEECH_ROUNDS}")
-        with capsys.disabled():
-            print("\n".join(lines))
+        to_terminal(capsys, lines)
 
         mute = [arm for arm in arms
                 if all(row[2] == row[3] for (who, _), row in tally.items() if who == arm)]
@@ -1573,12 +1566,11 @@ class TestIntentJudgeNotSpeechArms:
         for (model, variant), (directed, answered, noise, calls, silent) in tally.items():
             scored = calls - silent
             lines.append(f"🧪 {model:24} his answer {variant:8}  directed "
-                         f"{directed}/{scored}{_rate(directed, scored)}, answered "
+                         f"{rate(directed, scored)}, answered "
                          f"{answered}/{scored}, noise {noise}/{scored}, no verdict {silent}")
         for ((model, variant), name), count in sorted(misses.items()):
             lines.append(f"   ↳ {model} {variant}: {name} not directed {count}/{NOT_SPEECH_ROUNDS}")
-        with capsys.disabled():
-            print("\n".join(lines))
+        to_terminal(capsys, lines)
 
         mute = [arm for arm in arms if tally[arm][3] == tally[arm][4]]
         assert not mute, f"no answer at all from {mute}: check the model names and the provider"
@@ -1620,12 +1612,11 @@ class TestIntentJudgeNotSpeechArms:
         for (model, variant), (answered, directed, noise, calls, silent) in tally.items():
             scored = calls - silent
             lines.append(f"🧪 {model:24} her voice rewritten {variant:8}  answered "
-                         f"{answered}/{scored}{_rate(answered, scored)}, directed "
+                         f"{rate(answered, scored)}, directed "
                          f"{directed}/{scored}, noise {noise}/{scored}, no verdict {silent}")
         for ((model, variant), name), count in sorted(misses.items()):
             lines.append(f"   ↳ {model} {variant}: {name} answered {count}/{NOT_SPEECH_ROUNDS}")
-        with capsys.disabled():
-            print("\n".join(lines))
+        to_terminal(capsys, lines)
 
         mute = [arm for arm in arms if tally[arm][3] == tally[arm][4]]
         assert not mute, f"no answer at all from {mute}: check the model names and the provider"

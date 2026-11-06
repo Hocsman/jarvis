@@ -2256,6 +2256,31 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
     _response_language = str(getattr(cfg, "response_language", "") or "").strip()
     _persona_prompt = build_system_prompt(_assistant_name, response_language=_response_language)
 
+    # What she can do with his projects, said whatever the router offered:
+    # a question about what she can do reads to the router as conversation,
+    # and the chat model, shown none of the tools, answers from a prior that
+    # says an assistant cannot reach anyone's files. Only while the tool is
+    # offered and a call can run, never to a routine, which cannot reach
+    # it, and never on the turn that runs a call the user approved: that
+    # turn replays the request, and told to hand it over she would propose
+    # the call again and raise a second card for one action.
+    from ..projets.delegation import TOOL_NAME as _DELEGATION_TOOL
+
+    _projets_block = ""
+    if (
+        scope is None
+        and _settled.approval is None
+        and _DELEGATION_TOOL in _offered_builtins
+    ):
+        from ..projets.prompt import format_projets_block, withheld_because
+
+        _projets_withheld = withheld_because(cfg)
+        if _projets_withheld:
+            debug_log(f"projects block left out: {_projets_withheld}", "planning")
+        else:
+            _projets_block = format_projets_block()
+            debug_log(f"projects block in the system prompt: {_DELEGATION_TOOL} is offered", "planning")
+
     def _initial_system_message() -> dict:
         """The system message, with the offsets where its lasting parts end.
 
@@ -2273,6 +2298,9 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
 
         # Add model-size-appropriate prompt components
         guidance.extend(prompts.to_list())
+
+        if _projets_block:
+            guidance.append("\n" + _projets_block)
 
         # Chatterbox speaks English only, and Piper speaks the language of
         # its voice: English unless response_language or tts_piper_voices
