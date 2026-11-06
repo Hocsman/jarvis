@@ -11,7 +11,6 @@ from stdin (see ``client.HEADER``), and publishes frames to shared memory
 
 import argparse
 import collections
-import itertools
 import json
 import os
 import sys
@@ -35,6 +34,9 @@ KEEP_SECONDS = 5.0       # audio heard longer ago than this is forgotten
 SILENCE_RMS = 0.005
 LIPS_ATTACK_FRAMES = 2    # the lips start to follow her voice this many frames before it
 LIPS_RELEASE_FRAMES = 6   # and return to the portrait's over this many after it
+# A run of skipped chunks this long, a second of her face, is logged as it
+# happens; shorter ones are only counted in the summary logged at the rest.
+LOGGED_SKIPS = round(1.0 / tl.CHUNK_SECONDS)
 
 
 def _log(text: str) -> None:
@@ -190,21 +192,24 @@ class Renderer:
         Ditto hands a chunk's frames back only once the next chunk is fed, so
         the last chunk's frames are not owed yet: counting them would skip
         every chunk after a stall, and they would never come out."""
-        drawable = len(self.due) - tl.CHUNK_FRAMES
-        for due in itertools.islice(self.due, max(drawable, 0)):
+        owed = list(self.due)   # one copy: Ditto's thread pops from the deque meanwhile
+        for due in owed[:max(len(owed) - tl.CHUNK_FRAMES, 0)]:
             if due.epoch == self.epoch and due.publish:
                 return now > due.stamp + 1 / tl.FPS
         return False
 
     def _rest(self) -> None:
-        """Feeding stops: frames still inside Ditto will not be shown, and
+        """Feeding stops: frames still inside Ditto will never be shown, and
         those already published are withdrawn."""
-        self.frames.withdraw_all()
-        late = self.late.pop(self.epoch, 0)
+        with self.lock:
+            # Refused by the writer itself, so a frame Ditto's thread hands
+            # back while the face rests can never be published after this.
+            self.generation = self.frames.withdraw_all()
+        epoch, self.epoch = self.epoch, self.epoch + 1
+        late = self.late.pop(epoch, 0)
         if late or self.skipped:
             _log(f"before this rest: {late} frames after their moment, {self.skipped} chunks skipped")
         self.skipped = self._skipping = 0
-        self.epoch += 1
         self._since_voice = LIPS_RELEASE_FRAMES + 1   # whoever watches next finds her lips at rest
 
     def tick(self, now: float) -> float:
@@ -225,15 +230,15 @@ class Renderer:
             return min(step.wait, 0.05)
         if self._behind(now):
             # Ditto is behind: frames for this chunk would come too late to show.
-            if not self._skipping:
-                _log("Ditto fell behind: skipping chunks until it catches up")
             self._skipping += 1
             self.skipped += 1
+            if self._skipping == LOGGED_SKIPS:
+                _log("Ditto fell behind: skipping chunks until it catches up")
             self.feeder.fed(step.feed)
             return 0.0
-        if self._skipping:
+        if self._skipping >= LOGGED_SKIPS:
             _log(f"Ditto caught up after {self._skipping} chunks skipped")
-            self._skipping = 0
+        self._skipping = 0
         self._feed(step.feed, publish=True)
         return 0.0
 

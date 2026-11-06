@@ -267,6 +267,45 @@ class TestFeeding:
         finally:
             renderer.close()
 
+    def _stall(self, reader, capsys, seconds):
+        """Watch for a second, stall Ditto for ``seconds``, watch for two more;
+        returns what the renderer logged before it rests, and how many chunks it
+        skipped."""
+        stream = HoldingStream()
+        renderer = process.Renderer(stream, FrameWriter())
+        stream.renderer = renderer
+        clock = [time.perf_counter()]
+
+        def watch_for(span):
+            end = clock[0] + span
+            while clock[0] < end:
+                _watch(renderer, reader, clock[0])
+                renderer.tick(clock[0])
+                clock[0] += 0.02
+
+        try:
+            watch_for(1.0)
+            stream.stalled = True
+            watch_for(seconds)
+            stream.stalled = False
+            stream.hand_back()
+            watch_for(2.0)
+            return capsys.readouterr().err, renderer.skipped
+        finally:
+            renderer.close()
+
+    def test_a_long_stall_is_logged_as_it_starts_and_as_ditto_catches_up(self, reader, capsys):
+        err, _skipped = self._stall(reader, capsys, 3.0)
+
+        assert "Ditto fell behind" in err
+        assert "Ditto caught up after" in err
+
+    def test_a_hiccup_shorter_than_a_second_of_her_face_logs_nothing_while_watched(self, reader, capsys):
+        err, skipped = self._stall(reader, capsys, 0.8)
+
+        assert skipped > 0
+        assert "Ditto fell behind" not in err and "caught up" not in err
+
     def test_feeding_goes_on_while_ditto_keeps_up(self, renderer, reader):
         now = time.perf_counter()
         _watch(renderer, reader, now)

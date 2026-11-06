@@ -32,7 +32,7 @@ _HEADER = struct.Struct("<4sIIII4xQdd")
 _OFF_LAST_SEQ = struct.calcsize("<4sIIII4x")
 _OFF_VIEWER = _OFF_LAST_SEQ + 8
 _OFF_RENDERER = _OFF_VIEWER + 8
-# sequence (0 while being written, or once a cut has withdrawn it), stamp
+# sequence (0 while being written, or once a cut or a rest has withdrawn it), stamp
 _SLOT = struct.Struct("<Qd")
 _PIXELS = WIDTH * HEIGHT * 3
 _SLOT_SIZE = _SLOT.size + _PIXELS
@@ -129,11 +129,11 @@ class FrameWriter:
                     struct.pack_into("<Q", self._buf, off, 0)
             return self._generation
 
-    def withdraw_all(self) -> None:
-        """Withdraw every frame published: none of them may be shown again."""
-        with self._lock:
-            for slot in range(SLOTS):
-                struct.pack_into("<Q", self._buf, _slot_offset(slot), 0)
+    def withdraw_all(self) -> int:
+        """Withdraw every frame published and refuse every frame drawn before
+        now, whenever it arrives: none of them may be shown again. Returns the
+        generation the frames drawn from now on carry."""
+        return self.cut(float("-inf"))
 
     def beat(self, now: float) -> None:
         struct.pack_into("<d", self._buf, _OFF_RENDERER, now)
