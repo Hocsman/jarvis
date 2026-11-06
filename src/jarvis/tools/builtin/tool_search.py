@@ -1,19 +1,42 @@
 """toolSearchTool — mid-loop escape hatch for widening the tool allow-list.
 
 Wraps ``select_tools`` so the chat model can re-run the router with a
-refined query when the initial routing was too narrow. See
+refined query when the initial routing was too narrow, and finds a tool the
+query names by its exact name whatever the router answers. See
 ``src/jarvis/tools/builtin/tool_search.spec.md``.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+import re
+from typing import Any, Dict, List, Optional
 
 from ..base import Tool, ToolContext
 from ..types import ToolExecutionResult
-from ..selection import _ALWAYS_INCLUDED, router_timeout_sec, select_tools, ToolSelectionStrategy
+from ..selection import (
+    _ALWAYS_INCLUDED,
+    _NAME_WORD_RE,
+    router_timeout_sec,
+    select_tools,
+    tools_named_in,
+    ToolSelectionStrategy,
+)
 from ...debug import debug_log
 from ...llm import get_auxiliary_backend, get_embedding_backend
+
+# Any word, in any script: what is left of a query once its tool names are
+# taken out must hold none for the router to have nothing to add.
+_ANY_WORD_RE = re.compile(r"\w")
+
+
+def _names_only(query: str, named: List[str]) -> bool:
+    """Whether *query* is nothing but the tools it names, quotes and
+    punctuation aside (``claudeCode``, ``"claudeCode"``)."""
+    if not named:
+        return False
+    names = set(named)
+    rest = _NAME_WORD_RE.sub(lambda m: "" if m.group(0) in names else m.group(0), query)
+    return not _ANY_WORD_RE.search(rest)
 
 
 def _resolve_router_model(cfg) -> str:
@@ -96,27 +119,42 @@ class ToolSearchTool(Tool):
             debug_log(f"toolSearchTool: MCP cache unavailable: {e}", "tools")
             mcp_tools = {}
 
-        try:
-            router_model = _resolve_router_model(cfg)
-            selected = select_tools(
-                query=query,
-                builtin_tools=offered_builtin_tools(cfg),
-                mcp_tools=mcp_tools,
-                strategy=strategy,
-                llm_backend=get_auxiliary_backend(cfg, router_model),
-                llm_model=router_model,
-                llm_timeout_sec=router_timeout_sec(cfg),
-                embedding_backend=get_embedding_backend(cfg),
-                embed_model=cfg.embedding_model,
-                embed_timeout_sec=float(getattr(cfg, "llm_embedding_timeout_sec", 10.0)),
+        builtin_tools = offered_builtin_tools(cfg)
+        # A tool named by its exact name is found whatever the router makes
+        # of the query: the system prompt can give the model a name to
+        # search for (`claudeCode`, projets.spec.md). A query made only of
+        # names leaves the router nothing to add, so it is not asked.
+        named = tools_named_in(query, builtin_tools, mcp_tools)
+        if _names_only(query, named):
+            debug_log(
+                f"toolSearchTool: the query names {named} and nothing else, "
+                f"answered without the router",
+                "tools",
             )
-        except Exception as e:
-            debug_log(f"toolSearchTool: select_tools failed: {e}", "tools")
-            return ToolExecutionResult(
-                success=False,
-                reply_text=None,
-                error_message=f"Tool search failed: {e}",
-            )
+            selected: List[str] = named
+        else:
+            try:
+                router_model = _resolve_router_model(cfg)
+                routed = select_tools(
+                    query=query,
+                    builtin_tools=builtin_tools,
+                    mcp_tools=mcp_tools,
+                    strategy=strategy,
+                    llm_backend=get_auxiliary_backend(cfg, router_model),
+                    llm_model=router_model,
+                    llm_timeout_sec=router_timeout_sec(cfg),
+                    embedding_backend=get_embedding_backend(cfg),
+                    embed_model=cfg.embedding_model,
+                    embed_timeout_sec=float(getattr(cfg, "llm_embedding_timeout_sec", 10.0)),
+                )
+            except Exception as e:
+                debug_log(f"toolSearchTool: select_tools failed: {e}", "tools")
+                return ToolExecutionResult(
+                    success=False,
+                    reply_text=None,
+                    error_message=f"Tool search failed: {e}",
+                )
+            selected = named + [n for n in routed if n not in named]
 
         # Only what the turn does not have yet is a find: not itself, and not
         # the always-included tools, which every attended turn offers. A

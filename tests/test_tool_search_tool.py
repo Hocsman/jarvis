@@ -1,5 +1,7 @@
 """Unit tests for the toolSearchTool builtin."""
 
+import threading
+import time
 from unittest.mock import patch
 
 import pytest
@@ -85,40 +87,6 @@ class TestToolSearchTool:
         assert listed == ["getWeather"]
         assert not set(listed) & set(_ALWAYS_INCLUDED)
 
-    def test_a_search_for_a_tools_exact_name_finds_it(self, mock_config, tmp_path):
-        """The system prompt tells the chat model a tool's name when the
-        router may not have offered it (`claudeCode`, projets.spec.md); the
-        search for that name finds it, even from a router that answers
-        'none'."""
-        from unittest.mock import MagicMock
-
-        (tmp_path / "quillon").mkdir()
-        mock_config.claude_code_projects_dir = str(tmp_path)
-        mock_config.tool_selection_strategy = "llm"
-        router = MagicMock()
-        router.direct.return_value = "none"
-        tool = ToolSearchTool()
-        with patch("jarvis.tools.builtin.tool_search.get_auxiliary_backend",
-                   return_value=router):
-            result = tool.run({"query": "claudeCode"}, _ctx(mock_config))
-
-        listed = [line.split(":", 1)[0] for line in (result.reply_text or "").splitlines()]
-        assert listed == ["claudeCode"]
-
-    def test_a_tool_switched_off_is_not_found_by_its_name(self, mock_config):
-        from unittest.mock import MagicMock
-
-        mock_config.claude_code_projects_dir = ""
-        mock_config.tool_selection_strategy = "llm"
-        router = MagicMock()
-        router.direct.return_value = "none"
-        tool = ToolSearchTool()
-        with patch("jarvis.tools.builtin.tool_search.get_auxiliary_backend",
-                   return_value=router):
-            result = tool.run({"query": "claudeCode"}, _ctx(mock_config))
-
-        assert result.reply_text == "No additional tools found for that description."
-
     def test_select_tools_exception_returns_error(self, mock_config):
         tool = ToolSearchTool()
         with patch(
@@ -128,3 +96,111 @@ class TestToolSearchTool:
             result = tool.run({"query": "x"}, _ctx(mock_config))
         assert result.success is False
         assert "router down" in (result.error_message or "")
+
+
+def _listed(result) -> list:
+    return [line.split(":", 1)[0] for line in (result.reply_text or "").splitlines()]
+
+
+class _Router:
+    """The router's backend: answers ``answer``, raises ``raises``, or
+    holds its answer until ``release`` is set (or five seconds pass)."""
+
+    def __init__(self, answer="none", raises=None, holds=False):
+        self.answer = answer
+        self.raises = raises
+        self.release = threading.Event()
+        if not holds:
+            self.release.set()
+
+    def direct(self, *args, **kwargs):
+        self.release.wait(5.0)
+        if self.raises is not None:
+            raise self.raises
+        return self.answer
+
+
+class TestASearchForAToolsName:
+    """The system prompt can give the chat model a tool's name and tell it
+    to search for it when the router left it out (`claudeCode`,
+    projets.spec.md). A search for a tool's exact name finds it, whatever
+    the router makes of the query (tool_search.spec.md, Name cue)."""
+
+    @pytest.fixture
+    def cfg(self, mock_config, tmp_path):
+        (tmp_path / "quillon").mkdir()
+        mock_config.claude_code_projects_dir = str(tmp_path)
+        mock_config.tool_selection_strategy = "llm"
+        mock_config.tool_router_model = "router-test"
+        return mock_config
+
+    def _search(self, cfg, query, router):
+        with patch("jarvis.tools.builtin.tool_search.get_auxiliary_backend",
+                   return_value=router):
+            return ToolSearchTool().run({"query": query}, _ctx(cfg))
+
+    @pytest.mark.parametrize("query", ["claudeCode", '"claudeCode"', "`claudeCode`"])
+    def test_the_bare_name_is_found_from_a_router_that_answers_none(self, cfg, query):
+        result = self._search(cfg, query, _Router("none"))
+
+        assert _listed(result) == ["claudeCode"]
+
+    def test_a_tool_switched_off_is_not_found_by_its_name(self, cfg):
+        cfg.claude_code_projects_dir = ""
+
+        result = self._search(cfg, "claudeCode", _Router("none"))
+
+        assert result.reply_text == "No additional tools found for that description."
+
+    def test_a_name_among_other_words_comes_with_what_the_router_found(self, cfg):
+        result = self._search(
+            cfg, "claudeCode corrige le bug des dates dans le projet quillon",
+            _Router("webSearch"),
+        )
+
+        listed = _listed(result)
+        assert listed[0] == "claudeCode"
+        assert "webSearch" in listed
+
+    @pytest.mark.parametrize(
+        "query", ["Claude Code", "claudecode", "claudeCodes", "myclaudeCode"],
+    )
+    def test_only_the_exact_name_counts(self, cfg, query):
+        """The words a person says for it are the router's business: a name
+        is an identifier, and an identifier is spelt one way."""
+        result = self._search(cfg, query, _Router("none"))
+
+        assert "claudeCode" not in _listed(result)
+
+    def test_an_mcp_tool_is_found_by_its_name(self, cfg):
+        from jarvis.tools.registry import ToolSpec
+
+        cfg.mcps = {"homeassistant": {"command": "invented"}}
+        mcp = {"homeassistant__turn_on": ToolSpec(
+            "homeassistant__turn_on", "Turn on a smart home device.", {})}
+        with patch("jarvis.tools.registry.get_cached_mcp_tools", return_value=mcp):
+            result = self._search(cfg, "homeassistant__turn_on", _Router("none"))
+
+        assert _listed(result) == ["homeassistant__turn_on"]
+
+    def test_a_degraded_router_still_lets_a_name_in_a_longer_query_be_found(self, cfg):
+        result = self._search(
+            cfg, "claudeCode ajoute une page de contact au projet quillon",
+            _Router(raises=TimeoutError("router down")),
+        )
+
+        assert "claudeCode" in _listed(result)
+
+    def test_a_bare_name_is_answered_without_waiting_for_the_router(self, cfg):
+        """The router has nothing to add to a query made only of names, and
+        its round trip can take up to its whole deadline."""
+        router = _Router("none", holds=True)
+        started = time.monotonic()
+        try:
+            result = self._search(cfg, "claudeCode", router)
+            elapsed = time.monotonic() - started
+        finally:
+            router.release.set()
+
+        assert _listed(result) == ["claudeCode"]
+        assert elapsed < 2.0

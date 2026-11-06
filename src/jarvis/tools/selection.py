@@ -67,9 +67,12 @@ _ALWAYS_INCLUDED = ("stop", "forget", "remember")
 _URL_RE = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
 _URL_TOOL = "fetchWebPage"
 
-# A tool named in the query by its exact name is offered, whichever strategy
-# answered. The words a name can be: a tool name is letters, digits,
-# underscores and hyphens (`claudeCode`, `chrome-devtools__take_snapshot`).
+# The words a tool's name can be, for `tools_named_in`: a tool name is
+# letters, digits, underscores and hyphens (`claudeCode`,
+# `chrome-devtools__take_snapshot`). Only `toolSearchTool` reads names in a
+# query; `select_tools` does not, since the pre-loop router's query is what
+# the user said, and a word of it that happens to be a tool's name
+# (`screenshot`) is no request for the tool.
 _NAME_WORD_RE = re.compile(r"[A-Za-z0-9_-]+")
 
 # Minimum number of tools to return from similarity-based strategies.
@@ -168,39 +171,27 @@ def _include_url_tool(
     return selected
 
 
-def _include_named_tools(
-    selected: List[str],
+def tools_named_in(
     query: str,
     builtin_tools: Dict[str, "Tool"],
     mcp_tools: Dict[str, "ToolSpec"],
 ) -> List[str]:
-    """Add every tool of the catalogue the query names by its exact name.
+    """The tools of the catalogue that *query* names by their exact name.
 
     A name is an identifier, spelt one way, so the match is exact and on
-    whole words: "claudeCode" names the tool, "Claude Code" is left to the
-    strategy. The system prompt can tell the chat model a tool's name
-    (`projets.spec.md`), and ``toolSearchTool`` searching for that name
-    then finds it without depending on a small router having understood.
+    whole words: "claudeCode" names the tool, while "Claude Code",
+    "claudecode" or "claudeCodes" do not. A tool the catalogue does not
+    offer is not named. In catalogue order, builtins first.
 
-    Inserted before the always-included tools, so `remember` stays last
-    for a planner that reads the catalogue in order, and in place like
-    ``_include_url_tool``, so a ``ToolSelection`` keeps its ``degraded``
-    flag.
+    Read by ``toolSearchTool`` (``builtin/tool_search.spec.md``, Name cue):
+    the system prompt can tell the chat model a tool's name, and a search
+    for that name then finds it without depending on a small router having
+    understood.
     """
     words = set(_NAME_WORD_RE.findall(query or ""))
     if not words:
-        return selected
-    named = [
-        name for name in _all_tool_names(builtin_tools, mcp_tools)
-        if name in words and name not in selected
-    ]
-    if not named:
-        return selected
-    mandatory = [i for i, name in enumerate(selected) if name in _ALWAYS_INCLUDED]
-    at = mandatory[0] if mandatory else len(selected)
-    selected[at:at] = named
-    debug_log(f"tool selection: named in the query, offered {named}", "planning")
-    return selected
+        return []
+    return [name for name in _all_tool_names(builtin_tools, mcp_tools) if name in words]
 
 
 def _all_tool_names(
@@ -680,5 +671,4 @@ def select_tools(
             )
     else:
         selected = _all_tool_names(builtin_tools, mcp_tools)
-    selected = _include_named_tools(selected, query, builtin_tools, mcp_tools)
     return _include_url_tool(selected, query, builtin_tools, mcp_tools)

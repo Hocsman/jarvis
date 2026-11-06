@@ -48,35 +48,11 @@ degraded keyword fallback, and mutates the list in place so a `ToolSelection`
 keeps its `degraded` flag. A dotted word that is not an address
 (`requirements.txt`) does not trigger it.
 
-### Name cue
-
-Independently of any strategy, a query that names a tool of the catalogue by
-its exact name unions that tool into the selection (`_include_named_tools`).
-A name is an identifier and is spelt one way, so the match is exact and on
-whole words (a run of letters, digits, `_` and `-`): `claudeCode` names the
-tool, while `Claude Code`, `claudecode` or `claudeCodes` are left to the
-strategy. A tool the catalogue does not offer (`claudeCode` with no projects
-folder) is not named into it.
-
-It exists for `toolSearchTool`: the system prompt can tell the chat model the
-name of a tool the router may not have offered (`projets/projets.spec.md`,
-What she knows she can do), and a search for that name then finds it without
-depending on the router. When the router answers, it already finds a name:
-on a 112-tool catalogue (the builtins and the 89 MCP tools of four public
-servers), `qwen2.5:3b` alone offered `claudeCode` for the search `claudeCode`
-20 times in 20, and for four searches made of the name and a task 80 in 80,
-against 4 in 20 for a sentence that says "Claude Code", the product rather
-than the tool. The cue is for the turns it does not answer: the keyword
-fallback that a timeout or an unreadable answer leads to does not find
-`claudeCode` from its bare name. A spoken sentence goes through Whisper,
-which writes words, not identifiers, so in practice the only lowercase names
-a user utters are `screenshot` and the always-included tools: "fais un
-screenshot" also offers `screenshot`.
-
-Like the URL cue it applies to every strategy's result, including a degraded
-keyword fallback, and mutates the list in place so a `ToolSelection` keeps
-its `degraded` flag. The named tools go in before the always-included ones,
-so `remember` stays last (Always-included Tools).
+A tool's name in the query is no cue here: `select_tools` reads what the user
+said, and a word of it that happens to be a tool's name ("j'ai vu un
+screenshot marrant") is no request for the tool. A search for a tool's exact
+name is `toolSearchTool`'s business (`builtin/tool_search.spec.md`, Name
+cue), which reads the catalogue's names with `tools_named_in`.
 
 ### Keyword Strategy
 

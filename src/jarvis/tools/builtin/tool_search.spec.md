@@ -18,7 +18,18 @@ allow-list = <router's picks> + stop + toolSearchTool
 
 When the model invokes `toolSearchTool(query=...)`, the tool re-runs the same routing logic (`select_tools` from `src/jarvis/tools/selection.py`) against the new query, and the returned tool names are merged into the loop's allow-list for subsequent turns. `stop` and `toolSearchTool` itself always remain in the allow-list.
 
-A query that is, or contains, the exact name of a tool the catalogue offers finds that tool whatever the router answers (`selection.spec.md`, Name cue). That is how the system prompt's projects block reaches `claudeCode` on a turn whose router left it out: it tells the model to search for `"claudeCode"` (`projets/projets.spec.md`, What she knows she can do).
+A query that is, or contains, the exact name of a tool the catalogue offers finds that tool whatever the router answers (Name cue, below). That is how the system prompt's projects block reaches `claudeCode` on a turn whose router left it out: it tells the model to search for `"claudeCode"` (`projets/projets.spec.md`, What she knows she can do).
+
+### Name cue
+
+A `toolSearchTool` query is read for the names of the tools it searches: the offered builtins (`offered_builtin_tools`) and the MCP tools, through `tools_named_in` in `src/jarvis/tools/selection.py`. A name is an identifier and is spelt one way, so the match is exact and on whole words (a run of letters, digits, `_` and `-`): `claudeCode` names the tool, while `Claude Code`, `claudecode`, `claudeCodes` or `myclaudeCode` do not, and are left to the router. A tool the catalogue does not offer (`claudeCode` with no projects folder) is not found by its name.
+
+- **A query made only of names**, quotes and punctuation aside (`claudeCode`, `"claudeCode"`), is answered with those tools without asking the router: it has nothing to add, and its round trip can take up to `tool_router_timeout_sec`.
+- **A name among other words** (`claudeCode corrige le bug du projet quillon`): the router reads the whole query as usual, and the answer lists the named tools first, then what the router found, duplicates collapsed. A router that times out or answers nothing readable leaves the keyword fallback, and the named tools are still found.
+
+It exists because the system prompt can give the chat model the name of a tool the router may not have offered (`projets/projets.spec.md`, What she knows she can do), and a search for that name must then find it without depending on the router. When the router answers, it already finds a name: on a 112-tool catalogue (the builtins and the 89 MCP tools of four public servers), `qwen2.5:3b` alone offered `claudeCode` for the search `claudeCode` 20 times in 20, and for four searches made of the name and a task 80 in 80, against 4 in 20 for a sentence that says "Claude Code", the product rather than the tool. The cue is for the turns it does not answer: the keyword fallback that a timeout or an unreadable answer leads to does not find `claudeCode` from its bare name.
+
+Only `toolSearchTool` reads names. The pre-loop router's query is what the user said, and a word of it that happens to be a tool's name ("j'ai vu un screenshot marrant") is no request for the tool: a spoken sentence gets what the router makes of it, and nothing from such a word (`selection.spec.md`).
 
 ### Contract
 
@@ -33,7 +44,7 @@ A query that is, or contains, the exact name of a tool the catalogue offers find
 The reply engine:
 1. Runs `select_tools(text)` once pre-loop → `base_tools`.
 2. Exposes `base_tools ∪ {stop, toolSearchTool}` per turn.
-3. On a `toolSearchTool` call, dispatches it (running `select_tools(query)` with the same strategy config), appends the tool result as normal, and merges the returned tool names into the allow-list for the next turn. Duplicates collapse; the list only grows.
+3. On a `toolSearchTool` call, dispatches it (running `select_tools(query)` with the same strategy config, unless the query is made only of tool names, Name cue), appends the tool result as normal, and merges the returned tool names into the allow-list for the next turn. Duplicates collapse; the list only grows.
 4. Neither `stop` nor `toolSearchTool` is ever removed.
 5. Refuses a call to any name outside the allow-list with a tool-role
    error that names what *is* available. `stop` and `toolSearchTool` are
@@ -56,10 +67,10 @@ The engine caps invocations per reply via `tool_search_max_calls` (default 3). B
 ### What toolSearchTool is NOT
 
 - Not a free-form tool discovery surface: it uses the same routing pipeline as the pre-loop call, not a raw "list every tool" dump. The router already applies allow/deny logic and MCP-awareness; reusing it keeps semantics consistent.
-- Not a way to bypass authorisation: if the router would not have picked a tool pre-loop, `toolSearchTool` will not surface it either.
-- Not free: each call is an LLM round-trip. The model is told to use it only when none of the currently-available tools fit.
+- Not a way to bypass authorisation: it searches the catalogue the pre-loop router is shown, so a tool that catalogue leaves out is not surfaced, by its description or by its name.
+- Not free: each call is an LLM round-trip, unless its query is made only of tool names. The model is told to use it only when none of the currently-available tools fit.
 
 ### Testing
 
-- Unit tests cover the merge-into-allow-list behaviour, the no-results branch, and a search for a tool's exact name finding it from a router that answers `none` (and not finding a tool the catalogue does not offer).
+- Unit tests cover the merge-into-allow-list behaviour, the no-results branch, and the name cue: the bare name found from a router that answers `none`, and answered without waiting for the router; a name among other words found together with what the router found, and found when the router fails; only the exact name counting; an MCP tool found by its name; a tool the catalogue does not offer not found. `tests/test_tool_selection.py` holds `select_tools` to offering nothing for a spoken word that happens to be a tool's name.
 - An eval scenario covers the "initial routing was too narrow" case: the user starts with a vague question that routes to one tool, then clarifies into a request that needs a different tool. The agent should invoke `toolSearchTool` and then the newly-surfaced tool.

@@ -13,11 +13,13 @@ do and how to reach the tool when it is not among her tools this turn
 (`src/jarvis/projets/projets.spec.md`, What she knows she can do).
 
 Every turn here meets that worst case: the router's model answers 'none'
-(through the real `select_tools`, so the cues still apply). `toolSearchTool`
-runs for real, its router on the user's own router model, over the builtins
-and `EVAL_PROJECTS_MCP_TOOLS` invented MCP tools (89 by default, the size of
-a catalogue with four servers). `claudeCode` gets the tool's own decision
-(`vet_call`) and starts nothing; every other tool answers "OK".
+(through the real `select_tools`, so the URL cue still applies).
+`toolSearchTool` runs for real, its router on the user's own router model,
+over the builtins, `EVAL_PROJECTS_MCP_TOOLS` invented MCP tools (89 by
+default, the size of a catalogue with four servers) and one invented write
+tool shaped like a code host's (`repo__create_or_update_file`). `claudeCode`
+gets the tool's own decision (`vet_call`) and starts nothing; every other
+tool answers "OK".
 
 Three kinds of sentence, all invented:
 
@@ -31,8 +33,11 @@ Three kinds of sentence, all invented:
 `TestSheKnowsSheCan` runs the engine as it ships. `TestBeforeAndAfter`
 compares the prompt without the block and with it, the two arms alternating
 call by call in one loop (CLAUDE.md: a provider drifts within a session).
-Set `EVAL_PROJECTS_ROUNDS` to run it; each round asks every sentence once on
-each arm, so five rounds give 20 calls an arm for each kind.
+`TestAWriteToolOffered` runs the engine as it ships on the requests alone,
+the pre-loop router answering the write tool instead of 'none': a request
+passes when a job starts on its project and the write tool was not called.
+Set `EVAL_PROJECTS_ROUNDS` to run those two; each round asks every sentence
+once on each arm, so five rounds give 20 calls an arm for each kind.
 
 They take ``real_model_config``: the user's provider and models (the chat
 model, the planner and the judge on it; the router's model on local Ollama),
@@ -42,6 +47,7 @@ sentences and the prompt built around an empty memory.
 Run:
     ./scripts/run_evals.sh --single projects_question_finds_claude_code
     EVAL_PROJECTS_ROUNDS=5 ./scripts/run_evals.sh --single "projects_question_finds_claude_code and before"
+    EVAL_PROJECTS_ROUNDS=5 ./scripts/run_evals.sh --single "projects_question_finds_claude_code and write_tool"
 """
 
 from __future__ import annotations
@@ -111,17 +117,57 @@ def _invented_mcp_tools(count: int) -> dict:
     return tools
 
 
-class _RouterThatAnswersNone:
-    """The pre-loop router's model, as it answered the question in the field."""
+# A write tool shaped like a code host's: on a real catalogue with such a
+# server, a search worded as the task can go to it rather than to Claude
+# Code. Invented, like the rest of the catalogue.
+WRITE_TOOL = "repo__create_or_update_file"
+
+
+def _write_tool():
+    from jarvis.tools.registry import ToolSpec
+
+    return ToolSpec(
+        WRITE_TOOL,
+        "Create or update a single file in a remote Git repository.",
+        {
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "description": "Repository owner"},
+                "repo": {"type": "string", "description": "Repository name"},
+                "path": {"type": "string", "description": "Path of the file to create or update"},
+                "content": {"type": "string", "description": "Content of the file"},
+                "message": {"type": "string", "description": "Commit message"},
+                "branch": {"type": "string", "description": "Branch to commit to"},
+            },
+            "required": ["owner", "repo", "path", "content", "message", "branch"],
+        },
+    )
+
+
+class _RouterThatAnswers:
+    """The pre-loop router's model, answering one fixed thing."""
+
+    def __init__(self, answer: str):
+        self.answer = answer
 
     def direct(self, *args, **kwargs):
-        return "none"
+        return self.answer
 
 
 def _router_that_answers_none(**kwargs):
+    """As the router answered the question in the field."""
     from jarvis.tools.selection import select_tools
 
-    kwargs["llm_backend"] = _RouterThatAnswersNone()
+    kwargs["llm_backend"] = _RouterThatAnswers("none")
+    return select_tools(**kwargs)
+
+
+def _router_that_answers_the_write_tool(**kwargs):
+    """As a router answers a request on a project when a code host's write
+    tool sits in the catalogue: that tool, and not `claudeCode`."""
+    from jarvis.tools.selection import select_tools
+
+    kwargs["llm_backend"] = _RouterThatAnswers(WRITE_TOOL)
     return select_tools(**kwargs)
 
 
@@ -130,6 +176,7 @@ def _cfg(real_model_config, tmp_path):
     for name in PROJECTS:
         (root / name).mkdir(parents=True, exist_ok=True)
     mcp = _invented_mcp_tools(MCP_TOOLS)
+    mcp[WRITE_TOOL] = _write_tool()
     return dataclasses.replace(
         real_model_config,
         claude_code_projects_dir=str(root),
@@ -138,9 +185,12 @@ def _cfg(real_model_config, tmp_path):
     ), mcp
 
 
-def _turn(turn_cfg, mcp, sentence: str, *, block: bool) -> Tuple[str, List[Tuple[str, dict]], List[str]]:
-    """One voice turn; returns the reply, the jobs that would have started
-    (project, args) and the names of the tools called, in order."""
+def _turn(
+    turn_cfg, mcp, sentence: str, *, block: bool, pre_loop=_router_that_answers_none,
+) -> Tuple[str, List[Tuple[str, dict]], List[str]]:
+    """One voice turn, the pre-loop selection made by ``pre_loop``; returns
+    the reply, the jobs that would have started (project, args) and the
+    names of the tools called, in order."""
     from jarvis.memory.conversation import DialogueMemory
     from jarvis.memory.db import Database
     from jarvis.reply.engine import run_reply_engine
@@ -187,7 +237,7 @@ def _turn(turn_cfg, mcp, sentence: str, *, block: bool) -> Tuple[str, List[Tuple
     db = Database(":memory:", sqlite_vss_path=None)
     try:
         with without_block, \
-             patch("jarvis.reply.engine.select_tools", side_effect=_router_that_answers_none), \
+             patch("jarvis.reply.engine.select_tools", side_effect=pre_loop), \
              patch("jarvis.tools.registry.get_cached_mcp_tools", return_value=mcp), \
              patch("jarvis.reply.engine.run_tool_with_retries", side_effect=_runner):
             reply = run_reply_engine(
@@ -335,3 +385,58 @@ class TestBeforeAndAfter:
         assert hits[("block", "capability")] > hits[("no block", "capability")], (
             "The block made her say she can no more often than without it."
         )
+
+
+@pytest.mark.eval
+@pytest.mark.skipif(ROUNDS < 1, reason="set EVAL_PROJECTS_ROUNDS to run it")
+class TestAWriteToolOffered:
+    """The pre-loop router offers a code host's write tool for a request on
+    a project, and not `claudeCode`: the tool a task-worded search went to
+    on a real catalogue. The engine as it ships, block on. A request passes
+    when a job starts on its project and the write tool was not called."""
+
+    def test_a_request_goes_to_claude_code_not_the_write_tool(
+        self, real_model_config, tmp_path, capsys,
+    ):
+        cfg, mcp = _cfg(real_model_config, tmp_path)
+        hits = calls = wrote = searched = 0
+        misses: List[str] = []
+
+        def rate(got: int, n: int) -> str:
+            return f"{got}/{n} ({100 * got / n:.0f} %)" if n >= _MIN_CALLS_FOR_A_RATE \
+                else f"{got}/{n}   (under {_MIN_CALLS_FOR_A_RATE} calls: counts only)"
+
+        try:
+            for rnd in range(ROUNDS):
+                for sentence, projet in REQUESTS:
+                    reply, started, called = _turn(
+                        cfg, mcp, sentence, block=True,
+                        pre_loop=_router_that_answers_the_write_tool,
+                    )
+                    calls += 1
+                    if WRITE_TOOL in called:
+                        wrote += 1
+                    if "toolSearchTool" in called:
+                        searched += 1
+                    if started and started[-1][0] == projet and WRITE_TOOL not in called:
+                        hits += 1
+                    else:
+                        misses.append(
+                            f"{sentence[:50]!r}: tools {called}, "
+                            f"jobs {[p for p, _ in started]}, reply {reply[:120]!r}"
+                        )
+                _to_terminal(capsys, [f"⏱️ round {rnd + 1}/{ROUNDS} done"])
+        finally:
+            lines = [
+                f"📊 A write tool offered: {len(REQUESTS)} requests x {ROUNDS} rounds, "
+                f"the pre-loop router answering {WRITE_TOOL}, {len(mcp)} MCP tools",
+                f"   🛠️ job on the right project, write tool not called  {rate(hits, calls)}",
+                f"   ✍️ write tool called in {wrote} turns",
+                f"   🔎 toolSearchTool called in {searched} turns",
+            ]
+            for miss in misses:
+                lines.append(f"      ❌ {miss}")
+            _to_terminal(capsys, [""] + lines)
+
+        assert wrote == 0, f"She called {WRITE_TOOL} in {wrote} of {calls} turns."
+        assert hits == calls, f"{calls - hits} of {calls} requests did not reach Claude Code."

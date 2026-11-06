@@ -10,7 +10,7 @@ system prompt carries this block, worded as the very thing that denial says
 she lacks: access to his machine, his projects folder, reading and changing
 the code. It names the tool and the search that adds it to a turn whose
 router left it out: `toolSearchTool` finds a tool by its exact name
-(`selection.spec.md`, Name cue).
+(`tools/builtin/tool_search.spec.md`, Name cue).
 
 It names no project and no path: the block rides in every prompt, to
 whichever provider runs the chat model, and the tool lists the projects in

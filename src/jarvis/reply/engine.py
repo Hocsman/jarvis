@@ -2261,12 +2261,14 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
     # and the chat model, shown none of the tools, answers from a prior that
     # says an assistant cannot reach anyone's files. Only while the tool is
     # offered, and never to a routine, which cannot reach it.
+    from ..projets.delegation import TOOL_NAME as _DELEGATION_TOOL
+
     _projets_block = ""
-    if scope is None and "claudeCode" in _offered_builtins:
+    if scope is None and _DELEGATION_TOOL in _offered_builtins:
         from ..projets.prompt import format_projets_block
 
         _projets_block = format_projets_block()
-        debug_log("projects block in the system prompt: claudeCode is offered", "planning")
+        debug_log(f"projects block in the system prompt: {_DELEGATION_TOOL} is offered", "planning")
 
     def _initial_system_message() -> dict:
         """The system message, with the offsets where its lasting parts end.

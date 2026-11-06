@@ -82,7 +82,7 @@ def test_it_names_the_tool_and_the_search_that_finds_it():
     """The two names she needs: the tool that does the work, and the
     escape hatch that adds it to a turn whose router left it out. The
     search for the tool's exact name finds it whatever the router says
-    (selection.spec.md, Name cue)."""
+    (tool_search.spec.md, Name cue)."""
     block = format_projets_block()
 
     assert "claudeCode" in block
