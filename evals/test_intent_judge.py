@@ -17,14 +17,15 @@ collecting cases with the question shown, as the listener shows it, and
 hidden, the two alternating call by call on each arm (`-k shown` runs it
 alone). A third reads his answer to a question she ended her reply on,
 begun the moment she stops, unmarked, as the listener shows it when he is
-heard in a voice, and marked "(during TTS)", as it shows an answer too
-quiet to prove he spoke, which it answers only on a directed verdict with
-a query, alternating the same way (`-k his_answer` runs it alone). A
-fourth reads her last sentence coming back as words she never said, its
-voice stopping with hers, unmarked, as the judge is shown it when the two
-proofs alone decide, and marked, as the listener shows an utterance whose
-voice stops with hers (`-k rewritten` runs it alone, after a check that
-needs no model: the listener's text checks leave each case whole).
+heard in a voice that goes on after hers, and marked "(during TTS)", as it
+shows an answer too quiet to prove he spoke, which it answers only on a
+directed verdict with a query, alternating the same way (`-k his_answer`
+runs it alone). A fourth reads her last sentence coming back as words she
+never said, its voice stopping with hers, unmarked, as the judge is shown
+it when the two proofs alone decide, and marked, as the listener shows an
+utterance whose voice stops with hers (`-k rewritten` runs it alone, after
+a check that needs no model: the listener shows each case to the judge
+whole, marked only when its voice stops with hers).
 Arms go through `MockConfig`, so a cloud model
 goes to the provider the `EVAL_LLM_*` variables name and is billed there,
 and a bare local tag runs on the local Ollama. Only these synthetic
@@ -760,9 +761,10 @@ def _while_asking(before, asked, current):
 
 # Her reply ends on a question and he answers at once, his first word within
 # the echo tolerance of her last. The listener shows his answer to the judge
-# unmarked when it carries words she did not say, in a voice; an answer too
-# quiet to prove that is marked "(during TTS)", which the prompt says never
-# to extract.
+# unmarked when it carries words she did not say, in a voice that goes on
+# after her last word plus the tolerance; an answer too quiet to prove he
+# spoke, or short enough for its voice to stop with hers, is marked
+# "(during TTS)", which the prompt says never to extract.
 _FR_ASKS_BACK = "Bien reçu, Monsieur. Je reste à votre écoute : que souhaitez-vous savoir ce soir ?"
 _EN_ASKS_BACK = "Done. Is there anything else you would like to know tonight?"
 _FR_EARLIER = "Note que la réunion est déplacée à jeudi."
@@ -792,8 +794,9 @@ ANSWER_TO_HER_QUESTION_CASES = [
 # Through the speakers her voice clears the energy bar, so both proofs hold
 # on it; its voice stops with hers, so the listener shows it marked
 # "(during TTS)". Each case reaches the judge as written: the early echo
-# check does not take it for her reply, and the stripper of a merged chunk
-# keeps nothing of it (`test_her_voice_rewritten_reaches_the_judge_whole`).
+# check does not take it for her reply, and no stripper of her words cuts
+# it to a remainder (`test_her_voice_rewritten_reaches_the_judge_whole`
+# drives each through the listener).
 # Her voice moved air: `expected_noise` is false, which grants it the voice
 # the listener measures.
 HER_VOICE_REWRITTEN_CASES = [
@@ -826,34 +829,106 @@ HER_VOICE_REWRITTEN_CASES = [
 ]
 
 
-@pytest.mark.parametrize("case", HER_VOICE_REWRITTEN_CASES, ids=lambda case: case.name)
-def test_her_voice_rewritten_reaches_the_judge_whole(case):
-    """Needs no model. A case measures what the judge is shown only if the
-    listener's text checks leave it whole: the early echo check does not
-    take it for her reply coming back, it carries words she did not say,
-    and the stripper of a merged chunk, given it as heard just before her
-    last word, keeps nothing of it to show in its place."""
+def _a_listener_whose_judge_gives_no_verdict():
+    """A VoiceListener with its audio stubbed, configured as the unit tests
+    configure it, whose judge gives no verdict and keeps every call."""
+    cfg = MagicMock()
+    for key, value in dict(
+            whisper_model="small", whisper_device="auto", whisper_compute_type="int8",
+            whisper_backend="faster-whisper", whisper_language=None, sample_rate=16000,
+            vad_enabled=False, vad_aggressiveness=2, echo_tolerance=0.3,
+            echo_energy_threshold=2.0, hot_window_seconds=3.0, hot_window_enabled=True,
+            voice_collect_seconds=2.0, voice_max_collect_seconds=60.0, voice_device=None,
+            voice_debug=False, voice_min_energy=0.0045, tune_enabled=False,
+            wake_word="jarvis", wake_aliases=[], wake_fuzzy_ratio=0.78,
+            stop_commands=["stop", "quiet"], tts_rate=200,
+            transcript_buffer_duration_sec=120.0).items():
+        setattr(cfg, key, value)
+    tts = MagicMock(enabled=True)
+    tts.is_speaking.return_value = False
+    with patch("jarvis.listening.listener.webrtcvad", None), \
+            patch("jarvis.listening.listener.sd", None), \
+            patch("jarvis.listening.listener.np", None), \
+            patch("jarvis.listening.listener.create_intent_judge", return_value=None):
+        from jarvis.listening.listener import VoiceListener
+        listener = VoiceListener(MagicMock(), cfg, tts, MagicMock())
+    listener._intent_judge = MagicMock(available=True, last_failure_reason="")
+    listener._intent_judge.judge.return_value = None
+    return listener
+
+
+def _whisper_hears(listener, text: str, *, started: float, voice_ended: float,
+                   level: float) -> None:
+    """One utterance through the audio loop's own path, from the voice
+    detector closing it now to the decision: it started at *started* on the
+    capture clock, its voice went on until *voice_ended*, its audio sits at
+    *level*, and Whisper (faked) makes *text* of it."""
     import time
-    from rapidfuzz import fuzz
-    from jarvis.listening.echo_detection import EchoDetector
+    from types import SimpleNamespace
+    import numpy as np
 
-    heard, reply = case.segments[-1][0].lower(), case.last_tts_text
-    assert fuzz.partial_ratio(heard, reply.lower()) < EchoDetector.PURE_ECHO_THRESHOLD
-    assert _carries_speech_she_did_not_say(heard, reply)
+    cfg = listener.cfg
+    cfg.whisper_min_audio_duration, cfg.whisper_min_confidence = 0.15, 0.3
+    cfg.whisper_no_speech_threshold = 0.5
+    listener._whisper_backend, listener._whisper_device = "faster-whisper", "cuda"
+    listener.model = MagicMock()
+    listener.model.transcribe.return_value = (
+        [SimpleNamespace(text=f" {text}", avg_logprob=-0.1, no_speech_prob=0.01)],
+        SimpleNamespace(language=None))
+    listener.echo_detector.track_utterance_timing(started, 0.0)
+    closed = max(time.time(), voice_ended)
+    # The detector counts the silence after the voice in frames.
+    listener._silence_frames = round((closed - voice_ended) * 1000 / listener._frame_ms)
+    listener._frame_captured_at = closed
+    listener._utterance_frames = [np.full(listener._frame_samples, level, dtype=np.float32)
+                                  for _ in range(50)]
+    listener.is_speech_active = True
+    listener._finalize_utterance()
 
-    # Her reply played for six seconds and ended now: the utterance is
-    # heard from 1.2 s before her last word.
-    detector = EchoDetector()
-    detector.track_tts_start(reply, exact_duration=6.0)
-    now = time.time()
-    detector._tts_start_time = now - 6.0
 
-    def kept(salvaged):
-        return bool(salvaged and salvaged != heard
-                    and len(salvaged.split()) >= detector.min_salvage_words)
+@pytest.mark.parametrize("voice_stops_with_hers", [False, True],
+                         ids=["voice_on_after_hers", "voice_with_hers"])
+@pytest.mark.parametrize("case", HER_VOICE_REWRITTEN_CASES, ids=lambda case: case.name)
+def test_her_voice_rewritten_reaches_the_judge_whole(case, voice_stops_with_hers):
+    """Needs no model. A case measures what the judge is shown only if the
+    listener shows it whole. Heard from 1.2 s before the last word of a
+    reply that played for six seconds, at the level her voice reaches the
+    microphone, it is neither taken for her reply coming back nor cut to
+    what follows her words: the judge is shown it unmarked when its voice
+    goes on after hers, where the two proofs decide, and marked
+    "(during TTS)" when its voice stops with hers."""
+    import time
 
-    assert not kept(detector._salvage_suffix_from_echo(heard, 200, now - 1.2))
-    assert not kept(detector.salvage_after_echo_tail(heard))
+    heard, reply = case.segments[-1][0], case.last_tts_text
+    floor = 0.005
+    listener = _a_listener_whose_judge_gives_no_verdict()
+    detector = listener.echo_detector
+    try:
+        detector.track_tts_start(reply, baseline_energy=floor,
+                                 exact_duration=6.0, start_delay=-6.0)
+        last_word = time.time()
+        detector.track_tts_finish()
+        listener.state_manager.schedule_hot_window_activation()
+        while (not listener.state_manager.is_hot_window_active()
+               and time.time() < last_word + 1.0):
+            time.sleep(0.01)
+        tolerance = detector.echo_tolerance
+        voice_ended = last_word + (tolerance / 3 if voice_stops_with_hers else 2 * tolerance)
+        time.sleep(max(0.0, voice_ended - time.time()))
+        with patch("builtins.print"):
+            _whisper_hears(listener, heard, started=last_word - 1.2, voice_ended=voice_ended,
+                           level=floor * detector.energy_spike_threshold * 3.0)
+
+        calls = listener._intent_judge.judge.call_args_list
+        assert calls, "the listener set the case aside before the judge saw it"
+        shown = calls[-1].kwargs
+        assert shown["current_text"] == heard.lower(), "the judge was shown part of the case"
+        judged = [segment for segment in shown["segments"]
+                  if segment.text.lower().strip() == heard.lower()]
+        assert judged and judged[-1].is_during_tts == voice_stops_with_hers
+    finally:
+        listener._stop_thinking_tune()
+        listener.state_manager.stop()
 
 
 def _marked_as_hers(case: NotSpeechCase) -> NotSpeechCase:
@@ -1465,11 +1540,11 @@ class TestIntentJudgeNotSpeechArms:
     def test_his_answer_unmarked_against_marked_call_by_call(self, capsys):
         """His answer to her question, begun the moment she stops. Each arm
         reads every case unmarked, as the listener shows it when he is heard
-        in a voice, and marked "(during TTS)", as it shows an answer too
-        quiet to prove he spoke, the two alternating call by call. Directed
-        is the judge taking it as his; answered is what the listener then
-        does in the hot window, where a marked one is answered only on a
-        directed verdict with a query."""
+        in a voice that goes on after hers, and marked "(during TTS)", as it
+        shows an answer too quiet to prove he spoke, the two alternating
+        call by call. Directed is the judge taking it as his; answered is
+        what the listener then does in the hot window, where a marked one
+        is answered only on a directed verdict with a query."""
         judges = _warm_judges()
         variants = {"unmarked": lambda case: case, "marked": _marked_as_hers}
         answered_when = {"unmarked": _answered_in_the_hot_window,

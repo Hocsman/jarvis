@@ -288,9 +288,10 @@ While TTS is playing, echo rejection and stop commands are handled with fast tex
   wake word in it that can only be his still decides (see "Hot Window
   Mode"). A short answer said in the quiet after her last sound, whose voice
   stops before that quiet ends plus the tolerance, is flagged the same way.
-  While she speaks her last word is not known and her own voice clears the
-  energy bar, so there the flag rests on the words alone; an utterance whose
-  end is not known is weighed on the two proofs.
+  While she speaks her last word is not known, so there, as for an utterance
+  whose end is not known, the flag rests on the two proofs. Her own voice
+  clears the energy bar, so for her voice coming back they come down to its
+  words.
 - Intent judge uses this context to identify echo
 
 ## Rolling Transcript Buffer

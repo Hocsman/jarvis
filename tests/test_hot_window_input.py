@@ -1226,6 +1226,7 @@ def _whisper_hears(listener, text: str, *, started: float, level: float,
     if closed is None:
         closed = time.time()
     if voice_ended is not None:
+        assert voice_ended <= closed, "the detector closes an utterance after its voice ends"
         # The detector counts the silence in frames, each one frame long.
         listener._silence_frames = round(max(0.0, closed - voice_ended)
                                          * 1000 / listener._frame_ms)
@@ -2016,10 +2017,12 @@ class TestHerVoiceWhisperRewrote:
         tts.is_speaking.return_value = True
         listener.echo_detector.track_tts_start(_HER_NEXT_REPLY, baseline_energy=_FLOOR)
         judge = _judge_that_reads_the_marker(listener)
+        voice_ended = _as_her_voice_dies(listener, last_word)
+        # Closed after a few silent frames, so its end is read off the silence.
+        time.sleep(max(0.0, voice_ended + 0.1 - time.time()))
 
         _whisper_hears(listener, _HIS_QUESTION, started=last_word - 1.0,
-                       level=_level(listener, _HIS_VOICE),
-                       voice_ended=_as_her_voice_dies(listener, last_word))
+                       level=_level(listener, _HIS_VOICE), voice_ended=voice_ended)
 
         assert "during TTS" not in _current_line_shown_to(judge)
         listener.state_manager.stop()
@@ -2156,6 +2159,94 @@ class TestTheLogSaysWhyAnUtteranceIsMarked:
 
         assert not tts.is_speaking.return_value, "her reply never ended while they were weighed"
         assert not any("stopped with hers" in line for line in _voice_log(log))
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_her_next_reply_starting_while_her_words_are_weighed_does_not_change_the_reason(
+            self, _print):
+        """Her words come back while she speaks, and her next reply starts
+        while they are weighed: read again then, against a reply that does
+        not hold them, they would be words she did not say. They are marked
+        for being hers, as read while she spoke, and the log does not give
+        her voice ending as the reason."""
+        listener, _ = _create_listener(tts_speaking=True)
+        listener.echo_detector.track_tts_start(_HER_REPLY, baseline_energy=_FLOOR)
+        judge = _judge_that_reads_the_marker(listener)
+        weighed = []
+
+        def her_next_reply_starts_meanwhile(heard, spoken):
+            weighed.append(spoken)
+            if len(weighed) == 1:
+                listener.echo_detector.track_tts_start(_HER_NEXT_REPLY, baseline_energy=_FLOOR)
+            return _carries_speech_she_did_not_say(heard, spoken)
+
+        with patch("jarvis.listening.listener._carries_speech_she_did_not_say",
+                   side_effect=her_next_reply_starts_meanwhile), \
+                patch("jarvis.listening.listener.debug_log") as log:
+            _whisper_hears(listener, _HER_WORDS_DECIMATED, started=time.time() - 1.0,
+                           level=_level(listener, _HER_VOICE))
+
+        assert weighed, "her words were never weighed"
+        assert "during TTS" in _current_line_shown_to(judge)
+        assert not any("stopped with hers" in line for line in _voice_log(log))
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_her_reply_ending_unstamped_while_his_words_are_weighed_still_says_why(
+            self, _print):
+        """His words over hers, and her reply ends while they are weighed
+        with no last word stamped, as with the hot window off. They were
+        heard in her time, as read while she spoke, and the log says why
+        they are not marked."""
+        listener, tts = _create_listener(tts_speaking=True)
+        listener.echo_detector.track_tts_start(_HER_REPLY, baseline_energy=_FLOOR)
+        _install_intent_judge(listener, _make_judgment(directed=False, reasoning="no wake word"))
+
+        def her_reply_ends_unstamped(heard, spoken):
+            tts.is_speaking.return_value = False
+            return _carries_speech_she_did_not_say(heard, spoken)
+
+        with patch("jarvis.listening.listener._carries_speech_she_did_not_say",
+                   side_effect=her_reply_ends_unstamped), \
+                patch("jarvis.listening.listener.debug_log") as log:
+            _whisper_hears(listener, "Non, je parlais de Lyon, pas de Paris.",
+                           started=time.time() - 1.0, level=_level(listener, _HIS_VOICE))
+
+        assert not tts.is_speaking.return_value, "her reply never ended while they were weighed"
+        assert any("not marked as her echo" in line for line in _voice_log(log))
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_an_echo_verdict_overridden_as_she_speaks_again_logs_the_reading_that_decided(
+            self, _print):
+        """His answer goes on after her last word, and her next reply starts
+        while the judge weighs it. The echo verdict is overridden on his
+        voice outlasting hers, as read before the judge was asked, and the
+        log says so: read again after the judge, while she speaks, nothing
+        would say when a voice stopped."""
+        listener, tts = _create_listener(echo_tolerance=0.1, hot_window_seconds=0.5)
+        last_word = _she_says(listener, _HER_REPLY)
+        assert _wait_for_hot_window_active(listener)
+        judge = _install_intent_judge(listener, None)
+
+        def she_speaks_again_meanwhile(*_args, **_kwargs):
+            tts.is_speaking.return_value = True
+            listener.echo_detector.track_tts_start(_HER_NEXT_REPLY, baseline_energy=_FLOOR)
+            return _make_judgment(directed=False, confidence="medium",
+                                  reasoning="echo of the assistant's own speech")
+
+        judge.judge.side_effect = she_speaks_again_meanwhile
+        # His voice goes on well past her last word plus the tolerance.
+        time.sleep(max(0.0, last_word + 2 * listener.echo_detector.echo_tolerance - time.time()))
+
+        with patch("jarvis.listening.listener.debug_log") as log:
+            _whisper_hears(listener, _HIS_QUESTION, started=last_word - 0.3,
+                           level=_level(listener, _HIS_VOICE))
+
+        assert tts.is_speaking.return_value, "her next reply never started while the judge weighed"
+        overridden = [line for line in _voice_log(log) if "Overriding the echo verdict" in line]
+        assert overridden and all("went on after hers" in line for line in overridden)
+        assert "lyon" in _accepted_query(listener)
         listener.state_manager.stop()
 
 
