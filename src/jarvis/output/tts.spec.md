@@ -107,6 +107,11 @@ markdown (bold, italics, code, headings, quotes, bullets, and numbered
 markers only when two or more adjacent lines form a real list). The
 processed text is what the worker speaks and what
 `get_last_spoken_text()` returns. Words inside the markup are kept.
+Symbols are not rewritten here: the reply to a turn from the voice already
+writes its units, signs and dates as words, because the prompt asks it to
+(`src/jarvis/reply/prompts/prompts.spec.md`, Spoken Form), and the words for
+"°" or "km/h" belong to the reply's language, which this layer does not
+know.
 
 **Empty text is dropped, unless it carries a callback.** Whitespace
 with no completion callback queues nothing. Empty text *with* a
