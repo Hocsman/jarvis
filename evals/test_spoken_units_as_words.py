@@ -80,7 +80,6 @@ import dataclasses
 import os
 import random
 import re
-import sys
 import unicodedata
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -88,15 +87,12 @@ from unittest.mock import patch
 
 import pytest
 
-from helpers import is_fallback_reply
+from helpers import is_fallback_reply, rate, to_terminal
 
 ROUNDS = int(os.environ.get("EVAL_SPOKEN_UNITS_ROUNDS", "0") or 0)
 # A file holding another wording of the rule: the comparison then measures
 # the prompt's rule against it instead of against no rule.
 AGAINST = os.environ.get("EVAL_SPOKEN_FORM_AGAINST", "")
-
-# Below this many calls an arm's rate says nothing (CLAUDE.md, sample sizes).
-_MIN_CALLS_FOR_A_RATE = 20
 
 # What the voice misreads, as measured (see the module docstring).
 MISREAD: Dict[str, "re.Pattern[str]"] = {
@@ -521,14 +517,6 @@ def _voice_turn(
     return reply or ""
 
 
-def _to_terminal(capsys, lines: List[str]) -> None:
-    from jarvis.utils.console import force_utf8_stream
-
-    with capsys.disabled():
-        force_utf8_stream(sys.stdout)
-        print("\n".join(lines), flush=True)
-
-
 def _case(case_id: str) -> UnitsCase:
     return next(case for case in CASES if case.id == case_id)
 
@@ -722,11 +710,6 @@ class TestBeforeAndAfter:
         def add(counter: Dict, key, n: int = 1) -> None:
             counter[key] = counter.get(key, 0) + n
 
-        def rate(got: int, n: int) -> str:
-            if n >= _MIN_CALLS_FOR_A_RATE:
-                return f"{got}/{n} ({100 * got / n:.0f} %)"
-            return f"{got}/{n}   (under {_MIN_CALLS_FOR_A_RATE} calls: counts only)"
-
         all_cases: List["UnitsCase | IdentifierCase"] = list(CASES) + list(ID_CASES)
         rng = random.Random(0)
         try:
@@ -770,7 +753,7 @@ class TestBeforeAndAfter:
                             if found and not figures:
                                 what += ", figures lost"
                             misses.append(f"{name} / {case.id} ({what}): {reply[:160]!r}")
-                _to_terminal(capsys, [f"⏱️ round {rnd + 1}/{ROUNDS} done"])
+                to_terminal(capsys, [f"⏱️ round {rnd + 1}/{ROUNDS} done"])
         finally:
             lines = [
                 "",
@@ -805,7 +788,7 @@ class TestBeforeAndAfter:
                         lines.append(f"         💬 {case.id:<20} clean {a}/{n}, kept {b}/{n}")
             for miss in misses:
                 lines.append(f"      ❌ {miss}")
-            _to_terminal(capsys, lines)
+            to_terminal(capsys, lines)
 
         if AGAINST:
             # Which wording to keep weighs both measures at once: the run
