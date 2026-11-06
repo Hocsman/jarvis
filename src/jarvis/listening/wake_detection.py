@@ -122,8 +122,9 @@ def is_wake_word_detected(text_lower: str, wake_word: str, aliases: List[str], f
         debug_log(f"wake word: '{inside_a_word}' only inside a longer word, not her name: "
                   f"\"{text_lower}\"", "wake")
 
-    # Close spellings: each token stripped of its punctuation, weighed
-    # against every name. A token that was only punctuation is nothing.
+    # Close spellings: each token stripped of the punctuation and symbols at
+    # its ends, weighed against every name. A token that was only marks is
+    # nothing.
     names = _names(wake_word, aliases)
     try:
         heard_tokens = [token for token in (_without_end_marks(t) for t in text_lower.split()) if token]

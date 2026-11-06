@@ -181,7 +181,11 @@ class TestCloseSpellings:
         "„jarvas“, wie spät ist es?",
         "jarvas… quelle heure est-il ?",
         "「jarvas」",
-    ], ids=["inverted-question-mark", "guillemets", "german-quotes", "ellipsis", "corner-brackets"])
+        "♪jarvas♪ quelle heure est-il ?",
+        "`jarvas`, quelle heure est-il ?",
+        "+jarvas+",
+    ], ids=["inverted-question-mark", "guillemets", "german-quotes", "ellipsis", "corner-brackets",
+            "music-notes", "backticks", "plus-signs"])
     def test_punctuation_of_any_script_around_a_close_spelling_leaves_it_her_name(self, heard):
         assert is_wake_word_detected(heard, "jarvis", []) is True
 
