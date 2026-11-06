@@ -107,8 +107,9 @@ more rounded with its size in words. The numbers themselves stay digits,
 and the rule says so outright, with an example of each: asked only to put
 symbols into words, the model also spells numbers out ("minus three point
 four degrees", "the fourteenth of November"), which the voice reads worse
-than digits. The rule names no word of any language; its examples are
-English, and the model supplies the words in the language it answers in.
+than digits. Like every prompt here, the rule is written in English,
+examples included, and it lists no language's words for the symbols: it
+asks for them in the language of the reply, and the model supplies them.
 
 **It reaches a spoken reply only.** `get_system_prompts(model_size,
 spoken=True)` adds it right after `voice_style`; `spoken=False`, the
@@ -118,6 +119,12 @@ turn whose reply is read aloud (including the narration of an action
 approved from a voice question). A turn from the text chat (`"chat"`) is
 read and can keep "11 °C"; a routine's (`"routine"`) is written to its journal;
 a turn that names no origin is treated as read.
+
+It reaches the chat model's own reply only. When the loop runs out of turns
+and the max-turn digest writes the final reply (#6 in
+`docs/llm_contexts.md`), that call has its own prompt, without the rule.
+What the voice speaks without passing through the reply engine, a reminder
+or a Claude Code report, keeps whatever symbols it carries.
 
 It is a prompt rule, not a rewrite of the text before the voice: a table of
 symbols to words would have to know every language's words for them.
@@ -159,5 +166,8 @@ All prompts are language-agnostic:
      would misread (a degree sign, "/h", a minus sign or hyphen before a
      digit, a date in digits, five digits or more in a row) and on whether
      the figures asked for are still there, in digits.
+   - An eval that models a voice turn passes `origin="voix"` to
+     `run_reply_engine`: without it the engine builds the prompt of a reply
+     that is read, without the spoken-form rule.
      `EVAL_SPOKEN_UNITS_ROUNDS` compares the prompt without the rule against
      the prompt with it, the arms alternating call by call

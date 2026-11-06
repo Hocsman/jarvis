@@ -23,9 +23,11 @@ misread in it:
 
 - a degree sign;
 - "/h";
-- a minus sign or hyphen right before a digit, unless it follows a letter
-  or a digit (so "-3" counts, "J-3" and a range "3-5" do not);
-- a date in digits, with slashes or dashes (05/11/2026, 2026-11-05);
+- a minus sign or hyphen right before a digit, or one space before it,
+  unless it follows a letter or a digit (so "-3" and "- 3" count, "J-3" and
+  a range "3-5" do not);
+- a date in digits, with slashes or dashes (05/11/2026, 05-11-2026,
+  2026-11-05);
 - an unbroken run of five digits or more.
 
 And on whether it kept its figures: the reply answers, and the figures the
@@ -45,8 +47,10 @@ round asks every case in both languages on both arms, so four rounds give
 (nothing misread and every figure in digits) in each language.
 
 They take ``real_model_config``: the user's provider and models, sandboxed
-memory, location off, no MCP server, and every tool offered rather than
-routed. Tools are stubbed to return the case's invented result, so what
+memory, location off, no MCP server, every tool offered rather than
+routed, and the Kyutai voice, the one the misreadings were measured on
+(with Piper or Chatterbox the prompt tells the model to answer in English,
+and the French cases would measure that conflict instead). Tools are stubbed to return the case's invented result, so what
 leaves the machine is the invented question, that result and the prompt
 built around an empty memory.
 
@@ -80,8 +84,11 @@ _MIN_CALLS_FOR_A_RATE = 20
 MISREAD: Dict[str, "re.Pattern[str]"] = {
     "degree sign": re.compile("°"),
     "/h": re.compile(r"/\s*h\b", re.IGNORECASE),
-    "minus before a digit": re.compile(r"(?<!\w)[-\u2212\u2013]\d"),
-    "date in digits": re.compile(r"\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b|\b\d{4}-\d{2}-\d{2}\b"),
+    "minus before a digit": re.compile(r"(?<!\w)[-\u2212\u2013]\s?\d"),
+    "date in digits": re.compile(
+        r"\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b|\b\d{4}-\d{2}-\d{2}\b"
+        r"|\b\d{1,2}-\d{1,2}-\d{2,4}\b"
+    ),
     "5+ digits": re.compile(r"\d{5,}"),
 }
 
@@ -147,20 +154,22 @@ _WINDY = _weather("Port-Avelin", "Côte-Brune", (
 # said.
 _MILD_FACTS = (r"\b11\b",)
 _BELOW_ZERO_FR = (
-    r"(moins|[-\u2212\u2013])\s*[3-8]\b"
+    r"(?<!au )\bmoins\s*[3-8]\b|(?<!\w)[-\u2212\u2013]\s*[3-8]\b"
     r"|\b[3-8](?:[,.]\d)?\s*(?:degres?\s*)?(?:celsius\s*)?"
     r"(?:sous zero|en dessous de zero|en-dessous de zero|sous le zero)",
 )
 _BELOW_ZERO_EN = (
-    r"(minus|[-\u2212\u2013])\s*[3-8]\b"
+    r"\bminus\s*[3-8]\b|(?<!\w)[-\u2212\u2013]\s*[3-8]\b"
     r"|\b[3-8](?:[.,]\d)?\s*(?:degrees?\s*)?(?:celsius\s*)?below (?:zero|freezing)",
 )
 _WIND = (r"\b(34|35|61|60)\b",)
 _POPULATION = (
-    r"\b(1|un|one)\b[^.!?]{0,24}millions?"
+    r"\b(?:1(?:[.,]\d+)?|un|one)\s+millions?\b"
     r"|1[\s,.\u202f\u00a0]?234[\s,.\u202f\u00a0]?567|\d{7}",
 )
-_JOURNEY_TIME = (r"\b[23]\s*(h|heures?|hours?)\b|2:54|\b54\b",)
+_JOURNEY_TIME = (
+    r"\b[23]\s*(?:h|heures?|hours?)(?![a-z])|2:54|(?<![\d.,])54(?!\d)",
+)
 
 CASES: List[UnitsCase] = [
     UnitsCase(
@@ -292,8 +301,12 @@ def _config(real_model_config, case: UnitsCase):
     figures whose form is being scored."""
     return dataclasses.replace(
         real_model_config, mcps={}, response_language=_LANGUAGES[case.language],
-        tool_selection_strategy="all",
+        tool_selection_strategy="all", tts_engine="kyutai",
     )
+
+
+# Where `get_system_prompts` reads the rule: emptied for the arm without it.
+_RULE_AT = "jarvis.reply.prompts.model_variants.SPOKEN_FORM"
 
 
 def _voice_turn(cfg, case: UnitsCase, *, rule: bool = True) -> str:
@@ -318,9 +331,7 @@ def _voice_turn(cfg, case: UnitsCase, *, rule: bool = True) -> str:
                 return_value={"keywords": []},
             ))
             if not rule:
-                stack.enter_context(patch(
-                    "jarvis.reply.prompts.model_variants.SPOKEN_FORM", "",
-                ))
+                stack.enter_context(patch(_RULE_AT, ""))
             reply = run_reply_engine(
                 db=db, cfg=cfg, tts=None, text=case.asked,
                 dialogue_memory=DialogueMemory(inactivity_timeout=300),
@@ -337,6 +348,50 @@ def _to_terminal(capsys, lines: List[str]) -> None:
     with capsys.disabled():
         force_utf8_stream(sys.stdout)
         print("\n".join(lines), flush=True)
+
+
+def _case(case_id: str) -> UnitsCase:
+    return next(case for case in CASES if case.id == case_id)
+
+
+class TestTheScoring:
+    """The scoring itself, on written replies: no model is called."""
+
+    @pytest.mark.parametrize("case_id, reply", [
+        ("en population", "About 1.2 million people live in Port-Avelin."),
+        ("fr population", "Port-Avelin compte environ 1,2 million d'habitants."),
+        ("fr train journey", "Le trajet dure 2h54, prochain départ le 21 novembre."),
+        ("en train journey", "It takes just under 3 hours; the next one leaves on 21 November."),
+        ("fr freezing night", "Oui, il fera moins 3,4 degrés cette nuit."),
+    ])
+    def test_a_figure_in_the_form_the_rule_asks_for_is_kept(self, case_id, reply):
+        assert keeps_its_figures(reply, _case(case_id))
+
+    @pytest.mark.parametrize("case_id, reply", [
+        ("en population", "About one point two million people live there."),
+        ("fr population", "Environ un virgule deux million d'habitants."),
+        ("fr freezing night", "Il gèlera au moins 5 heures cette nuit."),
+    ])
+    def test_a_figure_spelled_out_or_missing_is_lost(self, case_id, reply):
+        assert not keeps_its_figures(reply, _case(case_id))
+
+    @pytest.mark.parametrize("reply, kind", [
+        ("Du 14-11-2026 au 16-11-2026.", "date in digits"),
+        ("Le 14/11/2026.", "date in digits"),
+        ("Il fera - 3 degrés.", "minus before a digit"),
+        ("Il fait 11,2 °C.", "degree sign"),
+        ("Le vent souffle à 34,7 km/h.", "/h"),
+        ("Population : 1234567.", "5+ digits"),
+    ])
+    def test_what_the_voice_misreads_is_found(self, reply, kind):
+        assert kind in misread_in(reply)
+
+    @pytest.mark.parametrize("reply", [
+        "Il fera moins 3,4 degrés à Brévanne, Val-d'Ormel, le 14 novembre 2026.",
+        "Comptez 3-5 jours, environ 30 mille visiteurs.",
+    ])
+    def test_a_reply_in_words_has_nothing_misread(self, reply):
+        assert misread_in(reply) == []
 
 
 # Read right in fewer than five replies in five with the rule, on Claude
@@ -387,9 +442,20 @@ class TestBeforeAndAfter:
     """The prompt without the rule against the prompt with it, call by call."""
 
     def test_the_rule_against_no_rule_call_by_call(self, real_model_config, capsys):
-        from jarvis.reply.prompts.model_variants import SPOKEN_FORM
+        from jarvis.reply.prompts.model_variants import (
+            SPOKEN_FORM, ModelSize, get_system_prompts,
+        )
 
         assert SPOKEN_FORM, "no spoken-form rule to compare against"
+        # Both arms would be the same prompt, and the comparison noise, if
+        # the rule were read from anywhere the arm without it does not empty.
+        for size in ModelSize:
+            with patch(_RULE_AT, ""):
+                emptied = get_system_prompts(size, spoken=True).to_list()
+            assert SPOKEN_FORM in get_system_prompts(size, spoken=True).to_list()
+            assert SPOKEN_FORM not in emptied, (
+                f"emptying {_RULE_AT} leaves the rule in the {size.name} prompt"
+            )
 
         arms = {"without the rule": False, "with the rule": True}
         names = list(arms)
