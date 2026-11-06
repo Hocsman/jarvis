@@ -2644,6 +2644,26 @@ class TestHerNameAloneThenSilence:
         listener.state_manager.stop()
 
     @patch("builtins.print")
+    def test_punctuation_heard_while_she_waits_is_nothing_to_answer(self, mock_print):
+        """Whisper writes "..." out of the quiet while she waits, and the
+        judge cannot be reached to call it noise: it joins his question,
+        which still holds no letter or digit, so nothing is answered."""
+        from jarvis.state import JarvisState
+
+        listener, _ = _create_listener()
+        _install_intent_judge(listener, None).last_failure_reason = "timeout"
+        listener._process_transcript("Jarvis ?", utterance_energy=0.01)
+        listener._process_transcript("...", utterance_energy=0.01)
+        assert listener.state_manager.get_pending_query().strip() == "...", \
+            "the punctuation did not join the wait"
+        mock_print.reset_mock()
+
+        _his_silence_runs_out(listener)
+
+        _the_wait_ended(listener, mock_print, JarvisState.IDLE)
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
     def test_what_he_says_before_his_silence_runs_out_is_answered(self, _print, tunes):
         listener, _ = _create_listener()
         listener.cfg.tune_enabled = True

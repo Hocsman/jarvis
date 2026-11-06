@@ -1890,8 +1890,10 @@ class VoiceListener(threading.Thread):
             self.state_manager.start_collection(query, heard_at=self._last_heard_at)
 
     def _something_to_stop(self) -> bool:
-        """A reply on its way, or his question still being collected."""
-        return self._a_reply_is_on_its_way() or self.state_manager.is_collecting()
+        """A turn owed, or his question still being collected. A turn a stop
+        has silenced counts while the engine finishes it: a stop he repeats
+        then is still a stop, never a question."""
+        return self._replies_owed > 0 or self.state_manager.is_collecting()
 
     def _a_reply_is_on_its_way(self) -> bool:
         """Whether a reply of hers will be said: a turn is being prepared or
@@ -1980,8 +1982,15 @@ class VoiceListener(threading.Thread):
                         self._speak_reply(reply, on_spoken=asked.heard if asked else None,
                                           language=turn.language)
                 if off:
-                    self._stop_thinking_tune()
-                    get_jarvis_state().set_state(JarvisState.IDLE)
+                    if self._a_reply_is_on_its_way() or self.state_manager.is_collecting():
+                        debug_log("stopped turn done: what he started since keeps the tune "
+                                  "and the state", "voice")
+                    else:
+                        # The stop silenced the tune and published IDLE, but
+                        # the THINKING this turn published as it reached the
+                        # engine may have landed after it.
+                        self._stop_thinking_tune()
+                        get_jarvis_state().set_state(JarvisState.IDLE)
             finally:
                 journal.flush()
         finally:
@@ -2460,7 +2469,10 @@ class VoiceListener(threading.Thread):
         complete the question. With no audio to read, the wall clock."""
         if self.state_manager.check_collection_timeout(now):
             query = self.state_manager.clear_collection()
-            if query.strip():
+            # No letter or digit, in any script, is nothing to answer: her
+            # name alone, and at most the punctuation Whisper made out of the
+            # quiet after it.
+            if any(ch.isalnum() for ch in query):
                 self._hand_over(query)
             else:
                 self._nothing_after_the_wake_word()
