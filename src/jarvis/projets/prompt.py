@@ -29,6 +29,8 @@ See projets.spec.md, What she knows she can do.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from .delegation import TOOL_NAME
 
 _ACCESS = (
@@ -63,7 +65,35 @@ def format_projets_block() -> str:
     """The block for a turn whose catalogue offers `claudeCode`.
 
     The caller decides whether it applies: the tool being offered (the
-    projects folder named) and the turn being attended, since a routine
-    never reaches the tool.
+    projects folder named), the turn being attended, since a routine never
+    reaches the tool, and not running a call the user approved, and
+    `withheld_because` having nothing to say.
     """
     return _BLOCK
+
+
+def withheld_because(cfg) -> str:
+    """Why the block would claim what she cannot do, or "" when it holds.
+
+    The tool is offered as soon as a folder is named, and every call is
+    still refused when that folder does not exist, or when the user filed
+    `claudeCode` under `## Jamais` for both of its risks. Saying the
+    projects are open to her then would have her promise what no call can
+    keep, and contradict a decision only the user makes.
+    """
+    root = str(getattr(cfg, "claude_code_projects_dir", "") or "").strip()
+    try:
+        if not root or not Path(root).expanduser().is_dir():
+            return "the projects folder does not exist"
+    except (OSError, ValueError):
+        return "the projects folder cannot be read"
+
+    # Imported here: the registry imports the tool, which imports this
+    # package.
+    from ..tools.policy import NEVER, RISK_DESTRUCTIVE, RISK_READ
+    from ..tools.registry import load_tool_policy
+
+    policy = load_tool_policy(cfg)
+    if all(policy.verdict(TOOL_NAME, risk) == NEVER for risk in (RISK_READ, RISK_DESTRUCTIVE)):
+        return f"{TOOL_NAME} is filed under ## Jamais"
+    return ""

@@ -67,14 +67,6 @@ _ALWAYS_INCLUDED = ("stop", "forget", "remember")
 _URL_RE = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
 _URL_TOOL = "fetchWebPage"
 
-# The words a tool's name can be, for `tools_named_in`: a tool name is
-# letters, digits, underscores and hyphens (`claudeCode`,
-# `chrome-devtools__take_snapshot`). Only `toolSearchTool` reads names in a
-# query; `select_tools` does not, since the pre-loop router's query is what
-# the user said, and a word of it that happens to be a tool's name
-# (`screenshot`) is no request for the tool.
-_NAME_WORD_RE = re.compile(r"[A-Za-z0-9_-]+")
-
 # Minimum number of tools to return from similarity-based strategies.
 # Prevents overly aggressive filtering that would leave the model with nothing useful.
 _MIN_SELECTED = 3
@@ -169,29 +161,6 @@ def _include_url_tool(
     if _URL_TOOL in builtin_tools or _URL_TOOL in mcp_tools:
         selected.append(_URL_TOOL)
     return selected
-
-
-def tools_named_in(
-    query: str,
-    builtin_tools: Dict[str, "Tool"],
-    mcp_tools: Dict[str, "ToolSpec"],
-) -> List[str]:
-    """The tools of the catalogue that *query* names by their exact name.
-
-    A name is an identifier, spelt one way, so the match is exact and on
-    whole words: "claudeCode" names the tool, while "Claude Code",
-    "claudecode" or "claudeCodes" do not. A tool the catalogue does not
-    offer is not named. In catalogue order, builtins first.
-
-    Read by ``toolSearchTool`` (``builtin/tool_search.spec.md``, Name cue):
-    the system prompt can tell the chat model a tool's name, and a search
-    for that name then finds it without depending on a small router having
-    understood.
-    """
-    words = set(_NAME_WORD_RE.findall(query or ""))
-    if not words:
-        return []
-    return [name for name in _all_tool_names(builtin_tools, mcp_tools) if name in words]
 
 
 def _all_tool_names(

@@ -204,3 +204,101 @@ class TestASearchForAToolsName:
 
         assert _listed(result) == ["claudeCode"]
         assert elapsed < 2.0
+
+    def test_several_names_are_all_found_without_the_router(self, cfg):
+        router = _Router("none", holds=True)
+        started = time.monotonic()
+        try:
+            result = self._search(cfg, "claudeCode, getWeather", router)
+            elapsed = time.monotonic() - started
+        finally:
+            router.release.set()
+
+        assert set(_listed(result)) == {"claudeCode", "getWeather"}
+        assert elapsed < 2.0
+
+    def test_a_router_that_raises_still_lets_a_name_in_a_longer_query_be_found(self, cfg):
+        """Building the router's backends, or the router itself, can raise
+        rather than fall back; the name the query carries is still found."""
+        with patch("jarvis.tools.builtin.tool_search.select_tools",
+                   side_effect=RuntimeError("router down")):
+            result = ToolSearchTool().run(
+                {"query": "claudeCode ajoute une page de contact au projet quillon"},
+                _ctx(cfg),
+            )
+
+        assert result.success is True
+        assert _listed(result) == ["claudeCode"]
+
+    def test_a_query_naming_many_tools_finds_no_more_than_the_router_would(self, cfg):
+        """A search is not a way to list the catalogue: the names it finds
+        are capped as the router's picks are, the first ones kept."""
+        from jarvis.tools.registry import offered_builtin_tools
+        from jarvis.tools.selection import _ALWAYS_INCLUDED, _LLM_MAX_SELECTED
+
+        names = [n for n in offered_builtin_tools(cfg)
+                 if n not in (*_ALWAYS_INCLUDED, "toolSearchTool")]
+        query = " ".join(names)
+
+        result = self._search(cfg, query, _Router("none"))
+
+        assert _listed(result) == names[:_LLM_MAX_SELECTED]
+
+
+class TestToolsNamedIn:
+    """Which tools of the catalogue a query names: each name as a whole
+    word, spelt as the catalogue spells it, with the characters a tool
+    name may hold (naming.PLAIN_NAME: letters, digits, `_`, `.`, `-`)."""
+
+    @pytest.fixture
+    def catalogue(self, mock_config, tmp_path):
+        from jarvis.tools.registry import ToolSpec, offered_builtin_tools
+
+        (tmp_path / "quillon").mkdir()
+        mock_config.claude_code_projects_dir = str(tmp_path)
+        mcp = {
+            name: ToolSpec(name, "An invented tool.", {})
+            for name in (
+                "chrome-devtools__take_snapshot", "devtools__take_snapshot",
+                "srv__files", "srv__files.read",
+            )
+        }
+        return offered_builtin_tools(mock_config), mcp
+
+    def _named(self, catalogue, query):
+        from jarvis.tools.builtin.tool_search import tools_named_in
+
+        return tools_named_in(query, *catalogue)
+
+    @pytest.mark.parametrize("query", ["", None, "   "])
+    def test_an_empty_query_names_nothing(self, catalogue, query):
+        assert self._named(catalogue, query) == []
+
+    def test_several_names_in_catalogue_order(self, catalogue):
+        named = self._named(catalogue, "getWeather puis claudeCode et webSearch")
+
+        assert named == [n for n in catalogue[0] if n in ("getWeather", "claudeCode", "webSearch")]
+
+    def test_a_hyphenated_name_is_found_and_its_tail_is_not(self, catalogue):
+        named = self._named(catalogue, "chrome-devtools__take_snapshot")
+
+        assert named == ["chrome-devtools__take_snapshot"]
+
+    def test_a_dotted_name_is_found_and_its_head_is_not(self, catalogue):
+        named = self._named(catalogue, "lis le fichier avec srv__files.read")
+
+        assert named == ["srv__files.read"]
+
+    @pytest.mark.parametrize("query", [
+        "claudeCode.", "Utilise claudeCode.", "«claudeCode»", "(claudeCode)",
+        "claudeCode...", "`claudeCode`, vite",
+    ])
+    def test_punctuation_around_a_name_does_not_hide_it(self, catalogue, query):
+        assert self._named(catalogue, query) == ["claudeCode"]
+
+    @pytest.mark.parametrize("query", [
+        "àclaudeCode", "claudeCodeé", "жclaudeCode", "claudeCode数", "claudeCode_x",
+        "x.claudeCode", "claudeCode-x", "claudeCode.x",
+    ])
+    def test_a_name_glued_to_a_letter_of_any_script_is_not_a_match(self, catalogue, query):
+        assert "claudeCode" not in self._named(catalogue, query)

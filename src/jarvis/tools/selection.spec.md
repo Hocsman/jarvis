@@ -52,7 +52,9 @@ A tool's name in the query is no cue here: `select_tools` reads what the user
 said, and a word of it that happens to be a tool's name ("j'ai vu un
 screenshot marrant") is no request for the tool. A search for a tool's exact
 name is `toolSearchTool`'s business (`builtin/tool_search.spec.md`, Name
-cue), which reads the catalogue's names with `tools_named_in`.
+cue): the name matching lives in `builtin/tool_search.py`, and the only
+thing it takes from here is `_LLM_MAX_SELECTED`, which caps the names it
+finds as it caps the router's picks.
 
 ### Keyword Strategy
 
