@@ -120,3 +120,69 @@ class TestWhichTurnsAreGivenTheRule:
         system = _system_message(db, _cfg(tmp_path))
 
         assert SPOKEN_FORM not in system
+
+
+def _digest_system_prompt(db, cfg, **kw) -> str:
+    """The system prompt the max-turn digest is handed when a turn's loop
+    runs out of turns: the model only ever calls a tool, so the digest
+    writes the reply."""
+    from src.jarvis.reply.engine import run_reply_engine
+    from src.jarvis.tools.types import ToolExecutionResult
+
+    cfg.agentic_max_turns = 2
+    cfg.intent_judge_model = ""
+    cfg.llm_digest_timeout_sec = 8.0
+    seen = {}
+
+    def _always_a_tool_call(**_call):
+        return {"message": {"role": "assistant", "content": "", "tool_calls": [{
+            "id": "c1", "type": "function",
+            "function": {"name": "getWeather", "arguments": {"location": "Valmorin"}},
+        }]}}
+
+    def _digest(**call):
+        seen["system_prompt"] = call["system_prompt"]
+        return "Je n'ai pas pu finir. Il fait 11,2 degrés à Valmorin."
+
+    with patch("src.jarvis.reply.engine.plan_query", return_value=[]), \
+         patch("src.jarvis.reply.engine.extract_search_params_for_memory",
+               return_value={}), \
+         patch("src.jarvis.reply.engine.select_tools",
+               return_value=["getWeather", "stop"]), \
+         patch("src.jarvis.reply.engine.chat_with_messages",
+               side_effect=_always_a_tool_call), \
+         patch("src.jarvis.reply.engine.run_tool_with_retries",
+               return_value=ToolExecutionResult(
+                   success=True, reply_text="Temperature: 11.2°C")), \
+         patch("src.jarvis.reply.enrichment.call_llm_direct", side_effect=_digest):
+        reply = run_reply_engine(
+            db=db, cfg=cfg, tts=None, text="il fait combien dehors ?",
+            dialogue_memory=DialogueMemory(inactivity_timeout=300.0), **kw,
+        )
+    assert reply == "Je n'ai pas pu finir. Il fait 11,2 degrés à Valmorin."
+    return seen["system_prompt"]
+
+
+@pytest.mark.unit
+class TestTheReplyWrittenWhenTheLoopRunsOut:
+    """When the loop runs out of turns, the max-turn digest writes the reply,
+    and on a turn from the voice that reply is spoken too."""
+
+    def test_on_a_turn_from_the_voice_it_is_given_the_rule(self, db, tmp_path):
+        system = _digest_system_prompt(db, _cfg(tmp_path), origin="voix", language="fr")
+
+        assert SPOKEN_FORM in system
+
+    def test_on_a_turn_from_the_text_chat_it_is_not(self, db, tmp_path):
+        system = _digest_system_prompt(db, _cfg(tmp_path), origin="chat")
+
+        assert SPOKEN_FORM not in system
+
+    def test_its_own_instructions_are_kept_either_way(self, db, tmp_path):
+        from src.jarvis.reply.enrichment import _LOOP_DIGEST_SYSTEM_PROMPT
+
+        spoken = _digest_system_prompt(db, _cfg(tmp_path), origin="voix")
+        written = _digest_system_prompt(db, _cfg(tmp_path), origin="chat")
+
+        assert written == _LOOP_DIGEST_SYSTEM_PROMPT
+        assert spoken.startswith(_LOOP_DIGEST_SYSTEM_PROMPT)

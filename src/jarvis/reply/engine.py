@@ -3353,6 +3353,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 user_query=redacted,
                 loop_messages=messages[user_msg_index + 1:],
                 cfg=cfg,
+                spoken=spoken,
             )
         except Exception as e:
             debug_log(

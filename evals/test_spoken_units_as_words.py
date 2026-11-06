@@ -16,7 +16,7 @@ model to write the words a person would say, in the reply's own language,
 and it reaches a turn from the voice only (`origin="voix"`): a reply typed
 in the chat window is read, not heard, and keeps its symbols.
 
-Each case is a question whose tool result is full of those symbols:
+Each units case is a question whose tool result is full of those symbols:
 weather in the weather tool's own format, a festival's dates, a city's
 population, a train journey. A reply is scored on what the voice would
 misread in it:
@@ -37,26 +37,41 @@ lost: the voice reads it worse than its digits, and a rule that turned
 "-3,4 °C" into "moins trois virgule quatre degrés" would trade one misreading
 for another.
 
-`TestSpokenRepliesSayTheirUnits` asks every case once as a voice turn.
-`TestBeforeAndAfter` compares the prompt without the rule against the prompt
-with it: both arms are voice turns, the first with the rule emptied, and
-they alternate call by call inside one loop (CLAUDE.md: a remote provider
-drifts within a session). Set `EVAL_SPOKEN_UNITS_ROUNDS` to run it; each
-round asks every case in both languages on both arms, so four rounds give
-24 calls per arm and language. It holds the rule to more replies read right
-(nothing misread and every figure in digits) in each language.
+An identifier is not a quantity, and rounding it gives a wrong answer
+rather than a misread one. The identifier cases ask for a postcode, a phone
+number, a booking reference, a door code and a founding year, from a tool
+result that writes them unbroken. Such a reply is right when every
+identifier comes back with every digit in order, grouped by spaces at
+most, in groups of five digits or fewer: never rounded, never spelled out,
+and not left in a run the voice misreads.
+
+`TestSpokenRepliesSayTheirUnits` and `TestIdentifiersSurvive` ask every
+case once as a voice turn. `TestBeforeAndAfter` compares two arms of the
+rule, both voice turns, alternating call by call inside one loop (CLAUDE.md:
+a remote provider drifts within a session): the prompt without the rule
+against the prompt with it, or, with `EVAL_SPOKEN_FORM_AGAINST` naming a
+file that holds another wording, that wording against the prompt's. Set
+`EVAL_SPOKEN_UNITS_ROUNDS` to run it; each round asks every case in both
+languages on both arms, so four rounds give 24 units calls and 20
+identifier calls per arm and language. Against no rule it holds the rule
+to more replies read right (nothing misread and every figure in digits) and
+to no fewer identifiers right, in each language; against another wording
+it reports both arms and asserts nothing.
 
 They take ``real_model_config``: the user's provider and models, sandboxed
 memory, location off, no MCP server, every tool offered rather than
 routed, and the Kyutai voice, the one the misreadings were measured on
 (with Piper or Chatterbox the prompt tells the model to answer in English,
-and the French cases would measure that conflict instead). Tools are stubbed to return the case's invented result, so what
-leaves the machine is the invented question, that result and the prompt
-built around an empty memory.
+and the French cases would measure that conflict instead). Tools are
+stubbed to return the case's invented result, so what leaves the machine
+is the invented question, that result and the prompt built around an empty
+memory.
 
 Run:
     ./scripts/run_evals.sh --single spoken_units_as_words
     EVAL_SPOKEN_UNITS_ROUNDS=4 python -m pytest evals/test_spoken_units_as_words.py -k before -s
+    EVAL_SPOKEN_UNITS_ROUNDS=4 EVAL_SPOKEN_FORM_AGAINST=other_rule.txt \\
+        python -m pytest evals/test_spoken_units_as_words.py -k before -s
 """
 
 from __future__ import annotations
@@ -68,7 +83,7 @@ import re
 import sys
 import unicodedata
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 from unittest.mock import patch
 
 import pytest
@@ -76,6 +91,9 @@ import pytest
 from helpers import is_fallback_reply
 
 ROUNDS = int(os.environ.get("EVAL_SPOKEN_UNITS_ROUNDS", "0") or 0)
+# A file holding another wording of the rule: the comparison then measures
+# the prompt's rule against it instead of against no rule.
+AGAINST = os.environ.get("EVAL_SPOKEN_FORM_AGAINST", "")
 
 # Below this many calls an arm's rate says nothing (CLAUDE.md, sample sizes).
 _MIN_CALLS_FOR_A_RATE = 20
@@ -171,6 +189,17 @@ _JOURNEY_TIME = (
     r"\b[23]\s*(?:h|heures?|hours?)(?![a-z])|2:54|(?<![\d.,])54(?!\d)",
 )
 
+_POPULATION_FR = (
+    "**Content from top result:**\n"
+    "Port-Avelin est la plus grande ville de la région Côte-Brune. "
+    "Population (recensement 2025) : 1234567 habitants. Fondée en 1287."
+)
+_POPULATION_EN = (
+    "**Content from top result:**\n"
+    "Port-Avelin is the largest city of the Côte-Brune region. "
+    "Population (2025 census): 1234567. Founded in 1287."
+)
+
 CASES: List[UnitsCase] = [
     UnitsCase(
         id="fr mild weather", language="fr",
@@ -201,12 +230,7 @@ CASES: List[UnitsCase] = [
     UnitsCase(
         id="fr population", language="fr",
         asked="Combien d'habitants à Port-Avelin ?",
-        result=(
-            "**Content from top result:**\n"
-            "Port-Avelin est la plus grande ville de la région Côte-Brune. "
-            "Population (recensement 2025) : 1234567 habitants. Fondée en 1287."
-        ),
-        facts=_POPULATION,
+        result=_POPULATION_FR, facts=_POPULATION,
     ),
     UnitsCase(
         id="fr train journey", language="fr",
@@ -249,12 +273,7 @@ CASES: List[UnitsCase] = [
     UnitsCase(
         id="en population", language="en",
         asked="How many people live in Port-Avelin?",
-        result=(
-            "**Content from top result:**\n"
-            "Port-Avelin is the largest city of the Côte-Brune region. "
-            "Population (2025 census): 1234567. Founded in 1287."
-        ),
-        facts=_POPULATION,
+        result=_POPULATION_EN, facts=_POPULATION,
     ),
     UnitsCase(
         id="en train journey", language="en",
@@ -270,6 +289,163 @@ CASES: List[UnitsCase] = [
         facts=_JOURNEY_TIME + (r"\b21(?:st)?\b",),
     ),
 ]
+
+
+@dataclass(frozen=True)
+class IdentifierCase:
+    id: str
+    language: str
+    asked: str
+    result: str
+    # Each must come back with every character, in order: never rounded,
+    # never spelled out.
+    identifiers: Tuple[str, ...]
+
+
+# The phone numbers are in the ranges set aside for fiction (France
+# 01 99 00, United Kingdom 020 7946 0).
+ID_CASES: List[IdentifierCase] = [
+    IdentifierCase(
+        id="fr postcode", language="fr",
+        asked="C'est quoi le code postal de Valmorin ?",
+        result=(
+            "**Content from top result:**\n"
+            "Valmorin, commune de la région Haute-Lisière. Code postal : 47390. "
+            "Altitude : 312 m. Population : 18650 habitants (2025)."
+        ),
+        identifiers=("47390",),
+    ),
+    IdentifierCase(
+        id="fr phone number", language="fr",
+        asked="Tu peux me donner le numéro de téléphone de la mairie de Brévanne ?",
+        result=(
+            "**Content from top result:**\n"
+            "Mairie de Brévanne, 3 place des Tilleuls. Téléphone : 0199003572. "
+            "Ouverte du lundi au vendredi, de 9 h à 17 h."
+        ),
+        identifiers=("0199003572",),
+    ),
+    IdentifierCase(
+        id="fr booking reference", language="fr",
+        asked="Dans mes notes, c'est quoi la référence de la réservation du gîte "
+              "à Kerlivan-Plage ?",
+        result=(
+            "notes/vacances.md:\n"
+            "Gîte des Mouettes, Kerlivan-Plage, du 21/11/2026 au 23/11/2026. "
+            "Référence de réservation : 50318472. Arrivée à partir de 16 h."
+        ),
+        identifiers=("50318472",),
+    ),
+    IdentifierCase(
+        id="fr door code", language="fr",
+        asked="Dans mes notes, c'est quoi le digicode de l'immeuble d'Élise "
+              "à Sorrevaux ?",
+        result=(
+            "notes/adresses.md:\n"
+            "Élise Fontanel, 14 rue des Augustins, Sorrevaux. Digicode : 73914, "
+            "puis interphone au nom de Fontanel, 3e étage."
+        ),
+        identifiers=("73914",),
+    ),
+    IdentifierCase(
+        id="fr founding year", language="fr",
+        asked="Port-Avelin, elle a été fondée en quelle année, et elle a combien "
+              "d'habitants ?",
+        result=_POPULATION_FR,
+        identifiers=("1287",),
+    ),
+    IdentifierCase(
+        id="en postcode", language="en",
+        asked="What's the postcode of Valmorin?",
+        result=(
+            "**Content from top result:**\n"
+            "Valmorin, a town in the Haute-Lisière region. Postcode: 47390. "
+            "Elevation: 312 m. Population: 18650 (2025)."
+        ),
+        identifiers=("47390",),
+    ),
+    IdentifierCase(
+        id="en phone number", language="en",
+        asked="Can you give me the phone number of Brévanne town hall?",
+        result=(
+            "**Content from top result:**\n"
+            "Brévanne Town Hall, 3 Linden Square. Telephone: 02079460718. "
+            "Open Monday to Friday, 9am to 5pm."
+        ),
+        identifiers=("02079460718",),
+    ),
+    IdentifierCase(
+        id="en booking reference", language="en",
+        asked="In my notes, what's the booking reference for the cottage in "
+              "Kerlivan-Plage?",
+        result=(
+            "notes/holidays.md:\n"
+            "Gull Cottage, Kerlivan-Plage, 21/11/2026 to 23/11/2026. Booking "
+            "reference: 50318472. Check-in from 4pm."
+        ),
+        identifiers=("50318472",),
+    ),
+    IdentifierCase(
+        id="en door code", language="en",
+        asked="In my notes, what's the door code for Elise's building in "
+              "Sorrevaux?",
+        result=(
+            "notes/addresses.md:\n"
+            "Elise Fontanel, 14 Augustine Street, Sorrevaux. Door code: 73914, "
+            "then buzz Fontanel, third floor."
+        ),
+        identifiers=("73914",),
+    ),
+    IdentifierCase(
+        id="en founding year", language="en",
+        asked="When was Port-Avelin founded, and how many people live there?",
+        result=_POPULATION_EN,
+        identifiers=("1287",),
+    ),
+]
+
+# What may stand between the characters of an identifier the reply kept:
+# grouped by spaces it is also read right; a dot or a hyphen keeps it whole
+# but is a symbol the voice may say.
+_KEPT_GAP = "[   .\\-]"
+_READ_GAP = "[   ]"
+# An unbroken run of digits the voice reads right: a postcode's five. Seven
+# in a row were misread 3 times in 3.
+_LONGEST_GROUP = 5
+
+
+def _written(identifier: str, gap: str) -> "re.Pattern[str]":
+    body = f"{gap}?".join(re.escape(c) for c in identifier)
+    return re.compile(rf"(?<![0-9A-Za-z]){body}(?![0-9A-Za-z])", re.IGNORECASE)
+
+
+def identifier_kept(reply: str, identifier: str) -> bool:
+    """Every character of ``identifier`` is in ``reply``, in order, at most
+    grouped by spaces, dots or hyphens: not rounded, not spelled out."""
+    return bool(_written(identifier, _KEPT_GAP).search(reply))
+
+
+def identifier_readable(reply: str, identifier: str) -> bool:
+    """Kept, grouped by spaces only, with no group longer than the voice
+    reads right."""
+    too_long = re.compile(rf"\d{{{_LONGEST_GROUP + 1},}}")
+    return any(
+        not too_long.search(m.group(0))
+        for m in _written(identifier, _READ_GAP).finditer(reply)
+    )
+
+
+def identifiers_right(reply: str, case: IdentifierCase) -> bool:
+    """The reply answers, and every identifier is kept and readable."""
+    if not reply.strip() or is_fallback_reply(reply):
+        return False
+    return all(identifier_readable(reply, i) for i in case.identifiers)
+
+
+def identifiers_kept(reply: str, case: IdentifierCase) -> bool:
+    if not reply.strip() or is_fallback_reply(reply):
+        return False
+    return all(identifier_kept(reply, i) for i in case.identifiers)
 
 
 def _fold(text: str) -> str:
@@ -292,7 +468,7 @@ def keeps_its_figures(reply: str, case: UnitsCase) -> bool:
     return all(re.search(fact, folded) for fact in case.facts)
 
 
-def _config(real_model_config, case: UnitsCase):
+def _config(real_model_config, case: "UnitsCase | IdentifierCase"):
     """The user's provider and models, the case's language, no MCP server:
     the user's servers have no part in a turn whose tools are stubbed.
 
@@ -305,13 +481,16 @@ def _config(real_model_config, case: UnitsCase):
     )
 
 
-# Where `get_system_prompts` reads the rule: emptied for the arm without it.
+# Where `get_system_prompts` reads the rule: replaced for an arm that
+# carries another wording, emptied for the arm without it.
 _RULE_AT = "jarvis.reply.prompts.model_variants.SPOKEN_FORM"
 
 
-def _voice_turn(cfg, case: UnitsCase, *, rule: bool = True) -> str:
-    """One voice turn on ``case``; ``rule=False`` empties the spoken-form rule,
-    which is the prompt as it stood before it."""
+def _voice_turn(
+    cfg, case: "UnitsCase | IdentifierCase", *, rule: Optional[str] = None,
+) -> str:
+    """One voice turn on ``case``. ``rule`` is the spoken-form rule's text
+    for this turn: None keeps the prompt's own, "" leaves the rule out."""
     from contextlib import ExitStack
 
     from jarvis.memory.conversation import DialogueMemory
@@ -330,8 +509,8 @@ def _voice_turn(cfg, case: UnitsCase, *, rule: bool = True) -> str:
                 "jarvis.reply.engine.extract_search_params_for_memory",
                 return_value={"keywords": []},
             ))
-            if not rule:
-                stack.enter_context(patch(_RULE_AT, ""))
+            if rule is not None:
+                stack.enter_context(patch(_RULE_AT, rule))
             reply = run_reply_engine(
                 db=db, cfg=cfg, tts=None, text=case.asked,
                 dialogue_memory=DialogueMemory(inactivity_timeout=300),
@@ -393,6 +572,33 @@ class TestTheScoring:
     def test_a_reply_in_words_has_nothing_misread(self, reply):
         assert misread_in(reply) == []
 
+    @pytest.mark.parametrize("case_id, reply", [
+        ("fr phone number", "Le numéro de la mairie est le 01 99 00 35 72."),
+        ("en phone number", "You can reach them on 020 7946 0718."),
+        ("fr booking reference", "La référence est 5031 8472."),
+        ("fr postcode", "Le code postal de Valmorin est 47390."),
+        ("en door code", "The door code is 73914."),
+        ("en founding year", "It was founded in 1287 and has about 1.2 million people."),
+    ])
+    def test_an_identifier_whole_and_grouped_is_right(self, case_id, reply):
+        case = next(c for c in ID_CASES if c.id == case_id)
+        assert identifiers_right(reply, case)
+
+    @pytest.mark.parametrize("case_id, reply, whole", [
+        # Copied as the tool wrote it: whole, but a run the voice misreads.
+        ("fr phone number", "Le numéro est le 0199003572.", True),
+        ("fr phone number", "Le numéro est le 01.99.00.35.72.", True),
+        # Rounded, spelled out or cut: not the identifier any more.
+        ("fr booking reference", "La référence est environ 50 millions.", False),
+        ("fr postcode", "C'est quarante-sept mille trois cent quatre-vingt-dix.", False),
+        ("en booking reference", "The reference is 5031847.", False),
+        ("en founding year", "It was founded around 1300.", False),
+    ])
+    def test_an_identifier_altered_or_unreadable_is_wrong(self, case_id, reply, whole):
+        case = next(c for c in ID_CASES if c.id == case_id)
+        assert not identifiers_right(reply, case)
+        assert identifiers_kept(reply, case) is whole
+
 
 # Read right in fewer than five replies in five with the rule, on Claude
 # Haiku 5.5 (06/11/2026, 5 calls a case): the model sometimes copies the
@@ -405,11 +611,19 @@ _KNOWN_WEAK = {
         "2 in 5: '1234567' copied unrounded: tracked, not blocking",
     "en population":
         "3 in 5: '1234567' copied unrounded: tracked, not blocking",
+    # Identifiers, 06/11/2026, 4 calls a case: never rounded or cut, but a
+    # long one comes back as the tool wrote it, unbroken.
+    "fr booking reference":
+        "0 in 4: '50318472' copied unbroken: tracked, not blocking",
+    "en booking reference":
+        "0 in 4: '50318472' copied unbroken: tracked, not blocking",
+    "en phone number":
+        "2 in 4: '02079460718' copied unbroken: tracked, not blocking",
 }
 
 
-def _each_case():
-    for case in CASES:
+def _each_case(cases):
+    for case in cases:
         weak = _KNOWN_WEAK.get(case.id)
         yield pytest.param(
             case, id=case.id,
@@ -422,7 +636,7 @@ class TestSpokenRepliesSayTheirUnits:
     """A voice turn's reply holds nothing the voice misreads, and keeps its
     figures."""
 
-    @pytest.mark.parametrize("case", list(_each_case()))
+    @pytest.mark.parametrize("case", list(_each_case(CASES)))
     def test_the_reply_says_its_units_in_words(self, real_model_config, case):
         reply = _voice_turn(_config(real_model_config, case), case)
 
@@ -437,18 +651,38 @@ class TestSpokenRepliesSayTheirUnits:
 
 
 @pytest.mark.eval
+class TestIdentifiersSurvive:
+    """A voice turn's reply gives a postcode, a phone number, a reference, a
+    code or a year with every digit, in groups the voice reads."""
+
+    @pytest.mark.parametrize("case", list(_each_case(ID_CASES)))
+    def test_the_identifier_comes_back_whole(self, real_model_config, case):
+        reply = _voice_turn(_config(real_model_config, case), case)
+
+        print(f"\n  🗣️ {case.id}: {reply[:240]!r}")
+        assert identifiers_kept(reply, case), (
+            f"The reply altered {case.identifiers!r}: {reply[:400]!r}"
+        )
+        assert identifiers_right(reply, case), (
+            f"The reply kept {case.identifiers!r} in a form the voice misreads: "
+            f"{reply[:400]!r}"
+        )
+
+
+@pytest.mark.eval
 @pytest.mark.skipif(ROUNDS < 1, reason="set EVAL_SPOKEN_UNITS_ROUNDS to compare")
 class TestBeforeAndAfter:
-    """The prompt without the rule against the prompt with it, call by call."""
+    """Two arms of the rule, call by call: no rule against the prompt's, or
+    the wording in `EVAL_SPOKEN_FORM_AGAINST` against the prompt's."""
 
-    def test_the_rule_against_no_rule_call_by_call(self, real_model_config, capsys):
+    def test_the_rule_against_another_call_by_call(self, real_model_config, capsys):
         from jarvis.reply.prompts.model_variants import (
             SPOKEN_FORM, ModelSize, get_system_prompts,
         )
 
         assert SPOKEN_FORM, "no spoken-form rule to compare against"
         # Both arms would be the same prompt, and the comparison noise, if
-        # the rule were read from anywhere the arm without it does not empty.
+        # the rule were read from anywhere the other arm does not replace.
         for size in ModelSize:
             with patch(_RULE_AT, ""):
                 emptied = get_system_prompts(size, spoken=True).to_list()
@@ -457,28 +691,47 @@ class TestBeforeAndAfter:
                 f"emptying {_RULE_AT} leaves the rule in the {size.name} prompt"
             )
 
-        arms = {"without the rule": False, "with the rule": True}
+        if AGAINST:
+            with open(AGAINST, encoding="utf-8") as f:
+                other = f.read().strip()
+            assert other and other != SPOKEN_FORM, (
+                f"{AGAINST} holds no other wording of the rule"
+            )
+            arms: Dict[str, Optional[str]] = {
+                f"the rule in {os.path.basename(AGAINST)}": other,
+                "the prompt's rule": None,
+            }
+        else:
+            arms = {"without the rule": "", "with the rule": None}
         names = list(arms)
         languages = list(_LANGUAGES)
-        # (arm, language) -> counters
+        # (arm, language) -> counters, units cases
         calls: Dict[Tuple[str, str], int] = {}
         clean: Dict[Tuple[str, str], int] = {}
         kept: Dict[Tuple[str, str], int] = {}
         # Both at once: nothing misread and every figure in digits.
         heard: Dict[Tuple[str, str], int] = {}
         by_kind: Dict[Tuple[str, str, str], int] = {}
-        per_case: Dict[Tuple[str, str], List[int]] = {}   # clean, kept, calls
+        # (arm, language) -> counters, identifier cases
+        id_calls: Dict[Tuple[str, str], int] = {}
+        id_kept: Dict[Tuple[str, str], int] = {}
+        id_right: Dict[Tuple[str, str], int] = {}
+        per_case: Dict[Tuple[str, str], List[int]] = {}   # two scores, calls
         misses: List[str] = []
+
+        def add(counter: Dict, key, n: int = 1) -> None:
+            counter[key] = counter.get(key, 0) + n
 
         def rate(got: int, n: int) -> str:
             if n >= _MIN_CALLS_FOR_A_RATE:
                 return f"{got}/{n} ({100 * got / n:.0f} %)"
             return f"{got}/{n}   (under {_MIN_CALLS_FOR_A_RATE} calls: counts only)"
 
+        all_cases: List["UnitsCase | IdentifierCase"] = list(CASES) + list(ID_CASES)
         rng = random.Random(0)
         try:
             for rnd in range(ROUNDS):
-                order = list(CASES)
+                order = list(all_cases)
                 rng.shuffle(order)
                 for i, case in enumerate(order):
                     cfg = _config(real_model_config, case)
@@ -486,22 +739,32 @@ class TestBeforeAndAfter:
                     for name in names[turn:] + names[:turn]:
                         reply = _voice_turn(cfg, case, rule=arms[name])
                         key = (name, case.language)
+                        row = per_case.setdefault((name, case.id), [0, 0, 0])
+                        row[2] += 1
+                        if isinstance(case, IdentifierCase):
+                            whole = identifiers_kept(reply, case)
+                            right = identifiers_right(reply, case)
+                            add(id_calls, key)
+                            add(id_kept, key, int(whole))
+                            add(id_right, key, int(right))
+                            row[0] += int(right)
+                            row[1] += int(whole)
+                            if not right:
+                                what = "unreadable" if whole else "identifier lost"
+                                misses.append(f"{name} / {case.id} ({what}): {reply[:160]!r}")
+                            continue
                         found = misread_in(reply)
                         figures = keeps_its_figures(reply, case)
-                        calls[key] = calls.get(key, 0) + 1
-                        clean[key] = clean.get(key, 0) + int(not found)
-                        kept[key] = kept.get(key, 0) + int(figures)
-                        heard[key] = heard.get(key, 0) + int(figures and not found)
+                        add(calls, key)
+                        add(clean, key, int(not found))
+                        add(kept, key, int(figures))
+                        add(heard, key, int(figures and not found))
                         for kind in found:
-                            k = (name, case.language, kind)
-                            by_kind[k] = by_kind.get(k, 0) + 1
+                            add(by_kind, (name, case.language, kind))
                         if GROUPED_LONG_NUMBER.search(reply):
-                            k = (name, case.language, "grouped long number")
-                            by_kind[k] = by_kind.get(k, 0) + 1
-                        row = per_case.setdefault((name, case.id), [0, 0, 0])
+                            add(by_kind, (name, case.language, "grouped long number"))
                         row[0] += int(not found)
                         row[1] += int(figures)
-                        row[2] += 1
                         if found or not figures:
                             what = ", ".join(found) if found else "figures lost"
                             if found and not figures:
@@ -511,8 +774,8 @@ class TestBeforeAndAfter:
         finally:
             lines = [
                 "",
-                f"📊 Spoken units: {len(CASES)} cases x {ROUNDS} rounds, "
-                "arms interleaved call by call",
+                f"📊 Spoken form: {len(CASES)} units cases and {len(ID_CASES)} "
+                f"identifier cases x {ROUNDS} rounds, arms interleaved call by call",
             ]
             for name in names:
                 lines.append(f"   🧪 {name}")
@@ -529,13 +792,25 @@ class TestBeforeAndAfter:
                         if count:
                             note = "  (not scored)" if kind not in MISREAD else ""
                             lines.append(f"         ⚠️ {kind:<22} {count}/{n}{note}")
-                for case in CASES:
-                    c, k, n = per_case.get((name, case.id), [0, 0, 0])
-                    lines.append(f"         💬 {case.id:<20} clean {c}/{n}, kept {k}/{n}")
+                    m = id_calls.get(key, 0)
+                    lines.append(
+                        f"      🔢 {language}  identifiers right {rate(id_right.get(key, 0), m)}"
+                        f"  (kept whole {rate(id_kept.get(key, 0), m)})"
+                    )
+                for case in all_cases:
+                    a, b, n = per_case.get((name, case.id), [0, 0, 0])
+                    if isinstance(case, IdentifierCase):
+                        lines.append(f"         💬 {case.id:<20} right {a}/{n}, whole {b}/{n}")
+                    else:
+                        lines.append(f"         💬 {case.id:<20} clean {a}/{n}, kept {b}/{n}")
             for miss in misses:
                 lines.append(f"      ❌ {miss}")
             _to_terminal(capsys, lines)
 
+        if AGAINST:
+            # Which wording to keep weighs both measures at once: the run
+            # reports them and leaves the judgement to whoever reads it.
+            return
         for language in languages:
             before = heard.get(("without the rule", language), 0)
             after = heard.get(("with the rule", language), 0)
@@ -543,4 +818,10 @@ class TestBeforeAndAfter:
                 f"In {language}, replies with the rule are no more often read right "
                 f"(nothing misread, every figure in digits) than replies without it: "
                 f"{after} against {before}."
+            )
+            before = id_right.get(("without the rule", language), 0)
+            after = id_right.get(("with the rule", language), 0)
+            assert after >= before, (
+                f"In {language}, the rule leaves fewer identifiers whole and "
+                f"readable than no rule: {after} against {before}."
             )

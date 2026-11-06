@@ -350,7 +350,7 @@ def _reply(
             return_value=ToolExecutionResult(success=True, reply_text="Aucun résultat."),
         ):
             reply = run_reply_engine(
-                db=db, cfg=cfg, tts=None, text=case.asked,
+                db=db, cfg=cfg, tts=None, origin="voix", text=case.asked,
                 dialogue_memory=dm, language="fr",
             )
     finally:
