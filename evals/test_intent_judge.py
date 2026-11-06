@@ -19,8 +19,11 @@ alone). A third reads his answer to a question she ended her reply on,
 begun the moment she stops, unmarked, as the listener shows it when he is
 heard in a voice, and marked "(during TTS)", as it shows an answer too
 quiet to prove he spoke, which it answers only on a directed verdict with
-a query, alternating the same way (`-k unmarked` runs it alone). Arms go
-through `MockConfig`, so a cloud model
+a query, alternating the same way (`-k his_answer` runs it alone). A
+fourth reads her last sentence coming back as words she never said, its
+voice stopping with hers, unmarked as the listener showed it when both
+proofs held and marked as it shows it now (`-k rewritten` runs it alone).
+Arms go through `MockConfig`, so a cloud model
 goes to the provider the `EVAL_LLM_*` variables name and is billed there,
 and a bare local tag runs on the local Ollama. Only these synthetic
 transcripts leave the machine. `EVAL_INTENT_JUDGE_ROUNDS` sets the rounds
@@ -782,6 +785,42 @@ ANSWER_TO_HER_QUESTION_CASES = [
 ]
 
 
+# Her reply ends on a reading, and her last sentence comes back as words she
+# never said: Whisper hears the figure as an hour and the unit as a name.
+# Through the speakers her voice clears the energy bar, so both proofs hold
+# and the listener used to show it unmarked; its voice stops with hers, so it
+# now shows it marked "(during TTS)". Her voice moved air: `expected_noise`
+# is false, which grants it the voice the listener measures.
+HER_VOICE_REWRITTEN_CASES = [
+    NotSpeechCase("french_weight_rewritten",
+                  _after("Combien pèse le colis ?",
+                         "Le colis est bien arrivé, Monsieur. Il pèse 3,2 kg.",
+                         "Il paie ce trois heures deux, Cagé."),
+                  "Le colis est bien arrivé, Monsieur. Il pèse 3,2 kg.", expected_noise=False),
+    NotSpeechCase("french_temperature_rewritten",
+                  _after("Il fait combien dehors ?",
+                         "Le ciel est couvert, Monsieur. Il fait 11,8 °C.",
+                         "Il fait onze heures huit, Céline."),
+                  "Le ciel est couvert, Monsieur. Il fait 11,8 °C.", expected_noise=False),
+    NotSpeechCase("french_distance_rewritten",
+                  _after("C'est loin, la gare ?",
+                         "La gare est à vingt minutes à pied. Le trajet fait 1,6 km.",
+                         "Le trajet fête une heure six, Camille."),
+                  "La gare est à vingt minutes à pied. Le trajet fait 1,6 km.",
+                  expected_noise=False),
+    NotSpeechCase("english_temperature_rewritten",
+                  _after("how warm is it outside",
+                         "It's a mild evening. It's currently 52.3 °F.",
+                         "It's currently 5:23, Fiona."),
+                  "It's a mild evening. It's currently 52.3 °F.", expected_noise=False),
+    NotSpeechCase("english_weight_rewritten",
+                  _after("how heavy is the parcel",
+                         "The parcel has arrived. It weighs 2.4 kg.",
+                         "It waits two four, Kegan."),
+                  "The parcel has arrived. It weighs 2.4 kg.", expected_noise=False),
+]
+
+
 def _marked_as_hers(case: NotSpeechCase) -> NotSpeechCase:
     """The case with the current segment marked "(during TTS)"."""
     text, _ = case.segments[-1]
@@ -1428,6 +1467,53 @@ class TestIntentJudgeNotSpeechArms:
                          f"{answered}/{scored}, noise {noise}/{scored}, no verdict {silent}")
         for ((model, variant), name), count in sorted(misses.items()):
             lines.append(f"   ↳ {model} {variant}: {name} not directed {count}/{NOT_SPEECH_ROUNDS}")
+        with capsys.disabled():
+            print("\n".join(lines))
+
+        mute = [arm for arm in arms if tally[arm][3] == tally[arm][4]]
+        assert not mute, f"no answer at all from {mute}: check the model names and the provider"
+
+    def test_her_voice_rewritten_unmarked_against_marked_call_by_call(self, capsys):
+        """Her last sentence coming back as words she never said, its voice
+        stopping with hers. Each arm reads every case unmarked, as the
+        listener showed it when both proofs held, where any verdict but
+        noise had it answered, and marked "(during TTS)", as it shows it
+        now, where only a directed verdict with a query is answered, the
+        two alternating call by call. Every answer is a miss: these are her
+        words."""
+        judges = _warm_judges()
+        variants = {"unmarked": lambda case: case, "marked": _marked_as_hers}
+        answered_when = {"unmarked": _answered_in_the_hot_window,
+                         "marked": _answered_when_marked}
+        arms = [(arm, variant) for arm in NOT_SPEECH_ARMS for variant in variants]
+        tally = {arm: [0, 0, 0, 0, 0] for arm in arms}   # answered, directed, noise, calls, no verdict
+        misses = {}   # (arm, case) -> answered
+        for case, arm in _interleaved(arms, HER_VOICE_REWRITTEN_CASES):
+            model, variant = arm
+            judges[model]._last_error_time = 0.0
+            shown = variants[variant](case)
+            verdict = run_intent_judge_multi_segment(
+                shown, judge=judges[model], current_text=shown.segments[-1][0])
+            row = tally[arm]
+            row[3] += 1
+            if verdict is None:
+                row[4] += 1
+                continue
+            answered = answered_when[variant](shown, verdict)
+            row[0] += int(answered)
+            row[1] += int(verdict.directed)
+            row[2] += int(verdict.noise)
+            if answered:
+                misses[(arm, case.name)] = misses.get((arm, case.name), 0) + 1
+
+        lines = [""]
+        for (model, variant), (answered, directed, noise, calls, silent) in tally.items():
+            scored = calls - silent
+            lines.append(f"🧪 {model:24} her voice rewritten {variant:8}  answered "
+                         f"{answered}/{scored}{_rate(answered, scored)}, directed "
+                         f"{directed}/{scored}, noise {noise}/{scored}, no verdict {silent}")
+        for ((model, variant), name), count in sorted(misses.items()):
+            lines.append(f"   ↳ {model} {variant}: {name} answered {count}/{NOT_SPEECH_ROUNDS}")
         with capsys.disabled():
             print("\n".join(lines))
 

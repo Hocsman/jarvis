@@ -1152,6 +1152,19 @@ _A_WORD_LIKE_HER_NAME_DECIMATED = "reçu monsieur mon avis mieux partir matin é
 _HER_REPLY_WITH_A_WORD_WHISPER_BENDS = (
     "Le dîner est servi, Monsieur. Voulez-vous que je baisse un peu la lumière du salon ?")
 _A_WORD_BENT_INTO_HER_NAME = "dîner servis monsieur voulez baisse peu lumière salon"
+# Her reply ending on a reading, and its last sentence coming back as words
+# she never said: Whisper hears the figure as an hour and the unit as a
+# name. Hardly a word of it is hers, so neither the contiguous echo check
+# nor the word test knows it for hers.
+_HER_REPLY_ENDING_ON_A_READING = "Prenez un parapluie demain, Monsieur. Il fera 7,4 °C."
+_HER_READING_REWRITTEN = "il serait sept heures quatre, séryl."
+# The same reply coming back with its first words known for hers and its
+# reading rewritten. With most of her words, the contiguous echo check knows
+# it for her reply and the stripper keeps what follows them; with fewer, only
+# the stripper of a merged chunk finds hers. Either way the rest is the
+# rewritten reading.
+_HER_REPLY_PARTLY_REWRITTEN = "prenez un parapluie demain monsieur il serait sept heures quatre séryl"
+_HER_LAST_WORDS_PARTLY_REWRITTEN = "monsieur il serait sept heures quatre séryl"
 
 
 def _with_the_default_aliases(listener):
@@ -1187,11 +1200,14 @@ def _she_says(listener, reply: str) -> float:
     return last_word
 
 
-def _whisper_hears(listener, text: str, *, started: float, level: float) -> None:
+def _whisper_hears(listener, text: str, *, started: float, level: float,
+                   voice_ended: float = None) -> None:
     """One utterance through the audio loop's own path, from the voice
     detector closing it to the decision: it started at *started* on the
-    capture clock (pre-roll included), closes now, its audio sits at
-    *level*, and Whisper (faked) makes *text* of it."""
+    capture clock (pre-roll included), its voice went on until
+    *voice_ended* (by default until now), the detector closes it now after
+    the silence since, its audio sits at *level*, and Whisper (faked) makes
+    *text* of it."""
     cfg = listener.cfg
     cfg.whisper_min_audio_duration, cfg.whisper_min_confidence = 0.15, 0.3
     cfg.whisper_no_speech_threshold = 0.5
@@ -1201,7 +1217,11 @@ def _whisper_hears(listener, text: str, *, started: float, level: float) -> None
         [SimpleNamespace(text=f" {text}", avg_logprob=-0.1, no_speech_prob=0.01)],
         SimpleNamespace(language="fr"))
     listener.echo_detector.track_utterance_timing(started, 0.0)
-    listener._frame_captured_at = time.time()
+    closed = time.time()
+    if voice_ended is not None:
+        listener._silence_frames = round(max(0.0, closed - voice_ended)
+                                         * listener._samplerate / listener._frame_samples)
+    listener._frame_captured_at = closed
     listener._utterance_frames = [np.full(320, level, dtype=np.float32) for _ in range(50)]
     listener.is_speech_active = True
     listener._finalize_utterance()
@@ -1794,6 +1814,161 @@ class TestHisAnswerTheMomentHerReplyEnds:
         her_line = next(line for line in _prompt_shown_to(judge).splitlines()
                         if "souhaitez vous soir" in line)
         assert "during TTS" in her_line
+        listener.state_manager.stop()
+
+
+# ---------------------------------------------------------------------------
+# Tests: Her voice coming back as words she never said
+# ---------------------------------------------------------------------------
+
+def _as_her_voice_dies(listener, last_word: float) -> float:
+    """When her voice coming back stops: with her last word, the room's
+    reverberation inside the echo tolerance."""
+    return last_word + listener.echo_detector.echo_tolerance / 3
+
+
+@pytest.mark.unit
+class TestHerVoiceWhisperRewrote:
+    """Whisper can make words she never said out of her own voice: a figure
+    heard as an hour, a unit as a name. Her voice through the speakers
+    clears the energy bar, so words she did not say in a voice no longer
+    tell her from him, and every verdict but noise had it answered. What
+    still tells them apart is when the voice stops: hers stops with her,
+    his answer goes on after her."""
+
+    def _her_reply_ends(self):
+        listener, _ = _create_listener(echo_tolerance=0.1, hot_window_seconds=0.2)
+        last_word = _she_says(listener, _HER_REPLY_ENDING_ON_A_READING)
+        assert _wait_for_hot_window_active(listener)
+        return listener, last_word
+
+    def _her_last_sentence_comes_back(self, listener, last_word):
+        _whisper_hears(listener, _HER_READING_REWRITTEN, started=last_word - 1.2,
+                       level=_level(listener, _HER_VOICE),
+                       voice_ended=_as_her_voice_dies(listener, last_word))
+
+    @pytest.mark.parametrize("verdict", [
+        _make_judgment(directed=False, confidence="medium",
+                       reasoning="echo of the assistant's own speech"),
+        _make_judgment(directed=False, confidence="high",
+                       reasoning="echo of the assistant's own speech"),
+        _make_judgment(directed=False, confidence="medium",
+                       reasoning="background conversation"),
+        _make_judgment(directed=False, confidence="low", reasoning="unclear fragment"),
+        _make_judgment(directed=True, query="", confidence="low",
+                       reasoning="follow-up in the hot window"),
+        None,
+    ], ids=["echo", "sure-echo", "rejected", "unsure", "directed-without-query",
+            "no-verdict"])
+    @patch("builtins.print")
+    def test_it_is_not_answered(self, mock_print, verdict):
+        listener, last_word = self._her_reply_ends()
+        _install_intent_judge(listener, verdict)
+
+        self._her_last_sentence_comes_back(listener, last_word)
+
+        assert _accepted_query(listener) == ""
+        assert _console_says_heard_as_her_echo(mock_print, _HER_READING_REWRITTEN)
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_it_is_shown_to_the_judge_as_hers(self, _print):
+        listener, last_word = self._her_reply_ends()
+        judge = _judge_that_reads_the_marker(listener)
+
+        self._her_last_sentence_comes_back(listener, last_word)
+
+        assert "during TTS" in _current_line_shown_to(judge)
+        assert _accepted_query(listener) == ""
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_what_follows_her_words_known_for_hers_is_not_salvaged(self, mock_print):
+        """Whisper knows her first words for hers and rewrites the reading:
+        the early check sees her reply coming back, and the stripper keeps
+        the words after hers. They stopped with her voice, so they are hers
+        too, and nothing is left to answer."""
+        listener, last_word = self._her_reply_ends()
+        _judge_that_reads_the_marker(listener)
+        heard = _HER_REPLY_PARTLY_REWRITTEN
+        reply = _HER_REPLY_ENDING_ON_A_READING.lower()
+        assert fuzz.partial_ratio(heard, reply) >= EchoDetector.PURE_ECHO_THRESHOLD
+        assert len((listener.echo_detector.salvage_after_echo_tail(heard) or "").split()) \
+            >= listener.echo_detector.min_salvage_words
+
+        _whisper_hears(listener, heard, started=last_word - 2.5,
+                       level=_level(listener, _HER_VOICE),
+                       voice_ended=_as_her_voice_dies(listener, last_word))
+
+        assert _accepted_query(listener) == ""
+        assert _console_says_heard_as_her_echo(mock_print, heard)
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_her_last_words_rewritten_stay_whole_and_hers(self, _print):
+        """Fewer of her words: the early check does not know them for her
+        reply, the stripper of a merged chunk still finds hers. Its voice
+        stopped with hers, so the judge is shown the whole utterance as
+        hers, not the rewritten reading as his."""
+        listener, last_word = self._her_reply_ends()
+        judge = _judge_that_reads_the_marker(listener)
+        heard = _HER_LAST_WORDS_PARTLY_REWRITTEN
+        assert (fuzz.partial_ratio(heard, _HER_REPLY_ENDING_ON_A_READING.lower())
+                < EchoDetector.PURE_ECHO_THRESHOLD)
+
+        _whisper_hears(listener, heard, started=last_word - 1.5,
+                       level=_level(listener, _HER_VOICE),
+                       voice_ended=_as_her_voice_dies(listener, last_word))
+
+        current = _current_line_shown_to(judge)
+        assert "during TTS" in current and heard in current.lower()
+        assert _accepted_query(listener) == ""
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_his_answer_begun_over_her_last_word_is_his(self, _print):
+        """He starts as she says her last word and goes on after her: the
+        voice outlasts hers, so it is his."""
+        listener, last_word = self._her_reply_ends()
+        judge = _judge_that_reads_the_marker(listener)
+        assert _wait_for_hot_window_expiry(listener)
+
+        _whisper_hears(listener, _HIS_QUESTION, started=last_word - 0.3,
+                       level=_level(listener, _HIS_VOICE))
+
+        assert "during TTS" not in _current_line_shown_to(judge)
+        assert "lyon" in _accepted_query(listener)
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_his_short_word_stopping_with_her_is_taken_for_hers(self, mock_print):
+        """The cost, kept on purpose: a word of his said over her last word
+        and stopping with it cannot be told from her voice coming back. It
+        is set aside as hers, and the console says so."""
+        listener, last_word = self._her_reply_ends()
+        _judge_that_reads_the_marker(listener)
+        heard = "Très bien, merci."
+
+        _whisper_hears(listener, heard, started=last_word - 0.4,
+                       level=_level(listener, _HIS_VOICE),
+                       voice_ended=_as_her_voice_dies(listener, last_word))
+
+        assert _accepted_query(listener) == ""
+        assert _console_says_heard_as_her_echo(mock_print, heard)
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_his_wake_word_stopping_with_her_is_still_his(self, _print):
+        """The same over her last word with the wake word, which her reply
+        does not hold: it can only be his call, and it is answered."""
+        listener, last_word = self._her_reply_ends()
+        _judge_that_reads_the_marker(listener)
+
+        _whisper_hears(listener, f"Jarvis, {_HIS_QUESTION}", started=last_word - 1.5,
+                       level=_level(listener, _HIS_VOICE),
+                       voice_ended=_as_her_voice_dies(listener, last_word))
+
+        assert "lyon" in _accepted_query(listener)
         listener.state_manager.stop()
 
 
