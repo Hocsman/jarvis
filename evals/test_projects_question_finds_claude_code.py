@@ -36,8 +36,12 @@ call by call in one loop (CLAUDE.md: a provider drifts within a session).
 `TestAWriteToolOffered` runs the engine as it ships on the requests alone,
 the pre-loop router answering the write tool instead of 'none': a request
 passes when a job starts on its project and the write tool was not called.
-Set `EVAL_PROJECTS_ROUNDS` to run those two; each round asks every sentence
-once on each arm, so five rounds give 20 calls an arm for each kind.
+`TestWorkGoesOneWay` compares the block without its last sentences (work on
+a project goes to Claude Code alone) and the block as shipped, interleaved
+the same way, the requests meeting the write tool and the rest 'none'.
+Set `EVAL_PROJECTS_ROUNDS` to run those three; each round asks every
+sentence once on each arm, so five rounds give 20 calls an arm for each
+kind.
 
 They take ``real_model_config``: the user's provider and models (the chat
 model, the planner and the judge on it; the router's model on local Ollama),
@@ -48,6 +52,7 @@ Run:
     ./scripts/run_evals.sh --single projects_question_finds_claude_code
     EVAL_PROJECTS_ROUNDS=5 ./scripts/run_evals.sh --single "projects_question_finds_claude_code and before"
     EVAL_PROJECTS_ROUNDS=5 ./scripts/run_evals.sh --single "projects_question_finds_claude_code and write_tool"
+    EVAL_PROJECTS_ROUNDS=5 ./scripts/run_evals.sh --single "projects_question_finds_claude_code and one_way"
 """
 
 from __future__ import annotations
@@ -56,7 +61,8 @@ import dataclasses
 import os
 import sys
 from contextlib import nullcontext
-from typing import Dict, List, Tuple
+from math import comb
+from typing import Dict, List, Optional, Tuple
 from unittest.mock import patch
 
 import pytest
@@ -187,10 +193,12 @@ def _cfg(real_model_config, tmp_path):
 
 def _turn(
     turn_cfg, mcp, sentence: str, *, block: bool, pre_loop=_router_that_answers_none,
+    block_text: Optional[str] = None,
 ) -> Tuple[str, List[Tuple[str, dict]], List[str]]:
     """One voice turn, the pre-loop selection made by ``pre_loop``; returns
     the reply, the jobs that would have started (project, args) and the
-    names of the tools called, in order."""
+    names of the tools called, in order. ``block_text`` stands in for the
+    shipped projects block when given."""
     from jarvis.memory.conversation import DialogueMemory
     from jarvis.memory.db import Database
     from jarvis.reply.engine import run_reply_engine
@@ -230,13 +238,15 @@ def _turn(
             )
         return ToolExecutionResult(success=True, reply_text="OK")
 
-    without_block = (
-        patch("jarvis.projets.prompt.format_projets_block", return_value="")
-        if not block else nullcontext()
-    )
+    if not block:
+        the_block = patch("jarvis.projets.prompt.format_projets_block", return_value="")
+    elif block_text is not None:
+        the_block = patch("jarvis.projets.prompt.format_projets_block", return_value=block_text)
+    else:
+        the_block = nullcontext()
     db = Database(":memory:", sqlite_vss_path=None)
     try:
-        with without_block, \
+        with the_block, \
              patch("jarvis.reply.engine.select_tools", side_effect=pre_loop), \
              patch("jarvis.tools.registry.get_cached_mcp_tools", return_value=mcp), \
              patch("jarvis.reply.engine.run_tool_with_retries", side_effect=_runner):
@@ -440,3 +450,107 @@ class TestAWriteToolOffered:
 
         assert wrote == 0, f"She called {WRITE_TOOL} in {wrote} of {calls} turns."
         assert hits == calls, f"{calls - hits} of {calls} requests did not reach Claude Code."
+
+
+def _fisher_two_sided(a: int, b: int, c: int, d: int) -> float:
+    """Fisher's exact test on [[a, b], [c, d]], two-sided: the probability of
+    every table with these margins as likely as the observed one or less."""
+    row, col, n = a + b, a + c, a + b + c + d
+
+    def p(x: int) -> float:
+        return comb(col, x) * comb(n - col, row - x) / comb(n, row)
+
+    observed = p(a)
+    low, high = max(0, row + col - n), min(row, col)
+    return min(1.0, sum(p(x) for x in range(low, high + 1) if p(x) <= observed * (1 + 1e-9)))
+
+
+# Which pre-loop answer each kind meets: the router offers the write tool
+# for a request on a project, and nothing for the rest, as in the field.
+_PRE_LOOP_BY_KIND = {
+    "capability": _router_that_answers_none,
+    "request": _router_that_answers_the_write_tool,
+    "not a request": _router_that_answers_none,
+}
+
+
+@pytest.mark.eval
+@pytest.mark.skipif(ROUNDS < 1, reason="set EVAL_PROJECTS_ROUNDS to compare")
+class TestWorkGoesOneWay:
+    """The block without its last sentences (`_ONE_WAY`: work on a project
+    goes to Claude Code alone, never through another tool, and she never
+    asks where the code is) against the block as shipped, call by call in
+    one loop, the first arm rotating. Requests meet a pre-loop router that
+    offers the write tool, and pass when a job starts on their project and
+    the write tool was not called; the other kinds meet a router that
+    answers 'none', with the criteria of `TestBeforeAndAfter`, the
+    not-a-request kind guarding against jobs nobody asked for."""
+
+    def test_the_block_against_the_block_without_one_way(self, real_model_config, tmp_path, capsys):
+        from jarvis.projets.prompt import _ACCESS, format_projets_block
+
+        cfg, mcp = _cfg(real_model_config, tmp_path)
+        arms = {"without one way": _ACCESS, "block": format_projets_block()}
+        names = list(arms)
+        cases = list(_cases())
+        hits: Dict[Tuple[str, str], int] = {(a, k): 0 for a in names for k in KINDS}
+        calls: Dict[Tuple[str, str], int] = {(a, k): 0 for a in names for k in KINDS}
+        wrote: Dict[str, int] = {a: 0 for a in names}
+        searched: Dict[str, int] = {a: 0 for a in names}
+        misses: List[str] = []
+
+        def rate(got: int, n: int) -> str:
+            return f"{got}/{n} ({100 * got / n:.0f} %)" if n >= _MIN_CALLS_FOR_A_RATE \
+                else f"{got}/{n}   (under {_MIN_CALLS_FOR_A_RATE} calls: counts only)"
+
+        try:
+            for rnd in range(ROUNDS):
+                for i, (kind, case) in enumerate(cases):
+                    turn = (i + rnd) % len(names)
+                    for name in names[turn:] + names[:turn]:
+                        sentence = _sentence(kind, case)
+                        reply, started, called = _turn(
+                            cfg, mcp, sentence, block=True, block_text=arms[name],
+                            pre_loop=_PRE_LOOP_BY_KIND[kind],
+                        )
+                        calls[(name, kind)] += 1
+                        if WRITE_TOOL in called:
+                            wrote[name] += 1
+                        if "toolSearchTool" in called:
+                            searched[name] += 1
+                        passed = _passes(cfg, kind, case, reply, started)
+                        if kind == "request":
+                            passed = passed and WRITE_TOOL not in called
+                        if passed:
+                            hits[(name, kind)] += 1
+                        else:
+                            misses.append(
+                                f"{name} / {kind} / {sentence[:50]!r}: tools {called}, "
+                                f"jobs {[p for p, _ in started]}, reply {reply[:120]!r}"
+                            )
+                _to_terminal(capsys, [f"⏱️ round {rnd + 1}/{ROUNDS} done"])
+        finally:
+            lines = [f"📊 Work goes one way: {len(cases)} sentences x {ROUNDS} rounds, "
+                     f"arms interleaved call by call, {len(mcp)} MCP tools, requests "
+                     f"meeting a router that offers {WRITE_TOOL}"]
+            for name in names:
+                lines.append(f"   🛠️ {name}")
+                for kind in KINDS:
+                    lines.append(f"      {kind:<14} {rate(hits[(name, kind)], calls[(name, kind)])}")
+                lines.append(f"      {WRITE_TOOL} called in {wrote[name]} turns")
+                lines.append(f"      toolSearchTool called in {searched[name]} turns")
+            w_hit, b_hit = hits[("without one way", "request")], hits[("block", "request")]
+            w_n, b_n = calls[("without one way", "request")], calls[("block", "request")]
+            if w_n and b_n:
+                p = _fisher_two_sided(b_hit, b_n - b_hit, w_hit, w_n - w_hit)
+                lines.append(f"   📐 requests, Fisher two-sided: p = {p:.4g}")
+            for miss in misses:
+                lines.append(f"      ❌ {miss}")
+            _to_terminal(capsys, [""] + lines)
+
+        assert hits[("block", "request")] > hits[("without one way", "request")], (
+            "The last sentences sent no more requests to Claude Code than without them."
+        )
+        assert hits[("block", "not a request")] >= hits[("without one way", "not a request")], (
+            "The last sentences started jobs nobody asked for."
+        )

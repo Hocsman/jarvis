@@ -80,11 +80,12 @@ So while `claudeCode` is offered, the system prompt says what she can do (`forma
 
 - the projects folder on the user's machine is open to her through Claude Code, a coding agent she hands a task to with `claudeCode`, which reads and changes the code and whose report reaches the user when it is done; so she can read, explain, review, fix and change the projects, and the user need not paste any code. It is worded as the very thing the denial says she lacks (CLAUDE.md, denial-template mirroring);
 - asked whether she can reach or work on the code or the projects, she says she can, through Claude Code, and asks which project and what to do;
-- asked for work on a project, she hands it over with `claudeCode`, and when the tool is not among her tools this turn, she first calls `toolSearchTool` with the query `"claudeCode"`. A search for a tool's exact name finds it whatever the router answers, and a search made only of the name is answered without asking the router (`src/jarvis/tools/builtin/tool_search.spec.md`, Name cue), so this path does not depend on the router having understood anything.
+- asked for work on a project, she hands it over with `claudeCode`, and when the tool is not among her tools this turn, she first calls `toolSearchTool` with the query `"claudeCode"`. A search for a tool's exact name finds it whatever the router answers, and a search made only of the name is answered without asking the router (`src/jarvis/tools/builtin/tool_search.spec.md`, Name cue), so this path does not depend on the router having understood anything;
+- work on a project always goes to Claude Code, whatever other tools she has this turn, and through it her tools do reach the code: she never changes the user's files or repositories with another tool, even one offered this turn, and never asks where the code is or which file to change, since Claude Code finds it in the project's folder. These last sentences mirror the three ways a request missed Claude Code when the router offered a code host's write tool (numbers below).
 
-The block is said whatever the router offered, since the router's answer is what it makes up for. It is a constant: no project name and no path. It rides in every attended prompt, to whichever provider runs the chat model, and the projects are listed by the tool in the one turn that needs them. With no projects folder named, the tool is not offered and neither the block nor the tool's name is in the prompt. A routine's turn never carries it: a routine cannot reach the tool.
+The block is said whatever the router offered, since the router's answer is what it makes up for. It is a constant: no project name, no path, and no tool but `claudeCode` and `toolSearchTool`. It rides in every attended prompt, to whichever provider runs the chat model, and the projects are listed by the tool in the one turn that needs them. With no projects folder named, the tool is not offered and neither the block nor the tool's name is in the prompt. A routine's turn never carries it: a routine cannot reach the tool.
 
-Measured end to end by `evals/test_projects_question_finds_claude_code.py`, with `claude-haiku-5-5` as the chat model (planner on), the pre-loop router's model answering `none` as it did in the field, and `toolSearchTool` running for real with `qwen2.5:3b` as its router over the builtins and 89 invented MCP tools. The two arms alternate call by call; each kind has four sentences in four languages, five rounds, so 20 calls an arm.
+Measured end to end by `evals/test_projects_question_finds_claude_code.py`, with `claude-haiku-5-5` as the chat model (planner on), the pre-loop router's model answering `none` as it did in the field, and `toolSearchTool` running for real with `qwen2.5:3b` as its router over the builtins and 89 invented MCP tools. The two arms alternate call by call; each kind has four sentences in four languages, five rounds, so 20 calls an arm. The block in this table is the block without its last sentences on work going one way, which are measured further down.
 
 | Kind | Without the block | With the block |
 |------|-------------------|----------------|
@@ -94,16 +95,26 @@ Measured end to end by `evals/test_projects_question_finds_claude_code.py`, with
 
 Without the block she said she had no access to the files or the machine, and offered to read code pasted to her. The nine times she said she could, she had first searched with `toolSearchTool` for a way to reach code projects: seven searches came back with `claudeCode`, and two with the invented file server's tools, which she then offered as her access to the code. The one request that reached Claude Code had searched for the task in German and been offered `claudeCode`; three searches for "ajouter une page de contact au projet baladeur" found contact tools. With the block she answered the question without searching, and for every request she searched for `"claudeCode"`, alone or followed by the task, which the name cue answers whatever the router makes of the rest.
 
-The router answering `none` leaves her nothing to reach for but `toolSearchTool`. A router can also offer a tool that competes with `claudeCode`: the eval's catalogue holds one invented write tool shaped like a code host's, `repo__create_or_update_file` (create or update a single file in a remote Git repository: owner, repository, path, content, commit message, branch), and `TestAWriteToolOffered` has the pre-loop router offer it, and not `claudeCode`, for each of the four requests, the engine as it ships, the block on, five rounds, 20 calls (2026-11-06):
+The router answering `none` leaves her nothing to reach for but `toolSearchTool`. A router can also offer a tool that competes with `claudeCode`: the eval's catalogue holds one invented write tool shaped like a code host's, `repo__create_or_update_file` (create or update a single file in a remote Git repository: owner, repository, path, content, commit message, branch). With the pre-loop router offering it, and not `claudeCode`, for each of the four requests, the block without its last sentences got the job started on the right project 14 times in 20 (`TestAWriteToolOffered`, five rounds, 2026-11-06), and the misses took three shapes, which the last sentences mirror:
 
-| A request for work on a named project, the router offering the write tool | Calls |
-|---------------------------------------------------------------------------|-------|
+| A request, the router offering the write tool, the block without its last sentences | Calls |
+|--------------------------------------------------------------------------------------|-------|
 | A job starts on that project and the write tool is not called | 14 in 20 |
 | No tool called: she says she cannot reach the code with the tools she has | 3 |
 | No tool called: she asks where the code is or which file to change | 2 |
 | The write tool called, to write a `README.md` holding placeholder text | 1 |
 
-Each of the 14 jobs followed a `toolSearchTool` call; none of the six misses searched. By request: the French bug fix 4 in 5, the contact page 5 in 5, the English test fix 3 in 5, the German search feature 2 in 5.
+Each of the 14 jobs followed a `toolSearchTool` call; none of the six misses searched. By request: the French bug fix 4 in 5, the contact page 5 in 5, the English test fix 3 in 5, the German search feature 2 in 5. In the field the write tool's call would meet the gate, which by default asks before an MCP tool that does not declare itself read-only runs (`src/jarvis/tools/policy.spec.md`), and cost a card; the eval runs no gate.
+
+The block without its last sentences against the block as shipped (`TestWorkGoesOneWay`): the two arms alternate call by call, the first arm rotating, five rounds of the twelve sentences, so 20 calls an arm for each kind (2026-11-06). The requests meet the router offering the write tool, the other kinds a router answering `none`.
+
+| Kind | Without the last sentences | As shipped |
+|------|----------------------------|------------|
+| Asked whether she can work on the projects: no job, and a judge reads the reply as saying she can | 20 in 20 | 20 in 20 |
+| A request for work on a named project, the router offering the write tool: a job starts on that project and the write tool is not called | 14 in 20 | 20 in 20 (p = 0.02) |
+| A sentence about code or a project that asks for no work: no job | 20 in 20 | 20 in 20 |
+
+Without the last sentences, four of the six missed requests called no tool and two searched, found `claudeCode` and asked which file to change instead of using it; five asked where the code was, who owned the repository or which file to change, and one said she had no access to the code. The write tool was not called in either arm. As shipped, every request searched for `claudeCode` and started the job; `toolSearchTool` ran in 25 turns against 19. "Remind me tomorrow morning to work on baladeur" started no job in either arm. `TestAWriteToolOffered` run alone on the block as shipped, five rounds: 20 jobs in 20 on the right project, each after a `toolSearchTool` call, the write tool never called.
 
 The router alone (`_select_llm`), `qwen2.5:3b` with an 8 s deadline, on the builtins as offered with a projects folder named and the 89 MCP tools of four public servers, the time line as its hint, the sentences interleaved, 20 calls each:
 
@@ -126,7 +137,7 @@ Known limitations:
 - The router offers no tool for most of these sentences, and the block makes up for it only with a chat model that searches.
 - A small chat model (`gemma4:e2b`) does not reach for `toolSearchTool`, so with one a request depends on the router offering `claudeCode`. The block is measured on `claude-haiku-5-5` only.
 - The eval's MCP tools are invented. With a real server in the catalogue, a search worded as the task can bring back its tools (on a catalogue with a code host's server, such a search went to its file-writing tool 5 times in 5), which is why the block gives her the name to search for.
-- A write tool offered in place of `claudeCode` competes with the block: with the invented one among her tools, 6 requests in 20 did not reach Claude Code, and one of them wrote a file through it (the write tool table above).
+- The sentences on work going one way are measured against one invented write tool, offered for every request: not against a real code host's server, nor with the router offering other tools beside it.
 
 ## Running Claude Code
 

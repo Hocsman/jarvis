@@ -98,6 +98,23 @@ def test_it_names_no_project():
     assert "quillon" not in block
 
 
+def test_it_names_no_other_tool():
+    """Work on a project goes to Claude Code alone: the block points at no
+    other tool, so it cannot steer a request to one."""
+    import re
+
+    from src.jarvis.tools.registry import BUILTIN_TOOLS
+
+    block = format_projets_block()
+    others = [
+        name for name in BUILTIN_TOOLS
+        if name not in ("claudeCode", "toolSearchTool")
+        and re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", block)
+    ]
+
+    assert others == []
+
+
 # ── When it reaches the prompt ────────────────────────────────────────
 
 

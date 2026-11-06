@@ -12,9 +12,17 @@ the code. It names the tool and the search that adds it to a turn whose
 router left it out: `toolSearchTool` finds a tool by its exact name
 (`tools/builtin/tool_search.spec.md`, Name cue).
 
-It names no project and no path: the block rides in every prompt, to
-whichever provider runs the chat model, and the tool lists the projects in
-the one turn that needs them.
+Its last sentences say that work on a project goes to Claude Code alone.
+A router can offer another tool for a request on a project (a code host's
+file-writing tool), and with one among her tools she wrote a file through
+it, said her tools could not reach the code, or asked where the code was
+and which file to change. Each of the three is named, as the thing not to
+do or as the thing that is already true.
+
+It names no project, no path and no tool but `claudeCode` and
+`toolSearchTool`: the block rides in every prompt, to whichever provider
+runs the chat model, and the tool lists the projects in the one turn that
+needs them.
 
 See projets.spec.md, What she knows she can do.
 """
@@ -23,7 +31,7 @@ from __future__ import annotations
 
 from .delegation import TOOL_NAME
 
-_BLOCK = (
+_ACCESS = (
     "YOUR ACCESS TO THE USER'S CODE PROJECTS\n"
     "The projects folder on the user's machine is open to you through "
     "Claude Code, a coding agent you hand a task to with the "
@@ -38,6 +46,17 @@ _BLOCK = (
     "your tools this turn, call toolSearchTool with the query "
     f"\"{TOOL_NAME}\" first."
 )
+
+# Work on a project goes one way, whatever else the router offered.
+_ONE_WAY = (
+    " Work on one of their projects always goes to Claude Code, whatever "
+    "other tools you have this turn: through it, your tools do reach their "
+    "code. Never change their files or repositories with another tool, even "
+    "one offered this turn, and never ask them where the code is or which "
+    "file to change: Claude Code finds it in the project's folder."
+)
+
+_BLOCK = _ACCESS + _ONE_WAY
 
 
 def format_projets_block() -> str:
