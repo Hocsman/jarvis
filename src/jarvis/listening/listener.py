@@ -926,9 +926,9 @@ class VoiceListener(threading.Thread):
                         min_words = self.echo_detector.min_salvage_words
                         if (salvaged != text_lower
                                 and len(salvaged.split()) >= min_words
-                                and self._not_her_echo(salvaged, utterance_energy)
                                 and not self._voice_stopped_with_hers(
-                                    utterance_end_time, trailing_silence)):
+                                    utterance_end_time, trailing_silence)
+                                and self._not_her_echo(salvaged, utterance_energy)):
                             debug_log(
                                 f"salvaged user speech from hot-window echo+speech "
                                 f"chunk: '{salvaged}'",
@@ -1127,11 +1127,16 @@ class VoiceListener(threading.Thread):
             # Words that could be her own voice coming back, as the "(during
             # TTS)" mark has it, read on the text as it stands once a
             # stripped echo prefix is gone. No hot-window override takes
-            # them, whatever the judge's words for leaving them out.
+            # them, whatever the judge's words for leaving them out. Her
+            # voice's end is read before the judge's call, during which her
+            # next reply can start, and an override's log line gives that
+            # reading.
+            stopped_with_hers = self._voice_stopped_with_hers(utterance_end_time,
+                                                              trailing_silence)
             could_be_hers = (could_be_hot_window
                              and self._could_be_hers(text_lower, utterance_energy,
-                                                     utterance_start_time, utterance_end_time,
-                                                     trailing_silence, spoken=last_tts_text))
+                                                     self._in_her_time(utterance_start_time),
+                                                     stopped_with_hers, spoken=last_tts_text))
 
             intent_judgment = self._judge_timed(
                 segments=context_segments,
@@ -1438,18 +1443,20 @@ class VoiceListener(threading.Thread):
                             # are never his.
                             is_pure_echo, echo_score = self._is_pure_echo(
                                 text_lower, last_tts_text)
-                            if is_pure_echo or could_be_hers or not self._not_her_echo(
-                                    text_lower, utterance_energy, spoken=last_tts_text):
+                            proofs = self._not_her_echo(
+                                text_lower, utterance_energy, spoken=last_tts_text)
+                            if is_pure_echo or could_be_hers or not proofs:
                                 self._heard_as_her_echo(
                                     text_lower, f"echo verdict stands, score={echo_score}, "
-                                                f"could be hers: {could_be_hers}")
+                                                f"could be hers: {could_be_hers}, "
+                                                f"words she did not say in a voice: {proofs}")
                                 return
                             print(f"  🧠 Intent override: accepting hot window speech "
                                   f"(words she did not say, in a voice)", flush=True)
                             debug_log(
                                 f"⚡ Overriding the echo verdict in hot window "
-                                f"(echo_score={echo_score}, words she did not say, "
-                                f"in a voice that went on after hers): \"{text_lower}\"",
+                                f"(echo_score={echo_score}, "
+                                f"{self._not_hers_because(stopped_with_hers)}): \"{text_lower}\"",
                                 "voice"
                             )
                             self.state_manager.cancel_hot_window_activation()
@@ -1633,7 +1640,7 @@ class VoiceListener(threading.Thread):
                 and utterance_start_time < finish + self.echo_detector.echo_tolerance)
 
     def _voice_stopped_with_hers(self, utterance_end_time: float,
-                                 trailing_silence: float) -> bool:
+                                 trailing_silence: float) -> Optional[bool]:
         """Whether the utterance's voice stopped before her last word plus
         the echo tolerance, on the capture clock: the detector closed it at
         *utterance_end_time* after *trailing_silence* seconds without a
@@ -1641,29 +1648,44 @@ class VoiceListener(threading.Thread):
         Whisper makes of it; his answer begun over her last word goes on
         after it.
 
-        While she speaks her last word is not known yet, and an utterance
-        whose end is not known says nothing: both are no, and the two
-        proofs decide (`_not_her_echo`)."""
+        None when it cannot be told: while she speaks her last word is not
+        known yet, and an utterance whose end is not known says nothing.
+        None counts as no, and the two proofs decide (`_not_her_echo`)."""
         if self.tts is not None and self.tts.is_speaking():
-            return False
+            return None
         finish = self.echo_detector._last_tts_finish_time
         if not (finish > 0 and utterance_end_time > 0):
-            return False
+            return None
         voice_ended = utterance_end_time - max(0.0, trailing_silence)
         return voice_ended < finish + self.echo_detector.echo_tolerance
 
-    def _could_be_hers(self, heard: str, utterance_energy: float,
-                       utterance_start_time: float, utterance_end_time: float,
-                       trailing_silence: float, spoken: Optional[str] = None) -> bool:
+    def _could_be_hers(self, heard: str, utterance_energy: float, in_her_time: bool,
+                       stopped_with_hers: Optional[bool],
+                       spoken: Optional[str] = None) -> bool:
         """Whether an utterance could be her own voice coming back, as the
-        "(during TTS)" mark has it: heard in her time (`_in_her_time`), and
-        either its voice stopped with hers (`_voice_stopped_with_hers`),
+        "(during TTS)" mark has it: heard in her time (*in_her_time*, as
+        `_in_her_time` read it), and either its voice stopped with hers
+        (*stopped_with_hers*, as `_voice_stopped_with_hers` read it),
         whatever its words, or nothing proves he spoke (`_not_her_echo`,
-        against *spoken*)."""
-        if not self._in_her_time(utterance_start_time):
+        against *spoken*).
+
+        The caller reads her time and her voice's end once, and its log line
+        gives that same reading: her reply can start or end while the words
+        are weighed."""
+        if not in_her_time:
             return False
-        return (self._voice_stopped_with_hers(utterance_end_time, trailing_silence)
+        return (bool(stopped_with_hers)
                 or not self._not_her_echo(heard, utterance_energy, spoken=spoken))
+
+    @staticmethod
+    def _not_hers_because(stopped_with_hers: Optional[bool]) -> str:
+        """Why words heard in her time were taken for his, as the log gives
+        it: words she did not say, in a voice, and that voice going on after
+        hers when its end was read (`_voice_stopped_with_hers`). While she
+        speaks, or with its end unknown, the two proofs alone decided."""
+        if stopped_with_hers is False:
+            return "words she did not say, in a voice that went on after hers"
+        return "words she did not say, in a voice"
 
     def _is_pure_echo(self, heard: str, spoken: str) -> tuple:
         """Whether *heard* is her reply *spoken* coming back whole: one
@@ -3368,10 +3390,13 @@ class VoiceListener(threading.Thread):
         self._check_query_timeout(captured_at)
 
     def _trailing_silence_seconds(self) -> float:
-        """The silence at the end of the utterance being closed, in seconds."""
+        """The silence at the end of the utterance being closed, in seconds:
+        the silent frames the voice detector counted, each cut at the rate
+        the microphone is read at, which is Whisper's own unless the device
+        refused it."""
         frames = getattr(self, "_silence_frames", 0)
         frame_samples = getattr(self, "_frame_samples", 0)
-        rate = getattr(self, "_samplerate", 0)
+        rate = getattr(self, "_stream_samplerate", None) or getattr(self, "_samplerate", 0)
         if not (frames and frame_samples and rate):
             return 0.0
         return frames * frame_samples / rate
@@ -3552,17 +3577,21 @@ class VoiceListener(threading.Thread):
         # voice detector's pre-roll included) before her last word plus the
         # echo tolerance. His answer to her question often starts inside
         # that tolerance, so timing does not decide alone: words she did not
-        # say, loud enough to have been spoken, in a voice that went on
-        # after hers, are never marked (`_could_be_hers`).
+        # say, loud enough to have been spoken, are never marked, unless
+        # their voice stopped with hers (`_could_be_hers`). Both are read
+        # once, so the line logged gives the reading that decided.
         in_her_time = self._in_her_time(utterance_start_time)
-        is_during_tts = self._could_be_hers(text, utterance_energy, utterance_start_time,
-                                            utterance_end_time, trailing_silence)
-        if in_her_time and not is_during_tts:
-            debug_log(f"🗣️ not marked as her echo (words she did not say, in a voice "
-                      f"that went on after hers): \"{text[:60]}\"", "voice")
-        elif is_during_tts and self._not_her_echo(text, utterance_energy):
-            debug_log(f"🔇 marked as her echo (its voice stopped with hers, whatever its "
-                      f"words): \"{text[:60]}\"", "voice")
+        stopped_with_hers = self._voice_stopped_with_hers(utterance_end_time, trailing_silence)
+        is_during_tts = self._could_be_hers(text, utterance_energy, in_her_time,
+                                            stopped_with_hers)
+        if in_her_time:
+            if is_during_tts and stopped_with_hers:
+                debug_log(f"🔇 marked as her echo (its voice stopped with hers, whatever "
+                          f"its words): \"{text[:60]}\"", "voice")
+            elif not is_during_tts:
+                debug_log(f"🗣️ not marked as her echo "
+                          f"({self._not_hers_because(stopped_with_hers)}): "
+                          f"\"{text[:60]}\"", "voice")
         self._transcript_buffer.add(
             text=text,
             start_time=utterance_start_time,

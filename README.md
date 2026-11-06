@@ -728,7 +728,7 @@ Get API key at [composio.dev](https://composio.dev)
 
 **Jarvis doesn't hear me** - Check microphone permissions, speak clearly after "Jarvis"
 
-**A follow-up right after a reply goes unanswered** - If the console shows `🔇 Heard (echo)`, Jarvis took your words for its own voice coming back. This can happen when you answer quietly the instant it stops speaking, with mostly its own words, or with a short word said over its last word that ends with it. Speak up a little, wait for it to finish, or start with "Jarvis", which gets it answered unless its reply had just said its own name or a word it can mistake for it (common words such as "jours" or "chairs" among them).
+**A follow-up right after a reply goes unanswered** - If the console shows `🔇 Heard (echo)`, Jarvis took your words for its own voice coming back. This can happen when you answer quietly the instant it stops speaking, with mostly its own words, or with a short word said over its last word or just after it. Speak up a little, say a few more words, wait a moment after it finishes, or start with "Jarvis", which gets it answered unless its reply had just said its own name or a word it can mistake for it (common words such as "jours" or "chairs" among them).
 
 **Not sure what is running** - Open the tray menu and click **🩺 Runtime Status**. It shows whether Jarvis is listening, whether Low Power Mode is active, whether Ollama is needed/running, which models are configured, and how many MCP servers are enabled.
 

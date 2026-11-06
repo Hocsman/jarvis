@@ -221,7 +221,7 @@ After TTS finishes, allow wake-word-free follow-up.
 
 **Mixed echo+speech handling:** When Whisper merges TTS echo and user speech into one chunk (e.g. mic picks up TTS then user speaks), the word-count guard detects the extra content and lets it through to the intent judge. The judge extracts the user's actual query from the mixed transcript. Post-judge echo checks also use the word-count guard and verify the judge's extracted query isn't itself echo before rejecting.
 
-**Early salvage for echo-prefixed follow-ups:** Before the early fuzzy check rejects a chunk as pure echo, the listener calls `cleanup_leading_echo` to strip any TTS-tail prefix. If exact-word cleanup fails (for example because Whisper mis-transcribed the first echo word — *"explores"* → *"laws"* — breaking the word-level comparison), the listener falls back to `salvage_after_echo_tail`, which scans heard-text word boundaries right-to-left looking for the rightmost 5-word window that fuzzy-matches the TTS tail (`partial_ratio >= 85`) and keeps everything after it. This preserves short follow-ups (*"Who made it?"*) that the existing fuzzy-prefix salvage would otherwise truncate by one word because it prefers the shortest suffix. If the surviving remainder has at least `EchoDetector.min_salvage_words` words (default 3), carries words she did not say in a voice (the two proofs of "Overriding an echo verdict takes positive evidence"), and its voice went on after hers (see "During TTS"), it replaces the transcript segment text and is treated as the user's follow-up. The same minimum-word threshold is shared by the during-TTS and post-TTS merged-chunk salvage paths, which keep a remainder on that count alone; in the hot window the overrides still set it aside when it could be hers. The post-TTS merged-chunk salvage keeps nothing from an utterance whose voice stopped with hers: it stays whole, and flagged.
+**Early salvage for echo-prefixed follow-ups:** Before the early fuzzy check rejects a chunk as pure echo, the listener calls `cleanup_leading_echo` to strip any TTS-tail prefix. If exact-word cleanup fails (for example because Whisper mis-transcribed the first echo word — *"explores"* → *"laws"* — breaking the word-level comparison), the listener falls back to `salvage_after_echo_tail`, which scans heard-text word boundaries right-to-left looking for the rightmost 5-word window that fuzzy-matches the TTS tail (`partial_ratio >= 85`) and keeps everything after it. This preserves short follow-ups (*"Who made it?"*) that the existing fuzzy-prefix salvage would otherwise truncate by one word because it prefers the shortest suffix. If the surviving remainder has at least `EchoDetector.min_salvage_words` words (default 3), carries words she did not say in a voice (the two proofs of "Overriding an echo verdict takes positive evidence"), and its voice went on after hers (see "During TTS"), it replaces the transcript segment text and is treated as the user's follow-up. The same minimum-word threshold is shared by the during-TTS and post-TTS merged-chunk salvage paths. The during-TTS one keeps a remainder on that count alone. So does the post-TTS one, unless the utterance's voice stopped with hers (see "During TTS"): from such an utterance it keeps nothing, and the utterance stays whole, and flagged. In the hot window the overrides still set a remainder aside when it could be hers.
 
 **Timestamp-based detection:** `was_speech_during_hot_window(utterance_start_time, utterance_end_time)` compares the utterance's time range against the hot window's time span (from schedule to expiry). This eliminates race conditions between slow Whisper transcription and the expiry timer — if the user started speaking during the window, it counts as hot window input regardless of when the transcript arrives. Also handles **overlapping utterances** where VAD triggered during TTS (mic picking up echo) but the utterance extended into the hot window period.
 
@@ -264,11 +264,20 @@ While TTS is playing, echo rejection and stop commands are handled with fast tex
   voice. After her last word, an utterance whose voice stopped before her
   last word plus `echo_tolerance` keeps the flag whatever its words: its
   voice stopped when the frame that closed it was captured, less the
-  silence the voice detector waited for. His answer begun over her last
-  word goes on after it and is not flagged. Kept on purpose: a short word
-  of his said over her last word and stopping with it cannot be told from
-  her voice, and is flagged with it; a wake word in it that can only be
-  his still decides (see "Hot Window Mode"). While she speaks her last word
+  silence the voice detector waited for, counted in frames of the rate the
+  microphone is read at. Her last word is when her reply finished playing,
+  as its completion callback stamps it (`output/tts.spec.md`, "Speaking
+  state and completion"), so quiet the engine plays after her last sound
+  counts as hers: for Kyutai, the pause the model leaves after its last
+  word and the time its stream takes to drain. The listener stamps it as
+  it opens the hot window: with `hot_window_enabled` off no last word is
+  stamped, and only her speaking is her time. His answer begun over her
+  last word goes on after it and is not flagged. Kept on purpose: a short
+  word of his said over her last word and stopping with it cannot be told
+  from her voice, and is flagged with it; a wake word in it that can only
+  be his still decides (see "Hot Window Mode"). A short answer said in the
+  quiet after her last sound, whose voice stops before that quiet ends
+  plus the tolerance, is flagged the same way. While she speaks her last word
   is not known and her own voice clears the energy bar, so there the flag
   rests on the words alone; an utterance whose end is not known is weighed
   on the two proofs.
@@ -555,7 +564,7 @@ If no query extracted, in hot window, and a wake word that can only be his (foun
 If judge.directed without a query, or rejects, in hot window, at any confidence:
     → Words that could be hers (heard in her time, and either their voice stopped with hers or they lack words she did not say in a voice): 🔇 Heard (echo)
     → Otherwise, not pure echo: collect what he said as a query
-    → An echo verdict: only on words she did not say, in a voice that went on after hers; otherwise 🔇 Heard (echo)
+    → An echo verdict: only on words she did not say, in a voice, that could not be hers; otherwise 🔇 Heard (echo)
 If nothing above took it and a question is being collected:
     → Judge it as a follow-up, his question before it (unless already judged as one)
     → Stop: cancel the question

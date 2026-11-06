@@ -21,8 +21,10 @@ heard in a voice, and marked "(during TTS)", as it shows an answer too
 quiet to prove he spoke, which it answers only on a directed verdict with
 a query, alternating the same way (`-k his_answer` runs it alone). A
 fourth reads her last sentence coming back as words she never said, its
-voice stopping with hers, unmarked as the listener showed it when both
-proofs held and marked as it shows it now (`-k rewritten` runs it alone).
+voice stopping with hers, unmarked, as the judge is shown it when the two
+proofs alone decide, and marked, as the listener shows an utterance whose
+voice stops with hers (`-k rewritten` runs it alone, after a check that
+needs no model: the listener's text checks leave each case whole).
 Arms go through `MockConfig`, so a cloud model
 goes to the provider the `EVAL_LLM_*` variables name and is billed there,
 and a bare local tag runs on the local Ollama. Only these synthetic
@@ -31,7 +33,7 @@ transcripts leave the machine. `EVAL_INTENT_JUDGE_ROUNDS` sets the rounds
 
     EVAL_LLM_PROVIDER=anthropic EVAL_LLM_API_KEY_ENV=YUBA_ANTHROPIC_KEY \\
     EVAL_INTENT_JUDGE_ARMS="gemma4:e2b,claude-haiku-5-5" \\
-      python -m pytest evals/test_intent_judge.py -k arms -s
+      python -m pytest evals/test_intent_judge.py -k "arms or reaches_the_judge" -s
 """
 
 import dataclasses
@@ -788,9 +790,12 @@ ANSWER_TO_HER_QUESTION_CASES = [
 # Her reply ends on a reading, and her last sentence comes back as words she
 # never said: Whisper hears the figure as an hour and the unit as a name.
 # Through the speakers her voice clears the energy bar, so both proofs hold
-# and the listener used to show it unmarked; its voice stops with hers, so it
-# now shows it marked "(during TTS)". Her voice moved air: `expected_noise`
-# is false, which grants it the voice the listener measures.
+# on it; its voice stops with hers, so the listener shows it marked
+# "(during TTS)". Each case reaches the judge as written: the early echo
+# check does not take it for her reply, and the stripper of a merged chunk
+# keeps nothing of it (`test_her_voice_rewritten_reaches_the_judge_whole`).
+# Her voice moved air: `expected_noise` is false, which grants it the voice
+# the listener measures.
 HER_VOICE_REWRITTEN_CASES = [
     NotSpeechCase("french_weight_rewritten",
                   _after("Combien pèse le colis ?",
@@ -805,13 +810,13 @@ HER_VOICE_REWRITTEN_CASES = [
     NotSpeechCase("french_distance_rewritten",
                   _after("C'est loin, la gare ?",
                          "La gare est à vingt minutes à pied. Le trajet fait 1,6 km.",
-                         "Le trajet fête une heure six, Camille."),
+                         "Le trajet faisait une heure six, Camille."),
                   "La gare est à vingt minutes à pied. Le trajet fait 1,6 km.",
                   expected_noise=False),
     NotSpeechCase("english_temperature_rewritten",
                   _after("how warm is it outside",
                          "It's a mild evening. It's currently 52.3 °F.",
-                         "It's currently 5:23, Fiona."),
+                         "It's cold, Ren, 5:23, Fiona."),
                   "It's a mild evening. It's currently 52.3 °F.", expected_noise=False),
     NotSpeechCase("english_weight_rewritten",
                   _after("how heavy is the parcel",
@@ -819,6 +824,36 @@ HER_VOICE_REWRITTEN_CASES = [
                          "It waits two four, Kegan."),
                   "The parcel has arrived. It weighs 2.4 kg.", expected_noise=False),
 ]
+
+
+@pytest.mark.parametrize("case", HER_VOICE_REWRITTEN_CASES, ids=lambda case: case.name)
+def test_her_voice_rewritten_reaches_the_judge_whole(case):
+    """Needs no model. A case measures what the judge is shown only if the
+    listener's text checks leave it whole: the early echo check does not
+    take it for her reply coming back, it carries words she did not say,
+    and the stripper of a merged chunk, given it as heard just before her
+    last word, keeps nothing of it to show in its place."""
+    import time
+    from rapidfuzz import fuzz
+    from jarvis.listening.echo_detection import EchoDetector
+
+    heard, reply = case.segments[-1][0].lower(), case.last_tts_text
+    assert fuzz.partial_ratio(heard, reply.lower()) < EchoDetector.PURE_ECHO_THRESHOLD
+    assert _carries_speech_she_did_not_say(heard, reply)
+
+    # Her reply played for six seconds and ended now: the utterance is
+    # heard from 1.2 s before her last word.
+    detector = EchoDetector()
+    detector.track_tts_start(reply, exact_duration=6.0)
+    now = time.time()
+    detector._tts_start_time = now - 6.0
+
+    def kept(salvaged):
+        return bool(salvaged and salvaged != heard
+                    and len(salvaged.split()) >= detector.min_salvage_words)
+
+    assert not kept(detector._salvage_suffix_from_echo(heard, 200, now - 1.2))
+    assert not kept(detector.salvage_after_echo_tail(heard))
 
 
 def _marked_as_hers(case: NotSpeechCase) -> NotSpeechCase:
@@ -1475,12 +1510,12 @@ class TestIntentJudgeNotSpeechArms:
 
     def test_her_voice_rewritten_unmarked_against_marked_call_by_call(self, capsys):
         """Her last sentence coming back as words she never said, its voice
-        stopping with hers. Each arm reads every case unmarked, as the
-        listener showed it when both proofs held, where any verdict but
-        noise had it answered, and marked "(during TTS)", as it shows it
-        now, where only a directed verdict with a query is answered, the
-        two alternating call by call. Every answer is a miss: these are her
-        words."""
+        stopping with hers. Each arm reads every case unmarked, as the judge
+        is shown it when the two proofs alone decide, where any verdict but
+        noise has it answered, and marked "(during TTS)", as the listener
+        shows an utterance whose voice stops with hers, where only a
+        directed verdict with a query is answered, the two alternating call
+        by call. Every answer is a miss: these are her words."""
         judges = _warm_judges()
         variants = {"unmarked": lambda case: case, "marked": _marked_as_hers}
         answered_when = {"unmarked": _answered_in_the_hot_window,
