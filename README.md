@@ -360,7 +360,7 @@ The settings are under **⚙️ Settings → 🔧 Advanced**:
 #### Language Modes
 - **Multilingual** (default, 99 languages): `"whisper_model": "medium"`
 - **English Only** (slightly better English accuracy): `"whisper_model": "medium.en"`
-- **One language you name**: `"whisper_language": "fr"` (Settings, *Whisper*, Language). Whisper then transcribes only that language, for voice and dictation: no more phrases invented out of silence in other languages, and a short word like "stop" is not spelled in another script. Leave it empty if you speak several languages to it. A code Whisper does not know, or another language than English with an English-only (`.en`) model, is ignored with a warning in the log.
+- **One language you name**: `"whisper_language": "fr"` (Settings, *Speech Recognition*, Language). Whisper then transcribes only that language, for voice and dictation: no more phrases invented out of silence in other languages, and a short word like "stop" is not spelled in another script. Leave it empty if you speak several languages to it. A code Whisper does not know, or another language than English with an English-only (`.en`) model, is ignored with a warning in the log.
 
 #### Model Sizes
 | Model | English | Multilingual | Download | VRAM | Speed |
@@ -382,12 +382,12 @@ pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
 CUDA is detected automatically — no configuration needed.
 
 #### Hallucination Filters
-Whisper sometimes produces confident but false transcriptions during silence or background noise (e.g. news-show intros, music). Most never come out: with `"whisper_vad": true` (the default, *Use VAD Filter* under *Whisper* in Settings), Whisper's voice detector cuts what holds no speech before it transcribes, for voice and dictation alike (not on the MLX backend, which has none). If the detector cannot load, the log says so once and Whisper transcribes without it. Two thresholds filter what remains before it reaches the intent judge:
+Whisper sometimes produces confident but false transcriptions during silence or background noise (e.g. news-show intros, music). Most never come out: with `"whisper_vad": true` (the default, *Use VAD Filter* under *Speech Recognition* in Settings), Whisper's voice detector cuts what holds no speech before it transcribes, for voice and dictation alike (not on the MLX backend, which has none). If the detector cannot load, the log says so at start-up and Whisper transcribes without it. Two thresholds filter what remains before it reaches the intent judge:
 
 - `"whisper_min_confidence": 0.3` — drops segments whose `avg_logprob`-derived confidence falls below this value. Raise if you see low-confidence noise leaking through; lower if real speech is being dropped.
 - `"whisper_no_speech_threshold": 0.5` — drops any segment whose `no_speech_prob` is at or above this value, regardless of `avg_logprob`. Catches the case where Whisper is confident about a hallucinated phrase but its own no-speech signal says the audio was silent. Applies to both the faster-whisper and MLX backends.
 
-Both thresholds are exposed in the Settings window under *Whisper*.
+Both thresholds are exposed in the Settings window under *Speech Recognition*.
 
 What gets past them, typically a subtitle credit or the closing line of a video ("Thank you.", "See you in the next video") in a language nobody in the room speaks, is left to the intent judge: when it says a phrase is not speech, the assistant does not answer it, even just after a reply when it is otherwise waiting for your follow-up, and does not add it to a question you are still asking. How much it catches depends on the judge model: the default small `gemma4:e2b` recognises most subtitle credits but usually not the closing lines of videos, which a larger judge model catches.
 

@@ -93,7 +93,8 @@ After transcription, text passes through these stages in order:
   heard again without it. Its failure is the process's, shared with the
   listener through `jarvis/listening/whisper_vad.py`: printed once,
   whichever of them saw it, and the detector is not asked for again
-  (`listening.spec.md`, "Text Whisper Makes Out of Silence").
+  until the listener next starts (`listening.spec.md`, "Text Whisper
+  Makes Out of Silence").
 - **Separate `sounddevice.InputStream`** for dictation audio — avoids
   modifying the complex listener code.
 - **Pause flag** on the main listener to prevent dictation speech being

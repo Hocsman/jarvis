@@ -9,9 +9,10 @@ the detector fails, and a caller that kept asking would lose every utterance.
 
 So a call that fails with the detector is made again without it. The
 detector is blamed only when it then fails to load on its own: the failure
-is announced once, and no caller in the process asks for it again. A call
-that failed for another reason (a passing GPU error while Whisper detects
-the language) leaves the detector on.
+is announced once, and no caller asks for it again until the listener next
+starts, which tries it afresh. A call that failed for another reason (with
+no language set, a passing GPU error while Whisper detects the language)
+leaves the detector on.
 
 The detector's model is loaded once per process and shared, so its failure
 is the process's: the listener and dictation, which share the Whisper model,
@@ -67,9 +68,16 @@ def load_voice_detector() -> None:
 
 
 def prepare_voice_detector() -> None:
-    """Load the detector now, or announce now that it cannot load."""
-    if detector_failed():
-        return
+    """Load the detector now, or announce now that it cannot load.
+
+    Called at each start-up of the listener, it tries afresh: the bundled
+    app restarts her inside its own process (Settings, Restart Jarvis), and
+    that start-up uses a detector that loads by then, or says again that it
+    still cannot.
+    """
+    global _failure
+    with _failure_lock:
+        _failure = None
     try:
         load_voice_detector()
         debug_log("Whisper's voice detector loaded", "voice")

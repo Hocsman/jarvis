@@ -21,9 +21,7 @@ nor dictation asks for the detector again. A failure that is not the
 detector's (a passing GPU error) leaves it on.
 """
 
-import sys
 from types import SimpleNamespace
-from contextlib import nullcontext
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -40,16 +38,20 @@ DETECTOR_MISSING = "[ONNXRuntimeError] : 3 : NO_SUCHFILE : silero_encoder_v5.onn
 GPU_ERROR = "CUDA failed with error out of memory"
 
 
-def _whisper_on(audio_holds, detector_fails=False, decoder_fails=False, fails_once=False):
+def _whisper_on(audio_holds, detector_fails=False, decoder_fails=False, fails_once=False,
+                silence_in="fr"):
     """A faster-whisper model hearing an utterance that holds *audio_holds*
     (a sentence, or "" for an utterance of noise).
 
     Without its voice detector it writes a sentence into noise, as the
-    real one did; with it, it finds no speech in noise and hears nothing.
-    A sentence that was said is heard either way. With *detector_fails*,
-    asking for the detector raises what a build without its model files
-    raises; with *decoder_fails*, every call raises, detector or not; with
-    *fails_once*, its first call raises a passing GPU error.
+    real one did; with it, it finds no speech in noise and hears nothing,
+    yet still names a language for it (*silence_in*), as the real one does
+    with no language set: the one it guesses from the silence it pads the
+    emptied utterance with. A sentence that was said is heard either way.
+    With *detector_fails*, asking for the detector raises what a build
+    without its model files raises; with *decoder_fails*, every call
+    raises, detector or not; with *fails_once*, its first call raises a
+    passing GPU error.
     """
     calls = []
 
@@ -62,7 +64,7 @@ def _whisper_on(audio_holds, detector_fails=False, decoder_fails=False, fails_on
         if audio_holds:
             text = audio_holds
         elif kwargs.get("vad_filter"):
-            return [], SimpleNamespace(language="fr")
+            return [], SimpleNamespace(language=silence_in)
         else:
             text = INVENTED
         return ([SimpleNamespace(text=" " + text, avg_logprob=-0.1, no_speech_prob=0.0)],
@@ -122,10 +124,25 @@ def _asked_for_the_detector(model):
     return any(call.kwargs.get("vad_filter") for call in model.transcribe.call_args_list)
 
 
+def _silero_that_hears_nothing(audio):
+    """Silero's model as faster-whisper calls it: a batch of audio cut in
+    512-sample windows in, one speech probability per window out."""
+    assert audio.ndim == 2 and audio.shape[1] % 512 == 0
+    return np.zeros((audio.shape[0], audio.shape[1] // 512), dtype=np.float32)
+
+
 def _a_detector_that_loads():
-    """faster-whisper's detector loading as it does where onnxruntime and
-    its model files are present (the suite refuses onnxruntime)."""
-    return patch("faster_whisper.vad.get_speech_timestamps", return_value=[])
+    """faster-whisper's detector where onnxruntime and its model files are
+    present. Only Silero's model is stood in for (the suite refuses
+    onnxruntime): faster-whisper's own code around it runs, with the
+    arguments the loader gives it."""
+    return patch("faster_whisper.vad.get_vad_model", return_value=_silero_that_hears_nothing)
+
+
+def _a_detector_that_cannot_load():
+    """faster-whisper's detector where onnxruntime is missing."""
+    return patch("faster_whisper.vad.get_vad_model", side_effect=RuntimeError(
+        "Applying the VAD filter requires the onnxruntime package"))
 
 
 @pytest.mark.unit
@@ -164,6 +181,56 @@ class TestTheListener:
 
         assert _heard(listener) == "Bonjour."
         assert "vad_filter" not in mlx.transcribe.call_args.kwargs
+
+    def test_an_utterance_of_noise_leaves_the_language_last_heard(self):
+        """With no language set, Whisper names one even for an utterance the
+        detector emptied. The question being collected keeps the language
+        it was asked in."""
+        listener = _listener(whisper_vad=True, audio_holds="Orla, quelle heure est-il ?")
+        listener.cfg.whisper_language = None
+        listener._finalize_utterance()
+
+        _hear_next(listener, "", silence_in="en")
+        listener.state_manager.stop()
+
+        assert listener._last_detected_language == "fr"
+
+    def test_on_mlx_an_utterance_heard_as_nothing_leaves_the_language_last_heard(self):
+        listener = _listener(whisper_vad=True, backend="mlx")
+        listener.cfg.whisper_language = None
+        mlx = MagicMock()
+        mlx.transcribe.side_effect = [
+            {"text": "Bonjour.", "language": "fr",
+             "segments": [{"text": "Bonjour.", "avg_logprob": -0.1, "no_speech_prob": 0.01}]},
+            {"text": "", "language": "en", "segments": []},
+        ]
+
+        with patch("jarvis.listening.listener.mlx_whisper", mlx, create=True):
+            listener._finalize_utterance()
+            listener._utterance_frames = [np.zeros(16000, dtype=np.float32)]
+            listener.is_speech_active = True
+            listener._finalize_utterance()
+        listener.state_manager.stop()
+
+        assert listener._last_detected_language == "fr"
+
+    def test_on_mlx_the_log_puts_nothing_down_to_a_detector(self):
+        """MLX Whisper has no voice detector, so an utterance it heard as
+        nothing is not put down to one."""
+        listener = _listener(whisper_vad=True, backend="mlx")
+        mlx = MagicMock()
+        mlx.transcribe.return_value = {"text": "", "language": "fr", "segments": []}
+        lines = []
+
+        with patch("jarvis.listening.listener.mlx_whisper", mlx, create=True), \
+                patch("jarvis.listening.listener.debug_log",
+                      side_effect=lambda message, *_a, **_k: lines.append(message)):
+            listener._finalize_utterance()
+        listener.state_manager.stop()
+
+        heard_as_nothing = [line for line in lines if "heard as nothing" in line]
+        assert heard_as_nothing
+        assert "voice detector on" not in heard_as_nothing[0]
 
 
 @pytest.mark.unit
@@ -317,9 +384,8 @@ def _start_listener(whisper_vad, detector_loads):
     """Run the listener's start-up up to the microphone, with a Whisper
     model that loads and a voice detector that loads or not.
 
-    The detector is faster-whisper's own (`faster_whisper.vad`). The suite
-    refuses onnxruntime, so there it cannot load, and one that loads is
-    stood in for.
+    The detector is faster-whisper's own (`faster_whisper.vad`), with
+    Silero's model stood in for: the suite refuses onnxruntime.
     """
     from test_voice_listener import _create_mock_config
 
@@ -330,7 +396,7 @@ def _start_listener(whisper_vad, detector_loads):
     cfg.whisper_no_speech_threshold = 0.5
     cfg.ollama_chat_model = cfg.llm_chat_model = cfg.ollama_base_url = ""
     cfg.intent_judge_model = ""
-    loads = _a_detector_that_loads() if detector_loads else nullcontext()
+    loads = _a_detector_that_loads() if detector_loads else _a_detector_that_cannot_load()
     with loads, \
             patch("jarvis.listening.listener.sys") as mock_sys, \
             patch("jarvis.listening.listener.FASTER_WHISPER_AVAILABLE", True), \
@@ -380,6 +446,27 @@ class TestStartUp:
         assert heard == "Orla, quelle heure est-il ?"
         assert len(_announcements(capsys.readouterr().out)) == 1
         assert not _asked_for_the_detector(listener.model)
+
+    def test_a_restart_in_the_same_process_tries_the_detector_again(self, capsys):
+        """The bundled app restarts her inside its own process (Settings,
+        Restart Jarvis). A detector that could not load at the first start
+        and loads now is used again: noise is heard as nothing."""
+        _start_listener(whisper_vad=True, detector_loads=False)
+        listener = _start_listener(whisper_vad=True, detector_loads=True)
+        listener._process_transcript = MagicMock()
+
+        with _a_detector_that_loads():
+            heard = _hear_next(listener, "")
+        listener.state_manager.stop()
+
+        assert heard is None
+        assert len(_announcements(capsys.readouterr().out)) == 1
+
+    def test_a_detector_that_still_cannot_load_is_announced_at_each_start(self, capsys):
+        _start_listener(whisper_vad=True, detector_loads=False)
+        _start_listener(whisper_vad=True, detector_loads=False)
+
+        assert len(_announcements(capsys.readouterr().out)) == 2
 
 
 @pytest.mark.unit
