@@ -46,6 +46,14 @@ So `_last_tts_text` accumulates across the sentences of one reply and
 resets when a new reply begins. The reference text is the reply, never
 the chunk.
 
+What is recorded when she starts speaking is recorded once, at her first
+sentence, and kept for the rest of the reply: the start of her speech,
+from which echo windows are timed, and the floor of the voice proof
+(`listening/listening.spec.md`, "Overriding an echo verdict takes positive
+evidence"). A later sentence can be queued while the microphone hears her
+say an earlier one: a floor read then would be her own voice, and his
+soft answer right after her last word would be taken for her echo.
+
 ## Segmentation
 
 A sentence closes on terminal punctuation followed by whitespace or end
@@ -112,6 +120,11 @@ than a lost answer.
 - A three-sentence reply is spoken as three chunks, in order.
 - The echo reference after the third chunk contains all three sentences,
   and an echo of the first is still recognised.
+- The floor of the voice proof is the one read when the first chunk was
+  queued: later chunks, queued while the microphone hears her, leave it
+  alone, and his soft answer right after her last word still counts as a
+  voice, while her own words coming back as she stops are still set aside
+  as hers. A new reply reads it again.
 - The hot window opens once, after the last chunk.
 - A stop during chunk one leaves chunks two and three unspoken.
 - Every chunk and the tail of a reply carry the same language, even when

@@ -263,8 +263,9 @@ While TTS is playing, echo rejection and stop commands are handled with fast tex
   Whisper bends no more of them than that test allows (40% of the words
   heard without a close match in her reply), and so does a phrase Whisper
   makes of the quiet right after her: the first carries no words she did
-  not say, the second no voice. While she speaks her own voice clears the
-  energy bar, so there the flag rests on the words alone.
+  not say, the second no voice. While she speaks, and over the echo of
+  her last words as she stops, her own voice clears the energy bar, so
+  there the flag rests on the words alone.
 - Intent judge uses this context to identify echo
 
 ## Rolling Transcript Buffer
@@ -396,10 +397,25 @@ The fuzzy check acts as a fast, reliable safety net. The intent judge provides d
    applies to this question in the post-TTS cooldown. Either test alone
    was fooled — text by a hallucination, energy by a door slamming.
 
-   Both together are still fooled by a hallucination while she speaks,
-   since her own voice clears the energy bar. That one the judge names:
-   a verdict that calls the utterance noise is never overridden (see "Text
-   Whisper Makes Out of Silence").
+   The floor is read once per reply, when her first sentence is queued:
+   the mean level of the last 50 frames the listening loop has read (a
+   second at the default 20 ms frame, and older than that while the loop
+   is busy with Whisper or the judge). It holds for the whole reply. A
+   reply spoken as it is written (`output/streaming.spec.md`) can queue a
+   later sentence while the microphone hears her say an earlier one,
+   whenever she is heard before the reply is written in full; a floor read
+   then would be her own voice, and his soft answer right after her last
+   word would fall under the bar it sets. Whatever the microphone heard in
+   that second is in the floor, and raises the bar with it: the thinking
+   tune, which plays until her reply is handed over, and, for a reply from
+   elsewhere said the moment another ends (see "Speaking Something
+   Produced Elsewhere"), the end of the one before.
+
+   Both together are still fooled by a hallucination while she speaks, and
+   over the echo of her last words as she stops, since her own voice
+   clears the energy bar. That one the judge names: a verdict that calls
+   the utterance noise is never overridden (see "Text Whisper Makes Out of
+   Silence").
 
    Fails open: with no TTS text to compare against, everything is the user's.
    The energy half fails open twice over — no baseline, or an energy of
@@ -603,13 +619,14 @@ thread and shared by every sentence of it.
 
 **One reply per pass, and none while she is already speaking.** The echo
 detector holds the record of one reply at a time: the text she is
-saying, when she began, and its exact duration. Starting a second reply
-while the first is still audible would replace that record with the
-second's, and the rest of the first would be compared against the wrong
-sentence. Completion callbacks are not the constraint, since they travel
-with their own queue item (`tts.spec.md`, "The queue"). Anything still
-queued waits for the reply thread's next pass, a few milliseconds away
-when no query is running.
+saying, when she began, its exact duration, and the floor of the voice
+proof (see "And it takes a voice"). Starting a second reply while the
+first is still audible would replace that record with the second's, and
+the rest of the first would be compared against the wrong sentence.
+Completion callbacks are not the constraint, since they travel with
+their own queue item (`tts.spec.md`, "The queue"). Anything still queued
+waits for the reply thread's next pass, a few milliseconds away when no
+query is running.
 
 ## Fallback Behaviour
 
