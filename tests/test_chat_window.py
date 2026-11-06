@@ -378,6 +378,7 @@ class TestDesktopAppChatDispatch:
         tray._chat_cancel_fn = None
         tray._chat_control_fn = None
         tray.is_listening = True
+        tray._daemon_stopping = False
         return tray
 
     def test_on_chat_ipc_line_creates_window_lazily(self, qapp):
@@ -449,6 +450,7 @@ class TestDesktopAppChatDispatch:
         tray._chat_cancel_fn = None
         tray._chat_control_fn = None
         tray.is_listening = False
+        tray._daemon_stopping = False
 
         tray.show_chat()
 
@@ -465,6 +467,7 @@ class TestDesktopAppChatDispatch:
         tray._chat_cancel_fn = None
         tray._chat_control_fn = None
         tray.is_listening = True
+        tray._daemon_stopping = False
 
         tray.show_chat()
 
@@ -485,6 +488,7 @@ class TestDesktopAppChatDispatch:
         tray._chat_cancel_fn = lambda: cancels.append(True)
         tray._chat_control_fn = lambda kind, payload: controls.append((kind, payload))
         tray.is_listening = True
+        tray._daemon_stopping = False
 
         tray.show_chat()
         win = tray.chat_window
@@ -1429,6 +1433,7 @@ class TestDesktopAppStdinBus:
         tray._chat_cancel_fn = None
         tray._chat_control_fn = None
         tray.is_listening = True
+        tray._daemon_stopping = False
         sink = io.StringIO()
         tray.daemon_process = type("P", (), {"stdin": sink})()
         return tray, sink
@@ -1536,6 +1541,7 @@ class TestDesktopAppChatBus:
         tray._chat_cancel_fn = None
         tray._chat_control_fn = None
         tray.is_listening = True
+        tray._daemon_stopping = False
         return tray
 
     def test_chat_lines_stay_out_of_the_log_viewer(self):
