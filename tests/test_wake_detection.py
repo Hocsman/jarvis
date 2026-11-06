@@ -155,6 +155,39 @@ class TestHerNameIsAWord:
         assert is_wake_word_detected("quelle heure est-il", "", [""]) is False
         assert extract_query_after_wake("quelle heure est-il ?", "", [" "]) == "quelle heure est-il ?"
 
+    @pytest.mark.parametrize("heard", [
+        "quelle heure est-il ?",
+        "il fait beau ...",
+        "bon - alors !",
+        "« oui »",
+    ], ids=["question-mark", "ellipsis", "dash", "guillemets"])
+    @pytest.mark.parametrize("wake_word, aliases", [("", []), (" ", [""]), ("jarvis", [""])],
+                             ids=["empty-wake-word", "blank-names", "empty-alias"])
+    def test_an_empty_name_is_no_close_spelling_of_a_lone_mark(self, heard, wake_word, aliases):
+        """French writes a space before "?" and "!", so a mark stands alone as
+        a token; stripped of its punctuation it is nothing, and nothing is no
+        close spelling of a name configured empty."""
+        assert is_wake_word_detected(heard, wake_word, aliases) is False
+
+
+@pytest.mark.unit
+class TestCloseSpellings:
+    """Failing a whole-word match, a token stripped of the punctuation at its
+    ends is weighed against each name, whatever the punctuation's script."""
+
+    @pytest.mark.parametrize("heard", [
+        "¿jarvas, qué hora es?",
+        "«jarvas», quelle heure est-il ?",
+        "„jarvas“, wie spät ist es?",
+        "jarvas… quelle heure est-il ?",
+        "「jarvas」",
+    ], ids=["inverted-question-mark", "guillemets", "german-quotes", "ellipsis", "corner-brackets"])
+    def test_punctuation_of_any_script_around_a_close_spelling_leaves_it_her_name(self, heard):
+        assert is_wake_word_detected(heard, "jarvis", []) is True
+
+    def test_a_word_far_from_every_name_stays_a_word_once_stripped(self):
+        assert is_wake_word_detected("«banane», quelle heure est-il ?", "jarvis", []) is False
+
 
 @pytest.mark.unit
 class TestStopCommand:
