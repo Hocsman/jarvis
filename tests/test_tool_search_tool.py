@@ -85,6 +85,40 @@ class TestToolSearchTool:
         assert listed == ["getWeather"]
         assert not set(listed) & set(_ALWAYS_INCLUDED)
 
+    def test_a_search_for_a_tools_exact_name_finds_it(self, mock_config, tmp_path):
+        """The system prompt tells the chat model a tool's name when the
+        router may not have offered it (`claudeCode`, projets.spec.md); the
+        search for that name finds it, even from a router that answers
+        'none'."""
+        from unittest.mock import MagicMock
+
+        (tmp_path / "quillon").mkdir()
+        mock_config.claude_code_projects_dir = str(tmp_path)
+        mock_config.tool_selection_strategy = "llm"
+        router = MagicMock()
+        router.direct.return_value = "none"
+        tool = ToolSearchTool()
+        with patch("jarvis.tools.builtin.tool_search.get_auxiliary_backend",
+                   return_value=router):
+            result = tool.run({"query": "claudeCode"}, _ctx(mock_config))
+
+        listed = [line.split(":", 1)[0] for line in (result.reply_text or "").splitlines()]
+        assert listed == ["claudeCode"]
+
+    def test_a_tool_switched_off_is_not_found_by_its_name(self, mock_config):
+        from unittest.mock import MagicMock
+
+        mock_config.claude_code_projects_dir = ""
+        mock_config.tool_selection_strategy = "llm"
+        router = MagicMock()
+        router.direct.return_value = "none"
+        tool = ToolSearchTool()
+        with patch("jarvis.tools.builtin.tool_search.get_auxiliary_backend",
+                   return_value=router):
+            result = tool.run({"query": "claudeCode"}, _ctx(mock_config))
+
+        assert result.reply_text == "No additional tools found for that description."
+
     def test_select_tools_exception_returns_error(self, mock_config):
         tool = ToolSearchTool()
         with patch(

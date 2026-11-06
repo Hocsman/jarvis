@@ -67,6 +67,11 @@ _ALWAYS_INCLUDED = ("stop", "forget", "remember")
 _URL_RE = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
 _URL_TOOL = "fetchWebPage"
 
+# A tool named in the query by its exact name is offered, whichever strategy
+# answered. The words a name can be: a tool name is letters, digits,
+# underscores and hyphens (`claudeCode`, `chrome-devtools__take_snapshot`).
+_NAME_WORD_RE = re.compile(r"[A-Za-z0-9_-]+")
+
 # Minimum number of tools to return from similarity-based strategies.
 # Prevents overly aggressive filtering that would leave the model with nothing useful.
 _MIN_SELECTED = 3
@@ -160,6 +165,41 @@ def _include_url_tool(
         return selected
     if _URL_TOOL in builtin_tools or _URL_TOOL in mcp_tools:
         selected.append(_URL_TOOL)
+    return selected
+
+
+def _include_named_tools(
+    selected: List[str],
+    query: str,
+    builtin_tools: Dict[str, "Tool"],
+    mcp_tools: Dict[str, "ToolSpec"],
+) -> List[str]:
+    """Add every tool of the catalogue the query names by its exact name.
+
+    A name is an identifier, spelt one way, so the match is exact and on
+    whole words: "claudeCode" names the tool, "Claude Code" is left to the
+    strategy. The system prompt can tell the chat model a tool's name
+    (`projets.spec.md`), and ``toolSearchTool`` searching for that name
+    then finds it without depending on a small router having understood.
+
+    Inserted before the always-included tools, so `remember` stays last
+    for a planner that reads the catalogue in order, and in place like
+    ``_include_url_tool``, so a ``ToolSelection`` keeps its ``degraded``
+    flag.
+    """
+    words = set(_NAME_WORD_RE.findall(query or ""))
+    if not words:
+        return selected
+    named = [
+        name for name in _all_tool_names(builtin_tools, mcp_tools)
+        if name in words and name not in selected
+    ]
+    if not named:
+        return selected
+    mandatory = [i for i, name in enumerate(selected) if name in _ALWAYS_INCLUDED]
+    at = mandatory[0] if mandatory else len(selected)
+    selected[at:at] = named
+    debug_log(f"tool selection: named in the query, offered {named}", "planning")
     return selected
 
 
@@ -640,4 +680,5 @@ def select_tools(
             )
     else:
         selected = _all_tool_names(builtin_tools, mcp_tools)
+    selected = _include_named_tools(selected, query, builtin_tools, mcp_tools)
     return _include_url_tool(selected, query, builtin_tools, mcp_tools)

@@ -18,6 +18,8 @@ allow-list = <router's picks> + stop + toolSearchTool
 
 When the model invokes `toolSearchTool(query=...)`, the tool re-runs the same routing logic (`select_tools` from `src/jarvis/tools/selection.py`) against the new query, and the returned tool names are merged into the loop's allow-list for subsequent turns. `stop` and `toolSearchTool` itself always remain in the allow-list.
 
+A query that is, or contains, the exact name of a tool the catalogue offers finds that tool whatever the router answers (`selection.spec.md`, Name cue). That is how the system prompt's projects block reaches `claudeCode` on a turn whose router left it out: it tells the model to search for `"claudeCode"` (`projets/projets.spec.md`, What she knows she can do).
+
 ### Contract
 
 - **Name**: `toolSearchTool`
@@ -59,5 +61,5 @@ The engine caps invocations per reply via `tool_search_max_calls` (default 3). B
 
 ### Testing
 
-- Unit tests cover the merge-into-allow-list behaviour and the no-results branch.
+- Unit tests cover the merge-into-allow-list behaviour, the no-results branch, and a search for a tool's exact name finding it from a router that answers `none` (and not finding a tool the catalogue does not offer).
 - An eval scenario covers the "initial routing was too narrow" case: the user starts with a vague question that routes to one tool, then clarifies into a request that needs a different tool. The agent should invoke `toolSearchTool` and then the newly-surfaced tool.

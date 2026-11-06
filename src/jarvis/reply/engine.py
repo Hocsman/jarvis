@@ -2256,6 +2256,18 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
     _response_language = str(getattr(cfg, "response_language", "") or "").strip()
     _persona_prompt = build_system_prompt(_assistant_name, response_language=_response_language)
 
+    # What she can do with his projects, said whatever the router offered:
+    # a question about what she can do reads to the router as conversation,
+    # and the chat model, shown none of the tools, answers from a prior that
+    # says an assistant cannot reach anyone's files. Only while the tool is
+    # offered, and never to a routine, which cannot reach it.
+    _projets_block = ""
+    if scope is None and "claudeCode" in _offered_builtins:
+        from ..projets.prompt import format_projets_block
+
+        _projets_block = format_projets_block()
+        debug_log("projects block in the system prompt: claudeCode is offered", "planning")
+
     def _initial_system_message() -> dict:
         """The system message, with the offsets where its lasting parts end.
 
@@ -2273,6 +2285,9 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
 
         # Add model-size-appropriate prompt components
         guidance.extend(prompts.to_list())
+
+        if _projets_block:
+            guidance.append("\n" + _projets_block)
 
         # Chatterbox speaks English only, and Piper speaks the language of
         # its voice: English unless response_language or tts_piper_voices

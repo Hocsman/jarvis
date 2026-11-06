@@ -857,3 +857,113 @@ class TestUrlCue:
             llm_model="test",
         )
         assert "fetchWebPage" not in result
+
+
+# ---------------------------------------------------------------------------
+# Name cue
+# ---------------------------------------------------------------------------
+
+class TestNameCue:
+    """A query that names a tool of the catalogue by its exact name gets it,
+    whatever the strategy answered. The system prompt can tell the chat
+    model a tool's name and to search for it; the search then finds it
+    without depending on a small router having understood."""
+
+    def _with_delegation(self):
+        tools = _builtin()
+        tools["claudeCode"] = FakeTool(
+            "claudeCode", "Hand work on one of the user's code projects to an agent.")
+        tools["forget"] = FakeTool("forget", "Forget something about the user.")
+        tools["remember"] = FakeTool("remember", "Remember something about the user.")
+        return tools
+
+    @pytest.mark.unit
+    def test_a_router_that_answers_none_still_offers_the_tool_named(self):
+        backend = _llm_backend(return_value="none")
+        result = select_tools(
+            "claudeCode", self._with_delegation(), {},
+            strategy=ToolSelectionStrategy.LLM,
+            llm_backend=backend, llm_model="test",
+        )
+        assert "claudeCode" in result
+        assert result.degraded is False
+
+    @pytest.mark.unit
+    def test_the_name_may_sit_among_other_words(self):
+        backend = _llm_backend(return_value="webSearch")
+        result = select_tools(
+            "hand the task to claudeCode on the project quillon",
+            self._with_delegation(), {},
+            strategy=ToolSelectionStrategy.LLM,
+            llm_backend=backend, llm_model="test",
+        )
+        assert "claudeCode" in result
+        assert "webSearch" in result
+
+    @pytest.mark.unit
+    def test_only_the_exact_name_counts(self):
+        """The words a user says for it are the router's business: the cue
+        reads an identifier, and an identifier is spelt one way."""
+        backend = _llm_backend(return_value="none")
+        for query in ("Claude Code", "claudecode", "myclaudeCode", "claudeCodes"):
+            result = select_tools(
+                query, self._with_delegation(), {},
+                strategy=ToolSelectionStrategy.LLM,
+                llm_backend=backend, llm_model="test",
+            )
+            assert "claudeCode" not in result, query
+
+    @pytest.mark.unit
+    def test_a_tool_the_catalogue_does_not_offer_is_not_named_into_it(self):
+        """A tool switched off is left out of the catalogue, and naming it
+        does not bring it back."""
+        backend = _llm_backend(return_value="none")
+        result = select_tools(
+            "claudeCode", _builtin(), {},
+            strategy=ToolSelectionStrategy.LLM,
+            llm_backend=backend, llm_model="test",
+        )
+        assert "claudeCode" not in result
+
+    @pytest.mark.unit
+    def test_the_named_tool_is_read_before_the_mandatory_ones(self):
+        """`remember` stays last: a small planner reads the catalogue in
+        order and restates a delegation as a `remember` step more often
+        when it is not (selection.spec.md, Always-included Tools)."""
+        backend = _llm_backend(return_value="none")
+        result = select_tools(
+            "claudeCode", self._with_delegation(), {},
+            strategy=ToolSelectionStrategy.LLM,
+            llm_backend=backend, llm_model="test",
+        )
+        assert result[-1] == "remember"
+        assert result.index("claudeCode") < result.index("stop")
+
+    @pytest.mark.unit
+    def test_the_cue_survives_a_degraded_router(self):
+        backend = _llm_backend(raises=TimeoutError("router down"))
+        result = select_tools(
+            "claudeCode", self._with_delegation(), {},
+            strategy=ToolSelectionStrategy.LLM,
+            llm_backend=backend, llm_model="test",
+        )
+        assert result.degraded is True
+        assert "claudeCode" in result
+
+    @pytest.mark.unit
+    def test_an_mcp_tool_is_named_the_same_way(self):
+        backend = _llm_backend(return_value="none")
+        result = select_tools(
+            "homeassistant__turn_on", _builtin(), _mcp(),
+            strategy=ToolSelectionStrategy.LLM,
+            llm_backend=backend, llm_model="test",
+        )
+        assert "homeassistant__turn_on" in result
+
+    @pytest.mark.unit
+    def test_the_keyword_strategy_gets_the_cue_too(self):
+        result = select_tools(
+            "claudeCode", self._with_delegation(), {},
+            strategy=ToolSelectionStrategy.KEYWORD,
+        )
+        assert "claudeCode" in result
