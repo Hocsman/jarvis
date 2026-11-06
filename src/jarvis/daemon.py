@@ -1300,7 +1300,9 @@ def build_tts_engine(cfg, face=None):
 
 
 def _say(text: str) -> None:
-    """A shutdown line on the console, which may already be gone."""
+    """A shutdown line printed outside any step, on a console that may already
+    be gone: no step is there to contain its failure. A line printed inside a
+    step costs at most that step."""
     try:
         print(text, flush=True)
     except Exception:
@@ -1309,10 +1311,14 @@ def _say(text: str) -> None:
 
 def _shutdown_step(name: str, action: Callable[[], object]) -> None:
     """One step of the shutdown, logged, and contained: a step that raises
-    costs that step and nothing after it."""
+    costs that step and nothing after it. A second Ctrl+C, which the signal
+    handlers raise as KeyboardInterrupt, cuts short the step it lands in."""
     debug_log(f"shutdown: {name}", "jarvis")
     try:
         action()
+    except KeyboardInterrupt:
+        debug_log(f"shutdown: {name} interrupted", "jarvis")
+        _say(f"  ⚠️ Shutdown: {name} interrupted")
     except Exception as e:
         debug_log(f"shutdown: {name} failed: {e!r}", "jarvis")
         _say(f"  ⚠️ Shutdown: {name} failed: {e}")

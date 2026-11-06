@@ -70,8 +70,12 @@ and never the voice.
   number between 0 and 2 s turns the face off), `watched` whenever
   someone starts or stops watching the face, or `failed` with a reason.
   Everything else it prints goes to its stderr, which the handle logs as
-  plain text: a line written in UTF-16 (onnxruntime's warnings on Windows) is
-  decoded, and colour codes are dropped.
+  plain text, colour codes dropped. onnxruntime writes its warnings on Windows
+  in UTF-16: a line where NUL bytes make up a third or more, which Latin text
+  in UTF-16 always does, is decoded as UTF-16; a line mostly in another script
+  is logged as best it decodes. The renderer is started without
+  `JARVIS_DEBUG_FILE`, so its lines reach the log file once, through this
+  relay.
 - **`FaceRenderer` never raises to its caller and never blocks it.** Sending
   is a write to a pipe from a worker thread fed by an unbounded queue, so a
   renderer that stops reading costs memory, not time, until it is declared

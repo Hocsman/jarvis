@@ -62,7 +62,8 @@ def debug_log(message: str, category: str = "debug") -> None:
         return
     line = f"[{category:^10}] {message}"
     try:
-        print(line, file=sys.stderr)
+        # One write, so the line stays whole beside other threads' lines.
+        sys.stderr.write(line + "\n")
     except Exception:
         pass
     _append_to_sink(line)

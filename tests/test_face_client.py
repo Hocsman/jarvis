@@ -166,6 +166,22 @@ class TestStartingAndStopping:
         assert portrait == "portrait.png"
         assert "portrait.png" not in argv
 
+    def test_the_renderer_leaves_the_log_file_to_the_daemon(self, made, tmp_path, monkeypatch):
+        """What the renderer logs reaches the log file through the daemon,
+        which relays its stderr; written there by the renderer too, each of
+        its lines would be in the file twice."""
+        seen = tmp_path / "env.txt"
+        monkeypatch.setenv("JARVIS_DEBUG_FILE", str(tmp_path / "daemon.log"))
+        r = made(f"""
+            open({str(seen)!r}, "w", encoding="utf-8").write(os.environ.get("JARVIS_DEBUG_FILE", "unset"))
+            say(event="ready", delay=0.75)
+            for _ in messages():
+                pass
+        """)
+        assert _wait(r.ready)
+
+        assert seen.read_text(encoding="utf-8") == "unset"
+
     def test_the_packaged_app_says_why_instead_of_starting_a_child(self, monkeypatch):
         monkeypatch.setattr(sys, "frozen", True, raising=False)
         r = FaceRenderer("portrait.png", command=[sys.executable, "-c", "raise SystemExit(5)"])

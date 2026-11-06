@@ -216,6 +216,51 @@ def test_a_console_that_fails_during_the_shutdown_does_not_cost_the_diary(
     _assert_closed(db)
 
 
+class _Interrupted(_Part):
+    """A component whose stop is cut short by a second Ctrl+C, which the
+    daemon's signal handlers raise as KeyboardInterrupt."""
+
+    def stop(self, *args, **kwargs):
+        self.stopped = True
+        raise KeyboardInterrupt
+
+
+@pytest.mark.unit
+def test_an_interrupt_during_a_step_costs_that_step_only(
+        a_conversation, db, tmp_path, monkeypatch, capsys):
+    from jarvis import daemon
+
+    dictation, tts, face = _Interrupted(), _Part(), _Part()
+
+    daemon._shut_down(db, MockConfig(), dictation=dictation, voice_thread=None, tts=tts, face=face)
+
+    assert _diary(str(tmp_path / "jarvis.db")) == ["We talked about watering the tomatoes."]
+    assert tts.stopped and face.stopped
+    _assert_closed(db)
+    assert capsys.readouterr().out.rstrip().endswith("👋 Daemon stopped")
+
+
+@pytest.mark.unit
+def test_each_step_is_logged_before_it_runs_in_the_order_of_the_spec(
+        a_conversation, db, monkeypatch, debug_on):
+    from jarvis import daemon
+
+    debug, log = debug_on
+    for name in ("_global_reminders", "_global_routines", "_global_routine_runner"):
+        monkeypatch.setattr(daemon, name, _Part())
+    monkeypatch.setattr(daemon, "_warm_profile_core_listener", lambda *args: None)
+
+    daemon._shut_down(db, MockConfig(), dictation=_Part(), voice_thread=_Part(), tts=_Part(), face=_Part())
+
+    steps = [line.split("shutdown: ", 1)[1] for line in log.read_text(encoding="utf-8").splitlines()
+             if "shutdown: " in line]
+    assert steps == [
+        "dictation", "reminder scheduler", "routine dispatcher", "routine in flight",
+        "Claude Code job", "voice listener", "chat worker", "diary", "speech", "face",
+        "MCP sessions", "database", "profile cache listener",
+    ]
+
+
 @pytest.mark.unit
 def test_a_fast_stop_skips_the_diary_and_nothing_else(a_conversation, db, tmp_path, monkeypatch):
     from jarvis import daemon
@@ -298,3 +343,93 @@ def test_a_mirror_without_a_file_still_survives_the_console(tmp_path):
 
     print("nobody hears this", file=tee, flush=True)
     tee.flush()
+
+
+@pytest.mark.unit
+def test_the_file_says_once_when_the_console_went_and_never_inside_a_line(tmp_path):
+    """The console fails in the middle of a line: the line reaches the file
+    whole, and the note that the console went follows it, once."""
+    from jarvis.main import _Tee
+
+    log = tmp_path / "daemon.log"
+    with open(log, "a", encoding="utf-8") as handle:
+        tee = _Tee(_DeadPipe(), handle)
+        tee.write("half ")
+        tee.write("a line\n")
+        print("the next line", file=tee, flush=True)
+        print("and another", file=tee, flush=True)
+
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert lines[0] == "half a line"
+    assert lines[1].startswith("🔌 ") and lines[1].endswith("the log file carries on alone")
+    assert lines[2:] == ["the next line", "and another"]
+
+
+@pytest.mark.unit
+def test_a_line_the_console_cannot_write_costs_that_line_only(tmp_path):
+    """A console still there that refuses one line (text it cannot encode) is
+    not gone: the lines after it, the desktop app's chat events among them,
+    still reach it."""
+    from jarvis.main import _Tee
+
+    raw = io.BytesIO()
+    console = io.TextIOWrapper(raw, encoding="utf-8", errors="strict", write_through=True)
+    log = tmp_path / "daemon.log"
+    with open(log, "a", encoding="utf-8") as handle:
+        tee = _Tee(console, handle)
+        print("a reply holding half an emoji \ud83d", file=tee, flush=True)
+        print("__CHAT__:the next event", file=tee, flush=True)
+        heard = raw.getvalue().decode("utf-8")
+
+    assert "__CHAT__:the next event" in heard
+    assert "a reply holding half an emoji" in heard
+    assert "gone" not in log.read_text(encoding="utf-8")
+
+
+@pytest.mark.unit
+def test_no_console_at_all_is_a_console_already_gone(tmp_path, monkeypatch):
+    """``pythonw`` starts the daemon with no console: printing does nothing,
+    and the file still gets the lines."""
+    from jarvis.main import _Tee, _install_sink
+
+    log = tmp_path / "daemon.log"
+    with open(log, "a", encoding="utf-8") as handle:
+        tee = _Tee(None, handle)
+        print("nobody hears this", file=tee, flush=True)
+    assert log.read_text(encoding="utf-8").splitlines() == ["nobody hears this"]
+
+    monkeypatch.delenv("JARVIS_DEBUG_FILE", raising=False)
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+    _install_sink()
+    print("✓ Daemon started", flush=True)
+    print("a warning", file=sys.stderr, flush=True)
+
+
+@pytest.mark.unit
+def test_lines_written_from_several_threads_reach_the_file_whole(debug_on):
+    """The listener, the speech engine, the face's readers and the reply
+    workers log at the same time through the two mirrored streams: every line
+    reaches the file whole, once."""
+    import threading
+
+    from jarvis.main import _Tee
+
+    debug, log = debug_on
+    with open(log, "a", encoding="utf-8", buffering=1) as handle:
+        out, err = _Tee(io.StringIO(), handle), _Tee(io.StringIO(), handle)
+        with patch.object(sys, "stdout", out), patch.object(sys, "stderr", err):
+            def talk(who):
+                for k in range(300):
+                    debug.debug_log(f"{who} logs {k}", "jarvis")
+                    print(f"{who} prints {k}", flush=True)
+
+            threads = [threading.Thread(target=talk, args=(f"thread {i}",)) for i in range(4)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+    expected = sorted([f"[  jarvis  ] thread {i} logs {k}" for i in range(4) for k in range(300)]
+                      + [f"thread {i} prints {k}" for i in range(4) for k in range(300)])
+    assert sorted(log.read_text(encoding="utf-8").splitlines()) == expected

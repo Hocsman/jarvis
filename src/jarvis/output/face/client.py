@@ -68,6 +68,9 @@ class FaceRenderer:
         src = str(Path(__file__).resolve().parents[3])
         env["PYTHONPATH"] = src + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
         env[PORTRAIT_ENV] = self._portrait
+        # Its stderr reaches the log file through this handle's relay: named
+        # to the renderer too, each of its debug lines would be there twice.
+        env.pop("JARVIS_DEBUG_FILE", None)
         try:
             self._proc = subprocess.Popen(self._command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                           stderr=subprocess.PIPE, creationflags=flags, env=env)
