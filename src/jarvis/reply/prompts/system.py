@@ -42,7 +42,7 @@ class PromptComponents:
     """
     Collection of all prompt components for a specific model size.
 
-    All components are combined in _build_initial_system_message() to form
+    All components are combined in _initial_system_message() to form
     the complete system message.
     """
     asr_note: str

@@ -25,6 +25,7 @@ from ..debug import debug_log
 from ..latency import get_latency_journal
 from ..state import JarvisState, get_jarvis_state
 from ..llm import (
+    CACHE_MARKS,
     extract_text_from_response,
     get_auxiliary_backend,
     get_embedding_backend,
@@ -1745,7 +1746,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
     enrichment_source = getattr(cfg, "memory_enrichment_source", "diary")
     conversation_context = ""
     # For small models, the diary + graph text is replaced by a single
-    # distilled note stored here. Injected by _build_initial_system_message.
+    # distilled note stored here. Injected by _initial_system_message.
     memory_digest_text = ""
     # Raw snippets captured here are later passed to digest_memory_for_query
     # for SMALL models so we don't flood their system prompt with 2-3 KB of
@@ -1986,7 +1987,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
             )
             # Replace the raw injections with the digest note (or nothing
             # when the distil decided nothing was relevant). Downstream
-            # `_build_initial_system_message` reads these two locals.
+            # `_initial_system_message` reads these two locals.
             if digest:
                 flat = digest.replace("\n", " ")
                 preview = flat[:80] + ("…" if len(flat) > 80 else "")
@@ -2197,7 +2198,19 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
     _response_language = str(getattr(cfg, "response_language", "") or "").strip()
     _persona_prompt = build_system_prompt(_assistant_name, response_language=_response_language)
 
-    def _build_initial_system_message() -> str:
+    def _initial_system_message() -> dict:
+        """The system message, with the offsets where its lasting parts end.
+
+        Its parts run from what lasts longest to what changes every reply:
+        persona, guidance, his profile and goals (the same for the whole
+        conversation), then the diary's summary of the conversation's
+        earlier part (the same until the diary next writes), then what this
+        reply alone brings (recalled memory, the plan, and the time line
+        appended before each call). ``CACHE_MARKS`` holds where the first
+        two end, so a backend whose prompt cache reads back only up to a
+        breakpoint keeps them from one reply to the next (``llm.spec.md``,
+        Anthropic). The text is the same with or without the marks.
+        """
         guidance = [_persona_prompt.strip()]
 
         # Add model-size-appropriate prompt components
@@ -2242,6 +2255,8 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
             except Exception as e:
                 debug_log(f"goals block skipped (non-fatal): {e}", "memory")
 
+        marks = [len("\n".join(guidance))]
+
         if earlier_text:
             # Worded as the very thing a model says it lacks when it
             # loses the thread ("I don't know what was said earlier in
@@ -2260,6 +2275,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 "said is a record of a past reply, not an established "
                 "fact:\n" + earlier_text
             )
+            marks.append(len("\n".join(guidance)))
 
         if conversation_context:
             # Two safety framings, both needed:
@@ -2331,14 +2347,14 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         # else: tools are passed via the native tools API parameter — do not include tools_desc
         # here as well, since that confuses the model and causes it to not use tools properly.
 
-        return "\n".join(guidance)
+        return {"role": "system", "content": "\n".join(guidance), CACHE_MARKS: marks}
 
     messages = []  # type: ignore[var-annotated]
     recent_tool_signatures = []  # keep last few tool calls: [(name, stable_args_json)]
     # Tools actually invoked during this reply — (name, args_summary, result_summary).
     invoked_tools_history: list[tuple[str, str, str]] = []
     # System message with guidance, tools, and enrichment
-    messages.append({"role": "system", "content": _build_initial_system_message()})
+    messages.append(_initial_system_message())
     # Include recent dialogue memory as-is
     if recent_messages:
         messages.extend(recent_messages)
@@ -2865,7 +2881,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 "planning",
             )
             use_text_tools = True
-            messages[0] = {"role": "system", "content": _build_initial_system_message()}
+            messages[0] = _initial_system_message()
             _update_system_message_with_context(messages)
             llm_resp = chat_with_messages(
                 cfg=cfg,
@@ -3152,10 +3168,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                             # tools_desc replaces the stale one. _update_system_
                             # message_with_context re-appends the time/location
                             # line on the next turn.
-                            messages[0] = {
-                                "role": "system",
-                                "content": _build_initial_system_message(),
-                            }
+                            messages[0] = _initial_system_message()
                         debug_log(
                             f"  🔧 allow-list widened via toolSearchTool: "
                             f"{len(allowed_tools)} tools now available "

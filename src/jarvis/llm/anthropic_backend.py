@@ -18,9 +18,12 @@ backend:
 3. **Thinking.** ``thinking=False`` is ``{"type": "disabled"}``; a model
    that refuses to turn it off is asked for adaptive thinking at low
    effort instead, and remembered. ``thinking=True`` is adaptive thinking.
-4. **Caching.** The system prompt carries a cache breakpoint, and a call
-   that offers tools (the agentic loop) also caches the growing
-   conversation.
+4. **Caching.** The system prompt goes out as blocks that each end on a
+   cache breakpoint: one block, unless the caller marked where its lasting
+   parts end (``CACHE_MARKS``), so the next call reads them back however
+   the rest changed. Tools go out sorted by name, the same bytes for the
+   same tools. A call that offers tools (the agentic loop) also caches the
+   growing conversation.
 
 The key is the configured one and nothing else: the SDK is built with an
 explicit ``api_key``, so ``ANTHROPIC_API_KEY`` and stored profiles are
@@ -42,13 +45,21 @@ import requests
 
 from ..config import ANTHROPIC_BASE_URL
 from ..debug import debug_log
-from .backend import LLMBackend, ToolsNotSupportedError
+from .backend import LLMBackend, ToolsNotSupportedError, cache_marks, cut_at_marks
 
 # Generation cap when the caller sets none. The API requires one; this is
 # far above any reply Jarvis speaks, and the call's timeout bounds it.
 _DEFAULT_MAX_TOKENS = 8192
 
 _EPHEMERAL = {"type": "ephemeral"}
+
+# The API takes four cache breakpoints a request. The system prompt gets at
+# most three blocks, each ending on one; the fourth is left for the
+# automatic breakpoint a tool loop sets on the conversation.
+_SYSTEM_BREAKPOINTS = 3
+
+# Between two system messages in the one system prompt.
+_SYSTEM_JOIN = "\n\n"
 
 # Lets a replayed thinking block be dropped, instead of failing the
 # request, when the history before it changed (the engine widens the tool
@@ -125,10 +136,11 @@ def _tool_result_block(call_id: str, text: str) -> Dict[str, Any]:
 def _to_turns(
     messages: List[Dict[str, Any]],
     kept_turn: Callable[[Any], Optional[List[Dict[str, Any]]]],
-) -> Tuple[str, List[Dict[str, Any]], bool]:
-    """The engine's messages as ``(system, turns, replayed)``.
+) -> Tuple[str, List[int], List[Dict[str, Any]], bool]:
+    """The engine's messages as ``(system, marks, turns, replayed)``.
 
-    Every system message joins the top-level system prompt. A tool result
+    Every system message joins the top-level system prompt, and its cache
+    marks (``CACHE_MARKS``) become ``marks``, offsets into that prompt. A tool result
     answers the call it names in the turn just before it, and a user
     message the engine tagged with a tool's name answers that tool's call
     (the approval path replays a granted call that way, see
@@ -138,6 +150,7 @@ def _to_turns(
     included), or ``None``.
     """
     system_parts: List[str] = []
+    system_marks: List[int] = []
     turns: List[Dict[str, Any]] = []
     pending: Dict[str, str] = {}
     replayed = False
@@ -157,6 +170,8 @@ def _to_turns(
         text = _text_of(msg.get("content"))
         if role == "system":
             if text.strip():
+                offset = sum(len(part) + len(_SYSTEM_JOIN) for part in system_parts)
+                system_marks += [offset + mark for mark in cache_marks(msg)]
                 system_parts.append(text)
         elif role == "assistant":
             calls = msg.get("tool_calls") if isinstance(msg.get("tool_calls"), list) else []
@@ -185,7 +200,29 @@ def _to_turns(
                 pending = {}
                 if text.strip():
                     push("user", [{"type": "text", "text": text}])
-    return "\n\n".join(system_parts), turns, replayed
+    return _SYSTEM_JOIN.join(system_parts), system_marks, turns, replayed
+
+
+def _system_blocks(system: str, marks: List[int]) -> List[Dict[str, Any]]:
+    """The system prompt as text blocks, each ending on a cache breakpoint.
+
+    It is cut at ``marks``, where the parts that last from one call to the
+    next end, so the next call reads each of them back however the part
+    after it changed. Joined, the blocks are the prompt: the model reads
+    the same text. A piece of only whitespace joins its neighbour (the API
+    refuses a blank text block), and past ``_SYSTEM_BREAKPOINTS`` blocks
+    the latest marks are dropped, the earliest ending the parts that last
+    longest.
+    """
+    pieces: List[str] = []
+    for piece in cut_at_marks(system, marks):
+        if pieces and not (piece.strip() and pieces[-1].strip()):
+            pieces[-1] += piece
+        else:
+            pieces.append(piece)
+    if len(pieces) > _SYSTEM_BREAKPOINTS:
+        pieces[_SYSTEM_BREAKPOINTS - 1:] = ["".join(pieces[_SYSTEM_BREAKPOINTS - 1:])]
+    return [{"type": "text", "text": piece, "cache_control": dict(_EPHEMERAL)} for piece in pieces]
 
 
 def _well_formed(turns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -238,7 +275,14 @@ def _well_formed(turns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _tools(tools: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
-    """OpenAI ``{"type": "function", "function": {...}}`` → Messages tools."""
+    """OpenAI ``{"type": "function", "function": {...}}`` → Messages tools,
+    by name.
+
+    The tool list opens the cached prefix, so the same tools must go out
+    as the same bytes whatever order the caller ranked them in: a router
+    naming ``remember`` first for one reply and last for the next would
+    otherwise make the next reply write the whole prompt again.
+    """
     out: List[Dict[str, Any]] = []
     for tool in tools or []:
         func = tool.get("function") if isinstance(tool, dict) else None
@@ -249,7 +293,7 @@ def _tools(tools: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
             entry["description"] = func["description"]
         entry["input_schema"] = func.get("parameters") or {"type": "object", "properties": {}}
         out.append(entry)
-    return out
+    return sorted(out, key=lambda entry: entry["name"])
 
 
 def _generation_cap(extra_options: Optional[Dict[str, Any]]) -> Optional[int]:
@@ -440,11 +484,12 @@ class AnthropicBackend(LLMBackend):
         max_tokens: int,
         tools: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        system, turns, replayed = _to_turns(messages, self._kept_turn if thinks else lambda _id: None)
+        system, marks, turns, replayed = _to_turns(
+            messages, self._kept_turn if thinks else lambda _id: None)
         kwargs: Dict[str, Any] = {"model": model, "max_tokens": max_tokens,
                                   "messages": _well_formed(turns)}
         if system:
-            kwargs["system"] = [{"type": "text", "text": system, "cache_control": dict(_EPHEMERAL)}]
+            kwargs["system"] = _system_blocks(system, marks)
         if tools:
             kwargs["tools"] = tools
             # The engine runs the first call of a turn and answers it; a
