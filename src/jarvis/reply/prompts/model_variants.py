@@ -12,6 +12,7 @@ from .system import (
     PromptComponents,
     ASR_NOTE,
     INFERENCE_GUIDANCE,
+    SPOKEN_FORM,
     VOICE_STYLE,
 )
 
@@ -244,16 +245,20 @@ TOOL_CONSTRAINTS_SMALL = _TOOL_CONSTRAINTS_BASE + "\n\n" + _TOOL_CONSTRAINTS_BAS
 # Prompt Assembly
 # =============================================================================
 
-def get_system_prompts(model_size: ModelSize) -> PromptComponents:
+def get_system_prompts(model_size: ModelSize, *, spoken: bool = False) -> PromptComponents:
     """
     Get prompt components appropriate for the given model size.
 
     Args:
         model_size: The detected model size
+        spoken: Whether the reply will be read aloud. Only then does it get
+            the spoken-form rule (units, signs and dates in words); a reply
+            that is read keeps its symbols.
 
     Returns:
         PromptComponents with all necessary prompt strings
     """
+    spoken_form = SPOKEN_FORM if spoken else None
     if model_size == ModelSize.SMALL:
         return PromptComponents(
             asr_note=ASR_NOTE,
@@ -262,6 +267,7 @@ def get_system_prompts(model_size: ModelSize) -> PromptComponents:
             voice_style=VOICE_STYLE,
             tool_guidance=TOOL_GUIDANCE_SMALL,
             tool_constraints=TOOL_CONSTRAINTS_SMALL,
+            spoken_form=spoken_form,
         )
     else:
         return PromptComponents(
@@ -271,4 +277,5 @@ def get_system_prompts(model_size: ModelSize) -> PromptComponents:
             voice_style=VOICE_STYLE,
             tool_guidance=TOOL_GUIDANCE_LARGE,
             tool_constraints=TOOL_CONSTRAINTS_LARGE,
+            spoken_form=spoken_form,
         )

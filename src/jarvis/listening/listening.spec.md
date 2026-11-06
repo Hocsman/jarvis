@@ -125,7 +125,13 @@ Instead of extracting post-wake-word audio, we:
 
 ### 2. Text-Based Wake Detection
 
-Wake word detection operates on the rolling transcript buffer. When Whisper produces text, it is checked for the configured wake word and aliases using fuzzy matching (`rapidfuzz`). This supports arbitrary wake words in any language.
+Wake word detection operates on the rolling transcript buffer. When Whisper produces text, it is checked for the configured wake word and aliases. This supports arbitrary wake words in any language.
+
+**Names are whole words.** The wake word and each alias are names, found only where they stand as whole words: neither end of the name runs on into a letter, a digit or a combining mark of the word around it, in any alphabet. "Charismatique" does not hold the alias "charis", nor "mañana" the name "ana", whether its "ñ" is written as one character or as an "n" and a combining tilde. Punctuation around a name is no part of a word ("Jarvis, …", "…, Jarvis ?", "«Jarvis»"). The words of a name of several words ("jar is") are found whatever the spacing between them, and not when its last word starts a longer one ("jar isolé"). The exception is text that does not mark where its words end: Chinese characters, kana and Hangul (whose particles join the name before them), and the scripts of South-East Asia (Thai, Lao, Khmer, Myanmar, the Tai scripts). There a name is found among the words around it. A name configured empty is found nowhere.
+
+**Close spellings.** Failing a whole-word match, each token of the text, split on whitespace and stripped of the punctuation at its ends, is compared with every name using difflib's `SequenceMatcher`, and a ratio of at least `wake_fuzzy_ratio` (0.78 by default) counts as the name: "jarvas" for "jarvis". A whole token is weighed against a whole name, so a name inside a much longer word scores low ("charismatique", 0.63 against "charis"), but a word one letter away from a short name passes ("charisme", 0.86 against "charis"), and so do ordinary words close to a short alias ("jours", 0.80 against "joris"; "avis", 0.89 against "javis").
+
+**Taking the name out.** When the wake word is what decides that he is speaking to her, the words where a name stands whole are taken out of what he said, with the spacing around them, and every other word is kept as it was heard: "Jarvis, est-elle charismatique ?" is answered as "est-elle charismatique ?". Commas, full stops, question and exclamation marks, semicolons and colons left at the start of what remains are dropped. A token that matched only as a close spelling stays in.
 
 ### 3. Context-Aware Intent Judge
 
@@ -149,8 +155,8 @@ The capture callback stamps each block with the time it was captured and queues 
 **Replies run on a thread of their own.** Once a query is collected, the loop hands it over (`_hand_over`) and goes back to listening; the reply thread runs the queries one after the other, each through the reply engine and then out loud. While she prepares an answer and while she says it, what he says is still heard.
 
 - **A question asked while a reply is on its way waits its turn.** It is answered after the one in hand, never alongside it, and only once her voice has stopped: a reply started while the last is still audible would replace the echo detector's record of it, and that one's window would open over the new one. At most `MAX_WAITING_TURNS` (2) wait; past that the oldest is dropped with a console line, so a wake word repeated by a film cannot stack up replies that would run minutes later.
-- **A stop silences the reply.** Heard while a reply is being prepared, said or waits to be, a stop says nothing more of the reply in hand (no sentence streamed after it, no tail), drops the questions waiting behind it and a question still being collected, and interrupts the speech engine. Each stop is counted, and a turn handed over before the count moved is never said: one stopped while it waited for the query lock is not run at all. The engine finishes a turn already running on its own, unheard; its tools still run. Replies other features handed over are kept.
-- **What counts as a stop.** While she speaks, any utterance holding a stop command, as before; while a reply is on its way or his question is still being collected, an utterance of at most `STOP_WORDS_WHILE_THINKING` (3) words, because a stop word inside a longer sentence ("Jarvis, how do I stop the timer?") is a question, and waits its turn. A stop the intent judge reads out of a sentence counts the same.
+- **A stop silences the reply.** Heard while a reply is being prepared, said or waits to be, a stop says nothing more of the reply in hand (no sentence streamed after it, no tail), drops the questions waiting behind it and a question still being collected, and interrupts the speech engine. Each stop is counted, and a turn handed over before the count moved is never said: one stopped while it waited for the query lock is not run at all. The engine finishes a turn already running on its own, unheard; its tools still run. A stopped turn is no longer a reply on its way, even while the engine finishes it: the thinking tune and THINKING are not kept for it, and when the engine is done with it, what he has started since (a question being collected or handed over) keeps its tune and the published state. Replies other features handed over are kept.
+- **What counts as a stop.** While she speaks, any utterance holding a stop command, as before; while a reply is on its way, or one a stop silenced is still being finished by the engine, or his question is still being collected, an utterance of at most `STOP_WORDS_WHILE_THINKING` (3) words (a stop he repeats, "Jarvis, stop !", is still a stop, never a question), because a stop word inside a longer sentence ("Jarvis, how do I stop the timer?") is a question, and waits its turn. A stop the intent judge reads out of a sentence counts the same.
 - **Her spoken question is answered by what he says to it.** A spoken question is settled by the next voice turn (`tools/policy.spec.md`), so a turn whose words he said before he finished hearing it is set aside, with a console line, and the question waits for his answer. A question he never heard, its reply having been stopped, is withdrawn as `expiré` before the next turn runs.
 - **Speech ignored while a reply is on its way leaves her thinking.** The thinking tune is that reply's: an utterance that is not for her does not stop it, and the published state stays THINKING.
 - **The reply thread is the only one that speaks.** Her answers and the replies other features hand over (`enqueue_reply`, "Speaking Something Produced Elsewhere") leave from it, so the echo detector's record of what she last said has one writer.
@@ -198,14 +204,18 @@ On small models, a caveat line is appended above a more involved example to set 
 System is waiting for wake word activation.
 
 **Triggers:**
-- Text-based detection finds wake word (or aliases) in transcript
+- Text-based detection finds the wake word or an alias in the transcript, as whole words or as a close spelling (see "Text-Based Wake Detection")
 
 **On trigger:**
 1. Start thinking beep immediately and publish the state LISTENING
 2. Wait for utterance to complete (user finishes speaking)
 3. Send transcript buffer + wake timestamp to intent judge
-4. If `directed=true` and `query` exists, collect it, and hand it to the reply thread once he has stopped for `voice_collect_seconds`
+4. If `directed=true` and `query` exists, collect it, and hand it to the reply thread once he has stopped for `voice_collect_seconds`; a verdict that finds nothing but her name leaves the decision to the wake-word check (below)
 5. If rejected, stop the beep and publish IDLE
+
+**Her name with nothing after it opens a question with nothing in it yet.** When the wake-word check finds nothing after the wake word, she waits for his question as for any other. Nothing means no letter or digit in any script once the wake word and its aliases are taken out: "Jarvis ?", "¿Jarvis?", "Jarvis…" and "Jarvis ! Jarvis !" are her name alone. The console says `👂 Waiting for your question...` rather than announcing a query, shown at once even through a pipe; the thinking tune plays, never over her voice; LISTENING is published; and what he says before his silence has lasted `voice_collect_seconds` is his question. When the silence runs out with nothing collected (no letter or digit: punctuation Whisper makes out of the quiet is nothing either), nothing is handed over and the wait ends where he can see it: `💤 Nothing after the wake word, returning to wake word mode` is printed, and the published state goes back to what she is doing. While she speaks she is SPEAKING; while a reply of hers is on its way she is THINKING, and the tune, which is that reply's, plays on; otherwise the tune stops and she is IDLE. A reply stopped since it was handed over is not on its way (see "The Microphone Is Always Read"). While he dictates, nothing is published: the dictation's state stands. The hot window comes to the same wait when a wake word that can only be his leaves the decision to the wake-word check (see "Hot Window Mode").
+
+**The intent judge does not answer her name as a question.** Outside the hot window, a directed verdict that finds nothing but her name, in what he said and in the `query` it reads, decides nothing, whatever its confidence: the wake-word check does, and she waits for his question as above. A query that holds more than her name is a question the judge read in his earlier words, and it is answered.
 
 **A sentence heard while a question is still being collected completes it**, in this mode and in the hot window. Every path that accepts an utterance adds it to the question being collected, never puts it in its place, and she answers both: "Salut Yuba, comment tu vas ?" then "Tu m'entends Yuba ?" is one question. A collection that keeps being completed still ends after `voice_max_collect_seconds`. The silence that ends it is counted from the end of the last utterance collected, in the time its audio was captured: neither Whisper nor the judge adds to the wait, and audio the loop reads late, after a stall, is measured in its own time, so his next words still complete the question. Whatever joins it is marked processed, like every accepted segment, so the judge never sees it again as context it could restate. A stop heard while it is collected cancels it instead (see "The Microphone Is Always Read"). What he adds needs no wake word, so Whisper's inventions reach the question too: one the judge calls noise is left out (see "Text Whisper Makes Out of Silence").
 
@@ -259,28 +269,28 @@ While TTS is playing, echo rejection and stop commands are handled with fast tex
   reply), and so does a phrase Whisper makes of the quiet right after her:
   the first carries no words she did not say, the second no voice.
 - Her voice coming back stops with hers. Through the speakers it clears the
-  energy bar, and Whisper can make words she never said of it (a figure
-  heard as an hour, a unit as a name), so both proofs can hold on her own
-  voice. After her last word, an utterance whose voice stopped before her
-  last word plus `echo_tolerance` keeps the flag whatever its words: its
-  voice stopped when the frame that closed it was captured, less the
-  silence the voice detector waited for, counted in frames of the rate the
-  microphone is read at. Her last word is when her reply finished playing,
-  as its completion callback stamps it (`output/tts.spec.md`, "Speaking
-  state and completion"), so quiet the engine plays after her last sound
-  counts as hers: for Kyutai, the pause the model leaves after its last
-  word and the time its stream takes to drain. The listener stamps it as
-  it opens the hot window: with `hot_window_enabled` off no last word is
-  stamped, and only her speaking is her time. His answer begun over her
-  last word goes on after it and is not flagged. Kept on purpose: a short
-  word of his said over her last word and stopping with it cannot be told
-  from her voice, and is flagged with it; a wake word in it that can only
-  be his still decides (see "Hot Window Mode"). A short answer said in the
-  quiet after her last sound, whose voice stops before that quiet ends
-  plus the tolerance, is flagged the same way. While she speaks her last word
-  is not known and her own voice clears the energy bar, so there the flag
-  rests on the words alone; an utterance whose end is not known is weighed
-  on the two proofs.
+  energy bar, as she speaks and as she stops, and Whisper can make words she
+  never said of it (a figure heard as an hour, a unit as a name), so both
+  proofs can hold on her own voice. After her last word, an utterance whose
+  voice stopped before her last word plus `echo_tolerance` keeps the flag
+  whatever its words: its voice stopped when the frame that closed it was
+  captured, less the silence the voice detector waited for, counted in
+  frames of the rate the microphone is read at. Her last word is when her
+  reply finished playing, as its completion callback stamps it
+  (`output/tts.spec.md`, "Speaking state and completion"), so quiet the
+  engine plays after her last sound counts as hers: for Kyutai, the pause
+  the model leaves after its last word and the time its stream takes to
+  drain. The listener stamps it as it opens the hot window: with
+  `hot_window_enabled` off no last word is stamped, and only her speaking is
+  her time. His answer begun over her last word goes on after it and is not
+  flagged. Kept on purpose: a short word of his said over her last word and
+  stopping with it cannot be told from her voice, and is flagged with it; a
+  wake word in it that can only be his still decides (see "Hot Window
+  Mode"). A short answer said in the quiet after her last sound, whose voice
+  stops before that quiet ends plus the tolerance, is flagged the same way.
+  While she speaks her last word is not known and her own voice clears the
+  energy bar, so there the flag rests on the words alone; an utterance whose
+  end is not known is weighed on the two proofs.
 - Intent judge uses this context to identify echo
 
 ## Rolling Transcript Buffer
@@ -412,15 +422,29 @@ The fuzzy check acts as a fast, reliable safety net. The intent judge provides d
    applies to this question in the post-TTS cooldown. Either test alone
    was fooled — text by a hallucination, energy by a door slamming.
 
+   The floor is read once per reply, when her first sentence is queued:
+   the mean level of the last 50 frames the listening loop has read (a
+   second at the default 20 ms frame, and older than that while the loop
+   is busy with Whisper or the judge). It holds for the whole reply. A
+   reply spoken as it is written (`output/streaming.spec.md`) can queue a
+   later sentence while the microphone hears her say an earlier one,
+   whenever she is heard before the reply is written in full; a floor read
+   then would be her own voice, and his soft answer right after her last
+   word would fall under the bar it sets. Whatever the microphone heard in
+   that second is in the floor, and raises the bar with it: the thinking
+   tune, which plays until her reply is handed over, and, for a reply from
+   elsewhere said the moment another ends (see "Speaking Something
+   Produced Elsewhere"), the end of the one before.
+
    Both together are fooled by her own voice when Whisper makes words she
    never said of it, since her voice through the speakers clears the energy
-   bar. After her last word, when the voice stops tells that one from him:
-   her voice coming back stops with hers, so an echo verdict on an
-   utterance whose voice stopped before her last word plus `echo_tolerance`
-   stands, whatever its words (see "During TTS"). While she speaks nothing
-   does, and a hallucination there the judge names: a verdict that calls
-   the utterance noise is never overridden (see "Text Whisper Makes Out of
-   Silence").
+   bar, as she speaks and as she stops. After her last word, when the voice
+   stops tells that one from him: her voice coming back stops with hers, so
+   an echo verdict on an utterance whose voice stopped before her last word
+   plus `echo_tolerance` stands, whatever its words (see "During TTS").
+   While she speaks nothing does, and a hallucination there the judge names:
+   a verdict that calls the utterance noise is never overridden (see "Text
+   Whisper Makes Out of Silence").
 
    Fails open: with no TTS text to compare against, everything is the user's.
    The energy half fails open twice over — no baseline, or an energy of
@@ -454,11 +478,11 @@ Judge output: {"directed": true, "query": "Ni hao", "reasoning": "New speech dir
 
 To minimise perceived latency, audio and visual feedback starts **immediately after Whisper transcription**, before the intent judge runs. The visual half is the assistant's shared state (`src/jarvis/state.py`, see `state.spec.md`), which whatever shows the assistant to the user reads:
 
-- **Wake word mode:** If the transcribed text contains the wake word (fuzzy-matched), start the thinking beep and publish LISTENING.
+- **Wake word mode:** If the transcribed text carries the wake word, as "Text-Based Wake Detection" finds it, start the thinking beep and publish LISTENING.
 - **Hot window:** If voice started during an active (or pending) hot window, start the thinking beep and publish LISTENING.
 - **No trigger:** If neither condition is met, no feedback is given.
 
-If the intent judge later rejects the query (and no hot window override applies), the beep is stopped and the state reverts to IDLE. This brief false-positive beep is acceptable — users prefer immediate acknowledgement over delayed but perfect accuracy.
+If the intent judge later rejects the query (and no hot window override applies), the beep is stopped and the state reverts to IDLE, unless a reply of hers is on its way: the tune is then that reply's, and it plays on. Her name followed by nothing ends as "Wake Word Mode" describes. This brief false-positive beep is acceptable — users prefer immediate acknowledgement over delayed but perfect accuracy.
 
 **LISTENING is not published early during TTS** — the beep is suppressed while TTS is playing to avoid self-triggering.
 
@@ -556,6 +580,8 @@ If no verdict, in hot window:
     → Otherwise: collect what he said as a query
 If judge rejects and says noise, in hot window:
     → Not speech: mark processed, ignore, hot window untouched
+If judge.directed, outside the hot window, and neither what was heard nor its query holds more than her name:
+    → Wake-word check: her name alone, she waits for his question
 If judge.directed and judge.query:
     → Verify wake word present (wake word mode) or non-echo (hot window)
     → Collect it (added to a question being collected), then hand it to the reply thread (it waits its turn)
@@ -570,6 +596,11 @@ If nothing above took it and a question is being collected:
     → Stop: cancel the question
     → Noise, not directed: mark processed, leave it out, silence clock untouched
     → Otherwise: mark processed, add it to the question
+When his silence has lasted voice_collect_seconds:
+    → A letter or digit collected: hand it to the reply thread
+    → Nothing collected (her name alone, punctuation at most): 💤 Nothing after the wake word, nothing handed over;
+      published state back to SPEAKING, THINKING (the reply's tune plays on) or IDLE (tune stopped);
+      while he dictates, the dictation's state stands
 ```
 
 ## Keeping a Copy of an Utterance
@@ -625,13 +656,14 @@ thread and shared by every sentence of it.
 
 **One reply per pass, and none while she is already speaking.** The echo
 detector holds the record of one reply at a time: the text she is
-saying, when she began, and its exact duration. Starting a second reply
-while the first is still audible would replace that record with the
-second's, and the rest of the first would be compared against the wrong
-sentence. Completion callbacks are not the constraint, since they travel
-with their own queue item (`tts.spec.md`, "The queue"). Anything still
-queued waits for the reply thread's next pass, a few milliseconds away
-when no query is running.
+saying, when she began, its exact duration, and the floor of the voice
+proof (see "And it takes a voice"). Starting a second reply while the
+first is still audible would replace that record with the second's, and
+the rest of the first would be compared against the wrong sentence.
+Completion callbacks are not the constraint, since they travel with
+their own queue item (`tts.spec.md`, "The queue"). Anything still queued
+waits for the reply thread's next pass, a few milliseconds away when no
+query is running.
 
 ## Fallback Behaviour
 

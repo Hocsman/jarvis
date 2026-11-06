@@ -27,8 +27,12 @@ used for end-of-session UI updates.
   value. This mirrors how `_check_and_update_diary` is invoked from a worker
   QThread in the existing desktop app.
 - The worker thread runs
-  `run_reply_engine(db, cfg, tts=None, text, _global_dialogue_memory, language=None)`.
+  `run_reply_engine(db, cfg, tts=None, text, _global_dialogue_memory, language=None, origin="chat")`.
 - `tts=None`: text chat never speaks. Audio output stays a voice-only concern.
+- `origin="chat"`: the reply is read, not heard, so it is not given the
+  spoken-form rule a voice turn gets (units, signs and dates written as
+  words, `src/jarvis/reply/prompts/prompts.spec.md`), and a typed weather
+  question can be answered "11,2 °C".
 - `language=None`: text input has no Whisper-detected language; tools fall
   back to their own defaults, same as a voice query with no language hint.
 - Redaction still applies (`run_reply_engine` calls `redact(text)` before

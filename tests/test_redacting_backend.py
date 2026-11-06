@@ -83,6 +83,46 @@ class TestRedactingBackendScrubs:
         assert "alice@example.com" in msgs[1]["content"]
 
     @pytest.mark.unit
+    def test_marks_still_end_the_lasting_part_once_it_is_scrubbed(self) -> None:
+        """The reply engine marks where the part of its system message that
+        lasts from reply to reply ends (``_cache_marks``). Scrubbing an
+        address out of that part shortens it; the mark must follow, or the
+        cache would break inside the part that changes."""
+        from jarvis.utils.redact import scrub_secrets
+
+        spy = _SpyBackend()
+        head = "Profile: writes to theo.marchand@example.org about bikes."
+        turn = "\n\n[Context: 21:14]"
+        RedactingBackend(spy).chat("m", [
+            {"role": "system", "content": head + turn, "_cache_marks": [len(head)]},
+            {"role": "user", "content": "hello"},
+        ])
+
+        sent = spy.calls["chat"]["messages"][0]
+        mark = sent["_cache_marks"][0]
+        assert sent["content"][:mark] == scrub_secrets(head)
+        assert sent["content"][mark:] == turn
+        assert "theo.marchand@example.org" not in sent["content"]
+
+    @pytest.mark.unit
+    def test_a_secret_cut_by_a_mark_is_scrubbed_whole(self) -> None:
+        """Scrubbing the parts one by one must never let through what
+        scrubbing the whole message catches: when the two disagree, the
+        whole message is scrubbed and the marks are dropped."""
+        from jarvis.utils.redact import scrub_secrets
+
+        spy = _SpyBackend()
+        content = "-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----"
+        RedactingBackend(spy).chat("m", [
+            {"role": "system", "content": content, "_cache_marks": [content.index("\n")]},
+        ])
+
+        sent = spy.calls["chat"]["messages"][0]
+        assert sent["content"] == scrub_secrets(content)
+        assert "MIIabc" not in sent["content"]
+        assert not sent.get("_cache_marks")
+
+    @pytest.mark.unit
     def test_chat_preserves_non_string_content(self) -> None:
         """Multimodal / structured content blocks pass through untouched."""
         spy = _SpyBackend()

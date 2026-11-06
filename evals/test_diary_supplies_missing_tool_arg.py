@@ -150,6 +150,7 @@ class TestDiarySuppliesMissingToolArg:
         ):
             response = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 # Deliberately time-free: a time word makes the extractor
                 # emit a from/to window that would exclude the seeded
                 # 2026-04-26 diary entry for reasons unrelated to the

@@ -16,11 +16,16 @@ _CACHE_TTL_SECONDS: float = 2.0
 # terminal or a file: diagnosing the voice path from outside the app is
 # impossible without this. Set ``JARVIS_DEBUG_FILE`` to a path to also
 # append there. Unset by default, so it costs nothing.
+#
+# The daemon's own entry (``jarvis.main``) mirrors its whole console into
+# that file, and a stderr that says so (``mirrors_log_file``) has already
+# put the line there. Appending is for the processes whose console is not
+# mirrored: the desktop app's, and the daemon run in its thread.
 _SINK_PATH = os.environ.get("JARVIS_DEBUG_FILE", "").strip()
 
 
 def _append_to_sink(line: str) -> None:
-    if not _SINK_PATH:
+    if not _SINK_PATH or getattr(sys.stderr, "mirrors_log_file", False) is True:
         return
     try:
         with open(_SINK_PATH, "a", encoding="utf-8") as handle:
@@ -57,7 +62,8 @@ def debug_log(message: str, category: str = "debug") -> None:
         return
     line = f"[{category:^10}] {message}"
     try:
-        print(line, file=sys.stderr)
+        # One write, so the line stays whole beside other threads' lines.
+        sys.stderr.write(line + "\n")
     except Exception:
         pass
     _append_to_sink(line)

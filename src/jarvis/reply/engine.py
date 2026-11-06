@@ -25,6 +25,7 @@ from ..debug import debug_log
 from ..latency import get_latency_journal
 from ..state import JarvisState, get_jarvis_state
 from ..llm import (
+    CACHE_MARKS,
     extract_text_from_response,
     get_auxiliary_backend,
     get_embedding_backend,
@@ -1231,6 +1232,9 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
             later the routines that run unattended. Recorded against every
             tool call in the action ledger, so the user can tell an action
             they asked for from one that happened while they were away.
+            ``"voix"`` is also the one turn whose reply is read aloud, so it
+            alone gets the spoken-form rule (units, signs and dates in
+            words); any other origin, or none, gets a reply that is read.
         granted / granted_action: a decision already taken by a
             deliberate gesture, so this turn runs the approved call and
             narrates it. The click has already claimed the question from
@@ -1745,7 +1749,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
     enrichment_source = getattr(cfg, "memory_enrichment_source", "diary")
     conversation_context = ""
     # For small models, the diary + graph text is replaced by a single
-    # distilled note stored here. Injected by _build_initial_system_message.
+    # distilled note stored here. Injected by _initial_system_message.
     memory_digest_text = ""
     # Raw snippets captured here are later passed to digest_memory_for_query
     # for SMALL models so we don't flood their system prompt with 2-3 KB of
@@ -1986,7 +1990,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
             )
             # Replace the raw injections with the digest note (or nothing
             # when the distil decided nothing was relevant). Downstream
-            # `_build_initial_system_message` reads these two locals.
+            # `_initial_system_message` reads these two locals.
             if digest:
                 flat = digest.replace("\n", " ")
                 preview = flat[:80] + ("…" if len(flat) > 80 else "")
@@ -2163,8 +2167,11 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
     # model has a concrete template to follow. Using text tools from the start also avoids
     # the wasted round-trip and prompt confusion of starting native and falling back mid-turn.
     use_text_tools = (model_size == ModelSize.SMALL)
-    prompts = get_system_prompts(model_size)
-    debug_log(f"Model size detected: {model_size.value} for {cfg.llm_chat_model} (use_text_tools={use_text_tools})", "planning")
+    # Only a turn from the voice is heard. The text chat's reply is read
+    # and a routine's is written to its journal, so they keep "11 °C".
+    spoken = origin == "voix"
+    prompts = get_system_prompts(model_size, spoken=spoken)
+    debug_log(f"Model size detected: {model_size.value} for {cfg.llm_chat_model} (use_text_tools={use_text_tools}, spoken={spoken})", "planning")
 
     # Compound-query decomposition for small models.
     # When a query contains a conjunction joining two question-clauses, the
@@ -2197,7 +2204,19 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
     _response_language = str(getattr(cfg, "response_language", "") or "").strip()
     _persona_prompt = build_system_prompt(_assistant_name, response_language=_response_language)
 
-    def _build_initial_system_message() -> str:
+    def _initial_system_message() -> dict:
+        """The system message, with the offsets where its lasting parts end.
+
+        Its parts run from what lasts longest to what changes every reply:
+        persona, guidance, his profile and goals (the same for the whole
+        conversation), then the diary's summary of the conversation's
+        earlier part (the same until the diary next writes), then what this
+        reply alone brings (recalled memory, the plan, and the time line
+        appended before each call). ``CACHE_MARKS`` holds where the first
+        two end, so a backend whose prompt cache reads back only up to a
+        breakpoint keeps them from one reply to the next (``llm.spec.md``,
+        Anthropic). The text is the same with or without the marks.
+        """
         guidance = [_persona_prompt.strip()]
 
         # Add model-size-appropriate prompt components
@@ -2242,6 +2261,8 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
             except Exception as e:
                 debug_log(f"goals block skipped (non-fatal): {e}", "memory")
 
+        marks = [len("\n".join(guidance))]
+
         if earlier_text:
             # Worded as the very thing a model says it lacks when it
             # loses the thread ("I don't know what was said earlier in
@@ -2260,6 +2281,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 "said is a record of a past reply, not an established "
                 "fact:\n" + earlier_text
             )
+            marks.append(len("\n".join(guidance)))
 
         if conversation_context:
             # Two safety framings, both needed:
@@ -2331,14 +2353,18 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         # else: tools are passed via the native tools API parameter — do not include tools_desc
         # here as well, since that confuses the model and causes it to not use tools properly.
 
-        return "\n".join(guidance)
+        return {"role": "system", "content": "\n".join(guidance), CACHE_MARKS: marks}
 
     messages = []  # type: ignore[var-annotated]
-    recent_tool_signatures = []  # keep last few tool calls: [(name, stable_args_json)]
+    # (name, stable_args_json) of every call run in this reply, whatever it
+    # returned. A call already in it is not run again: the same call twice
+    # is a loop. Several calls of one tool on different arguments are work
+    # (three folders, three cities); `agentic_max_turns` bounds them.
+    calls_run_this_reply: set[tuple[str, str]] = set()
     # Tools actually invoked during this reply — (name, args_summary, result_summary).
     invoked_tools_history: list[tuple[str, str, str]] = []
     # System message with guidance, tools, and enrichment
-    messages.append({"role": "system", "content": _build_initial_system_message()})
+    messages.append(_initial_system_message())
     # Include recent dialogue memory as-is
     if recent_messages:
         messages.extend(recent_messages)
@@ -2682,7 +2708,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                         _plan_exec_ok = (
                             _name in allowed_tools
                             and _name != "toolSearchTool"
-                            and _cand_sig not in recent_tool_signatures
+                            and _cand_sig not in calls_run_this_reply
                         )
                         if _plan_exec_ok:
                             debug_log(
@@ -2784,11 +2810,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                                 "tool_name": _name,
                                 "tool_failed": not _plan_result.success,
                             })
-                            recent_tool_signatures.append(_cand_sig)
-                            if len(recent_tool_signatures) > 5:
-                                recent_tool_signatures = (
-                                    recent_tool_signatures[-5:]
-                                )
+                            calls_run_this_reply.add(_cand_sig)
                             invoked_tools_history.append(
                                 (_name, _cand_sig[1], _plan_text)
                             )
@@ -2797,7 +2819,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                             debug_log(
                                 f"planner: rejected plan step exec "
                                 f"({_name!r}: allow_list={_name in allowed_tools}, "
-                                f"dup={_cand_sig in recent_tool_signatures})",
+                                f"dup={_cand_sig in calls_run_this_reply})",
                                 "planning",
                             )
                 except Exception as _pe:  # pragma: no cover — defensive
@@ -2865,7 +2887,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 "planning",
             )
             use_text_tools = True
-            messages[0] = {"role": "system", "content": _build_initial_system_message()}
+            messages[0] = _initial_system_message()
             _update_system_message_with_context(messages)
             llm_resp = chat_with_messages(
                 cfg=cfg,
@@ -2996,49 +3018,36 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
             if tool_name == "toolSearchTool":
                 tool_search_calls += 1
 
-            # Check exact signature for duplicate suppression
+            # The same call twice in one reply is a loop; the same tool on
+            # other arguments is the next item of a list. Only an identical
+            # name and arguments is answered from what the first call
+            # returned, whatever that was: a failure repeated word for word
+            # fails again. Calls from earlier replies are not in the set, so
+            # asking the same thing in the next reply runs it afresh.
             try:
                 stable_args = json.dumps(tool_args or {}, sort_keys=True, ensure_ascii=False)
                 signature = (tool_name, stable_args)
             except Exception:
                 signature = (tool_name, "__unserializable_args__")
 
-            if signature in recent_tool_signatures:
-                debug_log(f"  ⚠️ Duplicate {tool_name} call - returning cached guidance", "planning")
+            if signature in calls_run_this_reply:
+                debug_log(
+                    f"  ⚠️ {tool_name} called again with the same arguments "
+                    f"({len(calls_run_this_reply)} calls run this reply) - "
+                    f"answered from the earlier result",
+                    "planning",
+                )
+                # "called", not "ran": the first call may have been refused
+                # by the gate or failed before it produced anything.
+                print(
+                    f"    ⚠️ Not run again: {tool_name} already called with "
+                    f"these arguments in this reply",
+                    flush=True,
+                )
                 if use_text_tools:
                     messages.append({"role": "user", "content": f"[Tool: {tool_name}] You already called this tool with these arguments. Use the results from the previous tool call to answer the user."})
                 else:
                     messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": f"You already called {tool_name} with these exact arguments. The results are in the previous messages. Please use those results to answer the user."})
-                continue
-
-            # Check if we already have results for this type of tool (prevents tool call loops).
-            # In native-tools mode results carry role="tool"; in text-tools mode they carry
-            # role="user" with a "tool_name" key — check both to make the guard effective
-            # in small-model paths where direct-exec is most likely to loop.
-            # Only results produced during THIS reply count. Tool results
-            # replayed from dialogue carryover sit before `user_msg_index`
-            # and belong to earlier queries, so counting them refuses the
-            # first call of a turn: ask about London twice, then ask about
-            # Tokyo, and the model is told to use results it never got.
-            # Same split `_maybe_record_tool_carryover` and the end-of-loop
-            # digest already use.
-            _this_turn = messages[user_msg_index + 1:]
-            duplicate_tool_count = sum(
-                1 for msg in _this_turn[-10:]
-                if msg.get("tool_name") == tool_name
-                and msg.get("role") in ("tool", "user")
-            )
-            if duplicate_tool_count >= 2:
-                debug_log(f"  ⚠️ Too many {tool_name} calls ({duplicate_tool_count}) - returning guidance", "planning")
-                print(
-                    f"    ⚠️ Refused: {tool_name} already returned "
-                    f"{duplicate_tool_count} results this turn",
-                    flush=True,
-                )
-                if use_text_tools:
-                    messages.append({"role": "user", "content": f"[Tool: {tool_name}] You have already called this tool {duplicate_tool_count} times. Use the results from those calls to answer the user's question."})
-                else:
-                    messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": f"You have already called {tool_name} {duplicate_tool_count} times. Please use the results from those calls to answer the user's question."})
                 continue
 
             # Execute tool
@@ -3152,10 +3161,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                             # tools_desc replaces the stale one. _update_system_
                             # message_with_context re-appends the time/location
                             # line on the next turn.
-                            messages[0] = {
-                                "role": "system",
-                                "content": _build_initial_system_message(),
-                            }
+                            messages[0] = _initial_system_message()
                         debug_log(
                             f"  🔧 allow-list widened via toolSearchTool: "
                             f"{len(allowed_tools)} tools now available "
@@ -3253,14 +3259,14 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                     messages.append({
                         "role": "user",
                         "content": f"[Tool result: {tool_name}]\n{effective_result}{remainder_hint}",
-                        "tool_name": tool_name,  # kept for duplicate detection
+                        "tool_name": tool_name,  # read by the plan-step count and carry-over
                         "tool_failed": not result.success and not result.refused,
                     })
                 else:
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call_id,
-                        "tool_name": tool_name,  # Include tool_name for duplicate detection
+                        "tool_name": tool_name,  # read by the plan-step count and carry-over
                         "content": effective_result,
                         "tool_failed": not result.success and not result.refused,
                     })
@@ -3269,14 +3275,6 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 # Note: We don't add a guidance system message here because adding system messages
                 # after the conversation starts breaks native tool calling in models like Llama 3.2.
                 # The model should naturally decide to answer, chain tools, or ask for clarification.
-                # Record signature after a successful tool response
-                try:
-                    recent_tool_signatures.append(signature)
-                    # Keep short memory of last 5
-                    if len(recent_tool_signatures) > 5:
-                        recent_tool_signatures = recent_tool_signatures[-5:]
-                except Exception:
-                    pass
                 # Record invoked tool history.
                 try:
                     invoked_tools_history.append(
@@ -3308,6 +3306,9 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                         "tool_failed": True,
                     })
                 debug_log(f"    ❌ tool error: {err}", "planning")
+            # Whatever came back — a result, a refusal, an error — this
+            # exact call has now run once in this reply.
+            calls_run_this_reply.add(signature)
             # Loop continues to let the agent produce the next step/final reply
             continue
 
@@ -3347,6 +3348,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 user_query=redacted,
                 loop_messages=messages[user_msg_index + 1:],
                 cfg=cfg,
+                spoken=spoken,
             )
         except Exception as e:
             debug_log(

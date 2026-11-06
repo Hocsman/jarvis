@@ -9,8 +9,12 @@ Tests exercise VoiceListener._process_transcript with mocked TTS and intent judg
 but use real StateManager and EchoDetector instances to avoid coupling to internals.
 """
 
+import io
+import re
+import sys
 import threading
 import time
+import unicodedata
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
@@ -1570,25 +1574,6 @@ class TestHisAnswerTheMomentHerReplyEnds:
         assert "lyon" in answered and "jarvis" not in answered
         listener.state_manager.stop()
 
-    @patch("builtins.print")
-    def test_with_no_verdict_his_words_holding_an_alias_are_answered_as_said(self, _print):
-        """With no verdict, his words heard in a voice are answered as he
-        said them, a word of his holding one of the wake word's aliases
-        ("charismatique" holds "charis") included."""
-        listener, last_word = self._her_reply_ends()
-        _with_the_default_aliases(listener)
-        _install_intent_judge(listener, None).last_failure_reason = "timeout"
-        heard = "Est-elle charismatique ?"
-        cfg = listener.cfg
-        assert is_wake_word_detected(heard.lower(), cfg.wake_word, cfg.wake_aliases,
-                                     cfg.wake_fuzzy_ratio)
-
-        _whisper_hears(listener, heard, started=_just_after(listener, last_word),
-                       level=_level(listener, _HIS_VOICE))
-
-        assert _accepted_query(listener) == heard.lower()
-        listener.state_manager.stop()
-
     @pytest.mark.parametrize("verdict", [
         _make_judgment(directed=False, confidence="medium", reasoning="background conversation"),
         _make_judgment(directed=False, confidence="high",
@@ -2171,6 +2156,316 @@ class TestTheLogSaysWhyAnUtteranceIsMarked:
 
         assert not tts.is_speaking.return_value, "her reply never ended while they were weighed"
         assert not any("stopped with hers" in line for line in _voice_log(log))
+        listener.state_manager.stop()
+
+
+# ---------------------------------------------------------------------------
+# Tests: Her name is a word
+# ---------------------------------------------------------------------------
+
+# A question of his with a word in it that holds one of the spellings Whisper
+# gives her name: "charismatique" holds the alias "charis".
+_HIS_QUESTION_HOLDING_HER_NAME_IN_A_WORD = "Est-elle charismatique ?"
+_HIS_WORDS_AROUND_HER_NAME = ["{name}, est-elle charismatique ?",
+                              "Est-elle charismatique, {name} ?"]
+# Her reply with such a word in it.
+_HER_REPLY_HOLDING_HER_NAME_IN_A_WORD = (
+    "Elle est très charismatique, Monsieur. Voulez-vous en savoir plus ?")
+
+
+def _words(text: str) -> list:
+    """The words of *text*, its punctuation left out."""
+    return re.findall(r"\w+", text)
+
+
+def _her_names(cfg) -> set:
+    return set(cfg.wake_aliases) | {cfg.wake_word}
+
+
+def _a_spelling_of_her_name(cfg) -> str:
+    """One of the spellings Whisper gives her name, as the aliases list
+    them: a single word."""
+    return next(alias for alias in cfg.wake_aliases if " " not in alias)
+
+
+@pytest.mark.unit
+class TestHerNameIsAWord:
+    """Her name is a word. "Charismatique" holds "charis", one of the
+    spellings Whisper gives her name, and it is still a word of his: in
+    wake-word mode and in the hot window alike it neither wakes her nor
+    loses letters. Her name said as a word still wakes her, and is taken
+    out of what he said with every other word kept whole."""
+
+    def _with_her_names(self, listener):
+        _with_the_default_aliases(listener)
+        assert any(name in "charismatique" for name in _her_names(listener.cfg))
+        return listener
+
+    def _her_reply_ends(self, reply=_HER_REPLY):
+        listener, _ = _create_listener(echo_tolerance=0.1, hot_window_seconds=0.2)
+        self._with_her_names(listener)
+        last_word = _she_says(listener, reply)
+        assert _wait_for_hot_window_active(listener)
+        return listener, last_word
+
+    # -- Wake-word mode ---------------------------------------------------
+
+    @pytest.mark.parametrize("verdict", [
+        _make_judgment(directed=True, query="est-elle charismatique ?",
+                       reasoning="a question about someone"),
+        _make_judgment(directed=False, confidence="low", reasoning="unsure who is addressed"),
+        None,
+    ], ids=["directed", "unsure", "no-verdict"])
+    @patch("builtins.print")
+    def test_a_word_holding_her_name_does_not_wake_her(self, _print, verdict):
+        listener, _ = _create_listener()
+        self._with_her_names(listener)
+        _install_intent_judge(listener, verdict).last_failure_reason = "timeout"
+
+        _whisper_hears(listener, _HIS_QUESTION_HOLDING_HER_NAME_IN_A_WORD,
+                       started=time.time() - 1.0, level=_level(listener, _HIS_VOICE))
+
+        assert _accepted_query(listener) == ""
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("said", _HIS_WORDS_AROUND_HER_NAME, ids=["name-first", "name-last"])
+    @pytest.mark.parametrize("verdict", [
+        _make_judgment(directed=False, confidence="low", reasoning="unsure who is addressed"),
+        None,
+    ], ids=["unsure", "no-verdict"])
+    @patch("builtins.print")
+    def test_her_name_wakes_her_and_his_words_are_kept_whole(self, _print, verdict, said):
+        """One of the spellings Whisper gives her name wakes her wherever he
+        says it, set off by punctuation. The wake-word check takes it out of
+        what he said, and keeps every other word as he said it."""
+        listener, _ = _create_listener()
+        self._with_her_names(listener)
+        name = _a_spelling_of_her_name(listener.cfg)
+        _install_intent_judge(listener, verdict).last_failure_reason = "timeout"
+
+        _whisper_hears(listener, said.format(name=name.capitalize()),
+                       started=time.time() - 1.0, level=_level(listener, _HIS_VOICE))
+
+        assert _words(_accepted_query(listener)) == _words("est-elle charismatique")
+        listener.state_manager.stop()
+
+    # -- Hot window -------------------------------------------------------
+
+    @pytest.mark.parametrize("verdict", [
+        _make_judgment(directed=True, query="", confidence="high",
+                       reasoning="hot window, nothing to extract"),
+        _make_judgment(directed=True, query="", confidence="low",
+                       reasoning="hot window, nothing to extract"),
+        _make_judgment(directed=False, confidence="medium", reasoning="background conversation"),
+        _make_judgment(directed=False, confidence="high",
+                       reasoning="an echo of the assistant's own speech"),
+        None,
+    ], ids=["directed-without-query", "directed-without-query-low", "rejected", "echo",
+            "no-verdict"])
+    @patch("builtins.print")
+    def test_his_answer_holding_her_name_in_a_word_is_answered_whole(self, _print, verdict):
+        """His answer, heard in his voice the moment her reply ends, has a
+        word in it that holds her name. It carries no wake word: it is
+        answered as he said it, every letter kept."""
+        listener, last_word = self._her_reply_ends()
+        _install_intent_judge(listener, verdict).last_failure_reason = "timeout"
+
+        _whisper_hears(listener, _HIS_QUESTION_HOLDING_HER_NAME_IN_A_WORD,
+                       started=_just_after(listener, last_word),
+                       level=_level(listener, _HIS_VOICE))
+
+        assert _accepted_query(listener) == _HIS_QUESTION_HOLDING_HER_NAME_IN_A_WORD.lower()
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("verdict", [
+        None,   # the judge's own reading of the mark: her echo
+        _make_judgment(directed=False, confidence="medium",
+                       reasoning="the assistant's own speech, marked during TTS"),
+        _make_judgment(directed=True, query="", confidence="low",
+                       reasoning="hot window, nothing to extract"),
+    ], ids=["echo", "rejected", "directed-without-query"])
+    @patch("builtins.print")
+    def test_his_quiet_words_holding_her_name_in_a_word_are_weighed_as_words_that_could_be_hers(
+            self, mock_print, verdict):
+        """Said quietly the moment she stops, his words could be hers, and a
+        word holding her name is no wake word of his to hand them to the
+        wake-word check: they are set aside as any words that could be hers
+        are, and never answered with letters cut out."""
+        listener, last_word = self._her_reply_ends()
+        _judge_that_reads_the_marker(listener, on_hers=verdict)
+
+        _whisper_hears(listener, _HIS_QUESTION_HOLDING_HER_NAME_IN_A_WORD,
+                       started=_just_after(listener, last_word), level=_level(listener, 0.8))
+
+        assert _accepted_query(listener) == ""
+        assert _console_says_heard_as_her_echo(mock_print, _HIS_QUESTION_HOLDING_HER_NAME_IN_A_WORD)
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_with_no_verdict_his_quiet_words_holding_her_name_in_a_word_are_set_aside(
+            self, mock_print):
+        listener, last_word = self._her_reply_ends()
+        _install_intent_judge(listener, None).last_failure_reason = "timeout"
+
+        _whisper_hears(listener, _HIS_QUESTION_HOLDING_HER_NAME_IN_A_WORD,
+                       started=_just_after(listener, last_word), level=_level(listener, 0.8))
+
+        assert _the_judge_gave_no_verdict(mock_print)
+        assert _accepted_query(listener) == ""
+        assert _console_says_heard_as_her_echo(mock_print, _HIS_QUESTION_HOLDING_HER_NAME_IN_A_WORD)
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("said", _HIS_WORDS_AROUND_HER_NAME, ids=["name-first", "name-last"])
+    @pytest.mark.parametrize("judged", [True, False], ids=["echo-verdict", "no-verdict"])
+    @patch("builtins.print")
+    def test_his_quiet_answer_naming_her_is_answered_with_his_words_whole(
+            self, _print, judged, said):
+        """His quiet answer the moment she stops could be hers, but her name
+        in it, said as a word, can only be his call: the wake-word check
+        answers it, her name taken out and every other word kept whole."""
+        listener, last_word = self._her_reply_ends()
+        if judged:
+            _judge_that_reads_the_marker(listener)
+        else:
+            _install_intent_judge(listener, None).last_failure_reason = "timeout"
+        name = _a_spelling_of_her_name(listener.cfg)
+
+        _whisper_hears(listener, said.format(name=name.capitalize()),
+                       started=_just_after(listener, last_word), level=_level(listener, 0.8))
+
+        assert _words(_accepted_query(listener)) == _words("est-elle charismatique")
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("judged", [True, False], ids=["echo-verdict", "no-verdict"])
+    @patch("builtins.print")
+    def test_after_a_reply_holding_her_name_in_a_word_his_quiet_wake_word_decides(
+            self, _print, judged):
+        """Her reply had a word in it that holds her name, which is not her
+        name: his quiet answer naming her the moment she stops is still his
+        call, answered with his words kept."""
+        listener, last_word = self._her_reply_ends(_HER_REPLY_HOLDING_HER_NAME_IN_A_WORD)
+        if judged:
+            _judge_that_reads_the_marker(listener)
+        else:
+            _install_intent_judge(listener, None).last_failure_reason = "timeout"
+        name = _a_spelling_of_her_name(listener.cfg)
+
+        _whisper_hears(listener, f"{name.capitalize()}, {_HIS_QUESTION}",
+                       started=_just_after(listener, last_word), level=_level(listener, 0.8))
+
+        assert _words(_accepted_query(listener)) == _words(_HIS_QUESTION)
+        listener.state_manager.stop()
+
+
+# ---------------------------------------------------------------------------
+# Tests: His answer after a reply she spoke as she wrote it
+# ---------------------------------------------------------------------------
+
+# A reply long enough to be spoken sentence by sentence, ending on a question.
+_HER_STREAMED_REPLY = ("La réunion de lundi est confirmée. "
+                       "Votre collègue apportera les documents imprimés. "
+                       "Avez-vous une autre question ?")
+# He answers softly: above the bar the room's floor sets, well below her
+# voice coming back through the speakers.
+_HIS_SOFT_VOICE = 1.5
+# That reply coming back decimated by Whisper as she stops, every word still
+# hers: the contiguous echo check misses it.
+_HER_STREAMED_WORDS_DECIMATED = "réunion lundi collègue documents autre question"
+
+
+def _the_microphone_hears(listener, level: float) -> None:
+    """Two seconds of audio at *level*, 20 ms frames, through the audio
+    loop's own voice detector, which keeps the recent levels the floor is
+    read from."""
+    for _ in range(100):
+        listener._is_speech_frame(np.full(320, level, dtype=np.float32))
+
+
+def _she_streams(listener, reply: str) -> float:
+    """She says *reply* as she writes it, the way the reply thread does: each
+    sentence is queued as it closes, the first while the room is quiet and
+    each later one while the microphone hears her say the one before, then
+    the tail once the reply is written. The end-of-reply callback the tail
+    carries stamps her last word and schedules the hot window. Returns when
+    her voice stopped."""
+    listener.tts.voice_delay.return_value = 0.0
+    _the_microphone_hears(listener, _FLOOR)
+    on_token = listener._speak_as_it_comes(_Turn("question"))
+    queued = 0
+    for i in range(0, len(reply), 9):
+        on_token(reply[i:i + 9])
+        if listener.tts.speak.call_count > queued:
+            queued = listener.tts.speak.call_count
+            _the_microphone_hears(listener, _level(listener, _HER_VOICE))
+    listener._speak_reply(reply)
+    assert queued >= 2, "the reply was not spoken sentence by sentence"
+    last_word = time.time()
+    listener.tts.speak.call_args.kwargs["completion_callback"]()
+    return last_word
+
+
+@pytest.mark.unit
+class TestHisAnswerAfterAReplySpokenAsItWasWritten:
+    """She speaks a long reply as she writes it, sentence by sentence, and
+    he answers its closing question at once, softly.
+
+    The voice proof weighs his answer against `energy_spike_threshold` times
+    the floor recorded when she started speaking (listening.spec.md,
+    "Overriding an echo verdict takes positive evidence"). A later sentence
+    of such a reply can be queued while the microphone hears her say an
+    earlier one: a floor read then is her voice, and his soft answer right
+    after her last word, under the bar it sets, would be shown to the judge
+    as her echo and set aside."""
+
+    def _her_reply_ends(self):
+        listener, _ = _create_listener(echo_tolerance=0.1, hot_window_seconds=0.2)
+        last_word = _she_streams(listener, _HER_STREAMED_REPLY)
+        assert _wait_for_hot_window_active(listener)
+        return listener, last_word
+
+    @patch("builtins.print")
+    def test_his_soft_answer_is_answered(self, _print):
+        listener, last_word = self._her_reply_ends()
+        _judge_that_reads_the_marker(listener)
+
+        _whisper_hears(listener, _HIS_QUESTION, started=_just_after(listener, last_word),
+                       level=_level(listener, _HIS_SOFT_VOICE))
+
+        assert "lyon" in _accepted_query(listener).lower()
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_a_phrase_made_of_the_quiet_then_is_not_answered(self, mock_print):
+        """The control: the floor her reply started with still holds a
+        phrase Whisper makes of the room just after her under the bar."""
+        listener, last_word = self._her_reply_ends()
+        _judge_that_reads_the_marker(listener)
+
+        _whisper_hears(listener, "Merci.", started=_just_after(listener, last_word),
+                       level=_level(listener, _ROOM_NOISE))
+
+        assert _accepted_query(listener) == ""
+        assert _console_says_heard_as_her_echo(mock_print, "merci.")
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_her_own_words_coming_back_then_are_not(self, mock_print):
+        """Her echo as she stops, decimated by Whisper so that the text check
+        misses it. At her own level it clears the bar the room's floor sets,
+        so only its words show it is hers: it is still shown to the judge as
+        hers and set aside."""
+        listener, last_word = self._her_reply_ends()
+        judge = _judge_that_reads_the_marker(listener)
+        heard = _HER_STREAMED_WORDS_DECIMATED
+        assert (fuzz.partial_ratio(heard, _HER_STREAMED_REPLY.lower())
+                < EchoDetector.PURE_ECHO_THRESHOLD)
+
+        _whisper_hears(listener, heard, started=last_word - 1.5,
+                       level=_level(listener, _HER_VOICE))
+
+        assert "during TTS" in _current_line_shown_to(judge)
+        assert _accepted_query(listener) == ""
+        assert _console_says_heard_as_her_echo(mock_print, heard)
         listener.state_manager.stop()
 
 
@@ -2763,6 +3058,313 @@ class TestWhatWhisperMakesOfSilenceWhileHeAsks:
         shown = _prompt_shown_to(judge)
         assert "sous-titrage" not in shown
         assert "ça va aujourd'hui" in shown
+        listener.state_manager.stop()
+
+
+def _starts_with_an_emoji(line: str) -> bool:
+    """Whether a console line opens on an emoji once its leading spaces and
+    newlines are set aside: every line he reads says first what it is about."""
+    shown = line.lstrip()
+    return bool(shown) and unicodedata.category(shown[0]) == "So"
+
+
+class _SilentTune:
+    """The thinking tune, heard by nobody: it only knows whether it plays,
+    and whether it ever played. It opens no audio device and draws nothing
+    on the console, whatever the machine the tests run on."""
+
+    def __init__(self, enabled: bool = True) -> None:
+        self.playing = False
+        self.played = False
+
+    def start_tune(self) -> None:
+        self.playing = self.played = True
+
+    def stop_tune(self) -> None:
+        self.playing = False
+
+    def is_playing(self) -> bool:
+        return self.playing
+
+
+def _lines_for_him(mock_print) -> list:
+    """The console lines printed for him to read. Debug output goes to
+    stderr, and only while voice debugging is on: it is not among them."""
+    return [" ".join(str(arg) for arg in call.args)
+            for call in mock_print.call_args_list
+            if call.kwargs.get("file", sys.stdout) is not sys.stderr]
+
+
+def _his_silence_runs_out(listener) -> None:
+    """The audio loop reads on in silence until his question's silence has
+    lasted as long as any question's does."""
+    listener._check_query_timeout(time.time() + listener.state_manager.voice_collect_seconds)
+
+
+def _she_waits_for_his_question(listener, mock_print) -> None:
+    """Her name alone opened a question with nothing in it yet, and the
+    console says she waits for it rather than announcing a question with
+    nothing after it."""
+    pending = listener.state_manager.get_pending_query()
+    assert listener.state_manager.is_collecting(), "she does not wait for his question"
+    assert pending == "", f"her name was taken for his question: {pending!r}"
+    lines = _lines_for_him(mock_print)
+    assert lines and all(_starts_with_an_emoji(line) for line in lines), lines
+    assert not any(line.strip().endswith(":") for line in lines), lines
+
+
+def _the_wait_ended(listener, mock_print, state) -> None:
+    """His silence ran out on a question with nothing in it: nothing is
+    handed over, the console says so, and *state* is what is published."""
+    from jarvis.state import get_jarvis_state
+
+    assert not listener.state_manager.is_collecting(), "she still waits"
+    assert listener._turns.empty(), "a question with nothing in it was answered"
+    assert get_jarvis_state().state == state
+    lines = _lines_for_him(mock_print)
+    assert lines, "the wait ended with nothing on the console"
+    assert all(_starts_with_an_emoji(line) for line in lines), lines
+
+
+@pytest.mark.unit
+class TestHerNameAloneThenSilence:
+    """He says only her name, "Jarvis ?", and nothing after it: a question
+    with nothing in it yet. She waits for it as for any question, however
+    sure the judge is that he spoke to her, and when nothing comes the wait
+    ends where he can see it: a console line says so, and she goes back to
+    what she is doing, idle with the tune stopped unless she speaks, a reply
+    of hers is on its way or he dictates. A quiet "Jarvis ?" heard in her
+    time, which the judge gives no verdict on, comes to the same wait
+    through the hot window.
+    """
+
+    @pytest.fixture(autouse=True)
+    def tunes(self, monkeypatch):
+        """Every thinking tune she starts, silent."""
+        started = []
+
+        def a_tune(enabled=True):
+            tune = _SilentTune(enabled)
+            started.append(tune)
+            return tune
+
+        monkeypatch.setattr("jarvis.output.tune_player.TunePlayer", a_tune)
+        return started
+
+    @patch("builtins.print")
+    def test_the_console_says_she_waits_for_his_question(self, mock_print):
+        """Not a question announced with nothing after it."""
+        listener, _ = _create_listener()
+
+        listener._process_transcript("Jarvis ?", utterance_energy=0.01)
+
+        _she_waits_for_his_question(listener, mock_print)
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize(
+        "heard", ["¿Jarvis?", "Jarvis…", "Jarvis？", "Jarvis ? Jarvis ?", "Jarvis! Jarvis!"],
+        ids=["inverted-mark", "ellipsis", "full-width-mark", "twice", "exclaimed-twice"])
+    @patch("builtins.print")
+    def test_her_name_alone_as_whisper_writes_it(self, mock_print, heard):
+        """Whatever punctuation Whisper sets around her name, in whatever
+        language, no word is left once it is taken out: her name alone."""
+        from jarvis.state import JarvisState
+
+        listener, _ = _create_listener()
+
+        listener._process_transcript(heard, utterance_energy=0.01)
+
+        _she_waits_for_his_question(listener, mock_print)
+        mock_print.reset_mock()
+        _his_silence_runs_out(listener)
+        _the_wait_ended(listener, mock_print, JarvisState.IDLE)
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("query", ["", "?", "Jarvis"], ids=["no-query", "punctuation", "her-name"])
+    @patch("builtins.print")
+    def test_a_sure_verdict_on_her_name_alone_waits_for_his_question(self, mock_print, query):
+        """The judge is sure he spoke to her and finds no question beyond
+        her name: she waits for his question rather than answering her name
+        as if it were one."""
+        from jarvis.state import JarvisState
+
+        listener, _ = _create_listener()
+        _install_intent_judge(listener, _make_judgment(directed=True, query=query, confidence="high"))
+
+        listener._process_transcript("Jarvis ?", utterance_energy=0.01)
+
+        _she_waits_for_his_question(listener, mock_print)
+        mock_print.reset_mock()
+        _his_silence_runs_out(listener)
+        _the_wait_ended(listener, mock_print, JarvisState.IDLE)
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_a_question_the_judge_finds_in_his_earlier_words_is_answered(self, _print):
+        """He asked without her name, then said it alone: the question the
+        judge reads in what he said before is his, and it is answered."""
+        listener, _ = _create_listener()
+        _install_intent_judge(listener, _make_judgment(directed=True, query=_HIS_QUESTION,
+                                                       confidence="high"))
+
+        listener._process_transcript("Jarvis ?", utterance_energy=0.01)
+        _his_silence_runs_out(listener)
+
+        assert listener._turns.get_nowait().query == _HIS_QUESTION
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("tune", [True, False], ids=["tune", "no-tune"])
+    @patch("builtins.print")
+    def test_the_wait_ends_where_he_can_see_it(self, mock_print, tunes, tune):
+        from jarvis.state import JarvisState, get_jarvis_state
+
+        listener, _ = _create_listener()
+        listener.cfg.tune_enabled = tune
+        get_jarvis_state().set_state(JarvisState.IDLE)
+        listener._process_transcript("Jarvis ?", utterance_energy=0.01)
+        assert any(t.playing for t in tunes) == tune
+        mock_print.reset_mock()
+
+        _his_silence_runs_out(listener)
+
+        _the_wait_ended(listener, mock_print, JarvisState.IDLE)
+        assert not any(t.playing for t in tunes), "the thinking tune plays on"
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_through_the_hot_window_the_wait_ends_the_same_way(self, mock_print, tunes):
+        """Just after her reply, a quiet "Jarvis ?" could be her own voice,
+        and the judge gives no verdict on it. She did not say the wake word,
+        so the wake-word check decides, and it finds nothing after it."""
+        from jarvis.state import JarvisState
+
+        listener, _ = _create_listener(echo_tolerance=0.1, hot_window_seconds=0.2)
+        listener.cfg.tune_enabled = True
+        last_word = _she_says(listener, _HER_REPLY)
+        assert _wait_for_hot_window_active(listener)
+        _install_intent_judge(listener, None).last_failure_reason = "timeout"
+        mock_print.reset_mock()
+        _whisper_hears(listener, "Jarvis ?", started=_just_after(listener, last_word),
+                       level=_level(listener, 0.8))
+        assert _the_judge_gave_no_verdict(mock_print)
+        _she_waits_for_his_question(listener, mock_print)
+        mock_print.reset_mock()
+
+        _his_silence_runs_out(listener)
+
+        _the_wait_ended(listener, mock_print, JarvisState.IDLE)
+        assert not any(t.playing for t in tunes), "the thinking tune plays on"
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_if_she_is_speaking_when_it_ends_she_is_shown_speaking(self, mock_print, tunes):
+        """She began to speak while he was silent. The tune was the
+        question's own and never plays over her voice."""
+        from jarvis.state import JarvisState
+
+        listener, tts = _create_listener()
+        listener.cfg.tune_enabled = True
+        listener._process_transcript("Jarvis ?", utterance_energy=0.01)
+        tts.is_speaking.return_value = True
+        mock_print.reset_mock()
+
+        _his_silence_runs_out(listener)
+
+        _the_wait_ended(listener, mock_print, JarvisState.SPEAKING)
+        assert not any(t.playing for t in tunes), "the thinking tune plays over her voice"
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_her_name_alone_while_she_speaks_is_waited_on_without_the_tune(self, mock_print, tunes):
+        """Said while she speaks, her name alone is waited on like any
+        other, and the tune never plays over her voice."""
+        from jarvis.state import JarvisState
+
+        listener, _ = _create_listener(tts_speaking=True)
+        listener.cfg.tune_enabled = True
+
+        listener._process_transcript("Jarvis ?", utterance_energy=0.01)
+
+        _she_waits_for_his_question(listener, mock_print)
+        assert not any(t.playing for t in tunes), "the thinking tune plays over her voice"
+        mock_print.reset_mock()
+        _his_silence_runs_out(listener)
+        _the_wait_ended(listener, mock_print, JarvisState.SPEAKING)
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_while_he_dictates_the_dictation_keeps_its_state(self, mock_print, tunes):
+        """He said her name, then held the dictation key before his silence
+        ran out: the wait ends without taking the dictation's state from it."""
+        from jarvis.state import JarvisState, get_jarvis_state
+
+        listener, _ = _create_listener()
+        listener.cfg.tune_enabled = True
+        listener._process_transcript("Jarvis ?", utterance_energy=0.01)
+        # What the dictation's start does (daemon.py).
+        listener._dictation_active = True
+        get_jarvis_state().set_state(JarvisState.DICTATING)
+        mock_print.reset_mock()
+
+        _his_silence_runs_out(listener)
+
+        _the_wait_ended(listener, mock_print, JarvisState.DICTATING)
+        assert not any(t.playing for t in tunes), "the thinking tune plays on through the dictation"
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_punctuation_heard_while_she_waits_is_nothing_to_answer(self, mock_print):
+        """Whisper writes "..." out of the quiet while she waits, and the
+        judge cannot be reached to call it noise: it joins his question,
+        which still holds no letter or digit, so nothing is answered."""
+        from jarvis.state import JarvisState
+
+        listener, _ = _create_listener()
+        _install_intent_judge(listener, None).last_failure_reason = "timeout"
+        listener._process_transcript("Jarvis ?", utterance_energy=0.01)
+        listener._process_transcript("...", utterance_energy=0.01)
+        assert listener.state_manager.get_pending_query().strip() == "...", \
+            "the punctuation did not join the wait"
+        mock_print.reset_mock()
+
+        _his_silence_runs_out(listener)
+
+        _the_wait_ended(listener, mock_print, JarvisState.IDLE)
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_what_he_says_before_his_silence_runs_out_is_answered(self, _print, tunes):
+        listener, _ = _create_listener()
+        listener.cfg.tune_enabled = True
+        listener._process_transcript("Jarvis ?", utterance_energy=0.01)
+        collect = listener.state_manager.voice_collect_seconds
+
+        listener._check_query_timeout(time.time() + collect / 2)
+        assert listener.state_manager.is_collecting(), "she gave up before his silence ran out"
+        assert any(t.playing for t in tunes)
+
+        ended = time.time()
+        listener._transcript_buffer.add(_HIS_QUESTION, ended - 1.0, ended, 0.01)
+        listener._process_transcript(_HIS_QUESTION, 0.01, ended - 1.0, ended)
+        listener._check_query_timeout(ended + collect)
+
+        assert listener._turns.get_nowait().query == _HIS_QUESTION
+        listener.state_manager.stop()
+
+    def test_the_wait_reaches_a_piped_console_at_once(self, monkeypatch):
+        """Run from source, she prints into the pipe the desktop app reads,
+        which holds what is printed until it is flushed: the line saying she
+        waits reaches it while she waits, not once the wait is over."""
+        piped = io.BytesIO()
+        console = io.TextIOWrapper(piped, encoding="utf-8")
+        monkeypatch.setattr(sys, "stdout", console)
+        listener, _ = _create_listener()
+
+        listener._process_transcript("Jarvis ?", utterance_energy=0.01)
+
+        reached = piped.getvalue()
+        console.flush()
+        assert reached and reached == piped.getvalue(), "what she printed waits in the buffer"
         listener.state_manager.stop()
 
 

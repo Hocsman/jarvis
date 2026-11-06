@@ -106,7 +106,7 @@ def reply_with_fake_geocoder(cfg, text, places):
             return_value={"keywords": []},
         ):
             reply = run_reply_engine(
-                db=db, cfg=cfg, tts=None, text=text,
+                db=db, cfg=cfg, tts=None, origin="voix", text=text,
                 dialogue_memory=DialogueMemory(inactivity_timeout=300),
                 language="fr",
             )
