@@ -2408,7 +2408,11 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         return {"role": "system", "content": "\n".join(guidance), CACHE_MARKS: marks}
 
     messages = []  # type: ignore[var-annotated]
-    recent_tool_signatures = []  # keep last few tool calls: [(name, stable_args_json)]
+    # (name, stable_args_json) of every call run in this reply, whatever it
+    # returned. A call already in it is not run again: the same call twice
+    # is a loop. Several calls of one tool on different arguments are work
+    # (three folders, three cities); `agentic_max_turns` bounds them.
+    calls_run_this_reply: set[tuple[str, str]] = set()
     # Tools actually invoked during this reply — (name, args_summary, result_summary).
     invoked_tools_history: list[tuple[str, str, str]] = []
     # System message with guidance, tools, and enrichment
@@ -2756,7 +2760,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                         _plan_exec_ok = (
                             _name in allowed_tools
                             and _name != "toolSearchTool"
-                            and _cand_sig not in recent_tool_signatures
+                            and _cand_sig not in calls_run_this_reply
                         )
                         if _plan_exec_ok:
                             debug_log(
@@ -2858,11 +2862,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                                 "tool_name": _name,
                                 "tool_failed": not _plan_result.success,
                             })
-                            recent_tool_signatures.append(_cand_sig)
-                            if len(recent_tool_signatures) > 5:
-                                recent_tool_signatures = (
-                                    recent_tool_signatures[-5:]
-                                )
+                            calls_run_this_reply.add(_cand_sig)
                             invoked_tools_history.append(
                                 (_name, _cand_sig[1], _plan_text)
                             )
@@ -2871,7 +2871,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                             debug_log(
                                 f"planner: rejected plan step exec "
                                 f"({_name!r}: allow_list={_name in allowed_tools}, "
-                                f"dup={_cand_sig in recent_tool_signatures})",
+                                f"dup={_cand_sig in calls_run_this_reply})",
                                 "planning",
                             )
                 except Exception as _pe:  # pragma: no cover — defensive
@@ -3070,49 +3070,36 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
             if tool_name == "toolSearchTool":
                 tool_search_calls += 1
 
-            # Check exact signature for duplicate suppression
+            # The same call twice in one reply is a loop; the same tool on
+            # other arguments is the next item of a list. Only an identical
+            # name and arguments is answered from what the first call
+            # returned, whatever that was: a failure repeated word for word
+            # fails again. Calls from earlier replies are not in the set, so
+            # asking the same thing in the next reply runs it afresh.
             try:
                 stable_args = json.dumps(tool_args or {}, sort_keys=True, ensure_ascii=False)
                 signature = (tool_name, stable_args)
             except Exception:
                 signature = (tool_name, "__unserializable_args__")
 
-            if signature in recent_tool_signatures:
-                debug_log(f"  ⚠️ Duplicate {tool_name} call - returning cached guidance", "planning")
+            if signature in calls_run_this_reply:
+                debug_log(
+                    f"  ⚠️ {tool_name} called again with the same arguments "
+                    f"({len(calls_run_this_reply)} calls run this reply) - "
+                    f"answered from the earlier result",
+                    "planning",
+                )
+                # "called", not "ran": the first call may have been refused
+                # by the gate or failed before it produced anything.
+                print(
+                    f"    ⚠️ Not run again: {tool_name} already called with "
+                    f"these arguments in this reply",
+                    flush=True,
+                )
                 if use_text_tools:
                     messages.append({"role": "user", "content": f"[Tool: {tool_name}] You already called this tool with these arguments. Use the results from the previous tool call to answer the user."})
                 else:
                     messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": f"You already called {tool_name} with these exact arguments. The results are in the previous messages. Please use those results to answer the user."})
-                continue
-
-            # Check if we already have results for this type of tool (prevents tool call loops).
-            # In native-tools mode results carry role="tool"; in text-tools mode they carry
-            # role="user" with a "tool_name" key — check both to make the guard effective
-            # in small-model paths where direct-exec is most likely to loop.
-            # Only results produced during THIS reply count. Tool results
-            # replayed from dialogue carryover sit before `user_msg_index`
-            # and belong to earlier queries, so counting them refuses the
-            # first call of a turn: ask about London twice, then ask about
-            # Tokyo, and the model is told to use results it never got.
-            # Same split `_maybe_record_tool_carryover` and the end-of-loop
-            # digest already use.
-            _this_turn = messages[user_msg_index + 1:]
-            duplicate_tool_count = sum(
-                1 for msg in _this_turn[-10:]
-                if msg.get("tool_name") == tool_name
-                and msg.get("role") in ("tool", "user")
-            )
-            if duplicate_tool_count >= 2:
-                debug_log(f"  ⚠️ Too many {tool_name} calls ({duplicate_tool_count}) - returning guidance", "planning")
-                print(
-                    f"    ⚠️ Refused: {tool_name} already returned "
-                    f"{duplicate_tool_count} results this turn",
-                    flush=True,
-                )
-                if use_text_tools:
-                    messages.append({"role": "user", "content": f"[Tool: {tool_name}] You have already called this tool {duplicate_tool_count} times. Use the results from those calls to answer the user's question."})
-                else:
-                    messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": f"You have already called {tool_name} {duplicate_tool_count} times. Please use the results from those calls to answer the user's question."})
                 continue
 
             # Execute tool
@@ -3324,14 +3311,14 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                     messages.append({
                         "role": "user",
                         "content": f"[Tool result: {tool_name}]\n{effective_result}{remainder_hint}",
-                        "tool_name": tool_name,  # kept for duplicate detection
+                        "tool_name": tool_name,  # read by the plan-step count and carry-over
                         "tool_failed": not result.success and not result.refused,
                     })
                 else:
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call_id,
-                        "tool_name": tool_name,  # Include tool_name for duplicate detection
+                        "tool_name": tool_name,  # read by the plan-step count and carry-over
                         "content": effective_result,
                         "tool_failed": not result.success and not result.refused,
                     })
@@ -3340,14 +3327,6 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 # Note: We don't add a guidance system message here because adding system messages
                 # after the conversation starts breaks native tool calling in models like Llama 3.2.
                 # The model should naturally decide to answer, chain tools, or ask for clarification.
-                # Record signature after a successful tool response
-                try:
-                    recent_tool_signatures.append(signature)
-                    # Keep short memory of last 5
-                    if len(recent_tool_signatures) > 5:
-                        recent_tool_signatures = recent_tool_signatures[-5:]
-                except Exception:
-                    pass
                 # Record invoked tool history.
                 try:
                     invoked_tools_history.append(
@@ -3379,6 +3358,9 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                         "tool_failed": True,
                     })
                 debug_log(f"    ❌ tool error: {err}", "planning")
+            # Whatever came back — a result, a refusal, an error — this
+            # exact call has now run once in this reply.
+            calls_run_this_reply.add(signature)
             # Loop continues to let the agent produce the next step/final reply
             continue
 

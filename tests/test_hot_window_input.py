@@ -10,6 +10,7 @@ but use real StateManager and EchoDetector instances to avoid coupling to intern
 """
 
 import io
+import re
 import sys
 import threading
 import time
@@ -1548,25 +1549,6 @@ class TestHisAnswerTheMomentHerReplyEnds:
         assert "lyon" in answered and "jarvis" not in answered
         listener.state_manager.stop()
 
-    @patch("builtins.print")
-    def test_with_no_verdict_his_words_holding_an_alias_are_answered_as_said(self, _print):
-        """With no verdict, his words heard in a voice are answered as he
-        said them, a word of his holding one of the wake word's aliases
-        ("charismatique" holds "charis") included."""
-        listener, last_word = self._her_reply_ends()
-        _with_the_default_aliases(listener)
-        _install_intent_judge(listener, None).last_failure_reason = "timeout"
-        heard = "Est-elle charismatique ?"
-        cfg = listener.cfg
-        assert is_wake_word_detected(heard.lower(), cfg.wake_word, cfg.wake_aliases,
-                                     cfg.wake_fuzzy_ratio)
-
-        _whisper_hears(listener, heard, started=_just_after(listener, last_word),
-                       level=_level(listener, _HIS_VOICE))
-
-        assert _accepted_query(listener) == heard.lower()
-        listener.state_manager.stop()
-
     @pytest.mark.parametrize("verdict", [
         _make_judgment(directed=False, confidence="medium", reasoning="background conversation"),
         _make_judgment(directed=False, confidence="high",
@@ -1797,6 +1779,204 @@ class TestHisAnswerTheMomentHerReplyEnds:
         her_line = next(line for line in _prompt_shown_to(judge).splitlines()
                         if "souhaitez vous soir" in line)
         assert "during TTS" in her_line
+        listener.state_manager.stop()
+
+
+# ---------------------------------------------------------------------------
+# Tests: Her name is a word
+# ---------------------------------------------------------------------------
+
+# A question of his with a word in it that holds one of the spellings Whisper
+# gives her name: "charismatique" holds the alias "charis".
+_HIS_QUESTION_HOLDING_HER_NAME_IN_A_WORD = "Est-elle charismatique ?"
+_HIS_WORDS_AROUND_HER_NAME = ["{name}, est-elle charismatique ?",
+                              "Est-elle charismatique, {name} ?"]
+# Her reply with such a word in it.
+_HER_REPLY_HOLDING_HER_NAME_IN_A_WORD = (
+    "Elle est très charismatique, Monsieur. Voulez-vous en savoir plus ?")
+
+
+def _words(text: str) -> list:
+    """The words of *text*, its punctuation left out."""
+    return re.findall(r"\w+", text)
+
+
+def _her_names(cfg) -> set:
+    return set(cfg.wake_aliases) | {cfg.wake_word}
+
+
+def _a_spelling_of_her_name(cfg) -> str:
+    """One of the spellings Whisper gives her name, as the aliases list
+    them: a single word."""
+    return next(alias for alias in cfg.wake_aliases if " " not in alias)
+
+
+@pytest.mark.unit
+class TestHerNameIsAWord:
+    """Her name is a word. "Charismatique" holds "charis", one of the
+    spellings Whisper gives her name, and it is still a word of his: in
+    wake-word mode and in the hot window alike it neither wakes her nor
+    loses letters. Her name said as a word still wakes her, and is taken
+    out of what he said with every other word kept whole."""
+
+    def _with_her_names(self, listener):
+        _with_the_default_aliases(listener)
+        assert any(name in "charismatique" for name in _her_names(listener.cfg))
+        return listener
+
+    def _her_reply_ends(self, reply=_HER_REPLY):
+        listener, _ = _create_listener(echo_tolerance=0.1, hot_window_seconds=0.2)
+        self._with_her_names(listener)
+        last_word = _she_says(listener, reply)
+        assert _wait_for_hot_window_active(listener)
+        return listener, last_word
+
+    # -- Wake-word mode ---------------------------------------------------
+
+    @pytest.mark.parametrize("verdict", [
+        _make_judgment(directed=True, query="est-elle charismatique ?",
+                       reasoning="a question about someone"),
+        _make_judgment(directed=False, confidence="low", reasoning="unsure who is addressed"),
+        None,
+    ], ids=["directed", "unsure", "no-verdict"])
+    @patch("builtins.print")
+    def test_a_word_holding_her_name_does_not_wake_her(self, _print, verdict):
+        listener, _ = _create_listener()
+        self._with_her_names(listener)
+        _install_intent_judge(listener, verdict).last_failure_reason = "timeout"
+
+        _whisper_hears(listener, _HIS_QUESTION_HOLDING_HER_NAME_IN_A_WORD,
+                       started=time.time() - 1.0, level=_level(listener, _HIS_VOICE))
+
+        assert _accepted_query(listener) == ""
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("said", _HIS_WORDS_AROUND_HER_NAME, ids=["name-first", "name-last"])
+    @pytest.mark.parametrize("verdict", [
+        _make_judgment(directed=False, confidence="low", reasoning="unsure who is addressed"),
+        None,
+    ], ids=["unsure", "no-verdict"])
+    @patch("builtins.print")
+    def test_her_name_wakes_her_and_his_words_are_kept_whole(self, _print, verdict, said):
+        """One of the spellings Whisper gives her name wakes her wherever he
+        says it, set off by punctuation. The wake-word check takes it out of
+        what he said, and keeps every other word as he said it."""
+        listener, _ = _create_listener()
+        self._with_her_names(listener)
+        name = _a_spelling_of_her_name(listener.cfg)
+        _install_intent_judge(listener, verdict).last_failure_reason = "timeout"
+
+        _whisper_hears(listener, said.format(name=name.capitalize()),
+                       started=time.time() - 1.0, level=_level(listener, _HIS_VOICE))
+
+        assert _words(_accepted_query(listener)) == _words("est-elle charismatique")
+        listener.state_manager.stop()
+
+    # -- Hot window -------------------------------------------------------
+
+    @pytest.mark.parametrize("verdict", [
+        _make_judgment(directed=True, query="", confidence="high",
+                       reasoning="hot window, nothing to extract"),
+        _make_judgment(directed=True, query="", confidence="low",
+                       reasoning="hot window, nothing to extract"),
+        _make_judgment(directed=False, confidence="medium", reasoning="background conversation"),
+        _make_judgment(directed=False, confidence="high",
+                       reasoning="an echo of the assistant's own speech"),
+        None,
+    ], ids=["directed-without-query", "directed-without-query-low", "rejected", "echo",
+            "no-verdict"])
+    @patch("builtins.print")
+    def test_his_answer_holding_her_name_in_a_word_is_answered_whole(self, _print, verdict):
+        """His answer, heard in his voice the moment her reply ends, has a
+        word in it that holds her name. It carries no wake word: it is
+        answered as he said it, every letter kept."""
+        listener, last_word = self._her_reply_ends()
+        _install_intent_judge(listener, verdict).last_failure_reason = "timeout"
+
+        _whisper_hears(listener, _HIS_QUESTION_HOLDING_HER_NAME_IN_A_WORD,
+                       started=_just_after(listener, last_word),
+                       level=_level(listener, _HIS_VOICE))
+
+        assert _accepted_query(listener) == _HIS_QUESTION_HOLDING_HER_NAME_IN_A_WORD.lower()
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("verdict", [
+        None,   # the judge's own reading of the mark: her echo
+        _make_judgment(directed=False, confidence="medium",
+                       reasoning="the assistant's own speech, marked during TTS"),
+        _make_judgment(directed=True, query="", confidence="low",
+                       reasoning="hot window, nothing to extract"),
+    ], ids=["echo", "rejected", "directed-without-query"])
+    @patch("builtins.print")
+    def test_his_quiet_words_holding_her_name_in_a_word_are_weighed_as_words_that_could_be_hers(
+            self, mock_print, verdict):
+        """Said quietly the moment she stops, his words could be hers, and a
+        word holding her name is no wake word of his to hand them to the
+        wake-word check: they are set aside as any words that could be hers
+        are, and never answered with letters cut out."""
+        listener, last_word = self._her_reply_ends()
+        _judge_that_reads_the_marker(listener, on_hers=verdict)
+
+        _whisper_hears(listener, _HIS_QUESTION_HOLDING_HER_NAME_IN_A_WORD,
+                       started=_just_after(listener, last_word), level=_level(listener, 0.8))
+
+        assert _accepted_query(listener) == ""
+        assert _console_says_heard_as_her_echo(mock_print, _HIS_QUESTION_HOLDING_HER_NAME_IN_A_WORD)
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_with_no_verdict_his_quiet_words_holding_her_name_in_a_word_are_set_aside(
+            self, mock_print):
+        listener, last_word = self._her_reply_ends()
+        _install_intent_judge(listener, None).last_failure_reason = "timeout"
+
+        _whisper_hears(listener, _HIS_QUESTION_HOLDING_HER_NAME_IN_A_WORD,
+                       started=_just_after(listener, last_word), level=_level(listener, 0.8))
+
+        assert _the_judge_gave_no_verdict(mock_print)
+        assert _accepted_query(listener) == ""
+        assert _console_says_heard_as_her_echo(mock_print, _HIS_QUESTION_HOLDING_HER_NAME_IN_A_WORD)
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("said", _HIS_WORDS_AROUND_HER_NAME, ids=["name-first", "name-last"])
+    @pytest.mark.parametrize("judged", [True, False], ids=["echo-verdict", "no-verdict"])
+    @patch("builtins.print")
+    def test_his_quiet_answer_naming_her_is_answered_with_his_words_whole(
+            self, _print, judged, said):
+        """His quiet answer the moment she stops could be hers, but her name
+        in it, said as a word, can only be his call: the wake-word check
+        answers it, her name taken out and every other word kept whole."""
+        listener, last_word = self._her_reply_ends()
+        if judged:
+            _judge_that_reads_the_marker(listener)
+        else:
+            _install_intent_judge(listener, None).last_failure_reason = "timeout"
+        name = _a_spelling_of_her_name(listener.cfg)
+
+        _whisper_hears(listener, said.format(name=name.capitalize()),
+                       started=_just_after(listener, last_word), level=_level(listener, 0.8))
+
+        assert _words(_accepted_query(listener)) == _words("est-elle charismatique")
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("judged", [True, False], ids=["echo-verdict", "no-verdict"])
+    @patch("builtins.print")
+    def test_after_a_reply_holding_her_name_in_a_word_his_quiet_wake_word_decides(
+            self, _print, judged):
+        """Her reply had a word in it that holds her name, which is not her
+        name: his quiet answer naming her the moment she stops is still his
+        call, answered with his words kept."""
+        listener, last_word = self._her_reply_ends(_HER_REPLY_HOLDING_HER_NAME_IN_A_WORD)
+        if judged:
+            _judge_that_reads_the_marker(listener)
+        else:
+            _install_intent_judge(listener, None).last_failure_reason = "timeout"
+        name = _a_spelling_of_her_name(listener.cfg)
+
+        _whisper_hears(listener, f"{name.capitalize()}, {_HIS_QUESTION}",
+                       started=_just_after(listener, last_word), level=_level(listener, 0.8))
+
+        assert _words(_accepted_query(listener)) == _words(_HIS_QUESTION)
         listener.state_manager.stop()
 
 
