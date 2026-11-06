@@ -2339,6 +2339,17 @@ class VoiceListener(threading.Thread):
                 print("  ⚠️  Speech detection failed; using audio-level detection. Enable voice_debug for details.", flush=True)
             return rms >= float(getattr(self.cfg, "voice_min_energy", 0.0045))
 
+    def _whisper_vad(self) -> bool:
+        """Whether faster-whisper's own voice detector (Silero) cuts what
+        holds no speech before the decoder hears it (`whisper_vad`).
+
+        Out of an utterance of breath or room noise the decoder writes a
+        sentence, which `large-v3-turbo` reports with a `no_speech_prob` of
+        0.0, so no filter after it can tell; with the detector, such an
+        utterance comes back empty. MLX Whisper has no detector.
+        """
+        return bool(getattr(self.cfg, "whisper_vad", True))
+
     def _filter_noisy_segments(self, segments):
         """Filter out low-confidence Whisper segments."""
         min_confidence = getattr(self.cfg, "whisper_min_confidence", 0.3)
@@ -3214,6 +3225,16 @@ class VoiceListener(threading.Thread):
                         segments_iter, _ = self.model.transcribe(warmup_audio, language=self.cfg.whisper_language)
                     for _ in segments_iter:
                         pass
+                    if self._whisper_vad():
+                        # The voice detector loads its own model on first
+                        # use (about 0.2 s). The decode above ran without
+                        # it, since it would have cut this noise away; one
+                        # pass through it here loads it, and finding no
+                        # speech, decodes nothing.
+                        segments_iter, _ = self.model.transcribe(
+                            warmup_audio, language=self.cfg.whisper_language, vad_filter=True)
+                        for _ in segments_iter:
+                            pass
                     debug_log("faster-whisper warmup transcription complete", "voice")
                 except Exception as e:
                     debug_log(f"faster-whisper warmup failed: {e}", "voice")
@@ -3623,7 +3644,8 @@ class VoiceListener(threading.Thread):
                 with self.transcribe_lock:
                     try:
                         segments, _info = self.model.transcribe(
-                            audio, language=self.cfg.whisper_language, vad_filter=False,
+                            audio, language=self.cfg.whisper_language,
+                            vad_filter=self._whisper_vad(),
                             condition_on_previous_text=not cpu_mode,
                             without_timestamps=cpu_mode,
                         )
@@ -3654,6 +3676,8 @@ class VoiceListener(threading.Thread):
         )
 
         if not text or not text.strip():
+            debug_log(f"utterance of {audio_duration:.1f}s heard as nothing "
+                      f"(whisper_vad={self._whisper_vad()})", "voice")
             self.state_manager.check_hot_window_expiry(self.cfg.voice_debug)
             return
 

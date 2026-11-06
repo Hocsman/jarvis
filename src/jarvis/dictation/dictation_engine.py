@@ -637,6 +637,9 @@ class DictationEngine:
         self._cfg = cfg
         # The language Whisper transcribes in, as for the listener; None: it detects.
         self._whisper_language = whisper_language
+        # Whether Whisper's voice detector cuts what holds no speech, as for
+        # the listener: a press with nothing said then pastes nothing.
+        self._whisper_vad = bool(getattr(cfg, "whisper_vad", True))
         self._chat_model = chat_model
         self._thinking = thinking
 
@@ -1207,7 +1210,7 @@ class DictationEngine:
         try:
             try:
                 segments, _info = model.transcribe(audio, language=self._whisper_language,
-                                                   vad_filter=False)
+                                                   vad_filter=self._whisper_vad)
             except TypeError:
                 segments, _info = model.transcribe(audio, language=self._whisper_language)
             return " ".join(seg.text for seg in segments).strip()

@@ -85,7 +85,10 @@ After transcription, text passes through these stages in order:
 - **Shared Whisper model** via lazy reference (`lambda: voice_thread.model`)
   and backend info — no double memory usage. It transcribes in
   `whisper_language` when one is named, as the listener does, and detects
-  the language otherwise.
+  the language otherwise. With `whisper_vad` on (the default), Whisper's
+  voice detector cuts what holds no speech before it decodes, as for the
+  listener, so a press with nothing said pastes nothing rather than a
+  phrase Whisper wrote into the silence. MLX Whisper has no detector.
 - **Separate `sounddevice.InputStream`** for dictation audio — avoids
   modifying the complex listener code.
 - **Pause flag** on the main listener to prevent dictation speech being
