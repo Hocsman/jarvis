@@ -132,7 +132,11 @@ The face costs the GPU nothing while no one can see it.
 - Otherwise it rests, whatever audio it is handed: no chunk, no frame, no GPU
   work. A viewer who arrives while she speaks sees her from the next chunk
   that can still be drawn on time.
-- Frames still inside Ditto when it rests are never published.
+- Frames still inside Ditto when it rests are never published, and those
+  already published are withdrawn: whoever watches next never sees a frame
+  from before the rest, however long a front end holds her last frame. The
+  rest works as a cut covering every stamp, so the writer itself refuses a
+  frame drawn before it, even one Ditto's thread hands back as it happens.
 - The renderer tells its handle each time that changes (`watched`), and
   Kyutai holds her voice back for the face only while someone watches:
   with nobody watching she speaks at once.
@@ -184,7 +188,8 @@ It holds a header and a ring of 24 frames of 512 by 512 RGB pixels.
   viewer heartbeat and the renderer heartbeat.
 - **A slot** holds a sequence number, a stamp and the pixels. The renderer
   writes the pixels and the stamp first and the sequence number last, and a
-  cut withdraws a slot by clearing its sequence number. A reader copies a slot
+  cut withdraws a slot by clearing its sequence number; a rest clears them
+  all. A reader copies a slot
   and keeps the copy only if the sequence number was the same before and
   after, so a copy torn by a concurrent write is thrown away, never shown.
 - **The renderer beats** into the header on every turn of its loop, resting
@@ -270,10 +275,16 @@ is off until the daemon starts again, and nothing she says depends on it.
 
 A frame that comes after its stamp is not a failure: a front end shows the
 newest frame due and skips the rest. When Ditto falls behind, so that a frame
-it still owes should already be on screen, the renderer skips the chunk that
-falls due rather than queue it behind, so the face catches up with the voice
-instead of trailing it. It counts the frames it published after their stamp
-and the chunks it skipped, and logs both when it rests.
+it could already have drawn should already be on screen, the renderer skips
+the chunk that falls due rather than queue it behind, so the face catches up
+with the voice instead of trailing it. Ditto hands a chunk's frames back only
+once the next chunk is fed, so the last chunk's frames are never counted as
+owed: counting them would skip every chunk after the GPU was taken elsewhere
+for a moment, and the face would never come back while someone watched. A run
+of skipped chunks that reaches a second of her face is logged as it happens,
+and again when Ditto catches up; shorter runs are only counted. The renderer
+counts the frames it published after their stamp and the chunks it skipped,
+and logs both when it rests.
 
 ## Configuration
 
@@ -296,13 +307,18 @@ is checked by hand.
   mid-sentence, a feeder that fell behind.
 - `tests/test_face_frames.py`: the shared memory between two processes, the
   newest frame due, nothing early, torn copies thrown away, cuts withdrawing
-  and refusing frames (two cuts included), the heartbeats, a reader that
+  and refusing frames (two cuts included), a rest withdrawing every frame and
+  refusing those drawn before it, the heartbeats, a reader that
   outlives its renderer and finds the next one, a segment it cannot map passed
   over.
 - `tests/test_face_process.py`: the renderer with Ditto faked; messages read,
   cut and the end of the daemon, frames published at their stamps, warm-up
   frames and frames left inside Ditto at a rest never shown, frames after a
-  cut refused, late frames counted, a chunk skipped while Ditto owes a frame already due, nothing
+  cut refused, frames published before a rest withdrawn, late frames
+  counted, a chunk skipped while Ditto owes a frame it could already have
+  drawn but never for the chunk Ditto holds until the next is fed, the face
+  back on time once Ditto catches up after a stall, a long stall logged and
+  a short one not, nothing
   fed while no one watches, `watched` reported as it changes, `failed` with
   its reason; her lips held to the portrait's in silence (her own noise floor
   included) and following her voice while she is heard, the ramps either
