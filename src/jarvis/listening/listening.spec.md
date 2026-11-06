@@ -231,7 +231,7 @@ After TTS finishes, allow wake-word-free follow-up.
 
 **Mixed echo+speech handling:** When Whisper merges TTS echo and user speech into one chunk (e.g. mic picks up TTS then user speaks), the word-count guard detects the extra content and lets it through to the intent judge. The judge extracts the user's actual query from the mixed transcript. Post-judge echo checks also use the word-count guard and verify the judge's extracted query isn't itself echo before rejecting.
 
-**Early salvage for echo-prefixed follow-ups:** Before the early fuzzy check rejects a chunk as pure echo, the listener calls `cleanup_leading_echo` to strip any TTS-tail prefix. If exact-word cleanup fails (for example because Whisper mis-transcribed the first echo word — *"explores"* → *"laws"* — breaking the word-level comparison), the listener falls back to `salvage_after_echo_tail`, which scans heard-text word boundaries right-to-left looking for the rightmost 5-word window that fuzzy-matches the TTS tail (`partial_ratio >= 85`) and keeps everything after it. This preserves short follow-ups (*"Who made it?"*) that the existing fuzzy-prefix salvage would otherwise truncate by one word because it prefers the shortest suffix. If the surviving remainder has at least `EchoDetector.min_salvage_words` words (default 3) and carries words she did not say in a voice (the two proofs of "Overriding an echo verdict takes positive evidence"), it replaces the transcript segment text and is treated as the user's follow-up. The same minimum-word threshold is shared by the during-TTS and post-TTS merged-chunk salvage paths, which keep a remainder on that count alone; in the hot window the overrides still set it aside when it could be hers.
+**Early salvage for echo-prefixed follow-ups:** Before the early fuzzy check rejects a chunk as pure echo, the listener calls `cleanup_leading_echo` to strip any TTS-tail prefix. If exact-word cleanup fails (for example because Whisper mis-transcribed the first echo word — *"explores"* → *"laws"* — breaking the word-level comparison), the listener falls back to `salvage_after_echo_tail`, which scans heard-text word boundaries right-to-left looking for the rightmost 5-word window that fuzzy-matches the TTS tail (`partial_ratio >= 85`) and keeps everything after it. This preserves short follow-ups (*"Who made it?"*) that the existing fuzzy-prefix salvage would otherwise truncate by one word because it prefers the shortest suffix. If the surviving remainder has at least `EchoDetector.min_salvage_words` words (default 3), carries words she did not say in a voice (the two proofs of "Overriding an echo verdict takes positive evidence"), and its voice went on after hers (see "During TTS"), it replaces the transcript segment text and is treated as the user's follow-up. The same minimum-word threshold is shared by the during-TTS and post-TTS merged-chunk salvage paths. The during-TTS one keeps a remainder on that count alone. So does the post-TTS one, unless the utterance's voice stopped with hers (see "During TTS"): from such an utterance it keeps nothing, and the utterance stays whole, and flagged. In the hot window the overrides still set a remainder aside when it could be hers.
 
 **Timestamp-based detection:** `was_speech_during_hot_window(utterance_start_time, utterance_end_time)` compares the utterance's time range against the hot window's time span (from schedule to expiry). This eliminates race conditions between slow Whisper transcription and the expiry timer — if the user started speaking during the window, it counts as hot window input regardless of when the transcript arrives. Also handles **overlapping utterances** where VAD triggered during TTS (mic picking up echo) but the utterance extended into the hot window period.
 
@@ -262,14 +262,36 @@ While TTS is playing, echo rejection and stop commands are handled with fast tex
 - Timing does not decide alone. His answer to a question she ends her reply
   on often starts within that tolerance, so an utterance that carries words
   she did not say, loud enough to have been spoken (the two proofs of
-  "Overriding an echo verdict takes positive evidence"), is never flagged,
-  whatever its timing. Her own words coming back keep the flag, as long as
-  Whisper bends no more of them than that test allows (40% of the words
-  heard without a close match in her reply), and so does a phrase Whisper
-  makes of the quiet right after her: the first carries no words she did
-  not say, the second no voice. While she speaks, and over the echo of
-  her last words as she stops, her own voice clears the energy bar, so
-  there the flag rests on the words alone.
+  "Overriding an echo verdict takes positive evidence"), in a voice that
+  went on after hers, is never flagged, whatever its timing. Her own words
+  coming back keep the flag, as long as Whisper bends no more of them than
+  that test allows (40% of the words heard without a close match in her
+  reply), and so does a phrase Whisper makes of the quiet right after her:
+  the first carries no words she did not say, the second no voice.
+- Her voice coming back stops with hers. Through the speakers it clears the
+  energy bar, as she speaks and as she stops, and Whisper can make words she
+  never said of it (a figure heard as an hour, a unit as a name), so both
+  proofs can hold on her own voice. After her last word, an utterance whose
+  voice stopped before her last word plus `echo_tolerance` keeps the flag
+  whatever its words: its voice stopped when the frame that closed it was
+  captured, less the silence the voice detector waited for, counted in
+  frames of the rate the microphone is read at. Her last word is when her
+  reply finished playing, as its completion callback stamps it
+  (`output/tts.spec.md`, "Speaking state and completion"), so quiet the
+  engine plays after her last sound counts as hers: for Kyutai, the pause
+  the model leaves after its last word and the time its stream takes to
+  drain. The listener stamps it as it opens the hot window: with
+  `hot_window_enabled` off no last word is stamped, and only her speaking is
+  her time. His answer begun over her last word goes on after it and is not
+  flagged. Kept on purpose: a short word of his said over her last word and
+  stopping with it cannot be told from her voice, and is flagged with it; a
+  wake word in it that can only be his still decides (see "Hot Window
+  Mode"). A short answer said in the quiet after her last sound, whose voice
+  stops before that quiet ends plus the tolerance, is flagged the same way.
+  While she speaks her last word is not known, so there, as for an utterance
+  whose end is not known, the flag rests on the two proofs. Her own voice
+  clears the energy bar, so for her voice coming back they come down to its
+  words.
 - Intent judge uses this context to identify echo
 
 ## Rolling Transcript Buffer
@@ -415,21 +437,26 @@ The fuzzy check acts as a fast, reliable safety net. The intent judge provides d
    elsewhere said the moment another ends (see "Speaking Something
    Produced Elsewhere"), the end of the one before.
 
-   Both together are still fooled by a hallucination while she speaks, and
-   over the echo of her last words as she stops, since her own voice
-   clears the energy bar. That one the judge names: a verdict that calls
-   the utterance noise is never overridden (see "Text Whisper Makes Out of
-   Silence").
+   Both together are fooled by her own voice when Whisper makes words she
+   never said of it, since her voice through the speakers clears the energy
+   bar, as she speaks and as she stops. After her last word, when the voice
+   stops tells that one from him: her voice coming back stops with hers, so
+   an echo verdict on an utterance whose voice stopped before her last word
+   plus `echo_tolerance` stands, whatever its words (see "During TTS").
+   While she speaks nothing does, and a hallucination there the judge names:
+   a verdict that calls the utterance noise is never overridden (see "Text
+   Whisper Makes Out of Silence").
 
    Fails open: with no TTS text to compare against, everything is the user's.
    The energy half fails open twice over — no baseline, or an energy of
    zero, which is the listener's "not measured" value rather than a claim
    of silence.
 
-   The same two proofs decide which transcripts are flagged as possibly hers
-   (`is_during_tts`, see "During TTS"), so the judge is not told in the first
-   place that words with both are her echo, and no hot-window override takes
-   words without them that were heard in her time, whether the judge gave a
+   The same two proofs, with when the voice stopped, decide which
+   transcripts are flagged as possibly hers (`is_during_tts`, see "During
+   TTS"), so the judge is not told in the first place that words with both,
+   in a voice that went on after hers, are her echo, and no hot-window
+   override takes the others heard in her time, whether the judge gave a
    verdict or none. A wake word among those words is weighed with them,
    unless it can only be his (see "Hot Window Mode"): a verdict that
    extracts nothing from an utterance carrying such a wake word is not
@@ -562,9 +589,9 @@ If judge.directed and judge.query:
 If no query extracted, in hot window, and a wake word that can only be his (found in the utterance, none in her reply, still found once her words are taken out; not her reply coming back whole):
     → Wake-word check: collect what was heard, the wake word taken out
 If judge.directed without a query, or rejects, in hot window, at any confidence:
-    → Words that could be hers (heard in her time, without words she did not say in a voice): 🔇 Heard (echo)
+    → Words that could be hers (heard in her time, and either their voice stopped with hers or they lack words she did not say in a voice): 🔇 Heard (echo)
     → Otherwise, not pure echo: collect what he said as a query
-    → An echo verdict: only on words she did not say, in a voice; otherwise 🔇 Heard (echo)
+    → An echo verdict: only on words she did not say, in a voice, that could not be hers; otherwise 🔇 Heard (echo)
 If nothing above took it and a question is being collected:
     → Judge it as a follow-up, his question before it (unless already judged as one)
     → Stop: cancel the question

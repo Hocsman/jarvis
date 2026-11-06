@@ -15,7 +15,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from jarvis.listening.listener import _Turn
-from test_hot_window_input import _create_listener, _install_intent_judge, _make_judgment
+from test_hot_window_input import (
+    _HIS_VOICE, _create_listener, _install_intent_judge, _level, _make_judgment, _whisper_hears,
+)
 
 
 class _Clock:
@@ -320,15 +322,32 @@ def test_the_end_of_speech_is_the_end_of_the_utterance_less_its_trailing_silence
 
 
 @pytest.mark.unit
-def test_the_trailing_silence_is_what_the_voice_detector_counted():
-    from jarvis.listening.listener import VoiceListener
+@pytest.mark.parametrize("capture_rate", [16000, 44100, 48000])
+@patch("builtins.print")
+def test_the_end_of_speech_is_read_off_the_silent_frames_the_detector_counted(
+        _print, db, journal, capture_rate):
+    """The voice detector closes the utterance once it has counted its
+    endpoint silence in frames, cut at the rate the microphone is read at: a
+    stream that refuses Whisper's 16 kHz is cut into frames of its own rate.
+    Whatever the rate, he stopped when that silence began."""
+    clock = journal.test_clock
+    listener, _tts = _a_listener_timed_against(db, journal)
+    _install_intent_judge(listener, _make_judgment(directed=True, query="what time is it"))
+    # The stream as it is opened at that rate.
+    listener._stream_samplerate = capture_rate
+    listener._frame_samples = int(capture_rate * listener._frame_ms / 1000)
 
-    listener = object.__new__(VoiceListener)
-    listener._silence_frames = 40
-    listener._frame_samples = 320
-    listener._samplerate = 16000
+    clock.now = 1000.4
+    _whisper_hears(listener, "jarvis what time is it", started=999.0,
+                   level=_level(listener, _HIS_VOICE), voice_ended=999.2, closed=1000.0)
+    clock.now = 1006.0
+    with patch("jarvis.reply.engine.run_reply_engine", return_value="ok"), \
+         patch.object(listener, "_speak_reply"):
+        listener._dispatch_query(_Turn("what time is it"))
 
-    assert listener._trailing_silence_seconds() == pytest.approx(0.8)
+    row = _only_row(db)
+    assert row["transcribed_ms"] == 1200           # 999.2 -> 1000.4
+    listener.state_manager.stop()
 
 
 @pytest.mark.unit
