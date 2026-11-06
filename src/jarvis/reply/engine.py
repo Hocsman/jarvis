@@ -1096,6 +1096,25 @@ def _live_time_location_string(cfg) -> str:
         return ""
 
 
+def _degraded_pick_for(chat_model: str, pick: list, full_catalogue: list) -> list:
+    """What a turn whose router gave up offers the chat model
+    (`selection.spec.md`, LLM step 7).
+
+    A large chat model keeps the keyword pick: it looks through
+    ``toolSearchTool`` for what the pick lacks. A small one never does, and
+    offered the essential tools alone it answers without the tool it needed,
+    so it gets the whole catalogue for this turn.
+    """
+    if detect_model_size(chat_model) == ModelSize.SMALL:
+        debug_log(
+            f"tool router gave up: small chat model, whole catalogue offered "
+            f"({len(full_catalogue)} tools) for this turn",
+            "planning",
+        )
+        return list(full_catalogue)
+    return pick
+
+
 def _previous_turn_failed_tool_names(recent_messages: list) -> list[str]:
     """Return tool names whose previous-turn invocation reported failure.
 
@@ -1547,11 +1566,10 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         # weaker allow-list than the router would give on its next try.
         # The same holds for an answer equal to the whole catalogue (the
         # embedding strategy's when the query's embedding fails), which
-        # also pins ``allowed_tools`` to the full catalogue, overwhelms the
-        # planner (which then paraphrases tool steps as prose), and starves
-        # a small chat model into producing the empty-reply fallback.
-        # Re-rolling the router on the next turn is cheap and almost always
-        # recovers.
+        # also pins ``allowed_tools`` to the full catalogue for the rest of
+        # the conversation and overwhelms the planner (which then
+        # paraphrases tool steps as prose). Re-rolling the router on the
+        # next turn is cheap and almost always recovers.
         _router_gave_up = bool(getattr(routed_tools, "degraded", False))
         _router_returned_full_catalog = (
             routed_tools is not None
@@ -1561,6 +1579,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         if _router_gave_up:
             debug_log("tool router gave up, keyword pick used for this turn only", "planning")
             get_latency_journal().note_router_degraded()
+            routed_tools = _degraded_pick_for(cfg.llm_chat_model, routed_tools, _full_catalog_names)
         if (
             dialogue_memory
             and hasattr(dialogue_memory, "hot_cache_put")

@@ -450,6 +450,47 @@ def test_a_router_that_gave_up_on_a_sentence_no_tool_shares_does_not_hand_over_t
     assert len(offered[0]) < len(catalogue)
 
 
+@pytest.mark.unit
+def test_a_small_chat_model_whose_router_gave_up_is_offered_every_tool(
+    mock_config, db, dialogue_memory
+):
+    """A small chat model does not look through toolSearchTool: offered the
+    essential tools alone it answers without the one it needed
+    (`selection.spec.md`, LLM step 7). When the router gives up, it gets
+    the whole catalogue for that turn instead."""
+    from unittest.mock import MagicMock
+
+    from jarvis.reply.engine import run_reply_engine
+    from jarvis.tools.registry import offered_builtin_tools
+
+    gave_up = MagicMock()
+    gave_up.direct.return_value = None
+    prompts: list[str] = []
+
+    def chat(*args, **kwargs):
+        prompts.append("\n".join(str(m.get("content") or "") for m in kwargs.get("messages") or []))
+        return {"message": {"content": "Je regarde.", "role": "assistant"}}
+
+    mock_config.tool_selection_strategy = "llm"
+    mock_config.tool_router_model = "router-model"
+    mock_config.llm_chat_model = "gemma4:e2b"
+    catalogue = offered_builtin_tools(mock_config)
+
+    with patch("jarvis.reply.engine.plan_query", return_value=[]), \
+         patch("jarvis.reply.engine.chat_with_messages", side_effect=chat), \
+         patch("jarvis.reply.engine.extract_search_params_for_memory",
+               return_value={"keywords": []}), \
+         patch("jarvis.reply.engine.get_auxiliary_backend", return_value=gave_up):
+        run_reply_engine(
+            db=db, cfg=mock_config, tts=None, text="Какая завтра погода?",
+            dialogue_memory=dialogue_memory,
+        )
+
+    assert prompts, "the chat model was never called, so the test proves nothing"
+    missing = [name for name in catalogue if name not in prompts[0]]
+    assert missing == [], f"tools the small chat model was not offered: {missing}"
+
+
 # ── 5. A judge that never answers leaves the no-verdict path ──────────
 
 

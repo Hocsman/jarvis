@@ -13,10 +13,14 @@ planner naming it.
 
 Two arms over the same sentences, interleaved call by call:
 
-- `bounded`: what the engine offers on such a turn, the degraded keyword
-  pick for the sentence, through the real `select_tools`, with a router
-  that gave up;
-- `catalogue`: every offered tool, the other answer a no-match could give.
+- `bounded`: the degraded keyword pick for the sentence, through the real
+  `select_tools`, with a router that gave up: what the engine offers a large
+  chat model on such a turn;
+- `catalogue`: every offered tool, what the engine offers a small chat
+  model on such a turn (`_degraded_pick_for`).
+
+The comparison hands each arm's pick to the chat model as it is, whatever
+the model's size. The single-run test runs the engine as it ships.
 
 A run reaches the tool when `getWeather` is called. `toolSearchTool` answers
 as it does when its own search works (it names `getWeather`), so what is
@@ -58,6 +62,7 @@ Run:
 from __future__ import annotations
 
 import os
+from contextlib import nullcontext
 from unittest.mock import patch
 
 import pytest
@@ -155,9 +160,12 @@ def _respond(name, args):
     return "OK"
 
 
-def _run_turn(arm: str, sentence: str, mock_config, eval_db, eval_dialogue_memory):
+def _run_turn(arm: str, sentence: str, mock_config, eval_db, eval_dialogue_memory,
+              as_picked: bool = False):
     """One reply to ``sentence`` with the ``arm``'s allow-list; returns the
-    names of the tools the turn called, in order."""
+    names of the tools the turn called, in order. ``as_picked`` hands the
+    pick to the chat model as it is, without the engine's widening for a
+    small chat model."""
     from jarvis.reply.engine import run_reply_engine
     from jarvis.tools.types import ToolExecutionResult
 
@@ -173,7 +181,13 @@ def _run_turn(arm: str, sentence: str, mock_config, eval_db, eval_dialogue_memor
         capture.record(tool_name, tool_args or {})
         return ToolExecutionResult(success=True, reply_text=_respond(tool_name, tool_args or {}))
 
-    with patch("jarvis.reply.engine.select_tools", side_effect=ARMS[arm]), \
+    widening = (
+        patch("jarvis.reply.engine._degraded_pick_for",
+              side_effect=lambda model, pick, catalogue: pick)
+        if as_picked else nullcontext()
+    )
+    with widening, \
+         patch("jarvis.reply.engine.select_tools", side_effect=ARMS[arm]), \
          patch("jarvis.tools.registry.get_cached_mcp_tools", return_value=mcp), \
          patch("jarvis.reply.engine.run_tool_with_retries", side_effect=_runner), \
          patch("jarvis.reply.engine.extract_search_params_for_memory",
@@ -217,9 +231,9 @@ def test_the_sentence_reaches_the_degraded_pick_with_nothing_matched(sentence, m
 @requires_judge_llm
 @pytest.mark.xfail(
     detect_model_size(JUDGE_MODEL) == ModelSize.SMALL,
-    reason="a small chat model does not look through toolSearchTool when "
-           "the turn offers it nothing else: never, in the runs measured "
-           "above (selection.spec.md, LLM step 7)",
+    reason="a small chat model is handed the whole catalogue on such a turn, "
+           "and with the builtins alone it reached the weather 13 times in "
+           "22 in the runs measured above (selection.spec.md, LLM step 7)",
     strict=False,
 )
 @pytest.mark.parametrize("sentence", SENTENCES)
@@ -230,8 +244,8 @@ def test_a_turn_whose_router_gave_up_reaches_the_weather_tool(
     print(f"\n📊 degraded turn: {names}")
 
     assert "getWeather" in names, (
-        "A turn offered only the always-included tools and toolSearchTool "
-        f"must look for the weather tool and use it. Tools called: {names}"
+        "A turn whose router gave up must still reach the weather tool: "
+        f"through toolSearchTool, or from the whole catalogue. Tools called: {names}"
     )
 
 
@@ -253,6 +267,7 @@ def test_the_bounded_turn_against_the_whole_catalogue(mock_config):
                 try:
                     names = _run_turn(
                         arm, sentence, mock_config, db, DialogueMemory(inactivity_timeout=300),
+                        as_picked=True,
                     )
                 finally:
                     db.close()
