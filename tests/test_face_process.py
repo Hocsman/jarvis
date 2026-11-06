@@ -36,6 +36,29 @@ class FakeStream:
         self.stopped = True
 
 
+class HoldingStream(FakeStream):
+    """Ditto as it hands frames back: a chunk's frames come out only once the
+    next chunk is fed, and none come out while the GPU is taken elsewhere."""
+
+    def __init__(self):
+        super().__init__()
+        self.renderer = None
+        self.stalled = False
+        self.inside = 0   # frames fed and not handed back yet
+
+    def run_chunk(self, audio):
+        super().run_chunk(audio)
+        self.inside += tl.CHUNK_FRAMES
+        if not self.stalled:
+            self.hand_back()
+
+    def hand_back(self):
+        """Everything Ditto can draw: all but the last chunk's frames."""
+        while self.inside > tl.CHUNK_FRAMES:
+            self.inside -= 1
+            self.renderer.on_frame(_picture(1))
+
+
 def _picture(value):
     return np.full((HEIGHT, WIDTH, 3), value, np.uint8)
 
@@ -142,6 +165,21 @@ class TestPublishing:
         assert renderer.feeder.next_start is None
         assert _shown(renderer, reader, stamp + 0.01) is None
 
+    def test_frames_published_before_the_face_rests_are_withdrawn(self, renderer, reader):
+        """Whoever watches next never sees a frame from before the rest, however
+        long a front end holds her last frame."""
+        now = time.perf_counter()
+        _watch(renderer, reader, now)
+        renderer.tick(now)
+        stamp = renderer.due[0].stamp
+        for _ in range(tl.CHUNK_FRAMES):
+            renderer.on_frame(_picture(9))
+        assert _shown(renderer, reader, stamp) == 9
+
+        renderer.tick(now + process.WATCH_SECONDS + 1.0)   # nobody has read since: the face rests
+
+        assert _shown(renderer, reader, stamp + 0.01) is None
+
     def test_frames_drawn_before_a_cut_and_stamped_after_it_are_not_shown(self, renderer, reader):
         now = time.perf_counter()
         _watch(renderer, reader, now)
@@ -177,14 +215,96 @@ class TestFeeding:
         now = time.perf_counter()
         _watch(renderer, reader, now)
         renderer.tick(now)
+        second = renderer.feeder.due(renderer.feeder.next_start)
+        _watch(renderer, reader, second)
+        renderer.tick(second)      # Ditto can now draw the first chunk, and has not
         start = renderer.feeder.next_start
-        late = renderer.due[0].stamp + 2 / tl.FPS   # the first frame fed is still inside Ditto
+        late = renderer.due[0].stamp + 2 / tl.FPS
         _watch(renderer, reader, late)
 
         renderer.tick(late)
 
-        assert len(renderer.stream.chunks) == 1
+        assert len(renderer.stream.chunks) == 2
         assert renderer.feeder.next_start is not None and renderer.feeder.next_start > start
+
+    def test_the_chunk_ditto_holds_until_the_next_is_fed_is_not_owed(self, renderer, reader):
+        """Ditto hands a chunk's frames back once the next chunk is fed: a
+        renderer that waited for them first would wait for ever."""
+        now = time.perf_counter()
+        _watch(renderer, reader, now)
+        renderer.tick(now)
+        late = renderer.due[-1].stamp + 2 / tl.FPS
+        _watch(renderer, reader, late)
+
+        renderer.tick(late)
+
+        assert len(renderer.stream.chunks) == 2
+
+    def test_after_a_stall_the_face_comes_back_once_ditto_catches_up(self, reader):
+        stream = HoldingStream()
+        renderer = process.Renderer(stream, FrameWriter())
+        stream.renderer = renderer
+        clock = [time.perf_counter()]
+
+        def watch_for(seconds):
+            end = clock[0] + seconds
+            while clock[0] < end:
+                _watch(renderer, reader, clock[0])
+                renderer.tick(clock[0])
+                clock[0] += 0.02
+            return clock[0] - 0.02
+
+        try:
+            watch_for(1.0)            # Ditto keeps up
+            stream.stalled = True     # the GPU is taken elsewhere: nothing comes out
+            watch_for(1.0)
+            stream.stalled = False
+            stream.hand_back()        # what Ditto could draw comes out, late
+            last = watch_for(1.0)
+
+            shown = reader.read(last)
+            assert shown is not None and last - shown.stamp <= 2 / tl.FPS
+        finally:
+            renderer.close()
+
+    def _stall(self, reader, capsys, seconds):
+        """Watch for a second, stall Ditto for ``seconds``, watch for two more;
+        returns what the renderer logged before it rests, and how many chunks it
+        skipped."""
+        stream = HoldingStream()
+        renderer = process.Renderer(stream, FrameWriter())
+        stream.renderer = renderer
+        clock = [time.perf_counter()]
+
+        def watch_for(span):
+            end = clock[0] + span
+            while clock[0] < end:
+                _watch(renderer, reader, clock[0])
+                renderer.tick(clock[0])
+                clock[0] += 0.02
+
+        try:
+            watch_for(1.0)
+            stream.stalled = True
+            watch_for(seconds)
+            stream.stalled = False
+            stream.hand_back()
+            watch_for(2.0)
+            return capsys.readouterr().err, renderer.skipped
+        finally:
+            renderer.close()
+
+    def test_a_long_stall_is_logged_as_it_starts_and_as_ditto_catches_up(self, reader, capsys):
+        err, _skipped = self._stall(reader, capsys, 3.0)
+
+        assert "Ditto fell behind" in err
+        assert "Ditto caught up after" in err
+
+    def test_a_hiccup_shorter_than_a_second_of_her_face_logs_nothing_while_watched(self, reader, capsys):
+        err, skipped = self._stall(reader, capsys, 0.8)
+
+        assert skipped > 0
+        assert "Ditto fell behind" not in err and "caught up" not in err
 
     def test_feeding_goes_on_while_ditto_keeps_up(self, renderer, reader):
         now = time.perf_counter()
@@ -295,6 +415,9 @@ class TestHerLipsAtRest:
         now = time.perf_counter()
         _watch(renderer, reader, now)
         renderer.tick(now)
+        second = renderer.feeder.due(renderer.feeder.next_start)
+        _watch(renderer, reader, second)
+        renderer.tick(second)
         late = renderer.due[0].stamp + 2 / tl.FPS
         _watch(renderer, reader, late)
         renderer.tick(late)                             # skipped: Ditto owes a frame already due
@@ -305,8 +428,8 @@ class TestHerLipsAtRest:
 
         renderer.tick(renderer.feeder.due(start))
 
-        assert len(renderer.stream.chunks) == 2
-        assert sorted(renderer.stream.ctrl_info) == list(range(2 * tl.CHUNK_FRAMES))
+        assert len(renderer.stream.chunks) == 3
+        assert sorted(renderer.stream.ctrl_info) == list(range(3 * tl.CHUNK_FRAMES))
 
     def test_after_a_rest_her_lips_start_at_rest(self, renderer, reader):
         """Someone stopped watching while she spoke and comes back to her

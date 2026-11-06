@@ -39,6 +39,7 @@ def _run_engine(query, mock_config, eval_db, eval_dialogue_memory, mock_tool_run
     with patch("jarvis.reply.engine.run_tool_with_retries", side_effect=mock_tool_run):
         return run_reply_engine(
             db=eval_db, cfg=mock_config, tts=None,
+            origin="voix",
             text=query, dialogue_memory=eval_dialogue_memory,
         )
 
@@ -456,6 +457,7 @@ class TestMultiStepEntityQuery:
             from jarvis.reply.engine import run_reply_engine
             response = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text=query, dialogue_memory=eval_dialogue_memory,
             )
 

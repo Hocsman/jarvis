@@ -152,6 +152,7 @@ def ask(mock_config, eval_db, eval_dialogue_memory, tmp_path, case: LargeNodeCas
     with patch("jarvis.reply.engine.run_tool_with_retries", side_effect=_make_runner(capture)):
         response = run_reply_engine(
             db=eval_db, cfg=mock_config, tts=None,
+            origin="voix",
             text=case.text, dialogue_memory=eval_dialogue_memory,
         )
 

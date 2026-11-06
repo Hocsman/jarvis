@@ -159,6 +159,25 @@ class TestCut:
         assert (reader.read(NOW + 0.95).pixels == 42).all()
 
 
+class TestWithdrawingAll:
+    def test_every_frame_published_is_withdrawn(self, writer, reader):
+        for i in range(10):
+            writer.publish(_frame(i), NOW + i * 0.1, 0)
+
+        writer.withdraw_all()
+
+        assert reader.read(NOW + 2.0) is None
+
+    def test_a_frame_drawn_before_and_published_after_is_refused(self, writer, reader):
+        """Ditto's thread may hand a frame back while the renderer rests: it is
+        refused whenever it arrives, so it can never be shown afterwards."""
+        generation = writer.withdraw_all()
+
+        assert writer.publish(_frame(1), NOW + 0.1, 0) is False
+        assert writer.publish(_frame(2), NOW + 0.2, generation) is True
+        assert (reader.read(NOW + 0.3).pixels == 2).all()
+
+
 class TestWatching:
     def test_reading_tells_the_renderer_someone_is_watching(self, writer, reader):
         assert writer.viewer_age(NOW) == float("inf")

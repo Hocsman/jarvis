@@ -60,11 +60,15 @@ class EchoDetector:
 
         Args:
             tts_text: Text being spoken by TTS
-            baseline_energy: Current audio energy baseline
+            baseline_energy: The microphone's mean level just before this
+                text is queued. When the text starts a reply it becomes the
+                floor the voice proof weighs utterances against
+                (`utterance_carries_a_voice`).
             exact_duration: Exact audio duration in seconds (from Piper synthesis)
             continues: True when this is a later chunk of a reply already
                 being spoken. The reference text then accumulates instead
-                of being replaced, and the start time is left alone.
+                of being replaced, and the start time and the floor are
+                left alone.
 
                 A streamed reply arrives sentence by sentence, and every
                 consumer of ``_last_tts_text`` compares what the microphone
@@ -78,21 +82,30 @@ class EchoDetector:
                 timed from when she began speaking, and pushing that
                 forward on each chunk would let a late echo look like
                 fresh speech.
+
+                Nor is the floor read again. A later chunk can be queued
+                while the microphone hears her say an earlier one: a floor
+                read then would be her own voice, and his soft answer right
+                after her last word, under the bar it sets, would be taken
+                for her echo.
             start_delay: How much later than usual her voice will be heard
                 (a talking face holds it back by its delay). Her words are
                 timed from that much later.
         """
+        duration_info = f", exact_duration={exact_duration:.2f}s" if exact_duration else ""
         if continues and self._last_tts_text:
             self._last_tts_text = (
                 self._last_tts_text + " " + tts_text.lower().strip()).strip()
+            debug_log(f"TTS continues the reply, text_len={len(tts_text)}, floor kept at "
+                      f"{self._tts_energy_baseline:.4f} from its first sentence "
+                      f"(mic now {baseline_energy:.4f}){duration_info}", "echo")
         else:
             self._tts_start_time = time.time() + start_delay
             self._last_tts_text = tts_text.lower().strip()
-        self._tts_energy_baseline = baseline_energy
+            self._tts_energy_baseline = baseline_energy
+            debug_log(f"TTS started, text_len={len(tts_text)}, "
+                      f"floor={baseline_energy:.4f}{duration_info}", "echo")
         self._tts_exact_duration = exact_duration
-
-        duration_info = f", exact_duration={exact_duration:.2f}s" if exact_duration else ""
-        debug_log(f"TTS started, text_len={len(tts_text)}, baseline_energy={baseline_energy:.4f}{duration_info}", "echo")
     
     def utterance_carries_a_voice(self, utterance_energy: float) -> bool:
         """True when the utterance has someone's voice on top of the echo.

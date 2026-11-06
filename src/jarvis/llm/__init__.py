@@ -29,7 +29,12 @@ from typing import Any, Callable, Dict, List, Optional
 import requests  # noqa: F401  — re-exported for test patching, see module docstring
 
 from .anthropic_backend import AnthropicBackend
-from .backend import LLMBackend, ToolsNotSupportedError, strip_nonstandard_message_fields
+from .backend import (
+    CACHE_MARKS,
+    LLMBackend,
+    ToolsNotSupportedError,
+    strip_nonstandard_message_fields,
+)
 from .ollama import OllamaBackend, extract_text_from_response
 from .openai_compatible import OpenAICompatibleBackend
 from .factory import (
@@ -42,6 +47,7 @@ from .factory import (
 )
 
 __all__ = [
+    "CACHE_MARKS",
     "chat_is_remote",
     "get_auxiliary_backend",
     "get_private_backend",

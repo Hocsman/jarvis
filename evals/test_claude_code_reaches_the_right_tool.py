@@ -145,7 +145,7 @@ def _run(case, mock_config, eval_db, eval_dialogue_memory, tmp_path):
 
     with patch("jarvis.reply.engine.run_tool_with_retries", side_effect=_runner):
         response = run_reply_engine(
-            db=eval_db, cfg=mock_config, tts=None, text=case.text,
+            db=eval_db, cfg=mock_config, tts=None, origin="voix", text=case.text,
             dialogue_memory=eval_dialogue_memory,
         )
     return capture, response, started

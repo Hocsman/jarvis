@@ -690,7 +690,8 @@ class TestMessageSanitisation:
 
         backend.chat(
             "any",
-            [{"role": "system", "content": "sys", "_is_context_injected": True}],
+            [{"role": "system", "content": "sys", "_is_context_injected": True,
+              "_cache_marks": [1]}],
         )
 
         sent = mock_post.call_args.kwargs["json"]

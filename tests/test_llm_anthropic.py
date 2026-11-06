@@ -604,6 +604,129 @@ class TestChat:
         assert _backend(server).chat(MODEL, [{"role": "user", "content": "hi"}], timeout_sec=0.5) is None
 
 
+SEARCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "webSearch",
+        "description": "Search the web",
+        "parameters": {"type": "object", "properties": {"q": {"type": "string"}}},
+    },
+}
+
+
+def _breakpoints(body: Dict[str, Any]) -> int:
+    """Cache breakpoints in a request: explicit ones on blocks, and the
+    automatic one a top-level ``cache_control`` sets."""
+    blocks = list(body.get("system") or []) + list(body.get("tools") or [])
+    for message in body.get("messages") or []:
+        content = message.get("content")
+        blocks += content if isinstance(content, list) else []
+    return sum(1 for b in blocks if "cache_control" in b) + (1 if "cache_control" in body else 0)
+
+
+class TestCacheAcrossReplies:
+    """The reply engine's system message opens with a part that stays the
+    same from one reply to the next (persona, guidance, his profile) and
+    ends with one that does not (plan, recalled memory, the time). It marks
+    where the lasting parts end (``_cache_marks``, character offsets); the
+    lasting part then goes out as a block with its own breakpoint, so the
+    next reply reads it back instead of writing it again."""
+
+    HEAD = "Persona: a butler.\nHis profile: lives by a lake."
+    TURN_ONE = "\n\nACTION PLAN: reply.\n\n[Context: 21:14]"
+    TURN_TWO = "\n\n[Context: 21:15]"
+
+    def _reply(self, backend, turn: str, question: str, tools=None) -> None:
+        backend.chat(MODEL, [
+            {"role": "system", "content": self.HEAD + turn, "_cache_marks": [len(self.HEAD)]},
+            {"role": "user", "content": question},
+        ], tools=tools if tools is not None else [WEATHER_TOOL, SEARCH_TOOL])
+
+    def test_two_replies_send_the_same_cached_prefix(self):
+        server = _Server(_text("ok"), _text("ok"))
+        backend = _backend(server)
+
+        self._reply(backend, self.TURN_ONE, "weather in Annecy?")
+        self._reply(backend, self.TURN_TWO, "and tomorrow?")
+
+        first, second = server.body(0), server.body(1)
+        assert first["tools"] == second["tools"]
+        assert first["system"][0] == second["system"][0] == {
+            "type": "text", "text": self.HEAD, "cache_control": {"type": "ephemeral"}}
+
+    def test_the_model_reads_the_system_message_unchanged(self):
+        """Cutting the system prompt into blocks changes where the cache
+        breaks, never what the model reads."""
+        server = _Server(_text("ok"))
+
+        self._reply(_backend(server), self.TURN_ONE, "?")
+
+        assert "".join(b["text"] for b in server.body()["system"]) == self.HEAD + self.TURN_ONE
+
+    def test_the_part_that_changes_keeps_a_breakpoint_of_its_own(self):
+        """A loop turn after a tool result reads the whole system prompt
+        back, not only its lasting head."""
+        server = _Server(_text("ok"))
+
+        self._reply(_backend(server), self.TURN_ONE, "?")
+
+        assert server.body()["system"][-1] == {
+            "type": "text", "text": self.TURN_ONE, "cache_control": {"type": "ephemeral"}}
+
+    def test_a_request_never_carries_more_than_four_breakpoints(self):
+        """The API refuses a fifth. Past the limit the earliest marks win:
+        they end the parts that last longest."""
+        server = _Server(_text("ok"))
+        parts = ["Persona.", "\nProfile.", "\nEarlier today.", "\nRecalled.", "\nPlan."]
+        marks = [len("".join(parts[:i])) for i in range(1, len(parts))]
+
+        _backend(server).chat(MODEL, [
+            {"role": "system", "content": "".join(parts), "_cache_marks": marks},
+            {"role": "user", "content": "?"},
+        ], tools=[WEATHER_TOOL])
+
+        body = server.body()
+        assert _breakpoints(body) <= 4
+        assert body["system"][0]["text"] == "Persona."
+        assert body["system"][1]["text"] == "\nProfile."
+        assert "".join(b["text"] for b in body["system"]) == "".join(parts)
+
+    def test_a_part_of_only_blank_lines_is_not_a_block_of_its_own(self):
+        """The API refuses a text block with nothing but whitespace."""
+        server = _Server(_text("ok"))
+
+        _backend(server).chat(MODEL, [
+            {"role": "system", "content": self.HEAD + "\n\n", "_cache_marks": [len(self.HEAD)]},
+            {"role": "user", "content": "?"},
+        ])
+
+        assert [b["text"] for b in server.body()["system"]] == [self.HEAD + "\n\n"]
+
+    @pytest.mark.parametrize("marks", [[0], [10_000], ["12"], None, "12", [-3]])
+    def test_a_mark_that_points_nowhere_leaves_one_block(self, marks):
+        server = _Server(_text("ok"))
+
+        _backend(server).chat(MODEL, [
+            {"role": "system", "content": self.HEAD + self.TURN_ONE, "_cache_marks": marks},
+            {"role": "user", "content": "?"},
+        ])
+
+        assert server.body()["system"] == [{"type": "text", "text": self.HEAD + self.TURN_ONE,
+                                            "cache_control": {"type": "ephemeral"}}]
+
+    def test_the_same_tools_picked_in_another_order_are_sent_the_same(self):
+        """The tool list opens the cached prefix: the router ranking the
+        same tools differently from one reply to the next must not make
+        the next reply write it all again."""
+        server = _Server(_text("ok"), _text("ok"))
+        backend = _backend(server)
+
+        self._reply(backend, self.TURN_ONE, "?", tools=[WEATHER_TOOL, SEARCH_TOOL])
+        self._reply(backend, self.TURN_TWO, "?", tools=[SEARCH_TOOL, WEATHER_TOOL])
+
+        assert server.body(0)["tools"] == server.body(1)["tools"]
+
+
 class TestChatStreaming:
     def test_streamed_text_matches_the_buffered_result(self):
         server = _Server(_streamed_text(["Il ", "fait ", "beau."]), _text("Il fait beau."))
