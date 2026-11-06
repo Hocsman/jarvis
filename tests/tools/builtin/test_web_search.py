@@ -1166,9 +1166,9 @@ class TestLanguagePlumbingEndToEnd:
         from src.jarvis.listening import listener as listener_module
         import inspect
         src = inspect.getsource(listener_module)
-        # One init, at least two assignment sites (MLX + faster-whisper),
+        # One init, an assignment site (shared by MLX and faster-whisper),
         # the hand-over must read it, and the engine gets the turn's copy.
         assert "self._last_detected_language: Optional[str] = None" in src
-        assert src.count("self._last_detected_language = detected") >= 2
+        assert "self._last_detected_language = detected" in src
         assert "_Turn(query, self._last_detected_language" in src
         assert "language=turn.language" in src

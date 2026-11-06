@@ -19,6 +19,7 @@ import time
 from typing import Any, Callable, Optional
 
 from ..debug import debug_log
+from ..listening.whisper_vad import transcribe as transcribe_faster_whisper
 from ..utils.audio_lock import portaudio_lock
 from ..utils.audio_stream import (
     InputDeviceNotFound,
@@ -637,6 +638,11 @@ class DictationEngine:
         self._cfg = cfg
         # The language Whisper transcribes in, as for the listener; None: it detects.
         self._whisper_language = whisper_language
+        # Whether the setting asks for Whisper's voice detector, as for the
+        # listener: a press with nothing said then pastes nothing. A detector
+        # that has failed is skipped by `whisper_vad.transcribe` for the
+        # whole process, whoever saw it fail.
+        self._whisper_vad = bool(getattr(cfg, "whisper_vad", True))
         self._chat_model = chat_model
         self._thinking = thinking
 
@@ -1205,11 +1211,8 @@ class DictationEngine:
 
     def _transcribe_faster_whisper(self, model, audio) -> str:
         try:
-            try:
-                segments, _info = model.transcribe(audio, language=self._whisper_language,
-                                                   vad_filter=False)
-            except TypeError:
-                segments, _info = model.transcribe(audio, language=self._whisper_language)
+            segments, _info = transcribe_faster_whisper(
+                model, audio, language=self._whisper_language, voice_detector=self._whisper_vad)
             return " ".join(seg.text for seg in segments).strip()
         except Exception as exc:
             debug_log(f"faster-whisper transcription error: {exc}", "dictation")
