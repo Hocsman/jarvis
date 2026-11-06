@@ -810,7 +810,9 @@ class VoiceListener(threading.Thread):
     def track_tts_start(self, tts_text: str, continues: bool = False) -> None:
         """Called when TTS starts speaking."""
         if self.tts and self.tts.enabled:
-            # Calculate baseline energy from recent audio samples
+            # The microphone's mean level over its recent frames. The
+            # detector takes it as the voice proof's floor when this text
+            # starts a reply; a later sentence keeps its reply's floor.
             baseline_energy = 0.0045  # default
             if self._recent_audio_energy:
                 baseline_energy = sum(self._recent_audio_energy) / len(self._recent_audio_energy)
@@ -2064,12 +2066,12 @@ class VoiceListener(threading.Thread):
         """Say at most one queued reply. The reply thread only.
 
         One at a time, and only while nothing is already being said. The
-        echo detector holds the record of one reply (its text, its start
-        and its exact duration), so a second reply started while the
-        first is still audible would replace it, and the rest of the
-        first would be compared against the wrong sentence. Whatever is
-        left waits for the reply thread's next pass, a few milliseconds
-        away when it has no query to run.
+        echo detector holds the record of one reply (its text, its start,
+        its exact duration and the floor of its voice proof), so a second
+        reply started while the first is still audible would replace it,
+        and the rest of the first would be compared against the wrong
+        sentence. Whatever is left waits for the reply thread's next pass,
+        a few milliseconds away when it has no query to run.
         """
         q = getattr(self, "_reply_queue", None)
         if q is None:
