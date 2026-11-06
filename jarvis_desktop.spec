@@ -47,6 +47,12 @@ datas = [
     (str(project_root / 'THIRD_PARTY_NOTICES.txt'), '.'),
 ]
 
+# Data a third-party package opens from its own folder, which no PyInstaller
+# hook collects (PACKAGE_DATA in scripts/check_bundle_layout.py, which fails a
+# build that lacks one): faster-whisper reads its voice detector's model
+# (Silero, used while whisper_vad is on) from faster_whisper/assets.
+datas += collect_data_files('faster_whisper', subdir='assets')
+
 # Collect Piper TTS data files (espeak-ng-data is required for phonemization)
 try:
     import piper

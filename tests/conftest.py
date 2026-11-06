@@ -227,6 +227,21 @@ def _isolate_face_frames(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _voice_detector_not_yet_failed(monkeypatch):
+    """Start each test with Whisper's voice detector not yet failed.
+
+    Its failure is the process's (``jarvis/listening/whisper_vad.py``), and
+    the suite refuses onnxruntime, so the first test that warms a listener
+    would otherwise mark it failed for every test after it. The suite
+    imports the module both as ``jarvis.x`` and as ``src.jarvis.x``.
+    """
+    for name in ("jarvis.listening.whisper_vad", "src.jarvis.listening.whisper_vad"):
+        module = sys.modules.get(name)
+        if module is not None:
+            monkeypatch.setattr(module, "_failure", None)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_jarvis_state(_bac_a_sable, request, monkeypatch):
     """Keep the suite's state changes off the live state file.
 

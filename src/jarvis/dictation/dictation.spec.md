@@ -88,7 +88,12 @@ After transcription, text passes through these stages in order:
   the language otherwise. With `whisper_vad` on (the default), Whisper's
   voice detector cuts what holds no speech before it decodes, as for the
   listener, so a press with nothing said pastes nothing rather than a
-  phrase Whisper wrote into the silence. MLX Whisper has no detector.
+  phrase Whisper wrote into the silence. MLX Whisper has no detector. A
+  detector that fails never costs him what he dictated: the recording is
+  heard again without it. Its failure is the process's, shared with the
+  listener through `jarvis/listening/whisper_vad.py`: printed once,
+  whichever of them saw it, and the detector is not asked for again
+  (`listening.spec.md`, "Text Whisper Makes Out of Silence").
 - **Separate `sounddevice.InputStream`** for dictation audio — avoids
   modifying the complex listener code.
 - **Pause flag** on the main listener to prevent dictation speech being
