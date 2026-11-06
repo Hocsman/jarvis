@@ -869,6 +869,21 @@ class TestOtherMethods:
         assert _backend(server).warm_up(MODEL) is True
         assert server.body()["max_tokens"] == 1
 
+    def test_a_prompt_given_to_the_warm_up_is_not_sent(self):
+        """Every token is billed, and a catalogue in the user message is not
+        cached by the API: the warm-up stays the one minimal request."""
+        server = _Server(_text("h"))
+
+        assert _backend(server).warm_up(
+            MODEL, prompt=("a long system prompt", "a catalogue of tools")
+        ) is True
+
+        sent = json.dumps(server.body())
+        assert len(server.requests) == 1
+        assert server.body()["max_tokens"] == 1
+        assert "a long system prompt" not in sent
+        assert "a catalogue of tools" not in sent
+
     def test_warm_up_reports_failure(self):
         server = _Server(_error(404, "no such model", "not_found_error"))
 

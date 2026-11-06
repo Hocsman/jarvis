@@ -23,7 +23,7 @@ which backend is active.
 """
 
 from __future__ import annotations
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import json
 import requests
@@ -521,6 +521,7 @@ class OpenAICompatibleBackend(LLMBackend):
         model: str,
         timeout_sec: float = 60.0,
         keep_alive: str = "30m",
+        prompt: Optional[Tuple[str, str]] = None,
     ) -> bool:
         """Establish the persistent session's connection and warm the
         provider ahead of the first real query.
@@ -532,6 +533,11 @@ class OpenAICompatibleBackend(LLMBackend):
         one minimal (1-token) request at startup absorbs that cost up front
         so the user's first query lands on a warm path. The session is
         reused (the backend is cached), so the warm connection persists.
+
+        ``prompt`` is not sent: the request stays the one-token one,
+        because whether the server keeps a computed prompt between requests
+        is not something the OpenAI shape says, and a cloud endpoint would
+        bill every token of it.
         """
         if not model:
             return False

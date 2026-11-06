@@ -11,7 +11,7 @@ from typing import Any, Dict, Optional
 
 from ..base import Tool, ToolContext
 from ..types import ToolExecutionResult
-from ..selection import router_timeout_sec, select_tools, ToolSelectionStrategy
+from ..selection import _ALWAYS_INCLUDED, router_timeout_sec, select_tools, ToolSelectionStrategy
 from ...debug import debug_log
 from ...llm import get_auxiliary_backend, get_embedding_backend
 
@@ -118,9 +118,13 @@ class ToolSearchTool(Tool):
                 error_message=f"Tool search failed: {e}",
             )
 
-        # Filter out the sentinel/self so the formatted output only lists
-        # actionable candidates for the chat model to choose from.
-        real = [n for n in selected if n and n not in ("stop", "toolSearchTool")]
+        # Only what the turn does not have yet is a find: not itself, and not
+        # the always-included tools, which every attended turn offers. A
+        # search that matched nothing comes back with those alone, and
+        # listing them as hits would answer a question about the weather
+        # with `remember`.
+        already_offered = {"toolSearchTool", *_ALWAYS_INCLUDED}
+        real = [n for n in selected if n and n not in already_offered]
         if not real:
             debug_log(
                 f"toolSearchTool: no additional tools found for query={query!r}",

@@ -15,6 +15,7 @@ from typing import Any, Optional, List
 
 from ..debug import debug_log
 from ..llm import get_auxiliary_backend
+from ..llm.ollama import at_least_server_keep_alive
 from .transcript_buffer import TranscriptSegment
 
 
@@ -30,10 +31,15 @@ def _is_low_power_mode_enabled(cfg: Any) -> bool:
 
 
 def _ollama_keep_alive_for_power_mode(cfg: Any) -> str:
-    """Return the Ollama residency duration for the active power mode."""
+    """Return the Ollama residency duration for the active power mode.
+
+    Brief in low-power mode, where the user asked for less. Otherwise 30
+    minutes, or the residency the Ollama server is set to when that one is
+    longer: a request that names a residency replaces the server's.
+    """
     if _is_low_power_mode_enabled(cfg):
         return LOW_POWER_OLLAMA_KEEP_ALIVE
-    return DEFAULT_OLLAMA_KEEP_ALIVE
+    return at_least_server_keep_alive(DEFAULT_OLLAMA_KEEP_ALIVE)
 
 
 def warm_up_chat_model(cfg, model: str, timeout: float) -> bool:

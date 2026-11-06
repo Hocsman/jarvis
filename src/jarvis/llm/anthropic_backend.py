@@ -754,6 +754,7 @@ class AnthropicBackend(LLMBackend):
         model: str,
         timeout_sec: float = 60.0,
         keep_alive: str = "30m",
+        prompt: Optional[Tuple[str, str]] = None,
     ) -> bool:
         """Open the client's connection to the API ahead of the first query.
 
@@ -762,6 +763,10 @@ class AnthropicBackend(LLMBackend):
         startup absorbs. The connection then stays open for
         ``_KEEPALIVE_SEC`` of idleness. The request is billed, a few
         tokens' worth.
+
+        ``prompt`` is not sent: every token is billed, and what a
+        ``direct`` call repeats from one request to the next (a catalogue
+        in the user message) is not what the API caches.
         """
         client = self._sdk()
         if not model or client is None:

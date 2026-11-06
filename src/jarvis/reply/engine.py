@@ -85,7 +85,7 @@ from .planner import (
     is_search_memory_step,
     resolve_next_tool_call as _resolve_plan_step,
 )
-from ..tools.selection import router_timeout_sec, select_tools, ToolSelectionStrategy
+from ..tools.selection import router_timeout_sec, select_tools, warm_up_router, ToolSelectionStrategy
 import json
 import re
 import uuid
@@ -383,9 +383,11 @@ def resolve_tool_router_model(cfg) -> str:
 
     Resolution order: explicit `tool_router_model` → `intent_judge_model` →
     `llm_chat_model`. Routing is a small classification job (the same
-    shape as intent judging), so reusing the judge model gives a small, fast
-    default that is already warm on wake-word paths — the chat model is only
-    a last resort because its weights are expensive to page in mid-reply.
+    shape as intent judging), so reusing the judge model gives a small
+    default — the chat model is only a last resort because its weights are
+    expensive to page in mid-reply. On local Ollama a shared model is
+    loaded again on each exchange, since the judge's calls ask for another
+    context size than the router's (``selection.spec.md``, Router warm-up).
 
     Extracted as a helper so the resolution order can be unit-tested and so
     the listener's warmup path (listener.py) stays in sync with the reply
@@ -399,6 +401,36 @@ def resolve_tool_router_model(cfg) -> str:
         if candidate:
             return candidate
     return ""
+
+
+def warm_up_tool_router(cfg, timeout_sec: float, keep_alive: str) -> bool:
+    """Warm the tool router on the prompt its first call will send.
+
+    Resolved the way :func:`run_reply_engine` resolves the router's call:
+    the model from :func:`resolve_tool_router_model`, its backend from
+    ``get_auxiliary_backend``, the builtins this configuration offers and
+    the MCP tools discovered at start-up. ``keep_alive`` is the residency
+    the listener asks every start-up warm-up for. See
+    :func:`jarvis.tools.selection.warm_up_router`.
+    """
+    model = resolve_tool_router_model(cfg)
+    if not model:
+        return False
+    mcp_tools: dict = {}
+    if getattr(cfg, "mcps", {}):
+        try:
+            from ..tools.registry import get_cached_mcp_tools
+            mcp_tools = get_cached_mcp_tools()
+        except Exception as e:
+            debug_log(f"router warm-up: MCP tools unavailable, warming the builtins only: {e}", "planning")
+    return warm_up_router(
+        offered_builtin_tools(cfg),
+        mcp_tools,
+        llm_backend=get_auxiliary_backend(cfg, model),
+        llm_model=model,
+        timeout_sec=timeout_sec,
+        keep_alive=keep_alive,
+    )
 
 
 def resolve_memory_extractor_model(cfg) -> str:
@@ -1064,6 +1096,25 @@ def _live_time_location_string(cfg) -> str:
         return ""
 
 
+def _degraded_pick_for(chat_model: str, pick: list, full_catalogue: list) -> list:
+    """What a turn whose router gave up offers the chat model
+    (`selection.spec.md`, LLM step 7).
+
+    A large chat model keeps the keyword pick: it looks through
+    ``toolSearchTool`` for what the pick lacks. A small one never does, and
+    offered the essential tools alone it answers without the tool it needed,
+    so it gets the whole catalogue for this turn.
+    """
+    if detect_model_size(chat_model) == ModelSize.SMALL:
+        debug_log(
+            f"tool router gave up: small chat model, whole catalogue offered "
+            f"({len(full_catalogue)} tools) for this turn",
+            "planning",
+        )
+        return list(full_catalogue)
+    return pick
+
+
 def _previous_turn_failed_tool_names(recent_messages: list) -> list[str]:
     """Return tool names whose previous-turn invocation reported failure.
 
@@ -1513,12 +1564,12 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         # keyword strategy (``routed_tools.degraded``) answered in its place.
         # Pinning that pick for the rest of the conversation would keep a
         # weaker allow-list than the router would give on its next try.
-        # The same holds for the "fall open to all tools" answer, which
-        # also pins ``allowed_tools`` to the full catalogue, overwhelms the
-        # planner (which then paraphrases tool steps as prose), and starves
-        # a small chat model into producing the empty-reply fallback.
-        # Re-rolling the router on the next turn is cheap and almost always
-        # recovers.
+        # The same holds for an answer equal to the whole catalogue (the
+        # embedding strategy's when the query's embedding fails), which
+        # also pins ``allowed_tools`` to the full catalogue for the rest of
+        # the conversation and overwhelms the planner (which then
+        # paraphrases tool steps as prose). Re-rolling the router on the
+        # next turn is cheap and almost always recovers.
         _router_gave_up = bool(getattr(routed_tools, "degraded", False))
         _router_returned_full_catalog = (
             routed_tools is not None
@@ -1528,6 +1579,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         if _router_gave_up:
             debug_log("tool router gave up, keyword pick used for this turn only", "planning")
             get_latency_journal().note_router_degraded()
+            routed_tools = _degraded_pick_for(cfg.llm_chat_model, routed_tools, _full_catalog_names)
         if (
             dialogue_memory
             and hasattr(dialogue_memory, "hot_cache_put")

@@ -289,6 +289,47 @@ class TestOllamaBackendWarmUp:
         sent = mock_post.call_args.kwargs["json"]
         assert sent["keep_alive"] == "1m"
 
+    @patch("jarvis.llm.requests.post")
+    def test_a_warm_up_with_a_prompt_sends_what_direct_would_and_keeps_the_model(self, mock_post):
+        """The prompt is computed so the next ``direct`` call that opens with
+        it reads only what follows. That holds only if the warm-up is the same
+        request: the same messages under the same template, and the same
+        load options, since a different context size makes Ollama load the
+        model again and throw the computed prompt away."""
+        from jarvis.llm import OllamaBackend
+
+        mock_post.return_value = _make_response(
+            json_data={"message": {"role": "assistant", "content": "none"}}
+        )
+        backend = OllamaBackend("http://localhost:11434")
+
+        backend.direct("qwen2.5:3b", "You are a tool router.", "Available tools: ...")
+        asked_url = mock_post.call_args.args[0]
+        asked = mock_post.call_args.kwargs["json"]
+        assert backend.warm_up(
+            "qwen2.5:3b", keep_alive="30m",
+            prompt=("You are a tool router.", "Available tools: ..."),
+        ) is True
+        warmed_url = mock_post.call_args.args[0]
+        warmed = mock_post.call_args.kwargs["json"]
+
+        assert warmed_url == asked_url
+        for key in ("model", "messages", "cache_prompt", "think", "stream"):
+            assert warmed[key] == asked[key], key
+        assert {k: v for k, v in warmed["options"].items() if k != "num_predict"} == asked["options"]
+        assert warmed["options"]["num_predict"] == 1
+        assert warmed["keep_alive"] == "30m"
+
+    @patch("jarvis.llm.requests.post")
+    def test_a_warm_up_with_a_prompt_that_fails_says_so(self, mock_post):
+        import requests
+        from jarvis.llm import OllamaBackend
+
+        mock_post.side_effect = requests.exceptions.Timeout()
+        backend = OllamaBackend("http://localhost:11434")
+
+        assert backend.warm_up("qwen2.5:3b", prompt=("system", "user")) is False
+
 
 class TestOllamaBackendPromptCaching:
     """Every Ollama chat payload must explicitly request prompt caching so
