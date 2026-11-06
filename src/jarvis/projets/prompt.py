@@ -14,15 +14,26 @@ router left it out: `toolSearchTool` finds a tool by its exact name
 
 Its last sentences say that work on a project goes to Claude Code alone.
 A router can offer another tool for a request on a project (a code host's
-file-writing tool), and with one among her tools she wrote a file through
-it, said her tools could not reach the code, or asked where the code was
+file-writing tool), and with one among her tools she could write a file
+through it, say her tools cannot reach the code, or ask where the code is
 and which file to change. Each of the three is named, as the thing not to
 do or as the thing that is already true.
+
+It says nothing of a request found in a page or a tool's result, of the
+user's other files, or of a project name that matches two folders: with
+the block as it is (measured on `claude-haiku-5-5`), a request planted in
+a page starts no job, a note added to a file in his documents still goes
+to `localFiles`, and an unclear project starts no job, and a wording that
+says all three does no better
+(`evals/test_projects_question_finds_claude_code.py`).
 
 It names no project, no path and no tool but `claudeCode` and
 `toolSearchTool`: the block rides in every prompt, to whichever provider
 runs the chat model, and the tool lists the projects in the one turn that
-needs them.
+needs them. `withheld_because` keeps it out of a prompt where it would not
+be true: a projects folder that does not exist, `claudeCode` filed under
+`## Jamais`, or a small chat model, which does not take the search the
+block points it to.
 
 See projets.spec.md, What she knows she can do.
 """
@@ -80,18 +91,27 @@ def withheld_because(cfg) -> str:
     `claudeCode` under `## Jamais` for both of its risks. Saying the
     projects are open to her then would have her promise what no call can
     keep, and contradict a decision only the user makes.
+
+    A small chat model does not call `toolSearchTool` for a tool its router
+    left out, so the block's way to the tool is not one it takes: told the
+    projects are open to it, it says it can and promises the work, and
+    hands nothing over.
     """
+    # Imported here: the registry imports the tool, which imports this
+    # package.
+    from ..reply.prompts import ModelSize, detect_model_size
+    from ..tools.policy import NEVER, RISK_DESTRUCTIVE, RISK_READ
+    from ..tools.registry import load_tool_policy
+
+    if detect_model_size(getattr(cfg, "llm_chat_model", "")) == ModelSize.SMALL:
+        return "the chat model is small and does not search for a tool"
+
     root = str(getattr(cfg, "claude_code_projects_dir", "") or "").strip()
     try:
         if not root or not Path(root).expanduser().is_dir():
             return "the projects folder does not exist"
     except (OSError, ValueError):
         return "the projects folder cannot be read"
-
-    # Imported here: the registry imports the tool, which imports this
-    # package.
-    from ..tools.policy import NEVER, RISK_DESTRUCTIVE, RISK_READ
-    from ..tools.registry import load_tool_policy
 
     policy = load_tool_policy(cfg)
     if all(policy.verdict(TOOL_NAME, risk) == NEVER for risk in (RISK_READ, RISK_DESTRUCTIVE)):

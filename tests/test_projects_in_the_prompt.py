@@ -8,7 +8,8 @@ for a question about what she can do. So while the tool is offered, the
 system prompt says what she can do and how to reach the tool when it is not
 among her tools this turn. It says nothing when that would not be true: the
 feature off, the projects folder missing, `claudeCode` filed under
-`## Jamais`. Nor on a routine turn, which never reaches `claudeCode`, nor on
+`## Jamais`, a small chat model that does not search for a tool. Nor on a
+routine turn, which never reaches `claudeCode`, nor on
 the turn that runs a call the user approved, which must not propose it
 again.
 
@@ -224,6 +225,23 @@ def test_a_tool_filed_under_jamais_is_not_claimed(tmp_path, projects):
     system = _system_prompt(_cfg(tmp_path, str(projects)))
 
     assert format_projets_block() not in system
+
+
+def test_a_small_chat_model_is_not_told(tmp_path, projects):
+    """A small chat model does not search for a tool its router left out,
+    so a request reaches `claudeCode` only when the router offers it.
+    Telling it the projects are open to it has it promise work it never
+    hands over. The tool itself stays offered."""
+    from src.jarvis.reply.prompts import ModelSize, detect_model_size
+
+    cfg = _cfg(tmp_path, str(projects))
+    cfg.llm_chat_model = "test-small:3b"
+    assert detect_model_size(cfg.llm_chat_model) == ModelSize.SMALL
+
+    system = _system_prompt(cfg)
+
+    assert format_projets_block() not in system
+    assert TOOL_NAME in system
 
 
 def test_a_tool_that_asks_first_is_still_claimed(tmp_path, projects):

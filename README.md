@@ -249,6 +249,7 @@ Install [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and sign i
 ```
 
 - Every sub-folder is a project, matched from what you say ("nikah score" finds `nikahscore`). Two close matches, and it asks which one.
+- Ask whether it can work on your projects and it says yes, then asks which one and what to do. A small chat model such as the default `gemma4:e2b` is not told it can, because it does not look up a tool the router left out: with one, a request reaches Claude Code only when the router offers the tool, and it may answer that it has no access to your code.
 - A task that changes code shows a card with the project and the exact task, and runs only on a click; Claude Code may edit files but not run commands. A question runs without asking, and Claude Code may then only read: editing, commands and web access are denied, whatever the project's own Claude Code settings allow. Write `- claudeCode` under `## Demande` in `outils.md` if you want to be asked every time.
 - One task at a time, stopped after `claude_code_timeout_sec` (30 minutes by default). Ask "how is Claude Code doing?" at any point.
 - Say "stop Claude Code" to stop a task early, without stopping Jarvis: it asks first, then tells you once the task has actually stopped. What Claude Code already changed stays changed. Put `- stopClaudeCode` under `## Libre` in `outils.md` to skip the question (if your file already lists it under `## Demande`, move that line rather than adding one).
