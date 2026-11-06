@@ -69,7 +69,9 @@ and never the voice.
   `ready` with the renderer's delay once it can draw (a delay that is not a
   number between 0 and 2 s turns the face off), `watched` whenever
   someone starts or stops watching the face, or `failed` with a reason.
-  Everything else it prints goes to its stderr, which the handle logs.
+  Everything else it prints goes to its stderr, which the handle logs as
+  plain text: a line written in UTF-16 (onnxruntime's warnings on Windows) is
+  decoded, and colour codes are dropped.
 - **`FaceRenderer` never raises to its caller and never blocks it.** Sending
   is a write to a pipe from a worker thread fed by an unbounded queue, so a
   renderer that stops reading costs memory, not time, until it is declared

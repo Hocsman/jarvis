@@ -252,3 +252,38 @@ class TestNeverRaising:
         r.cut("soon")
 
         assert r.ready()
+
+
+class TestWhatItPrints:
+    """What the renderer prints besides its events reaches the log as text
+    (`face.spec.md`, "The process"). The runtimes it loads do not all write
+    UTF-8: on Windows onnxruntime writes UTF-16 with colour codes."""
+
+    @pytest.fixture
+    def logged(self, monkeypatch):
+        import jarvis.output.face.client as client
+
+        lines = []
+        monkeypatch.setattr(client, "debug_log", lambda message, category="debug": lines.append(message))
+        return lines
+
+    def test_wide_and_coloured_output_is_logged_as_plain_text(self, made, logged):
+        wide = "\x1b[0;93m2026-01-01 10:00:00 [W:runtime:, frame.cc:12] shape {800,10} is not {512,10} at café\x1b[m"
+        r = made(f"""
+            sys.stderr.buffer.write({wide!r}.encode("utf-16-le") + "\\n".encode("utf-16-le"))
+            sys.stderr.buffer.write("a second wide line\\n".encode("utf-16-le"))
+            sys.stderr.buffer.write("a narrow line\\n".encode("utf-8"))
+            sys.stderr.buffer.flush()
+            say(event="ready", delay=0.75)
+            for _ in messages():
+                pass
+        """)
+        assert _wait(r.ready)
+        assert _wait(lambda: any("a narrow line" in line for line in logged))
+
+        relayed = [line for line in logged if line.startswith("face renderer:")]
+        assert relayed == [
+            "face renderer: 2026-01-01 10:00:00 [W:runtime:, frame.cc:12] shape {800,10} is not {512,10} at café",
+            "face renderer: a second wide line",
+            "face renderer: a narrow line",
+        ]

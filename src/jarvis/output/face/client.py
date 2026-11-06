@@ -10,6 +10,7 @@ import json
 import math
 import os
 import queue
+import re
 import struct
 import subprocess
 import sys
@@ -184,7 +185,7 @@ class FaceRenderer:
                 except ValueError:
                     event = None
                 if not isinstance(event, dict):
-                    debug_log(f"face renderer: {line}", "face")
+                    debug_log(f"face renderer: {_as_text(raw)}", "face")
                     continue
                 if event.get("event") == "ready":
                     try:
@@ -208,6 +209,28 @@ class FaceRenderer:
 
     def _read_log(self) -> None:
         for raw in self._proc.stderr:
-            line = raw.decode("utf-8", "replace").rstrip()
+            line = _as_text(raw)
             if line:
                 debug_log(f"face renderer: {line}", "face")
+
+
+_COLOUR = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def _as_text(raw: bytes) -> str:
+    """One line the renderer printed, as plain text for the log.
+
+    The runtimes it loads do not all write UTF-8: on Windows onnxruntime writes
+    UTF-16 with colour codes. Read up to a newline byte, such a line holds a NUL
+    beside each character, and the line after it starts with the second byte of
+    that newline. A line mostly made of NULs is read as UTF-16, and colour codes
+    are dropped.
+    """
+    body = raw.rstrip(b"\n")
+    if len(body) % 2 and body.startswith(b"\x00"):
+        body = body[1:]
+    if body and body.count(b"\x00") * 3 >= len(body):
+        text = body.decode("utf-16-le", "replace")
+    else:
+        text = body.replace(b"\x00", b"").decode("utf-8", "replace")
+    return _COLOUR.sub("", text).rstrip()
