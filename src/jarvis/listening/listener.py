@@ -26,6 +26,10 @@ from ..utils.audio_lock import portaudio_lock
 from .wake_detection import is_wake_word_detected, extract_query_after_wake, is_stop_command
 from .transcript_buffer import TranscriptBuffer, TranscriptSegment
 from .whisper_turbo import is_faster_whisper_turbo_supported
+from .whisper_vad import (
+    detector_failed as voice_detector_failed, prepare_voice_detector,
+    transcribe as transcribe_faster_whisper,
+)
 from .intent_judge import (
     IntentJudge,
     _is_low_power_mode_enabled,
@@ -2339,6 +2343,26 @@ class VoiceListener(threading.Thread):
                 print("  ⚠️  Speech detection failed; using audio-level detection. Enable voice_debug for details.", flush=True)
             return rms >= float(getattr(self.cfg, "voice_min_energy", 0.0045))
 
+    def _whisper_vad_setting(self) -> bool:
+        """Whether `whisper_vad` asks for faster-whisper's own voice
+        detector (Silero), which cuts what holds no speech before the
+        decoder hears it.
+
+        Out of an utterance of breath or room noise the decoder writes a
+        sentence, which `large-v3-turbo` reports with a `no_speech_prob` of
+        0.0, so the confidence filters after it cannot tell; with the
+        detector, such an utterance comes back empty. MLX Whisper has no
+        detector.
+        """
+        return bool(getattr(self.cfg, "whisper_vad", True))
+
+    def _voice_detector_on(self) -> bool:
+        """Whether the voice detector runs: the backend is faster-whisper
+        (MLX has none), the setting asks for it, and it has not failed
+        since the listener started (`whisper_vad.py`)."""
+        return (self._whisper_backend != "mlx" and self._whisper_vad_setting()
+                and not voice_detector_failed())
+
     def _filter_noisy_segments(self, segments):
         """Filter out low-confidence Whisper segments."""
         min_confidence = getattr(self.cfg, "whisper_min_confidence", 0.3)
@@ -3218,6 +3242,13 @@ class VoiceListener(threading.Thread):
                 except Exception as e:
                     debug_log(f"faster-whisper warmup failed: {e}", "voice")
 
+            # The voice detector loads its own model on first use. The decode
+            # above ran without it, which would have cut this noise away, so
+            # it is loaded here; one that cannot load is announced now rather
+            # than on his first words. Each start-up tries it afresh.
+            if self.model is not None and self._whisper_vad_setting():
+                prepare_voice_detector()
+
         # Wait for LLM warmups before announcing "Listening!" so the first
         # engagement is responsive. A single 60s budget is shared across
         # all warmup threads so a slow/down Ollama can't block us from
@@ -3549,6 +3580,11 @@ class VoiceListener(threading.Thread):
             self.state_manager.check_hot_window_expiry(self.cfg.voice_debug)
             return
 
+        # The language Whisper reports for this utterance (the one named in
+        # `whisper_language`, or the one it detected), kept below only if
+        # the utterance is heard as something.
+        detected: Optional[str] = None
+
         # Speech recognition with appropriate backend
         try:
             if self._whisper_backend == "mlx":
@@ -3559,13 +3595,7 @@ class VoiceListener(threading.Thread):
                         path_or_hf_repo=self._mlx_model_repo,
                         language=self.cfg.whisper_language,
                     )
-
-                # Capture the language Whisper reports (the one named in
-                # `whisper_language`, or the one it detected) so downstream
-                # tools can pick locale-appropriate resources.
                 detected = result.get("language")
-                if isinstance(detected, str) and detected:
-                    self._last_detected_language = detected
 
                 # Filter segments by confidence (MLX Whisper returns segments with avg_logprob)
                 min_confidence = getattr(self.cfg, "whisper_min_confidence", 0.3)
@@ -3621,21 +3651,15 @@ class VoiceListener(threading.Thread):
                 # CPU mode: skip timestamps and disable context carry-over for speed
                 cpu_mode = self._whisper_device == "cpu"
                 with self.transcribe_lock:
-                    try:
-                        segments, _info = self.model.transcribe(
-                            audio, language=self.cfg.whisper_language, vad_filter=False,
-                            condition_on_previous_text=not cpu_mode,
-                            without_timestamps=cpu_mode,
-                        )
-                    except TypeError:
-                        segments, _info = self.model.transcribe(audio, language=self.cfg.whisper_language)
-                    segments_list = list(segments)
-                # Capture the detected language (faster-whisper exposes it
-                # on the info object). Guard against older API variants
-                # where the attribute may be absent.
+                    segments_list, _info = transcribe_faster_whisper(
+                        self.model, audio, language=self.cfg.whisper_language,
+                        voice_detector=self._whisper_vad_setting(),
+                        condition_on_previous_text=not cpu_mode,
+                        without_timestamps=cpu_mode,
+                    )
+                # faster-whisper reports it on the info object; older API
+                # variants may not carry the attribute.
                 detected = getattr(_info, "language", None)
-                if isinstance(detected, str) and detected:
-                    self._last_detected_language = detected
                 filtered_segments = self._filter_noisy_segments(segments_list)
                 text = " ".join(seg.text for seg in filtered_segments).strip()
         except Exception as e:
@@ -3654,8 +3678,21 @@ class VoiceListener(threading.Thread):
         )
 
         if not text or not text.strip():
+            detector = ("none on mlx" if self._whisper_backend == "mlx"
+                        else "on" if self._voice_detector_on() else "off")
+            debug_log(f"utterance of {audio_duration:.1f}s heard as nothing "
+                      f"(whisper_vad={self._whisper_vad_setting()}, "
+                      f"voice detector {detector})", "voice")
             self.state_manager.check_hot_window_expiry(self.cfg.voice_debug)
             return
+
+        # The language last heard, which the turn handed to the reply thread
+        # carries so tools can pick locale-appropriate resources. Only an
+        # utterance heard as something sets it: with no language set,
+        # Whisper still names one for an utterance the voice detector
+        # emptied, guessed from the silence it pads it with.
+        if isinstance(detected, str) and detected:
+            self._last_detected_language = detected
 
         annonce = self._transcription_announcement(text)
         if annonce:

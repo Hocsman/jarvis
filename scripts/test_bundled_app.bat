@@ -4,7 +4,8 @@ REM
 REM PyInstaller produces a onedir build: dist\Jarvis\Jarvis.exe next to an
 REM _internal folder that holds the data files the app reads at runtime.
 REM scripts\check_bundle_layout.py derives those files from the source tree and
-REM names any that the build is missing, before the app is launched.
+REM from the installed packages it names (PACKAGE_DATA), and names any that the
+REM build is missing, before the app is launched.
 
 echo.
 echo === Building Jarvis Desktop App with PyInstaller ===
@@ -49,7 +50,8 @@ echo Checking the build layout...
 if errorlevel 1 (
     echo.
     echo Build is incomplete: the files listed above are missing from dist\Jarvis\_internal.
-    echo Add them to the datas list in jarvis_desktop.spec.
+    echo Add them to the datas list in jarvis_desktop.spec. A package reported as not
+    echo installed means the check ran with another Python than the build.
     exit /b 1
 )
 echo.
