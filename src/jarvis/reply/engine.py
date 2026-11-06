@@ -3015,9 +3015,11 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                     f"answered from the earlier result",
                     "planning",
                 )
+                # "called", not "ran": the first call may have been refused
+                # by the gate or failed before it produced anything.
                 print(
-                    f"    ⚠️ Not run again: {tool_name} already ran with these "
-                    f"arguments in this reply",
+                    f"    ⚠️ Not run again: {tool_name} already called with "
+                    f"these arguments in this reply",
                     flush=True,
                 )
                 if use_text_tools:

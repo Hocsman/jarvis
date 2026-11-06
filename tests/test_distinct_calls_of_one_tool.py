@@ -252,10 +252,26 @@ def test_the_same_call_again_is_answered_from_what_it_returned_and_said(capsys):
     assert any("⚠️" in line and "getWeather" in line for line in out.splitlines())
 
 
+def _answer_to(call_id: str, messages: list[dict]) -> str:
+    found = [m.get("content") or "" for m in messages
+             if m.get("role") == "tool" and m.get("tool_call_id") == call_id]
+    assert len(found) == 1, f"call {call_id} answered {len(found)} times"
+    return found[0]
+
+
+def _repeat_line(out: str, tool: str) -> str:
+    lines = [ln for ln in out.splitlines() if "⚠️" in ln and tool in ln]
+    assert len(lines) == 1, lines
+    return lines[0]
+
+
 @pytest.mark.unit
-def test_the_same_call_after_a_failure_is_not_run_again():
+def test_the_same_call_after_a_failure_is_not_run_again(capsys):
     """A call that failed fails the same way when it is repeated word for
-    word inside the same reply: retrying it is the loop, not the work."""
+    word inside the same reply: retrying it is the loop, not the work.
+    The model's second call is still answered, the error it got the first
+    time is still in front of it, and the console does not claim the call
+    produced anything."""
     cfg = _mock_cfg()
     chat = [
         _call("getWeather", {"location": "Ambrel"}, "f1"),
@@ -263,7 +279,7 @@ def test_the_same_call_after_a_failure_is_not_run_again():
         _answer("I could not get the weather for Ambrel."),
     ]
 
-    _, ran, _ = _run(
+    _, ran, sent = _run(
         cfg=cfg, text="weather in Ambrel?", chat=chat, tools=["getWeather"],
         outcome=lambda a: ToolExecutionResult(
             success=False, reply_text=None,
@@ -271,27 +287,36 @@ def test_the_same_call_after_a_failure_is_not_run_again():
     )
 
     assert len(ran) == 1
+    assert "getWeather" in _answer_to("f2", sent[-1])
+    assert "weather service unreachable" in _answer_to("f1", sent[-1])
+    line = _repeat_line(capsys.readouterr().out, "getWeather")
+    assert "called" in line and " ran " not in line
 
 
 @pytest.mark.unit
-def test_the_same_call_after_a_refusal_is_not_run_again():
+def test_the_same_call_after_a_refusal_is_not_run_again(capsys):
     """A call the gate refused is refused again if it reaches the gate
-    again; the model is pointed at the refusal instead."""
+    again; the model is pointed at the refusal instead, and the console
+    does not say that a call the gate refused ran."""
     cfg = _mock_cfg()
+    refusal = "getWeather is not allowed for this assistant."
     chat = [
         _call("getWeather", {"location": "Ambrel"}, "n1"),
         _call("getWeather", {"location": "Ambrel"}, "n2"),
         _answer("You have not allowed me to check the weather."),
     ]
 
-    _, ran, _ = _run(
+    _, ran, sent = _run(
         cfg=cfg, text="weather in Ambrel?", chat=chat, tools=["getWeather"],
         outcome=lambda a: ToolExecutionResult(
-            success=False, refused=True,
-            reply_text="getWeather is not allowed for this assistant."),
+            success=False, refused=True, reply_text=refusal),
     )
 
     assert len(ran) == 1
+    assert "getWeather" in _answer_to("n2", sent[-1])
+    assert refusal in _answer_to("n1", sent[-1])
+    line = _repeat_line(capsys.readouterr().out, "getWeather")
+    assert "called" in line and " ran " not in line
 
 
 @pytest.mark.unit

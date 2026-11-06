@@ -36,7 +36,7 @@ def strip_nonstandard_message_fields(
     Completions schema removed.
 
     The reply engine annotates some messages with internal fields it
-    uses for duplicate detection and carry-over logic (``tool_name``,
+    uses for the plan-step count and carry-over logic (``tool_name``,
     ``tool_failed`` on tool messages, ``_is_context_injected`` on
     system messages). These must be stripped before the payload is
     serialised because strict servers (e.g. llama.cpp, vLLM)
