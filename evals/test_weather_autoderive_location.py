@@ -110,6 +110,7 @@ def _run_weather_query(mock_config, eval_db, eval_dialogue_memory, query: str):
     ):
         response = run_reply_engine(
             db=eval_db, cfg=mock_config, tts=None,
+            origin="voix",
             text=query, dialogue_memory=eval_dialogue_memory,
         )
     return capture, response

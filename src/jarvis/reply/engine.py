@@ -1231,6 +1231,9 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
             later the routines that run unattended. Recorded against every
             tool call in the action ledger, so the user can tell an action
             they asked for from one that happened while they were away.
+            ``"voix"`` is also the one turn whose reply is read aloud, so it
+            alone gets the spoken-form rule (units, signs and dates in
+            words); any other origin, or none, gets a reply that is read.
         granted / granted_action: a decision already taken by a
             deliberate gesture, so this turn runs the approved call and
             narrates it. The click has already claimed the question from
@@ -2163,8 +2166,11 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
     # model has a concrete template to follow. Using text tools from the start also avoids
     # the wasted round-trip and prompt confusion of starting native and falling back mid-turn.
     use_text_tools = (model_size == ModelSize.SMALL)
-    prompts = get_system_prompts(model_size)
-    debug_log(f"Model size detected: {model_size.value} for {cfg.llm_chat_model} (use_text_tools={use_text_tools})", "planning")
+    # Only a turn from the voice is heard. The text chat's reply is read
+    # and a routine's is written to its journal, so they keep "11 °C".
+    spoken = origin == "voix"
+    prompts = get_system_prompts(model_size, spoken=spoken)
+    debug_log(f"Model size detected: {model_size.value} for {cfg.llm_chat_model} (use_text_tools={use_text_tools}, spoken={spoken})", "planning")
 
     # Compound-query decomposition for small models.
     # When a query contains a conjunction joining two question-clauses, the
@@ -3347,6 +3353,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 user_query=redacted,
                 loop_messages=messages[user_msg_index + 1:],
                 cfg=cfg,
+                spoken=spoken,
             )
         except Exception as e:
             debug_log(

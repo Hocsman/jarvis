@@ -305,6 +305,7 @@ def test_a_real_model_turn_touches_nothing_of_the_users_own(
              patch("jarvis.reply.engine.extract_search_params_for_memory", return_value={"keywords": []}):
             reply = run_reply_engine(
                 db=db, cfg=cfg, tts=None,
+                origin="voix",
                 text="quelle est la météo ?", dialogue_memory=eval_dialogue_memory,
             )
     finally:
