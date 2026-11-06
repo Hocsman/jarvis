@@ -26,7 +26,7 @@ Publishing needs the standard library and debug logging only. No Qt and no deskt
 
 The end of speech publishes nothing. What follows it (a hot window, so `LISTENING`, or `IDLE`) is the daemon's call, and an engine that stops must not guess.
 
-A question that ends with nothing in it ends on what she is doing. Her name alone opens a question with nothing in it yet, and `LISTENING` is published while she waits for it (`listening.spec.md`, Wake Word Mode). When his silence runs out with nothing collected, the listener publishes `SPEAKING` while she speaks, `THINKING` while a reply of hers is on its way, and `IDLE` otherwise.
+A question that ends with nothing in it ends on what she is doing. Her name alone opens a question with nothing in it yet, and `LISTENING` is published while she waits for it (`listening.spec.md`, Wake Word Mode). When his silence runs out with nothing collected, the listener publishes `SPEAKING` while she speaks, `THINKING` while a reply of hers is on its way, and `IDLE` otherwise. A reply stopped since it was handed over is not on its way, though the engine may still be finishing it. While he dictates the listener publishes nothing: `DICTATING` or `DICTATION_PROCESSING` stands until the daemon ends the dictation.
 
 ## Holder
 
@@ -52,5 +52,5 @@ The desktop app also publishes one value, `ASLEEP`, when the daemon stops and wh
 
 - `tests/test_jarvis_state.py`: the holder's contract (starts asleep, shared through the file, falls back, never raises, publishes stay ordered under concurrency) and the headless import guarantee, checked in a clean interpreter.
 - `tests/test_the_pipeline_publishes_its_state.py` and `TestTheListenerPublishesItsState` in `tests/test_hot_window_input.py`: each stage publishes the state it enters, read back through the same reader a viewer uses.
-- `TestHerNameAloneThenSilence` in `tests/test_hot_window_input.py` and `test_her_name_alone_while_she_thinks_leaves_her_thinking` in `tests/test_elle_entend_pendant_qu_elle_reflechit.py`: a question that ends with nothing in it ends on what she is doing.
+- `TestHerNameAloneThenSilence` in `tests/test_hot_window_input.py`, and `test_her_name_alone_while_she_thinks_leaves_her_thinking`, `test_her_name_alone_after_a_stop_ends_idle` and `test_what_others_say_after_a_stop_ends_the_beep_it_started` in `tests/test_elle_entend_pendant_qu_elle_reflechit.py`: a question that ends with nothing in it ends on what she is doing, and a reply that was stopped keeps neither the tune nor `THINKING`.
 - `tests/conftest.py` gives every test its own state file, so a test run never moves the orb of an app the developer has open.

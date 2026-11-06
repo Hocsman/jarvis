@@ -149,7 +149,7 @@ The capture callback stamps each block with the time it was captured and queues 
 **Replies run on a thread of their own.** Once a query is collected, the loop hands it over (`_hand_over`) and goes back to listening; the reply thread runs the queries one after the other, each through the reply engine and then out loud. While she prepares an answer and while she says it, what he says is still heard.
 
 - **A question asked while a reply is on its way waits its turn.** It is answered after the one in hand, never alongside it, and only once her voice has stopped: a reply started while the last is still audible would replace the echo detector's record of it, and that one's window would open over the new one. At most `MAX_WAITING_TURNS` (2) wait; past that the oldest is dropped with a console line, so a wake word repeated by a film cannot stack up replies that would run minutes later.
-- **A stop silences the reply.** Heard while a reply is being prepared, said or waits to be, a stop says nothing more of the reply in hand (no sentence streamed after it, no tail), drops the questions waiting behind it and a question still being collected, and interrupts the speech engine. Each stop is counted, and a turn handed over before the count moved is never said: one stopped while it waited for the query lock is not run at all. The engine finishes a turn already running on its own, unheard; its tools still run. Replies other features handed over are kept.
+- **A stop silences the reply.** Heard while a reply is being prepared, said or waits to be, a stop says nothing more of the reply in hand (no sentence streamed after it, no tail), drops the questions waiting behind it and a question still being collected, and interrupts the speech engine. Each stop is counted, and a turn handed over before the count moved is never said: one stopped while it waited for the query lock is not run at all. The engine finishes a turn already running on its own, unheard; its tools still run. A stopped turn is no longer a reply on its way, even while the engine finishes it: the thinking tune and THINKING are not kept for it, and there is nothing left for another stop word to stop. Replies other features handed over are kept.
 - **What counts as a stop.** While she speaks, any utterance holding a stop command, as before; while a reply is on its way or his question is still being collected, an utterance of at most `STOP_WORDS_WHILE_THINKING` (3) words, because a stop word inside a longer sentence ("Jarvis, how do I stop the timer?") is a question, and waits its turn. A stop the intent judge reads out of a sentence counts the same.
 - **Her spoken question is answered by what he says to it.** A spoken question is settled by the next voice turn (`tools/policy.spec.md`), so a turn whose words he said before he finished hearing it is set aside, with a console line, and the question waits for his answer. A question he never heard, its reply having been stopped, is withdrawn as `expiré` before the next turn runs.
 - **Speech ignored while a reply is on its way leaves her thinking.** The thinking tune is that reply's: an utterance that is not for her does not stop it, and the published state stays THINKING.
@@ -204,10 +204,12 @@ System is waiting for wake word activation.
 1. Start thinking beep immediately and publish the state LISTENING
 2. Wait for utterance to complete (user finishes speaking)
 3. Send transcript buffer + wake timestamp to intent judge
-4. If `directed=true` and `query` exists, collect it, and hand it to the reply thread once he has stopped for `voice_collect_seconds`
+4. If `directed=true` and `query` exists, collect it, and hand it to the reply thread once he has stopped for `voice_collect_seconds`; a verdict that finds nothing but her name leaves the decision to the wake-word check (below)
 5. If rejected, stop the beep and publish IDLE
 
-**Her name with nothing after it opens a question with nothing in it yet.** When the wake-word check finds nothing after the wake word ("Jarvis ?" alone), she waits for his question as for any other: the console says `👂 Waiting for your question...` rather than announcing a query, the thinking tune plays and LISTENING is published, and what he says before his silence has lasted `voice_collect_seconds` is his question. When the silence runs out with nothing collected, nothing is handed over and the wait ends where he can see it: `💤 Nothing after the wake word, returning to wake word mode` is printed, and the published state goes back to what she is doing. While she speaks she is SPEAKING; while a reply of hers is on its way she is THINKING, and the tune, which is that reply's, plays on; otherwise the tune stops and she is IDLE. The hot window comes to the same wait when a wake word that can only be his leaves the decision to the wake-word check (see "Hot Window Mode").
+**Her name with nothing after it opens a question with nothing in it yet.** When the wake-word check finds nothing after the wake word, she waits for his question as for any other. Nothing means no letter or digit in any script once the wake word and its aliases are taken out: "Jarvis ?", "¿Jarvis?", "Jarvis…" and "Jarvis ! Jarvis !" are her name alone. The console says `👂 Waiting for your question...` rather than announcing a query, shown at once even through a pipe; the thinking tune plays, never over her voice; LISTENING is published; and what he says before his silence has lasted `voice_collect_seconds` is his question. When the silence runs out with nothing collected, nothing is handed over and the wait ends where he can see it: `💤 Nothing after the wake word, returning to wake word mode` is printed, and the published state goes back to what she is doing. While she speaks she is SPEAKING; while a reply of hers is on its way she is THINKING, and the tune, which is that reply's, plays on; otherwise the tune stops and she is IDLE. A reply stopped since it was handed over is not on its way (see "The Microphone Is Always Read"). While he dictates, nothing is published: the dictation's state stands. The hot window comes to the same wait when a wake word that can only be his leaves the decision to the wake-word check (see "Hot Window Mode").
+
+**The intent judge does not answer her name as a question.** Outside the hot window, a directed verdict that finds nothing but her name, in what he said and in the `query` it reads, decides nothing, whatever its confidence: the wake-word check does, and she waits for his question as above. A query that holds more than her name is a question the judge read in his earlier words, and it is answered.
 
 **A sentence heard while a question is still being collected completes it**, in this mode and in the hot window. Every path that accepts an utterance adds it to the question being collected, never puts it in its place, and she answers both: "Salut Yuba, comment tu vas ?" then "Tu m'entends Yuba ?" is one question. A collection that keeps being completed still ends after `voice_max_collect_seconds`. The silence that ends it is counted from the end of the last utterance collected, in the time its audio was captured: neither Whisper nor the judge adds to the wait, and audio the loop reads late, after a stall, is measured in its own time, so his next words still complete the question. Whatever joins it is marked processed, like every accepted segment, so the judge never sees it again as context it could restate. A stop heard while it is collected cancels it instead (see "The Microphone Is Always Read"). What he adds needs no wake word, so Whisper's inventions reach the question too: one the judge calls noise is left out (see "Text Whisper Makes Out of Silence").
 
@@ -432,7 +434,7 @@ To minimise perceived latency, audio and visual feedback starts **immediately af
 - **Hot window:** If voice started during an active (or pending) hot window, start the thinking beep and publish LISTENING.
 - **No trigger:** If neither condition is met, no feedback is given.
 
-If the intent judge later rejects the query (and no hot window override applies), the beep is stopped and the state reverts to IDLE. So it is when her name alone is followed by nothing until his silence runs out, unless she is speaking or a reply of hers is on its way (see "Wake Word Mode"). This brief false-positive beep is acceptable — users prefer immediate acknowledgement over delayed but perfect accuracy.
+If the intent judge later rejects the query (and no hot window override applies), the beep is stopped and the state reverts to IDLE, unless a reply of hers is on its way: the tune is then that reply's, and it plays on. Her name followed by nothing ends as "Wake Word Mode" describes. This brief false-positive beep is acceptable — users prefer immediate acknowledgement over delayed but perfect accuracy.
 
 **LISTENING is not published early during TTS** — the beep is suppressed while TTS is playing to avoid self-triggering.
 
@@ -530,6 +532,8 @@ If no verdict, in hot window:
     → Otherwise: collect what he said as a query
 If judge rejects and says noise, in hot window:
     → Not speech: mark processed, ignore, hot window untouched
+If judge.directed, outside the hot window, and neither what was heard nor its query holds more than her name:
+    → Wake-word check: her name alone, she waits for his question
 If judge.directed and judge.query:
     → Verify wake word present (wake word mode) or non-echo (hot window)
     → Collect it (added to a question being collected), then hand it to the reply thread (it waits its turn)
@@ -547,7 +551,8 @@ If nothing above took it and a question is being collected:
 When his silence has lasted voice_collect_seconds:
     → Something collected: hand it to the reply thread
     → Nothing collected (her name alone): 💤 Nothing after the wake word, nothing handed over;
-      published state back to SPEAKING, THINKING (the reply's tune plays on) or IDLE (tune stopped)
+      published state back to SPEAKING, THINKING (the reply's tune plays on) or IDLE (tune stopped);
+      while he dictates, the dictation's state stands
 ```
 
 ## Keeping a Copy of an Utterance

@@ -14,7 +14,7 @@ import sys
 import platform
 from collections import deque
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional, TYPE_CHECKING, Any
 from datetime import datetime
 
@@ -633,6 +633,10 @@ class VoiceListener(threading.Thread):
         # Each stop counts one. A turn handed over before the count moved
         # is never said.
         self._stop_epoch = 0
+        # The count when the latest turn was handed over. Turns run in the
+        # order they were handed over, so while any is owed the latest one
+        # is, and a stop since it was handed over leaves none to be said.
+        self._latest_turn_epoch = 0
         # When the last utterance he was heard saying ended.
         self._last_heard_at = 0.0
         # The utterance being handled, whole, and when it ended. It becomes
@@ -734,12 +738,18 @@ class VoiceListener(threading.Thread):
                 self._tune_player = TunePlayer(enabled=True)
                 self._tune_player.start_tune()
 
-    def _stop_thinking_tune(self) -> None:
-        """Stop the thinking tune and revert the published state to IDLE."""
+    def _silence_the_tune(self) -> bool:
+        """Stop the thinking tune, if one plays. Whether one did."""
         with self._tune_lock:
             player, self._tune_player = self._tune_player, None
-        if player is not None:
-            player.stop_tune()
+        if player is None:
+            return False
+        player.stop_tune()
+        return True
+
+    def _stop_thinking_tune(self) -> None:
+        """Stop the thinking tune and revert the published state to IDLE."""
+        if self._silence_the_tune():
             get_jarvis_state().set_state(JarvisState.IDLE)
 
     def _drop_the_early_beep(self) -> None:
@@ -1223,6 +1233,20 @@ class VoiceListener(threading.Thread):
                               f"\"{text_lower}\"", "voice")
                     decisive = False
 
+                # Her name alone, outside the hot window: a directed verdict
+                # that finds no question, in what he said or in its query,
+                # once her name is taken out, decides nothing. The wake-word
+                # check does, and waits for his question rather than answer
+                # her name as if it were one. A question the judge reads in
+                # his earlier words is his, and goes on below.
+                if (not could_be_hot_window and intent_judgment.directed
+                        and not self._what_follows_her_name(text_lower)
+                        and not self._what_follows_her_name((intent_judgment.query or "").lower())):
+                    debug_log(f"🔔 her name alone, the wake-word check decides "
+                              f"({intent_judgment.confidence} verdict)", "voice")
+                    intent_judgment = replace(intent_judgment, query="")
+                    decisive = False
+
                 # If directed with query, process it
                 if intent_judgment.directed and intent_judgment.query:
                     # In wake word mode, verify the wake word is actually present
@@ -1501,7 +1525,6 @@ class VoiceListener(threading.Thread):
 
         # Priority 4: Wake word detection (fallback when intent judge unavailable/inconclusive)
         wake_word = getattr(self.cfg, "wake_word", "jarvis")
-        aliases = set(getattr(self.cfg, "wake_aliases", [])) | {wake_word}
 
         wake_detected = self._carries_the_wake_word(text_lower)
         debug_log(f"wake word check: '{wake_word}' in '{text_lower}' → {wake_detected}", "voice")
@@ -1516,18 +1539,20 @@ class VoiceListener(threading.Thread):
             # Clear audio buffers to prevent concatenation issues
             self._clear_audio_buffers()
 
-            query_fragment = extract_query_after_wake(text_lower, wake_word, list(aliases))
-            self._collect(query_fragment)
+            self._collect(self._what_follows_her_name(text_lower))
 
             # Start thinking tune and show processing message. Her name with
             # nothing after it is a question with nothing in it yet: she
-            # waits for it, and `_check_query_timeout` ends the wait.
+            # waits for it, and `_check_query_timeout` ends the wait. The
+            # line is flushed: through a pipe it would otherwise wait for the
+            # next one, and could show up once the wait is over.
             self._start_thinking_tune()
             pending = self.state_manager.get_pending_query()
             if not pending:
                 debug_log("wake word with nothing after it: waiting for his question", "voice")
             try:
-                print(f"\n✨ Working on it: {pending}" if pending else "\n👂 Waiting for your question...")
+                print(f"\n✨ Working on it: {pending}" if pending else "\n👂 Waiting for your question...",
+                      flush=True)
             except Exception:
                 pass
             return
@@ -1642,6 +1667,15 @@ class VoiceListener(threading.Thread):
         aliases = set(getattr(self.cfg, "wake_aliases", [])) | {wake_word}
         fuzzy_ratio = float(getattr(self.cfg, "wake_fuzzy_ratio", 0.78))
         return is_wake_word_detected(text_lower, wake_word, list(aliases), fuzzy_ratio)
+
+    def _what_follows_her_name(self, text_lower: str) -> str:
+        """What *text_lower* says once the wake word and its aliases are
+        taken out, or nothing when no letter or digit is left, in any script:
+        "jarvis ?", "¿jarvis?" and "jarvis…" are her name alone."""
+        wake_word = getattr(self.cfg, "wake_word", "jarvis")
+        aliases = set(getattr(self.cfg, "wake_aliases", [])) | {wake_word}
+        fragment = extract_query_after_wake(text_lower, wake_word, list(aliases))
+        return fragment if any(ch.isalnum() for ch in fragment) else ""
 
     def _carries_his_wake_word(self, text_lower: str, spoken: str) -> bool:
         """Whether *text_lower* carries a wake word that can only be his
@@ -1829,6 +1863,7 @@ class VoiceListener(threading.Thread):
                          getattr(self, "_last_transcript", None),
                          heard_at=self._last_heard_at, epoch=self._stop_epoch)
             self._replies_owed += 1
+            self._latest_turn_epoch = turn.epoch
             dropped = None
             if self._turns.qsize() >= MAX_WAITING_TURNS:
                 try:
@@ -1859,8 +1894,10 @@ class VoiceListener(threading.Thread):
         return self._a_reply_is_on_its_way() or self.state_manager.is_collecting()
 
     def _a_reply_is_on_its_way(self) -> bool:
-        """Whether a turn is being prepared or said, or waits to be."""
-        return self._replies_owed > 0
+        """Whether a reply of hers will be said: a turn is being prepared or
+        said, or waits to be, and no stop came after it. A stopped turn the
+        engine is still finishing is never said, so it is not one."""
+        return self._replies_owed > 0 and self._latest_turn_epoch == self._stop_epoch
 
     def _stop_the_replies(self) -> None:
         """A stop: nothing more of the reply in hand is said, the queries
@@ -2435,20 +2472,25 @@ class VoiceListener(threading.Thread):
     def _nothing_after_the_wake_word(self) -> None:
         """His silence ran out on a question with nothing in it: her name
         alone, then nothing. Nothing is handed over, the console says so, and
-        the published state goes back to what she is doing. A reply on its
-        way owns the tune, which plays on; otherwise the tune was this
-        question's, and it stops."""
+        the published state goes back to what she is doing; while he
+        dictates, the dictation's state stands. A reply on its way owns the
+        tune, which plays on; otherwise the tune was this question's, and it
+        stops."""
         reply_on_its_way = self._a_reply_is_on_its_way()
         if not reply_on_its_way:
-            self._stop_thinking_tune()
-        if self.tts is not None and self.tts.is_speaking():
+            self._silence_the_tune()
+        if self._dictation_active:
+            state = None
+        elif self.tts is not None and self.tts.is_speaking():
             state = JarvisState.SPEAKING
         elif reply_on_its_way:
             state = JarvisState.THINKING
         else:
             state = JarvisState.IDLE
-        get_jarvis_state().set_state(state)
-        debug_log(f"nothing after the wake word: nothing handed over, state {state.value}", "voice")
+        if state is not None:
+            get_jarvis_state().set_state(state)
+        debug_log("nothing after the wake word: nothing handed over, state "
+                  f"{state.value if state is not None else 'left to the dictation'}", "voice")
         try:
             print("💤 Nothing after the wake word, returning to wake word mode\n", flush=True)
         except Exception:

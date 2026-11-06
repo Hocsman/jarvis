@@ -20,7 +20,14 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from test_hot_window_input import _create_listener
+from test_hot_window_input import (
+    _SilentTune,
+    _create_listener,
+    _his_silence_runs_out,
+    _install_intent_judge,
+    _make_judgment,
+    _the_wait_ended,
+)
 
 WAIT = 5.0
 
@@ -78,8 +85,9 @@ def _wait_for(predicate, timeout=WAIT):
 
 
 def _settled(listener):
-    """Every turn handed over has been answered, stopped or set aside."""
-    return _wait_for(lambda: not listener._a_reply_is_on_its_way())
+    """Every turn handed over has been answered, stopped or set aside, and
+    the reply thread is done with it."""
+    return _wait_for(lambda: listener._replies_owed == 0)
 
 
 def _spoken(tts):
@@ -325,27 +333,87 @@ def test_what_others_say_while_she_thinks_leaves_her_thinking(_print):
 
 
 @patch("builtins.print")
-def test_her_name_alone_while_she_thinks_leaves_her_thinking(_print):
+def test_her_name_alone_while_she_thinks_leaves_her_thinking(mock_print):
     """He says only her name while she prepares a reply, then nothing. The
     wait for his question ends with nothing to answer: the tune is that
     reply's and plays on, and she is shown thinking again."""
+    from jarvis.state import JarvisState
+
+    engine = _Engine()
+    listener, _tts, patcher = _listener_with(engine)
+    tune = _SilentTune()
+    try:
+        listener._hand_over("quelle heure est-il")
+        assert engine.started.wait(WAIT)
+        tune.start_tune()
+        listener._tune_player = tune
+        listener._process_transcript("Jarvis ?", utterance_energy=0.01)
+        assert listener.state_manager.is_collecting()
+        mock_print.reset_mock()
+
+        _his_silence_runs_out(listener)
+
+        _the_wait_ended(listener, mock_print, JarvisState.THINKING)
+        assert tune.playing, "the tune of the reply on its way was stopped"
+    finally:
+        listener._tune_player = None
+        engine.release.set()
+        _stop(listener, patcher)
+
+
+@patch("builtins.print")
+def test_her_name_alone_after_a_stop_ends_idle(mock_print):
+    """A stop silences the reply in hand, which the engine finishes unheard.
+    Her name alone after it, then nothing: no reply of hers is on its way,
+    so the tune is the question's own and stops, and she is idle."""
+    from jarvis.state import JarvisState
+
+    engine = _Engine()
+    listener, _tts, patcher = _listener_with(engine)
+    tune = _SilentTune()
+    try:
+        listener._hand_over("quelle heure est-il")
+        assert engine.started.wait(WAIT)
+        listener._process_transcript("stop", utterance_energy=0.01)
+        listener.cfg.tune_enabled = True
+        with patch("jarvis.output.tune_player.TunePlayer", return_value=tune):
+            listener._process_transcript("Jarvis ?", utterance_energy=0.01)
+        assert tune.playing and listener.state_manager.is_collecting()
+        mock_print.reset_mock()
+
+        _his_silence_runs_out(listener)
+
+        _the_wait_ended(listener, mock_print, JarvisState.IDLE)
+        assert not tune.playing, "the tune plays on for a reply that was stopped"
+    finally:
+        listener._tune_player = None
+        engine.release.set()
+        _stop(listener, patcher)
+
+
+@patch("builtins.print")
+def test_what_others_say_after_a_stop_ends_the_beep_it_started(_print):
+    """After a stop nothing of the reply in hand will be said, so the beep
+    an utterance not for her started is that utterance's own, and it stops."""
     from jarvis.state import JarvisState, get_jarvis_state
 
     engine = _Engine()
     listener, _tts, patcher = _listener_with(engine)
-    tune = MagicMock()
+    tune = _SilentTune()
     try:
         listener._hand_over("quelle heure est-il")
         assert engine.started.wait(WAIT)
-        listener._tune_player = tune
-        listener._process_transcript("Jarvis ?", utterance_energy=0.01)
-        assert listener.state_manager.is_collecting()
+        listener._process_transcript("stop", utterance_energy=0.01)
+        _install_intent_judge(listener, _make_judgment(directed=False, confidence="high"))
+        listener.cfg.tune_enabled = True
 
-        listener._check_query_timeout(time.time() + listener.state_manager.voice_collect_seconds)
+        with patch("jarvis.output.tune_player.TunePlayer", return_value=tune):
+            listener._process_transcript("jarvis, c'est un vieux film que j'ai revu hier",
+                                         utterance_energy=0.01)
 
-        assert get_jarvis_state().state == JarvisState.THINKING
-        assert not tune.stop_tune.called
-        assert listener._turns.empty(), "a question with nothing in it was handed over"
+        assert tune.played, "his words started no beep"
+        assert not tune.playing, "the beep plays on for a reply that was stopped"
+        assert get_jarvis_state().state == JarvisState.IDLE
     finally:
         listener._tune_player = None
         engine.release.set()
