@@ -30,10 +30,12 @@ def read_face_frame() -> Optional["Frame"]:
 
 
 # The oldest a frame of hers can be and still be shown. A live renderer's
-# newest frame is never older than its delay, the hold after a cut included;
-# an older one comes from a renderer that has stopped, stalled or died, or
-# from before it last rested.
-HOLD_SECONDS = 1.0
+# newest frame is never older than its delay, the hold after a cut included,
+# except while Ditto catches up after the GPU was taken elsewhere for a moment:
+# her last frame stays through that rather than giving way to the drawn face.
+# An older one comes from a renderer that has stopped, hung or died. Frames from
+# before it last rested are withdrawn by the renderer itself.
+HOLD_SECONDS = 3.0
 
 
 class TalkingFaceView(QWidget):

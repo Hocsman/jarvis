@@ -201,6 +201,7 @@ class TestTerminalOnSuccessfulToolUse:
              ):
             reply = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text="What's the weather in Paris?",
                 dialogue_memory=eval_dialogue_memory,
             )
@@ -273,6 +274,7 @@ class TestTerminalOnHonestCantDo:
              ):
             reply = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text="Send an email to my mum saying I'll be late.",
                 dialogue_memory=eval_dialogue_memory,
             )
@@ -373,6 +375,7 @@ class TestMaxTurnDigestCaveat:
              patch("jarvis.reply.engine.digest_loop_for_max_turns", side_effect=_spy_digest):
             reply = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text="Write me a very long essay about abstract algebra.",
                 dialogue_memory=eval_dialogue_memory,
             )
@@ -445,6 +448,7 @@ class TestToolSearchToolEscapeHatch:
              ):
             reply = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text=(
                     "Open YouTube and tell me the title of the first trending "
                     "video."
@@ -568,6 +572,7 @@ class TestRefusalNamesTheWayOut:
              ):
             reply = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text="What is the weather in Bagneux today?",
                 dialogue_memory=eval_dialogue_memory,
             )
@@ -628,6 +633,7 @@ class TestComplexMultiTurnMultiTool:
              ):
             reply = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text="Who directed Possessor and what else have they directed?",
                 dialogue_memory=eval_dialogue_memory,
             )
@@ -689,6 +695,7 @@ class TestComplexMultiTurnMultiTool:
              ):
             reply = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text="Compare the weather in Paris and London right now.",
                 dialogue_memory=eval_dialogue_memory,
             )
@@ -757,6 +764,7 @@ class TestComplexMultiTurnMultiTool:
             capture.clear()
             run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text="Who is Harry Styles?",
                 dialogue_memory=eval_dialogue_memory,
             )
@@ -766,6 +774,7 @@ class TestComplexMultiTurnMultiTool:
             capture.clear()
             reply2 = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text="What are his most famous songs?",
                 dialogue_memory=eval_dialogue_memory,
             )
@@ -836,6 +845,7 @@ class TestComplexMultiTurnMultiTool:
              ):
             reply = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text="What's the score in the Real Madrid game?",
                 dialogue_memory=eval_dialogue_memory,
             )
@@ -898,6 +908,7 @@ class TestComplexMultiTurnMultiTool:
             capture.clear()
             run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text="Open YouTube.",
                 dialogue_memory=eval_dialogue_memory,
             )
@@ -906,6 +917,7 @@ class TestComplexMultiTurnMultiTool:
             capture.clear()
             reply2 = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text="Now search for lo-fi beats.",
                 dialogue_memory=eval_dialogue_memory,
             )

@@ -136,6 +136,7 @@ def _run(case: ForgetCase, mock_config, eval_db, eval_dialogue_memory, tmp_path)
     ):
         response = run_reply_engine(
             db=eval_db, cfg=mock_config, tts=None,
+            origin="voix",
             text=case.text,
             dialogue_memory=eval_dialogue_memory,
         )

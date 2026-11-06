@@ -82,7 +82,7 @@ def _reply(cfg, db, dialogue, question: str) -> str:
              "jarvis.reply.engine.get_location_context_with_timezone",
              return_value=("Location: Bagneux, France", None),
          ):
-        return run_reply_engine(db=db, cfg=cfg, tts=None, text=question,
+        return run_reply_engine(db=db, cfg=cfg, tts=None, origin="voix", text=question,
                                 dialogue_memory=dialogue) or ""
 
 

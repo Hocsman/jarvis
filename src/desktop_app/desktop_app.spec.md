@@ -134,7 +134,7 @@ Two hosts embed it. `OrbWindow` is the floating instance: frameless, translucent
 
 `FaceWindow` (`face_widget.py`) opens from the tray action `👤 Show Face`, which also restores it when it is minimised, and only from there: with the talking face enabled or not, it never opens by itself. It shows one of two faces, never both.
 
-- **Her talking face**, while a renderer draws one (`src/jarvis/output/face/face.spec.md`): the frame `read_face_frame()` returns, imported from `jarvis`, scaled to fit the window with its proportions kept and centred on black. The window shows a frame for as long as it is less than one second old, and goes back to the drawn face once it has none that recent. A live renderer's newest frame is never older than its delay, the hold after a cut included (`face.spec.md`, "Interrupting"), so an older frame, or none, is what a renderer that is not running, has failed, has stopped or has stalled looks like from here, and so is a frame it drew before it last rested.
+- **Her talking face**, while a renderer draws one (`src/jarvis/output/face/face.spec.md`): the frame `read_face_frame()` returns, imported from `jarvis`, scaled to fit the window with its proportions kept and centred on black. The window shows a frame for as long as it is less than three seconds old, and goes back to the drawn face once it has none that recent. A live renderer's newest frame is never older than its delay, the hold after a cut included (`face.spec.md`, "Interrupting"), except while Ditto catches up after the GPU was taken elsewhere for a moment (`face.spec.md`, "Failure"): her last frame stays through that, so she freezes for a moment rather than giving way to another face. An older frame, or none, is what a renderer that is not running, has failed, has stopped or has hung looks like from here. A frame it drew before it last rested is never shown: the renderer withdraws its frames when it rests (`face.spec.md`, "Watching and resting").
 - **The drawn face** otherwise: the low-poly face that follows the assistant's state (see Assistant State).
 
 A read that fails counts as no frame: it runs in a Qt slot, where an exception would end the whole app, so the window stays up, shows the drawn face and logs the failure once.
@@ -221,7 +221,7 @@ The desktop app runs the Jarvis daemon in a **QThread** (bundled mode) or **subp
 The desktop app registers callbacks with the daemon for:
 
 - **Diary updates**: Shows DiaryUpdateDialog when session ends
-- **Clean shutdown**: Ensures graceful exit with diary save
+- **Clean shutdown**: Ensures graceful exit with diary save, even once the console is gone (see Shutdown and the Console)
 - **Fast shutdown**: Calls `request_stop(skip_diary_update=True)` in bundled mode, or sends `SHUTDOWN_SKIP_DIARY` over daemon stdin in subprocess mode. This skips only the final forced diary update; dictation, voice, TTS, MCP runtime, and database cleanup still run.
 
 #### Bundled Mode (QThread)
@@ -244,6 +244,14 @@ In subprocess mode, the daemon runs as a separate process. IPC is achieved via s
 - Chat IPC lines are marshalled onto the Qt main thread via `ChatIpcSignals`, then `_on_chat_ipc_line()` forwards them to `ChatWindow.process_ipc_line()` and, when it is open, to `DashboardWindow.process_ipc_line()`
 - When the daemon starts, stops, or a subprocess exits unexpectedly, the tray updates any open ChatWindow lifecycle banner and clears or refreshes its stdin hooks (submit, cancel, control), the dashboard's submit hook and the confirmation decision writer together, so no window writes to a dead pipe.
 - Same UI experience as bundled mode
+
+### Shutdown and the Console
+
+The daemon's shutdown (`_shut_down` in `jarvis/daemon.py`) is a sequence of steps, in this order: dictation, the reminder scheduler, the routine dispatcher, the routine in flight, the Claude Code job, the voice listener, the chat worker, the final diary pass (left out by a fast stop), speech, the face, the MCP sessions, the database, and the profile cache's listener on core writes. Each step is written to the debug log before it runs (`shutdown: <step>`). A step that raises is logged, reported on the console (`⚠️ Shutdown: <step> failed`) and costs that step only: the next one still runs, and the shutdown always ends with `👋 Daemon stopped`. A second Ctrl+C, which the daemon's signal handlers raise as `KeyboardInterrupt`, is the same: it cuts short the step it lands in (`⚠️ Shutdown: <step> interrupted`) and the steps after it still run.
+
+The console can be gone before the shutdown is over. In subprocess mode it is the pipe the desktop app reads, and the pipe closes when the app's process ends, whether or not the app waited for the daemon. The daemon's entry point (`python -m jarvis.main`) wraps stdout and stderr so that writing to the console never raises. A console that is gone (the pipe or the file beneath it reports an error, or there is no console at all) is given up for the rest of the run, and the shutdown goes on unchanged, diary included. A console that is still there and refuses one line is kept: a line it cannot encode goes out with what it cannot carry replaced, and any other refusal costs that one write, so the chat and diary events that follow still reach the desktop app.
+
+**The log file.** When `JARVIS_DEBUG_FILE` names a file, that entry point mirrors everything the daemon prints into it, each line once and whole, written before the console so that it is there whatever the console does; the moment a console went is noted in the file (`🔌 <stdout> gone (…)`), after the line in progress. Lines from several threads never splice: each thread's text reaches the file a whole line at a time, under one lock both streams share. The daemon's debug lines reach the file through that mirror. A process whose console is not mirrored (the desktop app itself, and the daemon run in its thread in bundled mode) appends its debug lines to the file itself. The talking face's renderer is started without `JARVIS_DEBUG_FILE`: what it prints reaches the file once, through the daemon, which relays it as plain text with colour codes dropped (`jarvis/output/face/face.spec.md`).
 
 ## Theme System
 

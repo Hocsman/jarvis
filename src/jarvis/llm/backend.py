@@ -18,7 +18,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 # Fields allowed per message ``role`` in the OpenAI Chat Completions schema.
 # Any field outside this set (e.g. engine-internal annotations like
-# ``tool_name``, ``tool_failed``, ``_is_context_injected``) MUST be
+# ``tool_name``, ``tool_failed``, ``_is_context_injected``, ``_cache_marks``) MUST be
 # stripped before the message reaches the wire, because strict servers
 # (llama.cpp, vLLM, etc.) reject unknown fields with 400 or 422.
 _ALLOWED_FIELDS_BY_ROLE: Dict[str, set[str]] = {
@@ -27,6 +27,36 @@ _ALLOWED_FIELDS_BY_ROLE: Dict[str, set[str]] = {
     "assistant": {"role", "content", "tool_calls", "name", "reasoning_content"},
     "tool": {"role", "tool_call_id", "content"},
 }
+
+
+# Engine-internal annotation on a system message: the character offsets in
+# its ``content`` where a part that stays the same from one call to the
+# next ends (the reply engine's persona and profile, then the summary of
+# the conversation's earlier part). A backend with a prefix cache that
+# only reads back up to a breakpoint (Anthropic) breaks the cache there;
+# the others strip it like every other annotation.
+CACHE_MARKS = "_cache_marks"
+
+
+def cache_marks(message: Dict[str, Any]) -> List[int]:
+    """The usable marks of ``message``: whole offsets strictly inside its
+    text, in order, each once. Anything else is ignored rather than
+    trusted."""
+    content = message.get("content")
+    raw = message.get(CACHE_MARKS)
+    if not isinstance(content, str) or not isinstance(raw, (list, tuple)):
+        return []
+    return sorted({
+        mark for mark in raw
+        if isinstance(mark, int) and not isinstance(mark, bool) and 0 < mark < len(content)
+    })
+
+
+def cut_at_marks(text: str, marks: List[int]) -> List[str]:
+    """``text`` in the pieces ``marks`` (as :func:`cache_marks` returns
+    them) separate; joined, they are ``text``."""
+    bounds = [0, *marks, len(text)]
+    return [text[start:end] for start, end in zip(bounds, bounds[1:])]
 
 
 def strip_nonstandard_message_fields(
