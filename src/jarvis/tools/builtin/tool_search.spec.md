@@ -24,7 +24,7 @@ When the model invokes `toolSearchTool(query=...)`, the tool re-runs the same ro
 - **Description** (visible to the model): "Search the full tool registry for tools that can help with a task. Use this if none of the currently-available tools fit what the user actually needs. Pass a short self-contained description of what you are trying to accomplish."
 - **Input schema**:
   - `query` (string, required): a self-contained natural-language description of the subtask needing a tool. Subject to the same `SELF-CONTAINED TOOL ARGUMENTS` rule as every other tool (pronouns and ellipsis resolved from conversation).
-- **Output**: a newline-separated list of tool names and one-line descriptions for everything routing surfaced for `query`. On no matches: a short honest note saying no additional tools were found.
+- **Output**: a newline-separated list of tool names and one-line descriptions for everything routing surfaced for `query`, apart from what every attended turn already offers: itself and the always-included tools (`stop`, `forget`, `remember`, `selection.spec.md`). When nothing else is left: a short honest note, "No additional tools found for that description." A search that matched nothing comes back with the always-included tools alone (`selection.spec.md`, keyword step 5), and listing them as finds would offer a write to the user's memory as the answer to a question about something else.
 
 ### Loop integration
 

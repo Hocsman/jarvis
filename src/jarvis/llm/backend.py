@@ -13,7 +13,7 @@ plus the same args and forwards to the matching backend method.
 
 from __future__ import annotations
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
 # Fields allowed per message ``role`` in the OpenAI Chat Completions schema.
@@ -193,11 +193,18 @@ class LLMBackend(ABC):
         model: str,
         timeout_sec: float = 60.0,
         keep_alive: str = "30m",
+        prompt: Optional[Tuple[str, str]] = None,
     ) -> bool:
         """Page ``model`` into the runtime's resident memory ahead of the
         first real request. Default implementation is a no-op suitable for
         runtimes without per-call model unloading (OpenAI-compatible servers
         keep models warm at server load time). Backends that benefit from
         explicit warmup (e.g. Ollama, which unloads after ``keep_alive``)
-        override to perform the runtime-specific ping."""
+        override to perform the runtime-specific ping.
+
+        ``prompt`` is a ``(system, user)`` pair a later :meth:`direct` call
+        with its default options will open with. A runtime that keeps a
+        computed prompt between requests computes it here, so that call
+        reads only what follows; one that keeps nothing, or bills every
+        token, does not send it."""
         return True

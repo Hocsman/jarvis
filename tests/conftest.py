@@ -562,6 +562,19 @@ def public_dns(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_ollama_residency(monkeypatch):
+    """Keep the machine's Ollama residency out of what the tests expect.
+
+    The residency Yuba asks Ollama for is never shorter than the one
+    ``OLLAMA_KEEP_ALIVE`` sets for the server, read from Yuba's own
+    environment, so on a machine that sets it every warm-up and judge call
+    would ask for that instead of Yuba's own. A test that is about it sets
+    the variable itself.
+    """
+    monkeypatch.delenv("OLLAMA_KEEP_ALIVE", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_hugging_face_hub(_bac_a_sable, request, monkeypatch):
     """Keep every test off the Hugging Face Hub and out of the user's model cache.
 

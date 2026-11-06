@@ -9,8 +9,10 @@ on-disk diary writes — should apply before any byte crosses the wire.
 ``RedactingBackend`` wraps any :class:`LLMBackend` and scrubs the text
 arguments on the egress methods (``direct``, ``streaming``, ``chat``,
 ``embed``) via :func:`jarvis.utils.redact.scrub_secrets` before
-delegating to the inner backend. ``list_models`` and ``warm_up`` carry
-no user content and pass straight through.
+delegating to the inner backend. ``list_models`` carries no user
+content and passes straight through; the prompt a ``warm_up`` may carry
+is the opening of a later ``direct`` call and is scrubbed as that call
+is.
 
 Design choice — decorator, not a constructor flag on the concrete
 backend: this keeps the upstream ``OpenAICompatibleBackend`` untouched
@@ -29,7 +31,7 @@ masked.
 from __future__ import annotations
 
 from itertools import accumulate
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .backend import CACHE_MARKS, LLMBackend, cache_marks, cut_at_marks
 from ..debug import debug_log
@@ -164,5 +166,12 @@ class RedactingBackend(LLMBackend):
         model: str,
         timeout_sec: float = 60.0,
         keep_alive: str = "30m",
+        prompt: Optional[Tuple[str, str]] = None,
     ) -> bool:
-        return self._inner.warm_up(model, timeout_sec=timeout_sec, keep_alive=keep_alive)
+        # Scrubbed as ``direct`` scrubs it: the prompt is the opening of a
+        # later ``direct`` call, and the two have to be the same text.
+        if prompt is not None:
+            prompt = (_scrub(prompt[0]), _scrub(prompt[1]))
+        return self._inner.warm_up(
+            model, timeout_sec=timeout_sec, keep_alive=keep_alive, prompt=prompt,
+        )

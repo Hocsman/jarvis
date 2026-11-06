@@ -54,7 +54,7 @@ keeps its `degraded` flag. A dotted word that is not an address
 2. Tokenise the user query (lowercase, split on whitespace/punctuation).
 3. Score each tool: count of query tokens that appear in the tool's keyword set.
 4. Return tools with score > 0, plus always-included tools.
-5. If no tools score > 0, fall back to returning all tools (query is too vague to filter).
+5. If no tool scores > 0, or the query leaves no token to score, return the always-included tools alone, never the whole catalogue. The reply engine offers `toolSearchTool` beside the selection, through which the chat model can look for the tool it needs (see `builtin/tool_search.spec.md`); whether it does depends on the model, as measured under LLM step 7, and on a turn whose router gave up a small chat model is offered the whole catalogue instead. The tokeniser reads ASCII letters and digits only, lowercased, drops English stop-words and does no stemming, so a query in another language than the descriptions, or in other words than theirs, usually lands here: a sentence in a non-Latin script leaves no token at all, and an accented word breaks into fragments (`météo` gives `m`, `t`, `o`), which can match a fragment of a description by accident (the `t` of `can't`).
 
 ### Embedding Strategy
 
@@ -76,11 +76,22 @@ Note: embedding is **not** the default strategy because nomic-embed-text produce
 4. Apply a hard `_LLM_MAX_SELECTED` (5) cap regardless of what the router returned, to guard against chatty routers that echo the whole catalogue.
 5. Append always-included tools.
 6. If the router replies `"none"`, return only the always-included tools.
-7. When the router cannot answer, fall back to the **keyword strategy**. That covers a timeout (the call waits at most `tool_router_timeout_sec`), an empty response, a parse failure (no token in the response matched a known tool name), no model configured, no backend supplied, and a backend that raises. The pick comes back as a `ToolSelection` (a list) whose `degraded` flag is true, so a caller that caches picks leaves it out and the next turn asks the router again; the reply engine also prints the tools line as `llm->keyword`. The fallback goes to the keyword strategy rather than to the full catalogue. Reasoning: the catalogue can grow to 30–40 tools once an MCP server like `chrome-devtools` is enabled, and exposing all of them to a small chat model (gemma4:e2b class) overwhelms tool selection, producing empty replies. Keyword scoring narrows on query/name overlap deterministically, and the engine's `toolSearchTool` escape hatch still lets the chat model widen mid-loop if the keyword pick missed.
+7. When the router cannot answer, fall back to the **keyword strategy**. That covers a timeout (the call waits at most `tool_router_timeout_sec`), an empty response, a parse failure (no token in the response matched a known tool name), no model configured, no backend supplied, and a backend that raises. The pick comes back as a `ToolSelection` (a list) whose `degraded` flag is true, so a caller that caches picks leaves it out and the next turn asks the router again; the reply engine also prints the tools line as `llm->keyword`. What the turn then offers depends on the chat model's size (`_degraded_pick_for` in the reply engine). A large chat model gets the keyword pick, and the engine's `toolSearchTool` lets it widen mid-loop if the pick missed; when the keyword strategy matches nothing, which is the usual case for a sentence in another language than the descriptions, that is the always-included tools and `toolSearchTool`. A small chat model (`detect_model_size` says SMALL) gets the whole catalogue for that turn, because it does not look through `toolSearchTool`. Either way the pick is not cached.
+
+   Whether such a turn still reaches its tool depends on the chat model. Measured by `evals/test_a_degraded_turn_finds_its_tool.py` (2026-11-06, two French weather questions that share no word with any description, a router that gave up, 22 runs an arm, arms interleaved call by call):
+
+   | Chat model | Catalogue | Degraded pick reaches `getWeather` | Whole catalogue reaches it |
+   |---|---|---|---|
+   | `deepseek/deepseek-v4-flash` (native tools) | 22 builtins | 18/22, every time through `toolSearchTool` | 22/22 |
+   | `deepseek/deepseek-v4-flash` | 112 tools | 20/22, every time through `toolSearchTool` | 22/22 |
+   | `gemma4:e2b` (text tools) | 22 builtins | 0/22 | 13/22 |
+   | `gemma4:e2b` | 112 tools | 0/22 | 22/22 |
+
+   A large model looks through `toolSearchTool`. `gemma4:e2b`, the default chat model, never called it: on the degraded pick it answered without a tool or ran `webSearch` when the planner named it (p < 0.0001 against the whole catalogue, Fisher exact, at each size). The whole catalogue, 112 tools included, produced no empty replies there. Hence the split by size: a large chat model reaches its tool through the search almost as often (the difference is not significant at 22 runs an arm) on a much shorter prompt, and a small one reaches it only when it is offered.
 
 #### Context-aware routing
 
-When the reply engine passes a `context_hint`, it is split into two labelled semantic slots in the router system prompt:
+When the reply engine passes a `context_hint`, it is split into two labelled semantic slots in the router's user prompt, after the catalogue and before the query:
 
 - **KNOWN FACTS** — things the assistant can already see (current time, detected location). If the query is answerable purely from these, the router should return `none`.
 - **RECENT DIALOGUE** — recent user/assistant turns. The router is instructed to read the current query as a continuation of this exchange, so short follow-ups (e.g. "I'm in London" after "which city?") route to the tool that answers the combined intent across turns rather than being treated as idle chatter.
@@ -119,6 +130,17 @@ These descriptions against their earlier wording, arms interleaved call by call,
 
 The gains are where qwen2.5:3b misses these tools with the earlier wording; gemma4:e2b offers the files and the articles either way. The losses are requests whose routing moves with any change to the catalogue: a repeated request that names the web goes to `webSearch` and `fetchWebPage` (qwen2.5:3b in English, gemma4:e2b in French), on gemma4:e2b one that names the evening goes to `setReminder`, "cherche sur internet des tutos Python" also gets `fetchWebPage` (15 of 15, an extra tool within the cap), and one one-off reminder in 15 also gets `setRoutine`, which still asks before it creates anything.
 
+#### Router warm-up
+
+The system prompt and the catalogue that opens the user prompt depend on nothing but the catalogue (`_router_prompts`), so every routing call opens with the same text: a few thousand tokens once MCP servers are enabled (3,387 on one configuration of 112 tools). `warm_up_router` hands that opening, with an empty query, to the backend's `warm_up` as its `prompt` (`llm/llm.spec.md`). The reply engine's `warm_up_tool_router(cfg, timeout_sec, keep_alive)` resolves the model (`resolve_tool_router_model`), the backend (`get_auxiliary_backend`) and the catalogue (`offered_builtin_tools` and the cached MCP tools, the builtins alone when that cache cannot be read) the way the routing call does. The voice listener runs it at start-up when the strategy is `llm` and the router has a model of its own, neither the chat model nor the intent judge's; a router on one of those rides that model's warm-up, for the reason under Context size below (`listening/listening.spec.md`, What gets warmed).
+
+On Ollama the server keeps the computed prompt, so the first routing call reads only what follows the catalogue (the known facts, the dialogue, the query) on a model that has already run. On `qwen2.5:3b` with a 112-tool catalogue (invented MCP tools, a 4,027-token prompt), that is 116 tokens computed instead of 4,023, and 19 ms of prompt reading instead of 277 ms on a model already warm and a GPU nothing else was using (Ollama 0.40.14, 10 calls an arm, interleaved). Without it, the opening is read during the first exchange on a model that has never run, while the speech models are still taking the GPU, and the router's deadline can expire before the catalogue is read (512 tokens of 3,387 in 8 s, twice in one day) so that the turn falls to the keyword strategy. The remote backends do not send the prompt; they open their connection as their warm-up always does.
+
+The warm-up is best-effort: with no model, or a warm-up that fails or raises, it returns False and the first call reads the whole prompt. Under `low_power_mode` there is no warm-up at all. Otherwise the computed prompt lasts as long as the model stays loaded with the router's context size (`num_ctx` 4096):
+
+- **Residency.** The warm-up loads the model with the start-up residency (`keep_alive`: 30 minutes, or the server's own when `OLLAMA_KEEP_ALIVE` sets a longer one, `listening/listening.spec.md`, Model residency). Routing calls name none, and Ollama leaves a loaded model's residency as it is when a request names none, so that residency holds, counted from the last call. Once it lapses, or once loading another model evicts this one for room, the next routing call loads the model again with the server's default residency and reads the whole prompt. Nothing re-warms it: after an eviction, a re-warm would in turn evict the model that needed the room.
+- **Context size.** A call on the same model that asks for another `num_ctx` makes Ollama load it again, and the computed prompt goes with the old load. The intent judge and the chat model ask for 8192, so a router on one of their local models (`tool_router_model` empty rides the judge's) would lose the warm-up to their first call, and each exchange reloads the shared model twice (one such load of `qwen2.5:3b` measured 6 s, another 25 s, both with a 12B model also loaded on Ollama 0.40.14). Such a router is not warmed on its prompt: the shared model's own warm-up loads it, and its first routing call reads the whole prompt. A dedicated `tool_router_model` avoids both the reloads and that cold first call. A call on the same model at the same size in between does not undo the warm-up: the server keeps earlier prompts and restores the router's (84 tokens computed with a judge-shaped call in between).
+
 ### Interface
 
 ```python
@@ -127,13 +149,27 @@ def select_tools(
     builtin_tools: Dict[str, Tool],
     mcp_tools: Dict[str, ToolSpec],
     strategy: ToolSelectionStrategy = ToolSelectionStrategy.ALL,
-    llm_base_url: str = "",
+    *,
+    llm_backend: Optional[LLMBackend] = None,
     llm_model: str = "",
     llm_timeout_sec: float = 8.0,
+    embedding_backend: Optional[LLMBackend] = None,
     embed_model: str = "",
     embed_timeout_sec: float = 10.0,
+    context_hint: Optional[str] = None,
 ) -> List[str]:
     """Return list of tool names relevant to the query."""
+
+def warm_up_router(
+    builtin_tools: Dict[str, Tool],
+    mcp_tools: Dict[str, ToolSpec],
+    *,
+    llm_backend: LLMBackend,
+    llm_model: str,
+    timeout_sec: float,
+    keep_alive: str,
+) -> bool:
+    """Warm the router's model on the router's own prompt."""
 ```
 
 ### Integration
@@ -150,7 +186,7 @@ Called from the reply engine (Step 6) before `generate_tools_json_schema()` and 
 - Key: `tool_router_model`
 - Type: `str`
 - Default: `""` (empty string — resolves to `intent_judge_model`, then `llm_chat_model`)
-- Effect: when `tool_selection_strategy == "llm"`, this model is used for the routing call. Resolution order for the empty default: `intent_judge_model` first (small, fast, already warm for wake-word paths and structurally the same classification job), then `llm_chat_model` as a last resort. Override `tool_router_model` explicitly to decouple routing from both — useful when you want routing on a dedicated third model.
+- Effect: when `tool_selection_strategy == "llm"`, this model is used for the routing call. Resolution order for the empty default: `intent_judge_model` first (small, and structurally the same classification job), then `llm_chat_model` as a last resort. On local Ollama a model shared that way is loaded again on each exchange, because the judge's and the chat model's calls ask for another context size than the router's, and the router is not warmed on its prompt (Router warm-up, Context size). Override `tool_router_model` with a dedicated small model to decouple routing from both and avoid the reloads.
 
 - Key: `tool_router_timeout_sec`
 - Type: `float`, clamped to 1–120 seconds

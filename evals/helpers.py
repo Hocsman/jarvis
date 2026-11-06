@@ -331,11 +331,11 @@ class MockConfig:
     # It did fall through, and the cost was invisible: `intent_judge_model`
     # defaulted to `gemma4:e2b`, `resolve_tool_router_model` resolved to
     # it, and OpenRouter answered "gemma4:e2b is not a valid model ID" on
-    # every routing call. `select_tools` fails open, so every eval run
-    # against a remote provider was silently exercising the fall-open
-    # path — "20 selected" is the whole catalogue, not a routing
-    # decision — while appearing to pass. A suite that measures routing
-    # has to actually route.
+    # every routing call. `select_tools` falls back to the keyword
+    # strategy when the router cannot answer, so every eval run against a
+    # remote provider was silently exercising the fallback, not a routing
+    # decision, while appearing to pass. A suite that measures routing has
+    # to actually route.
     intent_judge_model: str = SMALL_MODEL
     tool_router_model: str = SMALL_MODEL
     reminder_model: str = SMALL_MODEL
