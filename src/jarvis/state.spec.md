@@ -17,14 +17,16 @@ Publishing needs the standard library and debug logging only. No Qt and no deskt
 | Value | Meaning | Published by |
 |-------|---------|--------------|
 | `ASLEEP` | The daemon is not running or not ready | The holder when it is created; the desktop app while the daemon is down or a setup wizard is open |
-| `IDLE` | Awake, waiting for the wake word | The listener when it starts its loop, when a hot window ends and when a stop word silences her; the reply engine when the stop tool dismisses the conversation; the listener whenever it stops the thinking tune (a reply is about to be spoken, or there is none); the daemon when a dictation ends |
+| `IDLE` | Awake, waiting for the wake word | The listener when it starts its loop, when a hot window ends and when a stop word silences her, and again when the engine is done with the reply that stop silenced, unless a question he started since owns the state; the reply engine when the stop tool dismisses the conversation; the listener whenever it stops the thinking tune (a reply is about to be spoken, or there is none) and when a question ends with nothing in it (below); the daemon when a dictation ends |
 | `LISTENING` | Collecting a query, or a hot window is open | The listener on hearing the wake word or a hot-window follow-up; the listening state manager when a collection starts and when a hot window opens |
-| `THINKING` | A query is with the reply engine | The listener's reply thread when it hands a query to the engine |
-| `SPEAKING` | A speech engine is speaking | Each speech engine (Piper, Kokoro, Chatterbox, Kyutai) when speech starts |
+| `THINKING` | A query is with the reply engine | The listener's reply thread when it hands a query to the engine; the listener when a question ends with nothing in it while a reply is on its way (below) |
+| `SPEAKING` | A speech engine is speaking | Each speech engine (Piper, Kokoro, Chatterbox, Kyutai) when speech starts; the listener when a question ends with nothing in it while she speaks (below) |
 | `DICTATING` | Hold-to-dictate recording is active | The daemon's dictation-start callback |
 | `DICTATION_PROCESSING` | Captured dictation is being transcribed and pasted | The daemon's dictation-processing callback |
 
 The end of speech publishes nothing. What follows it (a hot window, so `LISTENING`, or `IDLE`) is the daemon's call, and an engine that stops must not guess.
+
+A question that ends with nothing in it ends on what she is doing. Her name alone opens a question with nothing in it yet, and `LISTENING` is published while she waits for it (`listening.spec.md`, Wake Word Mode). When his silence runs out with nothing collected, the listener publishes `SPEAKING` while she speaks, `THINKING` while a reply of hers is on its way, and `IDLE` otherwise. A reply stopped since it was handed over is not on its way, though the engine may still be finishing it. While he dictates the listener publishes nothing: `DICTATING` or `DICTATION_PROCESSING` stands until the daemon ends the dictation.
 
 ## Holder
 
@@ -50,4 +52,5 @@ The desktop app also publishes one value, `ASLEEP`, when the daemon stops and wh
 
 - `tests/test_jarvis_state.py`: the holder's contract (starts asleep, shared through the file, falls back, never raises, publishes stay ordered under concurrency) and the headless import guarantee, checked in a clean interpreter.
 - `tests/test_the_pipeline_publishes_its_state.py` and `TestTheListenerPublishesItsState` in `tests/test_hot_window_input.py`: each stage publishes the state it enters, read back through the same reader a viewer uses.
+- `TestHerNameAloneThenSilence` in `tests/test_hot_window_input.py`, and the tests on her name alone and on what follows a stop in `tests/test_elle_entend_pendant_qu_elle_reflechit.py`: a question that ends with nothing in it ends on what she is doing, a reply that was stopped keeps neither the tune nor `THINKING`, and its end leaves the tune and the state of a question asked since alone.
 - `tests/conftest.py` gives every test its own state file, so a test run never moves the orb of an app the developer has open.

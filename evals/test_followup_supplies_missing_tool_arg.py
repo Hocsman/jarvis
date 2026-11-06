@@ -118,11 +118,13 @@ class TestFollowupSuppliesMissingToolArg:
         ):
             turn1 = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text="how's the weather tomorrow Jarvis?",
                 dialogue_memory=eval_dialogue_memory,
             )
             turn2 = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text="I'm in London",
                 dialogue_memory=eval_dialogue_memory,
             )

@@ -226,7 +226,7 @@ class TestTheDrawnFace:
 
         assert _until(qapp, lambda: _drawn_face_shown(window), timeout=HOLD_SECONDS + 0.5)
 
-    def test_a_frame_drawn_before_the_renderer_last_rested_is_not_shown(self, qapp, segment, window_with):
+    def test_a_frame_older_than_the_hold_is_not_shown(self, qapp, segment, window_with):
         writer, reader = segment
         writer.publish(_pixels(GREEN), time.perf_counter() - 10 * HOLD_SECONDS, 0)
         window = window_with(reader.read)

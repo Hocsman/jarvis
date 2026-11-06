@@ -108,6 +108,7 @@ class TestTopicSwitching:
             capture.clear()
             response1 = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text="How's the weather today?",
                 dialogue_memory=eval_dialogue_memory
             )
@@ -117,6 +118,7 @@ class TestTopicSwitching:
             capture.clear()
             response2 = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text="Yeah, I could do but can you check how long CEX is open for?",
                 dialogue_memory=eval_dialogue_memory
             )
@@ -179,6 +181,7 @@ class TestTopicSwitching:
             capture.clear()
             run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text="What's the latest tech news?",
                 dialogue_memory=eval_dialogue_memory
             )
@@ -188,6 +191,7 @@ class TestTopicSwitching:
             capture.clear()
             response2 = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text="How's the weather outside?",
                 dialogue_memory=eval_dialogue_memory
             )
@@ -251,6 +255,7 @@ class TestFollowUpContext:
             capture.clear()
             response1 = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text="How's the weather today?",
                 dialogue_memory=eval_dialogue_memory
             )
@@ -260,6 +265,7 @@ class TestFollowUpContext:
             capture.clear()
             response2 = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text="Should I bring an umbrella?",
                 dialogue_memory=eval_dialogue_memory
             )
@@ -363,6 +369,7 @@ class TestSelfContainedToolArguments:
             capture.clear()
             run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text="Who is Harry Styles?",
                 dialogue_memory=eval_dialogue_memory
             )
@@ -372,6 +379,7 @@ class TestSelfContainedToolArguments:
             capture.clear()
             response2 = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text="What are his most famous songs?",
                 dialogue_memory=eval_dialogue_memory
             )
@@ -465,6 +473,7 @@ class TestMultiTurnExtended:
                 capture.clear()
                 response = run_reply_engine(
                     db=eval_db, cfg=mock_config, tts=None,
+                    origin="voix",
                     text=query,
                     dialogue_memory=eval_dialogue_memory
                 )

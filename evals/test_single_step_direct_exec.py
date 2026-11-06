@@ -58,6 +58,7 @@ class TestSingleStepPlanDirectExecution:
                 db=eval_db,
                 cfg=mock_config,
                 tts=None,
+                origin="voix",
                 text="What time is it in Tokyo?",
                 dialogue_memory=eval_dialogue_memory,
             )
@@ -93,6 +94,7 @@ class TestSingleStepPlanDirectExecution:
                 db=eval_db,
                 cfg=mock_config,
                 tts=None,
+                origin="voix",
                 text="What is the weather in Paris right now?",
                 dialogue_memory=eval_dialogue_memory,
             )
