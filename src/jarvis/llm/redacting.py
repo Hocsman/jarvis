@@ -28,9 +28,11 @@ masked.
 
 from __future__ import annotations
 
+from itertools import accumulate
 from typing import Any, Callable, Dict, List, Optional
 
-from .backend import LLMBackend
+from .backend import CACHE_MARKS, LLMBackend, cache_marks, cut_at_marks
+from ..debug import debug_log
 from ..utils.redact import scrub_secrets
 
 
@@ -45,12 +47,26 @@ def _scrub(text: Any) -> Any:
 def _scrub_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Return a shallow copy of ``messages`` with every string
     ``content`` field scrubbed. Tool-call metadata and non-string
-    content (e.g. multimodal blocks) are left untouched."""
+    content (e.g. multimodal blocks) are left untouched.
+
+    Scrubbing shortens or lengthens the text, so the cache marks of a
+    message (``CACHE_MARKS``) are recomputed: each marked piece is
+    scrubbed on its own and the marks moved to the new piece ends. When
+    that does not give exactly the whole text scrubbed at once (a secret
+    cut by a mark), the whole text is what goes and the marks are dropped:
+    the cache may miss, the scrub never does."""
     out: List[Dict[str, Any]] = []
     for m in messages or []:
         if isinstance(m, dict) and isinstance(m.get("content"), str):
             scrubbed = dict(m)
             scrubbed["content"] = scrub_secrets(m["content"])
+            if CACHE_MARKS in m:
+                pieces = [scrub_secrets(p) for p in cut_at_marks(m["content"], cache_marks(m))]
+                if "".join(pieces) == scrubbed["content"]:
+                    scrubbed[CACHE_MARKS] = list(accumulate(len(p) for p in pieces[:-1]))
+                else:
+                    del scrubbed[CACHE_MARKS]
+                    debug_log("redaction: a secret straddles a cache mark, marks dropped", "llm")
             out.append(scrubbed)
         else:
             out.append(m)

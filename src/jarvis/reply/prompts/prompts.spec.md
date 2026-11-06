@@ -141,7 +141,7 @@ symbols to words would have to know every language's words for them.
 
 ### Integration with Reply Engine
 
-The reply engine detects model size early and passes it to `_build_initial_system_message()`:
+The reply engine detects model size early and passes it to `_initial_system_message()`:
 
 ```python
 from jarvis.reply.prompts import detect_model_size, get_system_prompts
