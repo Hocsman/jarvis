@@ -8,7 +8,7 @@ reply, exactly as it does when the daemon is a subprocess.
 
 These tests drive the real tray, the real window and bridge, and the real
 ``jarvis.daemon.submit_text_query``. Only what cannot exist headless is
-replaced: the web view (a stand-in widget), the thread that would run the
+replaced: the web view and its page (stand-ins), the thread that would run the
 daemon's main loop (inert), and the reply engine (scripted). What they
 read is what the page would have been shown.
 
@@ -160,15 +160,22 @@ def tray(qapp, monkeypatch):
     from desktop_app.face_widget import JarvisState, get_jarvis_state
 
     class _StandInPage:
+        def __init__(self, _index, _parent=None):
+            pass
+
         def setWebChannel(self, _channel):
             pass
 
     class _StandInView(QWidget):
-        """QWebEngineView cannot be constructed in a headless run."""
+        """QtWebEngine is not built in the suite's process (see
+        test_dashboard_own_page.py, which drives the real view)."""
 
         def __init__(self, parent=None):
             super().__init__(parent)
-            self._page = _StandInPage()
+            self._page = None
+
+        def setPage(self, page):
+            self._page = page
 
         def page(self):
             return self._page
@@ -177,6 +184,7 @@ def tray(qapp, monkeypatch):
             pass
 
     monkeypatch.setattr("desktop_app.dashboard_window.QWebEngineView", _StandInView)
+    monkeypatch.setattr("desktop_app.dashboard_window._DashboardPage", _StandInPage)
     monkeypatch.setattr(app_mod, "QThread", _InertThread)
     monkeypatch.setattr("desktop_app.chat_window._decision_writer", None)
     get_jarvis_state().set_state(JarvisState.IDLE)
