@@ -2734,6 +2734,57 @@ class VoiceListener(threading.Thread):
         print(f"     🎤 Whisper '{model_name}' loaded on {resolved_device}{suffix}", flush=True)
         return resolved_device
 
+    # How long "Listening!" may wait for the warm-ups, counted from when they
+    # began. A slow or unreachable model server, or a voice still being
+    # downloaded, must not keep her deaf: past it, the first engagement pays.
+    _WARM_UP_BUDGET_SECONDS = 60.0
+
+    def _await_warm_ups(self) -> None:
+        """Wait, within one budget, for what the first engagement needs: the
+        LLM warm-ups and the voice. She says she is listening only once she
+        can answer out loud; a voice still warming would make the first
+        reply after a launch wait for it."""
+        deadline = (getattr(self, "_llm_warmup_started_at", None) or time.time()) \
+            + self._WARM_UP_BUDGET_SECONDS
+        warmup_threads = getattr(self, "_llm_warmup_threads", [])
+        for t in warmup_threads:
+            t.join(timeout=max(0.0, deadline - time.time()))
+        still_warming = any(t.is_alive() for t in warmup_threads)
+
+        if warmup_threads:
+            results = getattr(self, "_llm_warmup_results", {})
+
+            # Trailing space after ⚠️ intentional: the warning glyph renders
+            # narrower than 🧠/💬, so the pad keeps columns aligned.
+            def _print_status(role_key: str, label: str, ok_icon: str) -> None:
+                entry = results.get(role_key)
+                if entry is None:
+                    return
+                name, ok = entry
+                icon = ok_icon if ok else "⚠️ "
+                status = "ready" if ok else "warmup failed — will load on first use"
+                print(f"     {icon} {label} '{name}' {status}", flush=True)
+
+            _print_status("chat", "Chat model", "💬")
+            _print_status("judge", "Intent judge", "🧠")
+            _print_status("router", "Tool router", "🔧")
+
+        if self.tts is not None and getattr(self.tts, "enabled", False):
+            engine = str(getattr(self.cfg, "tts_engine", "") or "voice")
+            ready = self.tts.wait_until_ready(max(0.0, deadline - time.time()))
+            debug_log(f"voice warm-up: {ready}", "voice")
+            if ready is True:
+                print(f"     🔊 Voice '{engine}' ready", flush=True)
+            elif ready is False:
+                print(f"     ⚠️  Voice '{engine}' could not load", flush=True)
+            else:
+                still_warming = True
+
+        if still_warming:
+            debug_log(f"warm-ups still running after {self._WARM_UP_BUDGET_SECONDS:.0f}s "
+                      f"— continuing without", "voice")
+            print("     ⏳ Some models still warming — continuing anyway", flush=True)
+
     def _start_llm_warmup(self) -> list[threading.Thread]:
         """Pre-load the chat, intent judge and tool router models via the
         active backend.
@@ -3249,39 +3300,7 @@ class VoiceListener(threading.Thread):
             if self.model is not None and self._whisper_vad_setting():
                 prepare_voice_detector()
 
-        # Wait for LLM warmups before announcing "Listening!" so the first
-        # engagement is responsive. A single 60s budget is shared across
-        # all warmup threads so a slow/down Ollama can't block us from
-        # listening — we'll just pay the cold-load cost on demand.
-        warmup_threads = getattr(self, "_llm_warmup_threads", [])
-        if warmup_threads:
-            budget = 60.0
-            deadline = getattr(self, "_llm_warmup_started_at", time.time()) + budget
-            for t in warmup_threads:
-                remaining = max(0.0, deadline - time.time())
-                t.join(timeout=remaining)
-
-            still_warming = any(t.is_alive() for t in warmup_threads)
-            results = getattr(self, "_llm_warmup_results", {})
-
-            # Trailing space after ⚠️ intentional: the warning glyph renders
-            # narrower than 🧠/💬, so the pad keeps columns aligned.
-            def _print_status(role_key: str, label: str, ok_icon: str) -> None:
-                entry = results.get(role_key)
-                if entry is None:
-                    return
-                name, ok = entry
-                icon = ok_icon if ok else "⚠️ "
-                status = "ready" if ok else "warmup failed — will load on first use"
-                print(f"     {icon} {label} '{name}' {status}", flush=True)
-
-            _print_status("chat", "Chat model", "💬")
-            _print_status("judge", "Intent judge", "🧠")
-            _print_status("router", "Tool router", "🔧")
-
-            if still_warming:
-                debug_log("LLM warmup still running after 60s — continuing without", "voice")
-                print("     ⏳ Some models still warming — continuing anyway", flush=True)
+        self._await_warm_ups()
 
         # Audio parameters
         self._configure_frames()
