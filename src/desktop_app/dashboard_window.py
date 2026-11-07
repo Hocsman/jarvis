@@ -5,8 +5,9 @@ The page (``dashboard/index.html``) is driven live by a
 :class:`DashboardBridge` exposed over ``QWebChannel`` as ``window.jarvis``:
 system stats, voice state (orb colour + status), weather, and the chat
 round-trip all flow through it. The host (the tray) wires the chat
-submission callable and the settings window the page's gear opens, and
-forwards daemon replies via ``deliver_reply``.
+submission callable and the settings window the page's gear opens,
+forwards daemon replies via ``deliver_reply``, and calls
+``reload_settings`` each time the settings are saved.
 """
 
 from __future__ import annotations
@@ -69,6 +70,10 @@ class DashboardWindow(QMainWindow):
     # ── host (tray) hooks ──────────────────────────────────────────────
     def set_submit_fn(self, fn: Optional[Callable[[str], None]]) -> None:
         self.bridge.set_submit_fn(fn)
+
+    def reload_settings(self) -> None:
+        """The settings were saved: the bridge reads them again."""
+        self.bridge.reload_settings()
 
     def deliver_reply(self, text: Optional[str]) -> None:
         self.bridge.deliver_reply(text)

@@ -113,6 +113,22 @@ The central controller that manages:
 
 **Settings.** The gear in the page's top bar opens the settings window, the same one as the tray's `⚙️ Settings`, with the same offer to restart once it is saved. The page calls the bridge's `openSettings`, and once that call has returned the bridge calls the tray's `show_settings`, which it was handed when the window was built: the settings window runs modally, so it does not open inside the page's call. A bridge built without it does nothing.
 
+**Weather.** There is weather to fetch when location is on and a city is known: `weather_city`, or, when that is empty, the city the location lookup finds (see `location.spec.md`). That lookup may reach the network, so the bridge runs it when it is built and again only when a setting it depends on has changed: location on or off, the IP address, auto-detection, the CGNAT resolution or the cache time.
+
+The bridge reads the settings when it is built and again each time they are saved. The tray calls the window's `reload_settings` in two cases:
+- once the settings window closes after a save, which is after the user dismisses its "Saved" message; a cancelled settings window saved nothing and changes nothing;
+- once the setup wizard closes, finished or cancelled, since its pages save as they go.
+
+The tray does this whether or not a daemon runs: the dashboard lives in the tray's process, so the offer to restart has nothing to do with it. When the saved settings change what the weather would be asked for:
+- The page is handed an empty reading (`{}`), which puts the weather card and the top-bar chip back to their placeholders. The reading they showed answers the old settings, and the new one may never come (a misspelt city, the network down).
+- A fetch still on its way is no longer wanted. The fetcher asks before each of its two requests (the city to the geocoding service, then its coordinates to the forecast), so it sends nothing more. A request already sent completes, its reading is dropped when it comes, and it does not hold back the fetch for the new settings.
+- Location turned off, or no city left known, stops the 10-minute weather timer, so the city is no longer sent to Open-Meteo, and `weatherAvailableChanged` tells the page there is no weather.
+- Location turned on, or another city or response language, fetches at once and restarts the timer.
+
+Saved settings that leave the weather as it was change nothing: no lookup, no fetch, nothing sent to the page. A new response language while location is off is one of those.
+
+The bridge announces every change of `weatherAvailable` with `weatherAvailableChanged`, which updates the page's copy of the property (`QWebChannel` updates a property only through its notify signal). The card and the chip show a reading only once one has been fetched. Until then, and whenever there is no weather to fetch, they show placeholders that claim nothing: `--°C`, `—`, a thermometer, `--%`, `-- km/h`. Each reading is drawn over the placeholders, so a field it lacks shows its placeholder rather than an older value. A figure Open-Meteo does not send is left out of the reading (`utils/weather_now.py`), never shown as 0, and an answer with no current conditions is no reading at all.
+
 **Chat.** The page's `submitQuery` reaches the daemon through a submit hook that the tray wires when a daemon starts, clears when it stops or dies, and pushes to the window on every lifecycle change (`_set_chat_daemon_status`), so a dashboard opened before the daemon starts and one opened after it behave the same. With no hook wired the bridge answers with a local preview line and nothing is sent. The route depends on where the daemon runs:
 
 - **Subprocess mode**: the hook writes a `__CHAT_QUERY__:` line to the daemon's stdin. The daemon's `__CHAT__:` lines come back through `_on_chat_ipc_line`, which feeds the dashboard as well as the chat window.
@@ -121,6 +137,18 @@ The central controller that manages:
 A Claude Code report (`delegation_done`) reaches the dashboard on either route and is added to its transcript as a reply bubble without settling anything: a task typed in the dashboard is never spoken, and this is where its report is read.
 
 Nothing on this route logs the query text: the `start` event carries the redacted query, and the debug lines name no message.
+
+**Controls.** Every control on the page is a `<button>`, and each one either acts or is disabled: nothing points and does nothing. A disabled button is dimmed, keeps the default cursor, does not light up on hover, and reads as unavailable to assistive technology.
+
+| Control | What it does |
+|---------|--------------|
+| ⚙️ (top bar) | Opens the settings (see Settings above) |
+| ⟳ on Stats Système | Calls `refreshStats`: a reading now instead of at the next 2-second tick |
+| ⟳ on Météo | Calls `refreshWeather`, which fetches the weather again. One fetch runs at a time for the same settings: a click, or the 10-minute tick, while one is on its way starts nothing more, and a failed fetch does not hold back the next. The button is enabled only while the bridge's `weatherAvailable` is true (see Weather above), since with no weather to fetch the slot does nothing: it starts disabled, takes the bridge's value once the page has wired the bridge, and follows each `weatherAvailableChanged`. While it is disabled its tooltip says the weather is unavailable because location is off or no city is known |
+| ⌨️ | Puts the cursor in the message field; it never reaches the bridge |
+| ➤, or Enter in the message field | Sends the message (see Chat above) |
+| 🗑️ Effacer | Empties the transcript on the page and nothing else. The dialogue memory belongs to the daemon and voice shares it, so a click here never touches it: the page leaves a line in the emptied transcript saying that only the display was cleared and that Yuba still follows the conversation. A reply still being written stays, below that line |
+| 📷, 🎙️, ⬇️ Exporter | Disabled: there is no camera, no mic button and no export behind them. The 🎙️ tooltip points to the wake word, which is how she is spoken to |
 
 ### Orb
 
