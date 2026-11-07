@@ -2464,12 +2464,13 @@ _HIS_SOFT_VOICE = 1.5
 _HER_STREAMED_WORDS_DECIMATED = "réunion lundi collègue documents autre question"
 
 
-def _the_microphone_hears(listener, level: float) -> None:
-    """Two seconds of audio at *level*, 20 ms frames, through the audio
-    loop's own voice detector, which keeps the recent levels the floor is
-    read from."""
-    for _ in range(100):
-        listener._is_speech_frame(np.full(320, level, dtype=np.float32))
+def _the_microphone_hears(listener, level: float, seconds: float = 2.0) -> None:
+    """*seconds* of audio at *level* through the audio loop's own voice
+    detector, frame by frame, each read the moment it is captured: the loop
+    keeps the room's quiet level the floor is read from."""
+    for _ in range(round(seconds * 1000 / listener._frame_ms)):
+        listener._frame_captured_at = time.time()
+        listener._is_speech_frame(np.full(listener._frame_samples, level, dtype=np.float32))
 
 
 def _she_streams(listener, reply: str) -> float:
@@ -2557,6 +2558,140 @@ class TestHisAnswerAfterAReplySpokenAsItWasWritten:
         assert "during TTS" in _current_line_shown_to(judge)
         assert _accepted_query(listener) == ""
         assert _console_says_heard_as_her_echo(mock_print, heard)
+        listener.state_manager.stop()
+
+
+# ---------------------------------------------------------------------------
+# Tests: His answer after a reply the thinking tune led into
+# ---------------------------------------------------------------------------
+
+# The thinking tune through the speakers, as loud at the microphone as her
+# voice: well above the bar the room sets, and above his soft answer.
+_THE_TUNE = 2.5
+
+
+def _she_answers_after_the_tune(listener, reply: str) -> float:
+    """The room is quiet, he asks, the thinking tune plays while she thinks,
+    and her reply is handed over while the tune still plays, as a reply
+    spoken as it is written is. She says it, the end-of-reply callback stamps
+    her last word and schedules the hot window. Returns when her voice
+    stopped."""
+    listener.tts.voice_delay.return_value = 0.0
+    _the_microphone_hears(listener, _FLOOR, seconds=3.0)
+    _the_microphone_hears(listener, _level(listener, _HIS_VOICE), seconds=2.0)
+    listener._tune_player = _SilentTune()
+    listener._tune_player.start_tune()
+    _the_microphone_hears(listener, _level(listener, _THE_TUNE), seconds=4.0)
+    listener.track_tts_start(reply)
+    listener._silence_the_tune()
+    listener.tts.is_speaking.return_value = True
+    _the_microphone_hears(listener, _level(listener, _HER_VOICE), seconds=2.0)
+    listener.tts.is_speaking.return_value = False
+    last_word = time.time()
+    _simulate_tts_finish(listener)
+    return last_word
+
+
+@pytest.mark.unit
+class TestHisAnswerAfterTheThinkingTune:
+    """The thinking tune plays while she thinks, her reply is handed over
+    while it still plays, and he answers its closing question softly, a
+    fifth of a second after her last word.
+
+    Field trace (2026-11-07): the floor of the voice proof was read from the
+    microphone's last second, which was the tune, at five times the room's
+    level. His answer, louder than the room and softer than the tune, fell
+    under the bar that floor set: it was shown to the judge "(during TTS)",
+    set aside as her echo, and he had to ask again with her name."""
+
+    # His answer starts inside the echo tolerance after her last word, the
+    # voice detector's pre-roll counted, and goes on well after it.
+    _TOLERANCE = 0.3
+    _HE_STARTS = 0.2
+    _HE_STOPS = 0.6
+
+    def _her_reply_ends(self):
+        listener, _ = _create_listener(echo_tolerance=self._TOLERANCE, hot_window_seconds=1.0)
+        last_word = _she_answers_after_the_tune(listener, _HER_REPLY)
+        assert _wait_for_hot_window_active(listener)
+        return listener, last_word
+
+    def test_her_reply_weighs_his_words_against_the_room(self):
+        listener, _ = self._her_reply_ends()
+        carries_a_voice = listener.echo_detector.utterance_carries_a_voice
+
+        assert carries_a_voice(_level(listener, 1.2))
+        assert not carries_a_voice(_level(listener, 0.8))
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_his_soft_answer_just_after_her_last_word_is_answered(self, _print):
+        listener, last_word = self._her_reply_ends()
+        judge = _judge_that_reads_the_marker(listener)
+        soft = _level(listener, _HIS_SOFT_VOICE)
+        assert _FLOOR < soft < _level(listener, _THE_TUNE)
+        assert self._HE_STARTS < self._TOLERANCE < self._HE_STOPS
+        time.sleep(max(0.0, last_word + self._HE_STOPS - time.time()))
+
+        _whisper_hears(listener, _HIS_QUESTION, started=last_word + self._HE_STARTS, level=soft)
+
+        assert "during TTS" not in _current_line_shown_to(judge)
+        assert "lyon" in _accepted_query(listener).lower()
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_her_own_words_coming_back_are_still_hers(self, mock_print):
+        """Her echo as she stops, decimated by Whisper so that the text check
+        misses it: shown to the judge as hers and set aside."""
+        listener, last_word = self._her_reply_ends()
+        judge = _judge_that_reads_the_marker(listener)
+        assert (fuzz.partial_ratio(_HER_WORDS_DECIMATED, _HER_REPLY.lower())
+                < EchoDetector.PURE_ECHO_THRESHOLD)
+
+        _whisper_hears(listener, _HER_WORDS_DECIMATED, started=last_word - 1.5,
+                       voice_ended=last_word, level=_level(listener, _HER_VOICE))
+
+        assert "during TTS" in _current_line_shown_to(judge)
+        assert _accepted_query(listener) == ""
+        assert _console_says_heard_as_her_echo(mock_print, _HER_WORDS_DECIMATED)
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_a_phrase_made_of_the_quiet_then_is_still_not_answered(self, mock_print):
+        """The control: a floor at the room's level still holds what Whisper
+        makes of the room just after her under the bar."""
+        listener, last_word = self._her_reply_ends()
+        _judge_that_reads_the_marker(listener)
+        time.sleep(max(0.0, last_word + self._HE_STOPS - time.time()))
+
+        _whisper_hears(listener, "Merci.", started=last_word + self._HE_STARTS,
+                       level=_level(listener, _ROOM_NOISE))
+
+        assert _accepted_query(listener) == ""
+        assert _console_says_heard_as_her_echo(mock_print, "merci.")
+        listener.state_manager.stop()
+
+    def test_before_a_second_of_quiet_the_floor_is_the_default_and_the_log_says_so(self):
+        """Nothing heard yet but the tune: there is no room to read, the
+        floor is the default rather than the tune, and a debug line says
+        so."""
+        from jarvis.listening.room_floor import FALLBACK_FLOOR
+
+        listener, _ = _create_listener()
+        listener.tts.voice_delay.return_value = 0.0
+        listener._tune_player = _SilentTune()
+        listener._tune_player.start_tune()
+        _the_microphone_hears(listener, _level(listener, _THE_TUNE), seconds=4.0)
+        threshold = listener.echo_detector.energy_spike_threshold
+
+        with patch("jarvis.listening.listener.debug_log") as log:
+            listener.track_tts_start(_HER_REPLY)
+
+        assert listener.echo_detector.utterance_carries_a_voice(FALLBACK_FLOOR * threshold * 1.1)
+        assert not listener.echo_detector.utterance_carries_a_voice(
+            FALLBACK_FLOOR * threshold * 0.9)
+        assert any(f"{FALLBACK_FLOOR:.4f}" in str(call.args[0])
+                   for call in log.call_args_list)
         listener.state_manager.stop()
 
 

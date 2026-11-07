@@ -21,6 +21,7 @@ from datetime import datetime
 from rapidfuzz import fuzz
 from .audio_capture import UtteranceCapture
 from .echo_detection import EchoDetector
+from .room_floor import FALLBACK_FLOOR, ROOM_FLOOR_MIN_SECONDS, RoomFloor
 from .state_manager import StateManager, ListeningState
 from ..utils.audio_lock import portaudio_lock
 from .wake_detection import is_wake_word_detected, extract_query_after_wake, is_stop_command
@@ -703,8 +704,8 @@ class VoiceListener(threading.Thread):
             max_collect_seconds=float(getattr(self.cfg, "voice_max_collect_seconds", 60.0))
         )
 
-        # Energy tracking for echo detection
-        self._recent_audio_energy: deque = deque(maxlen=50)
+        # The room's quiet level, the floor of the echo detector's voice proof
+        self._room_floor = RoomFloor(frame_ms=self._frame_ms)
 
         # Audio-level wake word detection timestamp
         self._wake_timestamp: Optional[float] = None
@@ -779,6 +780,12 @@ class VoiceListener(threading.Thread):
         """Check if thinking tune is currently active."""
         return self._tune_player is not None and self._tune_player.is_playing()
 
+    def _she_is_heard(self) -> bool:
+        """Whether the speakers play something of hers: the thinking tune
+        or her voice."""
+        return self._is_thinking_tune_active() or bool(
+            self.tts is not None and self.tts.is_speaking())
+
     def _publish_listening_state(self) -> None:
         """Publish LISTENING as the assistant's state."""
         get_jarvis_state().set_state(JarvisState.LISTENING)
@@ -823,17 +830,27 @@ class VoiceListener(threading.Thread):
         return _sur_jeton
 
     def track_tts_start(self, tts_text: str, continues: bool = False) -> None:
-        """Called when TTS starts speaking."""
+        """Record *tts_text* with the echo detector as she is about to say it.
+
+        The room's quiet level goes with it (`room_floor.py`): the detector
+        takes it as the voice proof's floor when this text starts a reply,
+        and a later sentence (*continues*) keeps its reply's floor. Read from
+        what the microphone heard while neither the thinking tune nor her
+        voice played, it is the room's even when the tune still plays as her
+        first sentence is queued. Before a second of quiet has been heard
+        there is no room to read, and the floor is `FALLBACK_FLOOR`.
+        """
         if self.tts and self.tts.enabled:
-            # The microphone's mean level over its recent frames. The
-            # detector takes it as the voice proof's floor when this text
-            # starts a reply; a later sentence keeps its reply's floor.
-            baseline_energy = 0.0045  # default
-            if self._recent_audio_energy:
-                baseline_energy = sum(self._recent_audio_energy) / len(self._recent_audio_energy)
+            floor = self._room_floor.level()
+            if floor is None:
+                floor = FALLBACK_FLOOR
+                if not continues:
+                    debug_log(f"voice proof floor: {self._room_floor.seconds_heard():.1f}s of "
+                              f"quiet heard, under {ROOM_FLOOR_MIN_SECONDS:.0f}s, so the "
+                              f"default {FALLBACK_FLOOR:.4f}", "echo")
 
             # A talking face holds her voice back: her words come that much later.
-            self.echo_detector.track_tts_start(tts_text, baseline_energy, continues=continues,
+            self.echo_detector.track_tts_start(tts_text, floor, continues=continues,
                                                start_delay=self.tts.voice_delay())
 
     def activate_hot_window(self) -> None:
@@ -2314,9 +2331,10 @@ class VoiceListener(threading.Thread):
         if np is None:
             return True
 
-        # Track energy for echo detection
+        # The room's quiet level, for the echo detector's voice proof
         rms = float(np.sqrt(np.mean(np.square(frame))))
-        self._recent_audio_energy.append(rms)
+        self._room_floor.hear(rms, captured_at=self._frame_captured_at,
+                              hers_playing=self._she_is_heard(), now=time.time())
 
         if self._vad is None:
             return rms >= float(getattr(self.cfg, "voice_min_energy", 0.0045))

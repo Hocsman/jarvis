@@ -429,24 +429,48 @@ The fuzzy check acts as a fast, reliable safety net. The intent judge provides d
 
    What separates them is that one of them moved air. Overriding an echo
    verdict therefore needs both: words she did not say, and an utterance
-   whose energy rises above the ambient floor recorded when she started
-   speaking, by the same `energy_spike_threshold` the detector already
-   applies to this question in the post-TTS cooldown. Either test alone
-   was fooled — text by a hallucination, energy by a door slamming.
+   whose energy rises above the room's quiet level recorded when she
+   started speaking, by the same `energy_spike_threshold` the detector
+   already applies to this question in the post-TTS cooldown. Either test
+   alone was fooled — text by a hallucination, energy by a door slamming.
 
-   The floor is read once per reply, when her first sentence is queued:
-   the mean level of the last 50 frames the listening loop has read (a
-   second at the default 20 ms frame, and older than that while the loop
-   is busy with Whisper or the judge). It holds for the whole reply. A
-   reply spoken as it is written (`output/streaming.spec.md`) can queue a
-   later sentence while the microphone hears her say an earlier one,
-   whenever she is heard before the reply is written in full; a floor read
-   then would be her own voice, and his soft answer right after her last
-   word would fall under the bar it sets. Whatever the microphone heard in
-   that second is in the floor, and raises the bar with it: the thinking
-   tune, which plays until her reply is handed over, and, for a reply from
-   elsewhere said the moment another ends (see "Speaking Something
-   Produced Elsewhere"), the end of the one before.
+   **The floor is the room, never her nor him** (`room_floor.py`). The
+   microphone's last second as her reply starts is rarely the room: the
+   thinking tune plays until her reply is handed over, and a reply spoken
+   as it is written (`output/streaming.spec.md`) queues its first sentence
+   while the tune still plays; the end of his question can be in it; a
+   reply from elsewhere said the moment another ends (see "Speaking
+   Something Produced Elsewhere") follows her voice. A floor read there
+   sits at several times the room's level, and his soft answer right after
+   her last word, louder than the room and softer than the tune, falls
+   under the bar it sets and is shown to the judge as her echo. So:
+
+   - The listening loop measures each frame's level as it reads it. A
+     frame counts as the room when:
+     - nothing of hers plays as the loop reads it, neither the thinking
+       tune nor her voice;
+     - it was captured at most `ROOM_FRAME_MAX_AGE_SECONDS` (0.5 s) before.
+       The loop knows what plays when it reads a frame, not when the frame
+       was captured, and it falls behind while Whisper or the judge holds
+       it;
+     - it holds a sound: samples of exactly nothing are a muted or missing
+       input, not a quiet room.
+   - The floor is the `ROOM_FLOOR_PERCENTILE` (10th) percentile of the last
+     `ROOM_FLOOR_WINDOW_SECONDS` (15 s) of such frames, however long ago
+     they were heard. The stretch is longer than the longest utterance the
+     voice detector keeps whole (`max_utterance_ms`, 12 s by default), so
+     his words, a cough or a door fill less than nine-tenths of it and sit
+     above the percentile; a steady room varies by a few percent from one
+     frame to the next, so the percentile lies within a few percent of
+     its mean. It follows the room within one stretch of quiet when a fan
+     starts.
+   - Before `ROOM_FLOOR_MIN_SECONDS` (1 s) of such frames has been heard
+     there is no room to read: the floor is `FALLBACK_FLOOR` (0.0045), and
+     a debug line says so.
+
+   The floor is taken once per reply, when her first sentence is queued,
+   and holds for the whole reply: a reply is weighed against the room as
+   it began.
 
    Both together are fooled by her own voice when Whisper makes words she
    never said of it, since her voice through the speakers clears the energy
