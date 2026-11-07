@@ -2032,7 +2032,7 @@ class _AnswerRecorded:
 from jarvis.listening.intent_judge import _DECISION_FIELDS  # noqa: E402
 
 
-@pytest.mark.skipif(not NOT_SPEECH_ARMS, reason="name one or more judge models in EVAL_INTENT_JUDGE_ARMS")
+@pytest.mark.skipif(not JUDGE_MODELS, reason="name one or more judge models in EVAL_INTENT_JUDGE_ARMS")
 class TestADirectedVerdictComesBeforeItsReasoning:
     """A directed verdict is acted on once its decision fields are written,
     before the reasoning that ends the answer. It must be the verdict the
@@ -2049,7 +2049,7 @@ class TestADirectedVerdictComesBeforeItsReasoning:
         cases = [c for c in INTENT_JUDGE_TEST_CASES + MULTI_SEGMENT_TEST_CASES if c.expected_directed]
         lines = [""]
         changed = []
-        for model in NOT_SPEECH_ARMS:
+        for model in JUDGE_MODELS:
             judge = _judge_on(model)
             judge.judge(**_the_judges_arguments(cases[0]))  # loading is not timed
             took = {"whole": [], "streamed": []}
