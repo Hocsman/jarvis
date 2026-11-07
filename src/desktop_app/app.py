@@ -31,6 +31,7 @@ import psutil
 import threading
 import traceback
 import atexit
+import html
 import webbrowser
 import urllib.parse
 from dataclasses import dataclass
@@ -1223,6 +1224,14 @@ class LogViewerWindow(QMainWindow):
         webbrowser.open(url)
 
 
+# The memory viewer's server binds this address alone, and the window
+# probes, loads and guards it by this address: ``localhost`` would let
+# QtWebEngine try ``::1`` first, where the viewer never listens, so
+# another program bound to ``[::1]`` on the viewer's port would be shown
+# in its place.
+_VIEWER_HOST = "127.0.0.1"
+
+
 def _port_holds_viewer_server(port: int) -> bool:
     """True when whatever answers on `port` identifies as the memory viewer.
 
@@ -1240,7 +1249,7 @@ def _port_holds_viewer_server(port: int) -> bool:
     import json
 
     try:
-        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        conn = http.client.HTTPConnection(_VIEWER_HOST, port, timeout=2)
         try:
             conn.request("GET", "/api/health")
             resp = conn.getresponse()
@@ -1256,43 +1265,56 @@ def _port_holds_viewer_server(port: int) -> bool:
         return False
 
 
-# The embedded viewer navigates exactly one origin: the loopback server
-# that serves the page. Two schemes pass without a host check: ``about:``
-# for Qt's internal page states, and ``data:`` because ``setHtml`` is a
-# navigation to a self-contained ``data:text/html`` document (the error
-# page rides it).
-_VIEWER_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
-_VIEWER_LOCAL_SCHEMES = frozenset({"about", "data"})
-
-
-def _is_local_navigation(url) -> bool:
-    """Whether the embedded memory viewer may navigate to ``url``."""
-    if (url.scheme() or "").lower() in _VIEWER_LOCAL_SCHEMES:
+# The embedded viewer navigates only to its own server: ``http`` on
+# ``_VIEWER_HOST`` and the viewer's port, so to no other service on the
+# machine (Ollama on 11434, say), no other scheme on that address, and no
+# other loopback name. Two schemes pass without a host check: ``about:``
+# in any frame, for Qt's internal page states, and ``data:`` in the main
+# frame alone, because ``setHtml`` is a main-frame navigation to a
+# self-contained ``data:text/html`` document (the error page rides it)
+# and nothing the viewer shows frames one.
+def _is_local_navigation(url, port: int, is_main_frame: bool) -> bool:
+    """Whether the embedded memory viewer, served on ``port``, may navigate to ``url``."""
+    scheme = (url.scheme() or "").lower()
+    if scheme == "about":
         return True
-    return (url.host() or "").lower() in _VIEWER_LOCAL_HOSTS
+    if scheme == "data":
+        return is_main_frame
+    return scheme == "http" and url.host() == _VIEWER_HOST and url.port(80) == port
 
 
 if QWebEnginePage is not None:
 
     class _LocalOnlyPage(QWebEnginePage):
-        """WebEngine page that refuses every non-loopback navigation.
+        """WebEngine page that refuses every navigation, in any frame, to
+        anything but the viewer's own server (``http`` on ``_VIEWER_HOST``
+        and ``port``), Qt's ``about:`` states, and the main-frame ``data:``
+        document the error page rides (``_is_local_navigation``).
 
         The served page holds the launch token and references no remote
         asset; this makes navigation a property of the view too, so no
         link or injected redirect inside the embedded page can navigate
-        the machine to a remote host. Subresource requests (fetch, XHR,
-        images) do not pass through this guard; that the machine
-        contacts nobody rests on the served page referencing no remote
-        URL, which tests/test_memory_viewer_offline.py pins.
+        the machine to a remote host or to another service on it.
+        Subresource requests (fetch, XHR, images) do not pass through
+        this guard; that the machine contacts nobody rests on the served
+        page referencing no remote URL, which
+        tests/test_memory_viewer_offline.py pins.
         """
 
+        def __init__(self, parent, port: int):
+            super().__init__(parent)
+            self._port = port
+
         def acceptNavigationRequest(self, url, navigation_type, is_main_frame):
-            if _is_local_navigation(url):
+            if _is_local_navigation(url, self._port, is_main_frame):
                 return super().acceptNavigationRequest(url, navigation_type, is_main_frame)
-            debug_log(
-                f"viewer navigation refused: {url.scheme()}://{url.host()}",
-                "desktop",
-            )
+            # Scheme, host and port alone: no credentials, path (a data:
+            # document's payload), query or fragment.
+            parts = QUrl.UrlFormattingOption
+            address = url.adjusted(
+                parts.RemoveUserInfo | parts.RemovePath | parts.RemoveQuery | parts.RemoveFragment
+            ).toString()
+            debug_log(f"viewer navigation refused: {address}", "desktop")
             return False
 
 else:
@@ -1333,7 +1355,7 @@ class MemoryViewerWindow(QMainWindow):
             # Use embedded web view - URL will be set in showEvent when window is shown
             try:
                 self.web_view = QWebEngineView()
-                self.web_view.setPage(_LocalOnlyPage(self.web_view))
+                self.web_view.setPage(_LocalOnlyPage(self.web_view, self.MEMORY_VIEWER_PORT))
                 layout.addWidget(self.web_view)
                 web_view_created = True
             except Exception as e:
@@ -1393,7 +1415,7 @@ class MemoryViewerWindow(QMainWindow):
             # Check if server is already running on the port
             import socket
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            result = sock.connect_ex(('localhost', self.MEMORY_VIEWER_PORT))
+            result = sock.connect_ex((_VIEWER_HOST, self.MEMORY_VIEWER_PORT))
             sock.close()
 
             if result == 0:
@@ -1431,7 +1453,7 @@ class MemoryViewerWindow(QMainWindow):
 
                         # Disable Flask's reloader and debug mode
                         flask_app.run(
-                            host="127.0.0.1",
+                            host=_VIEWER_HOST,
                             port=self.MEMORY_VIEWER_PORT,
                             debug=False,
                             use_reloader=False,
@@ -1513,7 +1535,7 @@ class MemoryViewerWindow(QMainWindow):
 
                 # Check if server is listening
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                result = sock.connect_ex(('127.0.0.1', self.MEMORY_VIEWER_PORT))
+                result = sock.connect_ex((_VIEWER_HOST, self.MEMORY_VIEWER_PORT))
                 sock.close()
 
                 if result == 0:
@@ -1570,7 +1592,7 @@ class MemoryViewerWindow(QMainWindow):
             self.is_server_running = False
 
     def _show_error_page(self, message: str) -> None:
-        """Show an error page in the web view."""
+        """Show an error page in the web view, with ``message`` as text."""
         if self.web_view:
             error_html = f"""
             <html>
@@ -1586,7 +1608,7 @@ class MemoryViewerWindow(QMainWindow):
             <body><div class="error">
                 <div class="icon">⚠️</div>
                 <h1>Connection Failed</h1>
-                <p>{message}</p>
+                <p>{html.escape(message)}</p>
             </div></body>
             </html>
             """
@@ -1601,11 +1623,11 @@ class MemoryViewerWindow(QMainWindow):
             if self.start_server():
                 if self.web_view:
                     # Set URL and load (URL is set here, not in __init__, to avoid WebEngine crash)
-                    self.web_view.setUrl(QUrl(f"http://localhost:{self.MEMORY_VIEWER_PORT}"))
+                    self.web_view.setUrl(QUrl(f"http://{_VIEWER_HOST}:{self.MEMORY_VIEWER_PORT}"))
                 else:
                     # Open in system browser as fallback
                     import webbrowser
-                    webbrowser.open(f"http://localhost:{self.MEMORY_VIEWER_PORT}")
+                    webbrowser.open(f"http://{_VIEWER_HOST}:{self.MEMORY_VIEWER_PORT}")
             else:
                 # Server failed to start - show error message
                 debug_log("memory viewer server failed to start", "desktop")
