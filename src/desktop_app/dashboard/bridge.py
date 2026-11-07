@@ -76,8 +76,9 @@ def parse_chat_ipc_line(line: str):
     as consumed, so a bad payload isn't re-handled as a log line).
 
     Lives here — free of Qt and of the web view — so the wire contract can
-    be tested headlessly; importing the window pulls in QtWebEngine, which
-    cannot be constructed in a headless test run.
+    be tested in the suite's own process; the window builds a QtWebEngine
+    view, which is built only in a process of its own (Chromium aborts a
+    process whose QApplication has no program name).
     """
     from jarvis.daemon import CHAT_IPC_PREFIX
     if not line.startswith(CHAT_IPC_PREFIX):
