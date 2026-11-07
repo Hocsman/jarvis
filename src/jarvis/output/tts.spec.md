@@ -65,6 +65,7 @@ The four engines are interchangeable to the listener. Each exposes:
 | `is_speaking()` | Whether an item is being synthesised or played |
 | `get_last_spoken_text()` | The processed text of the item most recently started |
 | `voice_delay()` | How much later than usual her voice will be heard: the talking face's delay while a face is ready and watched (Kyutai, see "The face"), otherwise 0 |
+| `wait_until_ready(timeout)` | Waits up to `timeout` seconds for the load (and warm-up) `start` began. `True` once the engine can speak without paying it, `False` once it settled without a voice (it could not load, or the engine is off), `None` when it is still loading at the deadline, or when `start` has not been called and nothing is loading (then it returns at once). Piper and Chatterbox load inside `start`, so they never wait. The listener calls it before it announces "Listening!" (`listening.spec.md`, "Startup & Model Warmup") |
 
 `speak` starts the worker if nobody has. Calling `start` on Piper loads
 the voice on the calling thread (downloading it if absent) so the wait
@@ -705,6 +706,11 @@ language. The line is not added for Kokoro or Kyutai.
   with a reproduction, as it needs the GPU.
 - Kyutai's initialisation ends with one throwaway synthesis (audio
   discarded, nothing queued or played).
+- Each engine's `wait_until_ready`: Kyutai and Kokoro answer `None` while
+  their background load or warm-up runs and `True` once the warm-up
+  synthesis is done; an engine that could not load answers `False`, a
+  disabled one `False`, and one nobody started `None` without spending the
+  wait. Piper and Chatterbox answer at once from what `start` loaded.
 - A voice name is resolved through the model's voice repository, a
   `.safetensors` path is used as it is, and a path that does not exist
   fails initialisation before the model is loaded. A value that is not a

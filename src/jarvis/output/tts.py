@@ -795,6 +795,17 @@ class ChatterboxTTS:
     def is_speaking(self) -> bool:
         return self._is_speaking.is_set()
 
+    def wait_until_ready(self, timeout: float) -> Optional[bool]:
+        """Whether the voice can speak without paying its load. ``start``
+        loads it before returning, so nothing is waited for: True when it
+        loaded, False when it could not (or the engine is off), None
+        before ``start``, when nothing has been loaded yet."""
+        if not self.enabled:
+            return False
+        if not self._initialized:
+            return None
+        return self._model is not None
+
     def voice_delay(self) -> float:
         """No face follows this engine, so nothing holds her voice back."""
         return 0.0
@@ -1352,6 +1363,17 @@ class PiperTTS:
     def is_speaking(self) -> bool:
         return self._is_speaking.is_set()
 
+    def wait_until_ready(self, timeout: float) -> Optional[bool]:
+        """Whether the voice can speak without paying its load. ``start``
+        loads it before returning, so nothing is waited for: True when it
+        loaded, False when it could not (or the engine is off), None
+        before ``start``, when nothing has been loaded yet."""
+        if not self.enabled:
+            return False
+        if not self._initialized:
+            return None
+        return self._voice is not None
+
     def voice_delay(self) -> float:
         """No face follows this engine, so nothing holds her voice back."""
         return 0.0
@@ -1434,6 +1456,7 @@ class KokoroTTS:
         self._initialized = False
         self._init_lock = threading.Lock()
         self._init_error: Optional[str] = None
+        self._settled = threading.Event()  # the load and warm-up are over, however they ended
 
         # Audio stream for interruption.
         self._audio_stream = None
@@ -1486,6 +1509,7 @@ class KokoroTTS:
                 debug_log(f"Kokoro TTS init failed: {self._init_error}", "tts")
 
             self._initialized = True
+            self._settled.set()
             return self._pipe is not None
 
     def _parse_voice_spec(self) -> Optional[list]:
@@ -1807,12 +1831,34 @@ class KokoroTTS:
     def is_speaking(self) -> bool:
         return self._is_speaking.is_set()
 
+    def wait_until_ready(self, timeout: float) -> Optional[bool]:
+        """Wait up to ``timeout`` seconds for the warm-up ``start`` began.
+
+        True once the pipeline is loaded and its warm-up synthesis done,
+        False once it could not load (or the engine is off), None when it is
+        still loading at the deadline, or when nobody started it and nothing
+        is loading."""
+        return _wait_for_the_warm_up(self, self._settled, timeout, lambda: self._pipe is not None)
+
     def voice_delay(self) -> float:
         """No face follows this engine, so nothing holds her voice back."""
         return 0.0
 
     def get_last_spoken_text(self) -> str:
         return self._last_spoken_text
+
+
+def _wait_for_the_warm_up(engine, settled: threading.Event, timeout: float,
+                          loaded: Callable[[], bool]) -> Optional[bool]:
+    """``wait_until_ready`` for an engine that loads on a background thread
+    (Kokoro, Kyutai): ``settled`` is set when that load is over."""
+    if not engine.enabled:
+        return False
+    if engine._thread is None and not settled.is_set():
+        return None
+    if not settled.wait(max(0.0, timeout)):
+        return None
+    return loaded()
 
 
 # The voice Kyutai speaks with when none is named: a French female voice, a
@@ -1991,6 +2037,7 @@ class KyutaiTTS:
         self._initialized = False
         self._init_lock = threading.Lock()
         self._init_error: Optional[str] = None
+        self._settled = threading.Event()  # the load and warm-up are over, however they ended
 
         # Audio stream for interruption.
         self._audio_stream = None
@@ -2135,6 +2182,7 @@ class KyutaiTTS:
             if self._init_error:
                 debug_log(f"Kyutai TTS init failed: {self._init_error}", "tts")
             self._initialized = True
+            self._settled.set()
             return self._model is not None
 
     def _synthesise(self, text: str, cancelled: Callable[[], bool],
@@ -2251,6 +2299,15 @@ class KyutaiTTS:
             self._face.cut(time.perf_counter())
             with self._face_lock:
                 self._face_last = None
+
+    def wait_until_ready(self, timeout: float) -> Optional[bool]:
+        """Wait up to ``timeout`` seconds for the warm-up ``start`` began.
+
+        True once the model is loaded and its throwaway synthesis done, False
+        once it could not load (or the engine is off), None when it is still
+        loading at the deadline, or when nobody started it and nothing is
+        loading."""
+        return _wait_for_the_warm_up(self, self._settled, timeout, lambda: self._model is not None)
 
     def voice_delay(self) -> float:
         """How much later than usual her voice will be heard: the face's delay

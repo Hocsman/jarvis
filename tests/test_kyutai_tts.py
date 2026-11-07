@@ -313,7 +313,7 @@ class TestKyutaiInterface:
     def test_has_same_interface_as_other_engines(self):
         tts = tts_module.KyutaiTTS(enabled=False)
         for name in ("start", "stop", "speak", "interrupt", "is_speaking",
-                     "get_last_spoken_text", "voice_delay"):
+                     "get_last_spoken_text", "voice_delay", "wait_until_ready"):
             assert callable(getattr(tts, name)), f"missing {name}"
 
     def test_disabled_is_a_no_op(self, stage):
@@ -813,6 +813,39 @@ class TestLifecycle:
         stage.load_gate.set()
         assert _until(lambda: tts._initialized)
         assert stage.load_attempts == 1
+
+    def test_the_voice_is_ready_once_its_warm_up_is_over_and_not_before(
+            self, stage, make_engine):
+        stage.load_gate = threading.Event()
+        tts = make_engine()
+        tts.start()
+        assert stage.load_started.wait(5)
+
+        assert tts.wait_until_ready(0.05) is None, "still loading: not ready yet"
+
+        stage.load_gate.set()
+        assert tts.wait_until_ready(5) is True
+        assert stage.scripts == [tts._WARMUP_TEXT], "ready means warmed, not just loaded"
+
+    def test_a_voice_that_cannot_load_is_settled_and_not_ready(
+            self, stage, make_engine, monkeypatch):
+        monkeypatch.setattr(tts_module.KyutaiTTS, "_cuda_problem",
+                            staticmethod(lambda: "no NVIDIA GPU was found"))
+        tts = make_engine()
+        tts.start()
+
+        assert tts.wait_until_ready(5) is False
+
+    def test_an_engine_nobody_started_has_nothing_to_wait_for(self, stage, make_engine):
+        tts = make_engine()
+
+        began = time.monotonic()
+        assert tts.wait_until_ready(5) is None
+        assert time.monotonic() - began < 1.0, "nothing is loading: the wait must not be spent"
+        assert stage.load_attempts == 0
+
+    def test_a_disabled_voice_is_never_ready(self, stage):
+        assert tts_module.KyutaiTTS(enabled=False).wait_until_ready(5) is False
 
     def test_starting_twice_leaves_the_first_worker_in_place(self, stage, make_engine):
         tts = make_engine()

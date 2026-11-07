@@ -314,8 +314,9 @@ Leave `embedding_provider` empty to use the same provider as chat. When no embed
 
 Jarvis favours fast first responses by default: it warms Whisper, the chat
 model, the intent judge and the tool router (on the tool list it reads for
-every request, when the router has a model of its own) before announcing that
-it is listening, and asks Ollama to keep those models loaded for 30 minutes,
+every request, when the router has a model of its own) and waits for the
+voice to finish warming up before announcing that it is listening, so the
+first reply speaks at once, and asks Ollama to keep those models loaded for 30 minutes,
 or longer if `OLLAMA_KEEP_ALIVE` tells Ollama to. On Macs or
 laptops where heat and battery matter more than instant first-token latency,
 enable **⚙️ Settings → ✨ Features → Low Power Mode**.
@@ -328,7 +329,7 @@ enable **⚙️ Settings → ✨ Features → Low Power Mode**.
 
 Low Power Mode skips LLM startup warmup and shortens Ollama model residency for
 the intent judge to 1 minute. Whisper still warms so voice input
-is ready. The first LLM-backed request after startup or idle may be slower.
+is ready, and the voice is still waited for so the first reply is heard at once. The first LLM-backed request after startup or idle may be slower.
 
 **Latency journal.** To find out where the time goes in a spoken exchange,
 Jarvis keeps one line per voice turn with the duration of each stage (speech
@@ -520,7 +521,7 @@ pip install --no-deps moshi==0.2.11
 { "tts_engine": "kyutai" }
 ```
 - Needs an NVIDIA GPU (CUDA) and about 4 GB of free VRAM. There is no CPU mode.
-- The model (~4 GB) downloads once from Hugging Face on first use, and the first start-up takes tens of seconds while it warms up.
+- The model (~4 GB) downloads once from Hugging Face on first use, and each start-up takes tens of seconds while it warms up: Jarvis says "Listening!" once it can speak (or after 60 s).
 - Sentences are played as they are synthesised and the next one is prepared while the current one plays: expect about a second before the first sentence is heard, then a short pause between sentences. Kokoro starts a little faster.
 - The default voice is a French female voice. To pick another, browse the [voice list](https://huggingface.co/kyutai/tts-voices) and set `tts_kyutai_voice` to a name from it (for example `cml-tts/fr/577_394_000070-0001_enhanced.wav`), or to the path of a `.safetensors` voice file. A local path to anything else (a `.wav` recording, say) is refused rather than sent to Hugging Face.
 - Known limitation: only English and French text is read correctly. Any other language is read with the wrong sounds, and the voice follows `tts_kyutai_voice` alone, not `response_language`.
@@ -726,7 +727,7 @@ Get API key at [composio.dev](https://composio.dev)
 <details>
 <summary><strong>Common issues</strong></summary>
 
-**First startup takes a bit** - Jarvis pre-warms the Whisper, chat, intent-judge and tool-router models before announcing "Listening!" so the first engagement feels instant. This adds a few seconds on cold start and is bounded at 60 s. If Ollama is slow, Jarvis will start listening anyway and load the models on demand. Enable **Low Power Mode** in Settings to skip LLM startup warmup.
+**First startup takes a bit** - Jarvis pre-warms the Whisper, chat, intent-judge and tool-router models, and waits for the voice to warm up, before announcing "Listening!" so the first engagement feels instant. This adds a few seconds on cold start, tens of seconds with Kyutai, and is bounded at 60 s. If Ollama is slow, Jarvis will start listening anyway and load the models on demand. Enable **Low Power Mode** in Settings to skip LLM startup warmup.
 
 **First startup downloads the speech model** - On the very first launch Jarvis downloads the Whisper model (up to ~3 GB depending on the chosen size) and shows progress lines (`⬇️ Downloading … X/Y MB · rate`) in the log. A slow connection keeps printing progress as long as data flows. An interrupted download resumes where it stopped on the next launch.
 
