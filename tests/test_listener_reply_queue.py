@@ -26,6 +26,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.jarvis.listening.echo_detection import EchoDetector
+from src.jarvis.listening.room_floor import RoomFloor
 
 
 @pytest.fixture
@@ -49,7 +50,7 @@ def listener():
     obj._streamed_chars = 0
     obj._last_detected_language = None
     obj.state_manager = MagicMock()
-    obj._recent_audio_energy = []
+    obj._room_floor = RoomFloor(frame_ms=20)
     obj.tts.is_speaking.return_value = False
     obj._speech_lock = threading.Lock()
     obj._tune_lock = threading.Lock()
