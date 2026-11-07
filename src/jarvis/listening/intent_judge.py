@@ -250,7 +250,7 @@ WAKE WORD MODE:
 HOT WINDOW MODE (no wake word needed):
 - User IS DIRECTED (directed=true) — always, unless the current segment is not speech (see NOT SPEECH). This overrides any "topic-less question" heuristic above; follow-ups like "tell me more" are directed in hot window.
 - Extract from segments WITHOUT "(during TTS)" marker
-- Question or statement both valid
+- Question, statement, greeting, thanks or compliment to {name}: all valid, all directed
 
 ECHO / MARKER RULES:
 - "(during TTS)" = echo of assistant -> skip, never extract

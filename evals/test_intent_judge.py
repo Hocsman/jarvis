@@ -25,7 +25,18 @@ never said, its voice stopping with hers, unmarked, as the judge is shown
 it when the two proofs alone decide, and marked, as the listener shows an
 utterance whose voice stops with hers (`-k rewritten` runs it alone, after
 a check that needs no model: the listener shows each case to the judge
-whole, marked only when its voice stops with hers).
+whole, marked only when its voice stops with hers). A fifth reads a remark
+said to her that asks for nothing (a greeting, thanks, a compliment) right
+after her reply, with its controls heard at the same moment: his words to
+someone else, Whisper's inventions, her own warm sign-off misheard as
+words she never said, unmarked, and a lone "Thank you." after an English
+reply (`-k a_remark_to_her` runs it alone, with its check that needs no
+model and its per-case reading on the eval model).
+`EVAL_INTENT_JUDGE_PROMPT_REF` names a git ref: each model then also runs
+with the system prompt at that ref, as an arm of its own interleaved with
+the others, so a prompt change is measured against the prompt it replaces
+in the same window; the fifth test then prints a Fisher test per model and
+group, on what the listener answers and on what the judge calls directed.
 Arms go through `MockConfig`, so a cloud model
 goes to the provider the `EVAL_LLM_*` variables name and is billed there,
 and a bare local tag runs on the local Ollama. Only these synthetic
@@ -35,22 +46,42 @@ transcripts leave the machine. `EVAL_INTENT_JUDGE_ROUNDS` sets the rounds
     EVAL_LLM_PROVIDER=anthropic EVAL_LLM_API_KEY_ENV=YUBA_ANTHROPIC_KEY \\
     EVAL_INTENT_JUDGE_ARMS="gemma4:e2b,claude-haiku-5-5" \\
       python -m pytest evals/test_intent_judge.py -k "arms or reaches_the_judge" -s
+
+    EVAL_INTENT_JUDGE_PROMPT_REF=develop EVAL_LLM_PROVIDER=anthropic \\
+    EVAL_LLM_API_KEY_ENV=YUBA_ANTHROPIC_KEY EVAL_INTENT_JUDGE_ARMS="gemma4:e2b,claude-haiku-5-5" \\
+      python -m pytest evals/test_intent_judge.py -k remark_to_her -s
 """
 
 import dataclasses
+import functools
 import os
 import random
+import re
 
 import pytest
 from unittest.mock import patch, MagicMock
 from dataclasses import dataclass
 from typing import Optional, List, Union
 
-from helpers import JUDGE_MODEL, JUDGE_BASE_URL, MockConfig, is_judge_llm_available, rate, to_terminal
+from helpers import (JUDGE_MODEL, JUDGE_BASE_URL, MockConfig, fisher_two_sided,
+                     is_judge_llm_available, rate, to_terminal)
 from jarvis.listening.listener import _carries_speech_she_did_not_say
 
-NOT_SPEECH_ARMS = [a.strip() for a in os.environ.get("EVAL_INTENT_JUDGE_ARMS", "").split(",") if a.strip()]
+JUDGE_MODELS = [a.strip() for a in os.environ.get("EVAL_INTENT_JUDGE_ARMS", "").split(",") if a.strip()]
 NOT_SPEECH_ROUNDS = int(os.environ.get("EVAL_INTENT_JUDGE_ROUNDS", "4") or 4)
+# A git ref: each model then also reads every case with the system prompt
+# at that ref, as an arm of its own, "<model> @<ref>".
+PROMPT_REF = os.environ.get("EVAL_INTENT_JUDGE_PROMPT_REF", "").strip()
+
+
+def _arm_at_ref(model: str) -> str:
+    """The arm that runs *model* with the system prompt at `PROMPT_REF`."""
+    return f"{model} @{PROMPT_REF}"
+
+
+JUDGE_ARMS = [arm for model in JUDGE_MODELS
+              for arm in ([model, _arm_at_ref(model)] if PROMPT_REF else [model])]
+_ARM_WIDTH = max([24, *(len(arm) for arm in JUDGE_ARMS)])
 
 
 # =============================================================================
@@ -891,12 +922,17 @@ def _whisper_hears(listener, text: str, *, started: float, voice_ended: float,
 @pytest.mark.parametrize("case", HER_VOICE_REWRITTEN_CASES, ids=lambda case: case.name)
 def test_her_voice_rewritten_reaches_the_judge_whole(case, voice_stops_with_hers):
     """Needs no model. A case measures what the judge is shown only if the
-    listener shows it whole. Heard from 1.2 s before the last word of a
-    reply that played for six seconds, at the level her voice reaches the
-    microphone, it is neither taken for her reply coming back nor cut to
-    what follows her words: the judge is shown it unmarked when its voice
-    goes on after hers, where the two proofs decide, and marked
-    "(during TTS)" when its voice stops with hers."""
+    listener shows it whole."""
+    _shown_to_the_judge_whole(case, voice_stops_with_hers)
+
+
+def _shown_to_the_judge_whole(case, voice_stops_with_hers):
+    """Heard from 1.2 s before the last word of a reply that played for six
+    seconds, at the level her voice reaches the microphone, the case's last
+    segment is neither taken for her reply coming back nor cut to what
+    follows her words: the judge is shown it unmarked when its voice goes on
+    after hers, where the two proofs decide, and marked "(during TTS)" when
+    its voice stops with hers."""
     import time
 
     heard, reply = case.segments[-1][0], case.last_tts_text
@@ -999,6 +1035,152 @@ COLLECTING_TEST_CASES = [
 ]
 
 
+# Right after her reply he says something to her that asks for nothing: a
+# greeting, thanks, a compliment, gladness that she is back. Field trace
+# 2026-11-07: such a remark, said in French in the second person right after
+# she came back, was called "a closing-style pleasantry" and noise, and the
+# hot window let it go unanswered. The judge is shown what the listener
+# shows it then: his question was answered, so it is processed and hidden,
+# her reply is there sentence by sentence as Whisper heard it, marked
+# "(during TTS)", and his remark, heard in a voice that goes on after hers,
+# is unmarked.
+def _sentences(reply: str) -> list:
+    return re.split(r"(?<=[.!?])\s+", reply)
+
+
+def _right_after(reply: str, current: str) -> list:
+    """Her reply heard sentence by sentence, marked, then *current*, unmarked."""
+    return [*((sentence, True) for sentence in _sentences(reply)), (current, False)]
+
+
+_FR_BACK = "Oui, Monsieur, je vous entends. Me revoilà, tout fonctionne de nouveau."
+_FR_GOOD_EVENING = "C'est noté pour demain à sept heures. Bonne soirée, Monsieur."
+_EN_BACK = "Yes, I can hear you. I'm back, and everything is working again."
+_EN_GOOD_NIGHT = "Done, I'll remind you at seven tomorrow. Good night."
+
+REMARK_TO_HER_CASES = [
+    NotSpeechCase("french_glad_to_hear_her",
+                  _right_after(_FR_BACK, "Ah, ça fait du bien de t'entendre à nouveau."),
+                  _FR_BACK, expected_noise=False),
+    NotSpeechCase("french_missed_her",
+                  _right_after(_FR_BACK, "Tu m'as manqué, tu sais."),
+                  _FR_BACK, expected_noise=False),
+    NotSpeechCase("french_compliment",
+                  _right_after(_FR_REPLY, "T'es vraiment la meilleure, toi."),
+                  _FR_REPLY, expected_noise=False),
+    NotSpeechCase("french_good_evening_back",
+                  _right_after(_FR_GOOD_EVENING, "Merci, bonne soirée à toi aussi."),
+                  _FR_GOOD_EVENING, expected_noise=False),
+    NotSpeechCase("french_well_done",
+                  _right_after(_FR_REPLY, "Bravo, t'as été rapide sur ce coup-là."),
+                  _FR_REPLY, expected_noise=False),
+    NotSpeechCase("english_glad_to_hear_her",
+                  _right_after(_EN_BACK, "Oh, it's lovely to hear your voice again."),
+                  _EN_BACK, expected_noise=False),
+    NotSpeechCase("english_missed_her",
+                  _right_after(_EN_BACK, "I missed you, you know."),
+                  _EN_BACK, expected_noise=False),
+    NotSpeechCase("english_compliment",
+                  _right_after(_EN_REPLY, "You're a star, honestly."),
+                  _EN_REPLY, expected_noise=False),
+    NotSpeechCase("english_good_night_back",
+                  _right_after(_EN_GOOD_NIGHT, "Thanks, good night to you too."),
+                  _EN_GOOD_NIGHT, expected_noise=False),
+    NotSpeechCase("english_well_done",
+                  _right_after(_EN_REPLY, "Well done, that was quick."),
+                  _EN_REPLY, expected_noise=False),
+]
+
+# The controls, heard at the same moment. His words to someone else in the
+# room are his words, never noise, and the hot window answers them whatever
+# the judge calls them. Whether it calls them directed is still read: a
+# marked segment is answered only on a directed verdict, and a wording that
+# stretches "to {name}" to anyone he addresses would push it up.
+TO_SOMEONE_ELSE_CASES = [
+    NotSpeechCase("french_to_someone_else_music",
+                  _right_after(_FR_REPLY, "Camille, tu peux baisser la musique, s'il te plaît ?"),
+                  _FR_REPLY, expected_noise=False),
+    NotSpeechCase("french_to_someone_else_wait",
+                  _right_after(_FR_BACK, "Attends Hugo, j'arrive dans deux minutes."),
+                  _FR_BACK, expected_noise=False),
+    NotSpeechCase("french_to_someone_else_keys",
+                  _right_after(_FR_GOOD_EVENING, "Léa, t'as vu où j'ai mis mes clés ?"),
+                  _FR_GOOD_EVENING, expected_noise=False),
+    NotSpeechCase("english_to_someone_else_door",
+                  _right_after(_EN_REPLY, "Sam, can you grab the door for me?"),
+                  _EN_REPLY, expected_noise=False),
+    NotSpeechCase("english_to_someone_else_wait",
+                  _right_after(_EN_BACK, "Hang on, Priya, I'll be right with you."),
+                  _EN_BACK, expected_noise=False),
+]
+
+# Whisper's inventions there, the thankful ones and the farewells first:
+# words a video says to its audience read like a remark to her.
+INVENTIONS_RIGHT_AFTER_HER_CASES = [
+    NotSpeechCase("french_subtitle_number_after_she_is_back",
+                  _right_after(_FR_BACK, "Sous-titrage ST' 501"),
+                  _FR_BACK, expected_noise=True),
+    NotSpeechCase("lone_english_thanks_after_her_french_good_evening",
+                  _right_after(_FR_GOOD_EVENING, "Thank you."),
+                  _FR_GOOD_EVENING, expected_noise=True),
+    NotSpeechCase("french_thanks_for_watching_after_her_reply",
+                  _right_after(_FR_REPLY, "Merci d'avoir regardé cette vidéo !"),
+                  _FR_REPLY, expected_noise=True),
+    NotSpeechCase("french_broadcaster_credit_after_her_good_evening",
+                  _right_after(_FR_GOOD_EVENING, "Sous-titrage Société Radio-Canada"),
+                  _FR_GOOD_EVENING, expected_noise=True),
+    NotSpeechCase("english_video_outro_after_her_good_night",
+                  _right_after(_EN_GOOD_NIGHT, "Thanks for watching, see you next time!"),
+                  _EN_GOOD_NIGHT, expected_noise=True),
+]
+
+
+def _her_sign_off_heard_as(name: str, reply: str, heard: str) -> NotSpeechCase:
+    """Her reply heard sentence by sentence, marked, its last sentence heard
+    as *heard*, unmarked: the judge reads it when the two proofs alone
+    decide. Her voice moved air, so `expected_noise` is false."""
+    return NotSpeechCase(name, [*((sentence, True) for sentence in _sentences(reply)[:-1]),
+                                (heard, False)],
+                         reply, expected_noise=False)
+
+
+_FR_WELL_WISHES = "C'est fait, Monsieur. Je vous souhaite une très belle soirée."
+_EN_WELL_WISHES = "All done. Have a lovely evening, and sleep well."
+
+# Her own warm sign-off coming back as words she never said, which read like
+# his to her. Her words returned as she said them never reach the judge: the
+# early echo check takes them for her reply. These do, whole
+# (`test_a_remark_to_her_control_reaches_the_judge_whole`), and any verdict
+# but noise has them answered.
+HER_SIGN_OFF_MISHEARD_CASES = [
+    _her_sign_off_heard_as("french_good_evening_heard_as_endearment",
+                           _FR_GOOD_EVENING, "Bonsoir, mon cœur."),
+    _her_sign_off_heard_as("french_good_evening_heard_as_thanks",
+                           _FR_GOOD_EVENING, "Bon soir et merci, Mathieu."),
+    _her_sign_off_heard_as("french_well_wishes_heard_as_his",
+                           _FR_WELL_WISHES, "Te souhaiter belle nuit, ma belle."),
+    _her_sign_off_heard_as("english_good_night_heard_with_a_name",
+                           _EN_GOOD_NIGHT, "Night to you, Ida, my dear."),
+    _her_sign_off_heard_as("english_well_wishes_heard_as_endearment",
+                           _EN_WELL_WISHES, "Lovely night, sweetheart."),
+]
+
+# A lone "Thank you." right after an English reply: without the audio it is
+# Whisper's commonest invention as much as his thanks, and the prompt names
+# both a lone "thank you" as text Whisper invents and thanks to her as
+# directed. Left alone is the side counted right: a thanks left unanswered
+# costs him nothing, an invention answered costs a reply nobody asked for
+# and opens the hot window again.
+LONE_THANKS_CASES = [
+    NotSpeechCase("lone_english_thanks_after_her_good_night",
+                  _right_after(_EN_GOOD_NIGHT, "Thank you."), _EN_GOOD_NIGHT, expected_noise=True),
+    NotSpeechCase("lone_english_thanks_after_she_is_back",
+                  _right_after(_EN_BACK, "Thank you."), _EN_BACK, expected_noise=True),
+    NotSpeechCase("lone_english_thanks_after_her_well_wishes",
+                  _right_after(_EN_WELL_WISHES, "Thank you."), _EN_WELL_WISHES, expected_noise=True),
+]
+
+
 # Cases known to fail with the small model on the current prompt.
 # Track regressions / future prompt improvements here.
 KNOWN_FAILING_CASES: set = {
@@ -1016,6 +1198,17 @@ KNOWN_FAILING_CASES: set = {
     # Half the time or more: the field case itself, a subtitle credit with a
     # number.
     "french_subtitle_number_while_asking",
+    # Her sign-off misheard, unmarked: as with her voice rewritten, it never
+    # calls her words noise, so the hot window answers them.
+    *(case.name for case in HER_SIGN_OFF_MISHEARD_CASES),
+    # A lone "Thank you." after an English reply: it takes it for his thanks.
+    *(case.name for case in LONE_THANKS_CASES),
+    # Right after her reply, as after any reply: it calls the broadcaster's
+    # credit noise, not the rest.
+    "french_subtitle_number_after_she_is_back",
+    "lone_english_thanks_after_her_french_good_evening",
+    "french_thanks_for_watching_after_her_reply",
+    "english_video_outro_after_her_good_night",
 }
 
 
@@ -1378,18 +1571,72 @@ def _without_his_question(case: NotSpeechCase) -> NotSpeechCase:
     return dataclasses.replace(case, segments=case.segments[:-2] + case.segments[-1:])
 
 
-def _judge_on(model: str):
+@functools.lru_cache(maxsize=None)
+def _system_prompt_at(ref: str) -> str:
+    """The judge's system prompt as it stands at git *ref*, read from the
+    source without running it."""
+    import ast
+    import subprocess
+    from pathlib import Path
+
+    shown = subprocess.run(
+        ["git", "show", f"{ref}:src/jarvis/listening/intent_judge.py"],
+        capture_output=True, text=True, encoding="utf-8",
+        cwd=Path(__file__).resolve().parent,
+    )
+    if shown.returncode:
+        raise LookupError(f"git cannot show the judge at {ref!r}: {shown.stderr.strip()}")
+    for node in ast.walk(ast.parse(shown.stdout)):
+        if isinstance(node, ast.ClassDef) and node.name == "IntentJudge":
+            for stmt in node.body:
+                if (isinstance(stmt, ast.Assign)
+                        and any(getattr(t, "id", "") == "SYSTEM_PROMPT_TEMPLATE" for t in stmt.targets)):
+                    template = ast.literal_eval(stmt.value)
+                    try:
+                        template.format(name="Jarvis")
+                    except (KeyError, IndexError, ValueError) as error:
+                        raise LookupError(f"the judge's prompt at {ref!r} does not take "
+                                          f"the assistant's name alone: {error!r}") from error
+                    return template
+    raise LookupError(f"no IntentJudge.SYSTEM_PROMPT_TEMPLATE at {ref!r}")
+
+
+def _judge_on(arm: str):
+    """The judge an arm names: a model, with the system prompt at a git ref
+    when the arm ends in " @<ref>"; the rest of the judge is this tree's."""
     from jarvis.listening.intent_judge import IntentJudge, IntentJudgeConfig
 
-    return IntentJudge(IntentJudgeConfig(
+    model, _, ref = arm.partition(" @")
+    judge = IntentJudge(IntentJudgeConfig(
         assistant_name="Jarvis", model=model, cfg=MockConfig(), timeout_sec=30.0,
     ))
+    if ref:
+        template = _system_prompt_at(ref)
+        judge.SYSTEM_PROMPT_TEMPLATE = template
+        assert judge._build_system_prompt() == template.format(name="Jarvis"), (
+            f"the judge does not build its system prompt from the template {arm!r} sets")
+    return judge
+
+
+def test_an_arm_at_a_ref_runs_the_prompt_at_that_ref():
+    """Needs no model. An arm at a git ref sends the judge's system prompt
+    as it stands at that ref, and the same arm without the ref sends this
+    tree's."""
+    from jarvis.listening.intent_judge import IntentJudge
+
+    at_head = _system_prompt_at("HEAD")
+    assert "HOT WINDOW MODE" in at_head
+    assert _judge_on("gemma4:e2b @HEAD")._build_system_prompt() == at_head.format(name="Jarvis")
+    assert (_judge_on("gemma4:e2b")._build_system_prompt()
+            == IntentJudge.SYSTEM_PROMPT_TEMPLATE.format(name="Jarvis"))
+    with pytest.raises(LookupError):
+        _system_prompt_at("no-such-ref-anywhere")
 
 
 def _warm_judges() -> dict:
     """A judge per arm, each asked once unmeasured, so loading a model is
     not scored as a miss."""
-    judges = {arm: _judge_on(arm) for arm in NOT_SPEECH_ARMS}
+    judges = {arm: _judge_on(arm) for arm in JUDGE_ARMS}
     cold = [arm for arm, judge in judges.items()
             if run_intent_judge_multi_segment(NOT_SPEECH_TEST_CASES[0], judge=judge) is None]
     assert not cold, f"no answer to a warm-up from {cold}: check the model names and the provider"
@@ -1446,7 +1693,70 @@ class TestIntentJudgeKnowsSilenceFromSpeech:
         assert ok, msg
 
 
-@pytest.mark.skipif(not NOT_SPEECH_ARMS, reason="name one or more judge models in EVAL_INTENT_JUDGE_ARMS")
+# The remark eval's groups, each with what the listener must do with its
+# cases (all unmarked, so it answers any verdict but noise): answer a remark
+# to her, hear his words to someone else as speech, answer neither an
+# invention, nor her sign-off misheard, nor a lone thanks.
+REMARK_GROUPS = {
+    "remarks_to_her": (REMARK_TO_HER_CASES, "answered"),
+    "to_someone_else": (TO_SOMEONE_ELSE_CASES, "speech"),
+    "inventions": (INVENTIONS_RIGHT_AFTER_HER_CASES, "left alone"),
+    "her_sign_off_misheard": (HER_SIGN_OFF_MISHEARD_CASES, "left alone"),
+    "lone_thanks": (LONE_THANKS_CASES, "left alone"),
+}
+REMARK_EVAL_CASES = [case for cases, _ in REMARK_GROUPS.values() for case in cases]
+_REMARK_GROUP_OF = {case.name: group for group, (cases, _) in REMARK_GROUPS.items()
+                    for case in cases}
+
+
+def _remark_verdict_ok(case: NotSpeechCase, verdict) -> bool:
+    """Whether the listener does with the verdict what the case's group needs."""
+    needs = REMARK_GROUPS[_REMARK_GROUP_OF[case.name]][1]
+    if needs == "speech":
+        return not verdict.noise
+    return _answered_in_the_hot_window(case, verdict) == (needs == "answered")
+
+
+@pytest.mark.parametrize("voice_stops_with_hers", [False, True],
+                         ids=["voice_on_after_hers", "voice_with_hers"])
+@pytest.mark.parametrize("case", HER_SIGN_OFF_MISHEARD_CASES, ids=lambda case: case.name)
+def test_a_remark_to_her_control_reaches_the_judge_whole(case, voice_stops_with_hers):
+    """Needs no model. Her sign-off misheard measures what the judge is
+    shown only if the listener shows it whole."""
+    _shown_to_the_judge_whole(case, voice_stops_with_hers)
+
+
+class TestIntentJudgeHearsARemarkToHer:
+    """Right after her reply, a remark said to her that asks for nothing (a
+    greeting, thanks, a compliment) is answered: a not-directed noise verdict
+    is the one the hot window never overrides. The controls: his words to
+    someone else are never noise, and neither Whisper's inventions, nor her
+    own warm sign-off misheard as words she never said, nor a lone "Thank
+    you." after an English reply are answered."""
+
+    @pytest.mark.parametrize("case", REMARK_EVAL_CASES, ids=lambda case: case.name)
+    def test_a_remark_to_her_case(self, case: NotSpeechCase):
+        _skip_if_not_intent_judge_phase()
+        if not is_intent_judge_available():
+            pytest.skip("Intent judge model (gemma4) not available")
+
+        result = run_intent_judge_multi_segment(case, current_text=case.segments[-1][0])
+
+        if result is None:
+            pytest.fail("Intent judge returned None")
+
+        group = _REMARK_GROUP_OF[case.name]
+        msg = (f"{case.name} ({group}, needs: {REMARK_GROUPS[group][1]}): "
+               f"directed={result.directed}, noise={result.noise}, query='{result.query}'. "
+               f"Reasoning: {result.reasoning}")
+        print(f"\nTest Case: {case.name} | current: \"{case.segments[-1][0]}\"")
+        if not _remark_verdict_ok(case, result):
+            if case.name in KNOWN_FAILING_CASES:
+                pytest.xfail(f"Known gemma4:e2b limitation: {msg}")
+            pytest.fail(msg)
+
+
+@pytest.mark.skipif(not JUDGE_MODELS, reason="name one or more judge models in EVAL_INTENT_JUDGE_ARMS")
 class TestIntentJudgeNotSpeechArms:
 
     def test_arms_hear_the_same_segments_call_by_call(self, capsys):
@@ -1454,10 +1764,10 @@ class TestIntentJudgeNotSpeechArms:
         kinds = {True: "inventions", False: "his words"}
         situations = {False: ("after her reply", "answered"), True: ("while he asks", "joined")}
         # taken, noise, stop, calls, no verdict, answered on an unsure verdict
-        tally = {(arm, situation, kind): [0, 0, 0, 0, 0, 0] for arm in NOT_SPEECH_ARMS
+        tally = {(arm, situation, kind): [0, 0, 0, 0, 0, 0] for arm in JUDGE_ARMS
                  for situation, _ in situations.values() for kind in kinds.values()}
-        misses = {arm: {} for arm in NOT_SPEECH_ARMS}   # case -> wrong outcomes
-        for case, arm in _interleaved(NOT_SPEECH_ARMS, NOT_SPEECH_TEST_CASES + COLLECTING_TEST_CASES):
+        misses = {arm: {} for arm in JUDGE_ARMS}   # case -> wrong outcomes
+        for case, arm in _interleaved(JUDGE_ARMS, NOT_SPEECH_TEST_CASES + COLLECTING_TEST_CASES):
             judges[arm]._last_error_time = 0.0   # one timeout must not mute the arm
             verdict = run_intent_judge_multi_segment(case, judge=judges[arm])
             row = tally[(arm, situations[case.collecting][0], kinds[case.expected_noise])]
@@ -1478,7 +1788,7 @@ class TestIntentJudgeNotSpeechArms:
             scored = calls - silent
             stops = f", stop {stop}" if situation == situations[True][0] else ""
             unsure_part = f" ({unsure} on an unsure verdict)" if situation == situations[False][0] else ""
-            lines.append(f"🧪 {arm:24} {situation:15} {kind:10}  {verbs[situation]} "
+            lines.append(f"🧪 {arm:{_ARM_WIDTH}} {situation:15} {kind:10}  {verbs[situation]} "
                          f"{rate(taken, scored)}{unsure_part}, noise {noise}/{scored}"
                          f"{stops}, no verdict {silent}")
         for arm, wrong in misses.items():
@@ -1486,7 +1796,7 @@ class TestIntentJudgeNotSpeechArms:
                 lines.append(f"   ↳ {arm}: {name} wrong {count}/{NOT_SPEECH_ROUNDS}")
         to_terminal(capsys, lines)
 
-        mute = [arm for arm in NOT_SPEECH_ARMS
+        mute = [arm for arm in JUDGE_ARMS
                 if all(row[3] == row[4] for (who, _, _), row in tally.items() if who == arm)]
         assert not mute, f"no answer at all from {mute}: check the model names and the provider"
 
@@ -1498,14 +1808,14 @@ class TestIntentJudgeNotSpeechArms:
         judges = _warm_judges()
         kinds = {True: "inventions", False: "his words"}
         variants = {"shown": lambda case: case, "hidden": _without_his_question}
-        arms = [(arm, variant) for arm in NOT_SPEECH_ARMS for variant in variants]
+        arms = [(arm, variant) for arm in JUDGE_ARMS for variant in variants]
         tally = {(arm, kind): [0, 0, 0, 0] for arm in arms   # joined, stop, calls, no verdict
                  for kind in kinds.values()}
         misses = {}   # (arm, case) -> wrong outcomes
         for case, arm in _interleaved(arms, COLLECTING_TEST_CASES):
-            model, variant = arm
-            judges[model]._last_error_time = 0.0
-            verdict = run_intent_judge_multi_segment(variants[variant](case), judge=judges[model])
+            judge_arm, variant = arm
+            judges[judge_arm]._last_error_time = 0.0
+            verdict = run_intent_judge_multi_segment(variants[variant](case), judge=judges[judge_arm])
             row = tally[(arm, kinds[case.expected_noise])]
             row[2] += 1
             if verdict is None:
@@ -1517,13 +1827,13 @@ class TestIntentJudgeNotSpeechArms:
                 misses[(arm, case.name)] = misses.get((arm, case.name), 0) + 1
 
         lines = [""]
-        for ((model, variant), kind), (joined, stop, calls, silent) in tally.items():
+        for ((judge_arm, variant), kind), (joined, stop, calls, silent) in tally.items():
             scored = calls - silent
-            lines.append(f"🧪 {model:24} question {variant:6} {kind:10}  joined "
+            lines.append(f"🧪 {judge_arm:{_ARM_WIDTH}} question {variant:6} {kind:10}  joined "
                          f"{rate(joined, scored)}, stop {stop}, "
                          f"no verdict {silent}")
-        for ((model, variant), name), count in sorted(misses.items()):
-            lines.append(f"   ↳ {model} {variant}: {name} wrong {count}/{NOT_SPEECH_ROUNDS}")
+        for ((judge_arm, variant), name), count in sorted(misses.items()):
+            lines.append(f"   ↳ {judge_arm} {variant}: {name} wrong {count}/{NOT_SPEECH_ROUNDS}")
         to_terminal(capsys, lines)
 
         mute = [arm for arm in arms
@@ -1542,15 +1852,15 @@ class TestIntentJudgeNotSpeechArms:
         variants = {"unmarked": lambda case: case, "marked": _marked_as_hers}
         answered_when = {"unmarked": _answered_in_the_hot_window,
                          "marked": _answered_when_marked}
-        arms = [(arm, variant) for arm in NOT_SPEECH_ARMS for variant in variants]
+        arms = [(arm, variant) for arm in JUDGE_ARMS for variant in variants]
         tally = {arm: [0, 0, 0, 0, 0] for arm in arms}   # directed, answered, noise, calls, no verdict
         misses = {}   # (arm, case) -> not directed
         for case, arm in _interleaved(arms, ANSWER_TO_HER_QUESTION_CASES):
-            model, variant = arm
-            judges[model]._last_error_time = 0.0
+            judge_arm, variant = arm
+            judges[judge_arm]._last_error_time = 0.0
             shown = variants[variant](case)
             verdict = run_intent_judge_multi_segment(
-                shown, judge=judges[model], current_text=shown.segments[-1][0])
+                shown, judge=judges[judge_arm], current_text=shown.segments[-1][0])
             row = tally[arm]
             row[3] += 1
             if verdict is None:
@@ -1563,13 +1873,13 @@ class TestIntentJudgeNotSpeechArms:
                 misses[(arm, case.name)] = misses.get((arm, case.name), 0) + 1
 
         lines = [""]
-        for (model, variant), (directed, answered, noise, calls, silent) in tally.items():
+        for (judge_arm, variant), (directed, answered, noise, calls, silent) in tally.items():
             scored = calls - silent
-            lines.append(f"🧪 {model:24} his answer {variant:8}  directed "
+            lines.append(f"🧪 {judge_arm:{_ARM_WIDTH}} his answer {variant:8}  directed "
                          f"{rate(directed, scored)}, answered "
                          f"{answered}/{scored}, noise {noise}/{scored}, no verdict {silent}")
-        for ((model, variant), name), count in sorted(misses.items()):
-            lines.append(f"   ↳ {model} {variant}: {name} not directed {count}/{NOT_SPEECH_ROUNDS}")
+        for ((judge_arm, variant), name), count in sorted(misses.items()):
+            lines.append(f"   ↳ {judge_arm} {variant}: {name} not directed {count}/{NOT_SPEECH_ROUNDS}")
         to_terminal(capsys, lines)
 
         mute = [arm for arm in arms if tally[arm][3] == tally[arm][4]]
@@ -1587,15 +1897,15 @@ class TestIntentJudgeNotSpeechArms:
         variants = {"unmarked": lambda case: case, "marked": _marked_as_hers}
         answered_when = {"unmarked": _answered_in_the_hot_window,
                          "marked": _answered_when_marked}
-        arms = [(arm, variant) for arm in NOT_SPEECH_ARMS for variant in variants]
+        arms = [(arm, variant) for arm in JUDGE_ARMS for variant in variants]
         tally = {arm: [0, 0, 0, 0, 0] for arm in arms}   # answered, directed, noise, calls, no verdict
         misses = {}   # (arm, case) -> answered
         for case, arm in _interleaved(arms, HER_VOICE_REWRITTEN_CASES):
-            model, variant = arm
-            judges[model]._last_error_time = 0.0
+            judge_arm, variant = arm
+            judges[judge_arm]._last_error_time = 0.0
             shown = variants[variant](case)
             verdict = run_intent_judge_multi_segment(
-                shown, judge=judges[model], current_text=shown.segments[-1][0])
+                shown, judge=judges[judge_arm], current_text=shown.segments[-1][0])
             row = tally[arm]
             row[3] += 1
             if verdict is None:
@@ -1609,16 +1919,71 @@ class TestIntentJudgeNotSpeechArms:
                 misses[(arm, case.name)] = misses.get((arm, case.name), 0) + 1
 
         lines = [""]
-        for (model, variant), (answered, directed, noise, calls, silent) in tally.items():
+        for (judge_arm, variant), (answered, directed, noise, calls, silent) in tally.items():
             scored = calls - silent
-            lines.append(f"🧪 {model:24} her voice rewritten {variant:8}  answered "
+            lines.append(f"🧪 {judge_arm:{_ARM_WIDTH}} her voice rewritten {variant:8}  answered "
                          f"{rate(answered, scored)}, directed "
                          f"{directed}/{scored}, noise {noise}/{scored}, no verdict {silent}")
-        for ((model, variant), name), count in sorted(misses.items()):
-            lines.append(f"   ↳ {model} {variant}: {name} answered {count}/{NOT_SPEECH_ROUNDS}")
+        for ((judge_arm, variant), name), count in sorted(misses.items()):
+            lines.append(f"   ↳ {judge_arm} {variant}: {name} answered {count}/{NOT_SPEECH_ROUNDS}")
         to_terminal(capsys, lines)
 
         mute = [arm for arm in arms if tally[arm][3] == tally[arm][4]]
+        assert not mute, f"no answer at all from {mute}: check the model names and the provider"
+
+    def test_a_remark_to_her_call_by_call(self, capsys):
+        """A remark to her that asks for nothing, right after her reply, and
+        its controls, every case on every arm, interleaved call by call.
+        Answered is what the listener does in the hot window, which is what
+        he hears; directed is the judge taking the words as said to her,
+        which takes the decision only for a marked segment. With
+        `EVAL_INTENT_JUDGE_PROMPT_REF` set, each model's two prompts are
+        compared on both, group by group."""
+        judges = _warm_judges()
+        # right, directed, answered, noise, calls, no verdict
+        tally = {(arm, group): [0, 0, 0, 0, 0, 0] for arm in JUDGE_ARMS for group in REMARK_GROUPS}
+        misses = {}   # (arm, case) -> wrong verdicts
+        for case, arm in _interleaved(JUDGE_ARMS, REMARK_EVAL_CASES):
+            judges[arm]._last_error_time = 0.0
+            verdict = run_intent_judge_multi_segment(
+                case, judge=judges[arm], current_text=case.segments[-1][0])
+            row = tally[(arm, _REMARK_GROUP_OF[case.name])]
+            row[4] += 1
+            if verdict is None:
+                row[5] += 1
+                continue
+            right = _remark_verdict_ok(case, verdict)
+            row[0] += int(right)
+            row[1] += int(verdict.directed)
+            row[2] += int(_answered_in_the_hot_window(case, verdict))
+            row[3] += int(verdict.noise)
+            if not right:
+                misses[(arm, case.name)] = misses.get((arm, case.name), 0) + 1
+
+        lines = [""]
+        for (arm, group), (right, directed, answered, noise, calls, silent) in tally.items():
+            scored = calls - silent
+            lines.append(f"🧪 {arm:{_ARM_WIDTH}} {group:21}  right {rate(right, scored)}, "
+                         f"answered {answered}/{scored}, directed {directed}/{scored}, "
+                         f"noise {noise}/{scored}, no verdict {silent}")
+        for (arm, name), count in sorted(misses.items()):
+            lines.append(f"   ↳ {arm}: {name} wrong {count}/{NOT_SPEECH_ROUNDS}")
+        if PROMPT_REF:
+            lines.append("")
+            for model in JUDGE_MODELS:
+                for group in REMARK_GROUPS:
+                    here, there = tally[(model, group)], tally[(_arm_at_ref(model), group)]
+                    n_here, n_there = here[4] - here[5], there[4] - there[5]
+                    for measure, column in (("answered", 2), ("directed", 1)):
+                        got_here, got_there = here[column], there[column]
+                        p = fisher_two_sided(got_here, n_here - got_here,
+                                             got_there, n_there - got_there)
+                        lines.append(f"📊 {model:24} {group:21}  {measure:8} {got_here}/{n_here} "
+                                     f"here, {got_there}/{n_there} @{PROMPT_REF}, Fisher p = {p:.2g}")
+        to_terminal(capsys, lines)
+
+        mute = [arm for arm in JUDGE_ARMS
+                if all(row[4] == row[5] for (who, _), row in tally.items() if who == arm)]
         assert not mute, f"no answer at all from {mute}: check the model names and the provider"
 
 
@@ -1667,7 +2032,7 @@ class _AnswerRecorded:
 from jarvis.listening.intent_judge import _DECISION_FIELDS  # noqa: E402
 
 
-@pytest.mark.skipif(not NOT_SPEECH_ARMS, reason="name one or more judge models in EVAL_INTENT_JUDGE_ARMS")
+@pytest.mark.skipif(not JUDGE_MODELS, reason="name one or more judge models in EVAL_INTENT_JUDGE_ARMS")
 class TestADirectedVerdictComesBeforeItsReasoning:
     """A directed verdict is acted on once its decision fields are written,
     before the reasoning that ends the answer. It must be the verdict the
@@ -1684,7 +2049,7 @@ class TestADirectedVerdictComesBeforeItsReasoning:
         cases = [c for c in INTENT_JUDGE_TEST_CASES + MULTI_SEGMENT_TEST_CASES if c.expected_directed]
         lines = [""]
         changed = []
-        for model in NOT_SPEECH_ARMS:
+        for model in JUDGE_MODELS:
             judge = _judge_on(model)
             judge.judge(**_the_judges_arguments(cases[0]))  # loading is not timed
             took = {"whole": [], "streamed": []}
