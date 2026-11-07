@@ -52,6 +52,10 @@ def _output(name: str) -> dict:
     return {"name": name, "max_input_channels": 0, "default_samplerate": 48000.0}
 
 
+# The name of a capture stream's delivery thread.
+CAPTURE_THREAD = "test-portaudio-callback"
+
+
 class _Capture:
     """A capture stream on one device. While it runs and its device is
     connected, a thread of its own hands the callback a block at the
@@ -82,7 +86,7 @@ class _Capture:
         if self._running.is_set():
             return
         self._running.set()
-        self._thread = threading.Thread(target=self._deliver, daemon=True, name="test-portaudio-callback")
+        self._thread = threading.Thread(target=self._deliver, daemon=True, name=CAPTURE_THREAD)
         self._thread.start()
 
     def _deliver(self) -> None:
@@ -1004,9 +1008,35 @@ def test_the_list_is_read_afresh_less_often_after_a_minute_unless_dictation_miss
 def _press(engine) -> None:
     before = thread_guard.snapshot()
     engine._start_recording()
-    thread_guard.wait_for_workers(before)
+    _wait_for_the_press(before)
     engine._stop_recording(discard=True)
     thread_guard.wait_for_workers(before)
+
+
+def _wait_for_the_press(before, timeout: float = 5.0) -> None:
+    """Let the worker a press starts finish, or fail naming what is left.
+
+    The press's microphone delivers on its own thread from its start until
+    the release closes it, so that thread is not waited for here; the
+    release's `thread_guard.wait_for_workers` then checks it has ended.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        workers = [
+            thread for thread in threading.enumerate()
+            if thread not in before
+            and thread.name != CAPTURE_THREAD
+            and thread is not threading.current_thread()
+        ]
+        if not workers:
+            return
+        if time.monotonic() >= deadline:
+            pytest.fail(
+                f"{len(workers)} worker thread(s) still running after {timeout}s: "
+                + ", ".join(thread_guard.describe(thread) for thread in workers),
+                pytrace=False,
+            )
+        time.sleep(0.01)
 
 
 def _dictation(machine: Machine, voice_device: str, **callbacks):
