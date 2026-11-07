@@ -42,6 +42,7 @@ if TYPE_CHECKING:
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QMainWindow, QTextEdit, QVBoxLayout, QHBoxLayout, QWidget, QLabel, QDialog, QPushButton
 from PyQt6.QtGui import QIcon, QAction, QFont, QTextCursor
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal, QObject, QThread, QUrl
+from PyQt6.QtNetwork import QNetworkProxy, QNetworkProxyFactory
 
 # Global lock file handle (must remain open for the lock to persist)
 _lock_file_handle = None
@@ -88,6 +89,22 @@ def _dashboard_available() -> bool:
     can be shown. Unlike the memory viewer it has no system-browser fallback:
     the channel to the bridge exists only inside this process."""
     return HAS_WEBENGINE and not _is_macos_bundle()
+
+
+def _give_qt_no_proxy() -> None:
+    """Give Qt no proxy and no system lookup, so the web views look for none.
+
+    QtWebEngine takes its proxy from Qt alone (a profile has no proxy of its
+    own), and Qt follows the system by default. Windows' default automatic
+    detection then makes Chromium send a DHCP query and a DNS lookup for
+    ``wpad`` on the first HTTP load, loopback included. The views show local
+    pages only, which Chromium never sends through a proxy, so they lose
+    nothing. Nothing else in the process uses Qt networking: the Python HTTP
+    clients read their own proxy settings. Runs before the first view loads.
+    """
+    QNetworkProxyFactory.setUseSystemConfiguration(False)
+    QNetworkProxy.setApplicationProxy(QNetworkProxy(QNetworkProxy.ProxyType.NoProxy))
+    debug_log("qt networking given no proxy: web views skip proxy discovery", "desktop")
 
 
 @dataclass
@@ -1674,6 +1691,9 @@ class JarvisSystemTray:
         if self.app is None:
             self.app = QApplication(sys.argv)
         self.app.setQuitOnLastWindowClosed(False)
+        # Before any window: the first web view load would otherwise look
+        # for a proxy on the network.
+        _give_qt_no_proxy()
 
         # Initialize state
         self.daemon_process: Optional[subprocess.Popen] = None
