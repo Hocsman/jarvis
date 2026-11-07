@@ -1828,16 +1828,20 @@ class _WarmingVoice:
     """A speech engine whose warm-up ends ``warm_up_seconds`` after it was
     built, or that could not load at all (``failed``)."""
 
-    enabled = True
-
-    def __init__(self, warm_up_seconds=1.0, failed=False):
+    def __init__(self, warm_up_seconds=1.0, failed=False, enabled=True, broken=False):
         self.done_at = time.monotonic() + warm_up_seconds
         self.failed = failed
+        self.enabled = enabled
+        self.broken = broken
+        self.asked = []  # the timeouts it was asked to wait
 
     def is_ready(self):
         return not self.failed and time.monotonic() >= self.done_at
 
     def wait_until_ready(self, timeout):
+        self.asked.append(timeout)
+        if self.broken:
+            raise RuntimeError("the engine fell over")
         if self.failed:
             return False
         left = self.done_at - time.monotonic()
@@ -1851,15 +1855,24 @@ class _WarmingVoice:
         return MagicMock()
 
 
-def _run_until_the_microphone_opens(voice, budget=5.0, engine="kyutai"):
+def _run_until_the_microphone_opens(voice, budget=5.0, engine="kyutai", low_power=False,
+                                    llm_warm_up_seconds=0.0):
     """Run the listener's start-up with a fake Whisper and microphone, and
-    return whether the voice was ready when the microphone was opened,
-    or None if it never was."""
+    return whether the voice was ready when the microphone was opened
+    (None without a voice), or None if it never was opened. The LLM
+    warm-ups take ``llm_warm_up_seconds``."""
+    import threading
+
     opened = []
 
     def _open(*args, **kwargs):
-        opened.append(voice.is_ready())
+        opened.append(voice.is_ready() if voice is not None else None)
         raise RuntimeError("stop here")
+
+    def _llm_warm_ups(listener):
+        thread = threading.Thread(target=time.sleep, args=(llm_warm_up_seconds,), daemon=True)
+        thread.start()
+        return [thread]
 
     with patch("jarvis.listening.listener.sys") as mock_sys:
         mock_sys.platform = "linux"
@@ -1868,6 +1881,8 @@ def _run_until_the_microphone_opens(voice, budget=5.0, engine="kyutai"):
                 patch("jarvis.listening.listener.WhisperModel", return_value=MagicMock(
                     transcribe=MagicMock(return_value=(iter([]), MagicMock())))), \
                 patch("jarvis.listening.listener._open_input_stream", side_effect=_open), \
+                patch("jarvis.listening.listener.VoiceListener._start_llm_warmup",
+                      _llm_warm_ups), \
                 patch("jarvis.listening.listener.sd") as mock_sd:
             mock_sd.query_devices.return_value = [{"name": "Test Mic", "max_input_channels": 1}]
             from jarvis.listening.listener import VoiceListener
@@ -1877,6 +1892,7 @@ def _run_until_the_microphone_opens(voice, budget=5.0, engine="kyutai"):
             mock_cfg.llm_chat_model = ""
             mock_cfg.intent_judge_model = ""
             mock_cfg.tts_engine = engine
+            mock_cfg.low_power_mode = low_power
             listener = VoiceListener(MagicMock(), mock_cfg, voice, MagicMock())
             listener._WARM_UP_BUDGET_SECONDS = budget
             listener.run()
@@ -1915,6 +1931,44 @@ class TestTheVoiceIsReadyBeforeListening:
         out = capsys.readouterr().out
         assert "Voice 'kyutai' could not load" in out
         assert "still warming" not in out
+
+    def test_a_voice_turned_off_is_neither_waited_for_nor_announced(self, capsys):
+        voice = _WarmingVoice(warm_up_seconds=60.0, enabled=False)
+
+        began = time.monotonic()
+        _run_until_the_microphone_opens(voice, budget=30.0)
+        assert time.monotonic() - began < 5.0
+
+        out = capsys.readouterr().out
+        assert "Voice" not in out
+        assert "still warming" not in out
+
+    def test_without_a_voice_the_microphone_opens_without_one(self, capsys):
+        began = time.monotonic()
+        _run_until_the_microphone_opens(None, budget=30.0)
+        assert time.monotonic() - began < 5.0
+        assert "Voice" not in capsys.readouterr().out
+
+    def test_in_low_power_mode_the_voice_is_still_waited_for(self, capsys):
+        voice = _WarmingVoice(warm_up_seconds=1.0)
+
+        assert _run_until_the_microphone_opens(voice, low_power=True) is True
+        assert "🔊 Voice 'kyutai' ready" in capsys.readouterr().out
+
+    def test_the_voice_gets_what_the_llm_warm_ups_left_of_the_budget(self):
+        voice = _WarmingVoice(warm_up_seconds=60.0)
+
+        began = time.monotonic()
+        _run_until_the_microphone_opens(voice, budget=1.5, llm_warm_up_seconds=1.0)
+        assert time.monotonic() - began < 5.0
+        assert voice.asked and voice.asked[0] <= 0.6
+
+    def test_a_voice_that_fails_to_answer_does_not_keep_her_deaf(self, capsys):
+        voice = _WarmingVoice(broken=True)
+
+        _run_until_the_microphone_opens(voice, budget=30.0)
+        assert voice.asked, "the voice was never asked"
+        assert "still warming" in capsys.readouterr().out
 
 
 class TestWhisperWarmup:

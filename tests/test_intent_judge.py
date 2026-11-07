@@ -1318,9 +1318,12 @@ class TestADirectedVerdictIsActedOnOnceDecided:
         assert box["result"].directed is True
         assert judge.available is True, "a failure after the verdict backed the judge off"
 
-    def test_a_backend_that_never_answers_is_given_up_on(self):
+    def test_a_backend_that_never_answers_is_given_up_on(self, monkeypatch):
         import threading
 
+        import jarvis.listening.intent_judge as intent_judge
+
+        monkeypatch.setattr(intent_judge, "_PAST_THE_TIMEOUT_SECONDS", 0.2)
         hung = threading.Event()
 
         class _Hung:
@@ -1339,3 +1342,78 @@ class TestADirectedVerdictIsActedOnOnceDecided:
             assert judge.available is True
         finally:
             hung.set()
+
+    def test_a_verdict_written_with_quoted_booleans_is_taken_as_early(self):
+        answer = ('{"directed": "true", "query": "quelle heure est-il", "stop": "false", '
+                  '"confidence": "high", "reasoning": "a question"}')
+        backend = _WritingBackend(answer, pause_at='"reasoning": "')
+        judge = IntentJudge()
+        try:
+            with patch("jarvis.listening.intent_judge.get_auxiliary_backend", return_value=backend):
+                thread, box = _judge_in_background(judge, self._SEGMENTS)
+                thread.join(2.0)
+            assert not thread.is_alive(), "a quoted true was not read as directed"
+            assert box["result"].directed is True
+            assert box["result"].stop is False
+        finally:
+            backend.go_on.set()
+
+    def test_a_stop_is_acted_on_before_its_reasoning(self):
+        # Said over her reply, a stop is where the time matters most.
+        answer = ('{"directed": true, "query": "", "stop": true, '
+                  '"confidence": "high", "reasoning": "he asks her to stop"}')
+        backend = _WritingBackend(answer, pause_at='"reasoning": "')
+        judge = IntentJudge()
+        try:
+            with patch("jarvis.listening.intent_judge.get_auxiliary_backend", return_value=backend):
+                thread, box = _judge_in_background(judge, self._SEGMENTS)
+                thread.join(2.0)
+            assert not thread.is_alive(), "the stop waited for its reasoning"
+            assert box["result"].stop is True
+        finally:
+            backend.go_on.set()
+
+    def test_a_reasoning_models_verdict_is_still_found_in_its_thinking(self):
+        # The token cap cut the answer short; the verdict is in the thinking,
+        # which a streamed answer carries as a buffered one does.
+        verdict = ('{"directed": true, "query": "quelle heure est-il", "stop": false, '
+                   '"confidence": "high", "reasoning": "a question"}')
+
+        class _Thinking:
+            def chat(self, *args, on_token=None, **kwargs):
+                if on_token is not None:
+                    on_token('{"dire')
+                return {"message": {"content": '{"dire',
+                                    "reasoning_content": f"He asks the time. {verdict}"}}
+
+        judge = IntentJudge()
+        with patch("jarvis.listening.intent_judge.get_auxiliary_backend", return_value=_Thinking()):
+            result = judge.judge(self._SEGMENTS)
+        assert result is not None
+        assert result.directed is True
+        assert result.query == "quelle heure est-il"
+
+    def test_a_server_that_stalls_mid_answer_does_not_back_the_judge_off(self):
+        import requests
+        from urllib3.exceptions import ReadTimeoutError
+
+        from jarvis.llm.openai_compatible import OpenAICompatibleBackend
+
+        def stalls():
+            yield b'data: {"choices": [{"delta": {"content": "{\\"dir"}}]}'
+            raise requests.exceptions.ConnectionError(
+                ReadTimeoutError(None, "http://x/v1", "Read timed out.")
+            )
+
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.raise_for_status = MagicMock()
+        resp.iter_lines = stalls
+        resp.__enter__ = MagicMock(return_value=resp)
+        resp.__exit__ = MagicMock(return_value=None)
+        judge = IntentJudge()
+        with patch("requests.Session.post", return_value=resp),                 patch("jarvis.listening.intent_judge.get_auxiliary_backend",
+                      return_value=OpenAICompatibleBackend("http://x/v1")):
+            result = judge.judge(self._SEGMENTS)
+        assert result is None
+        assert judge.available is True, "a stalled stream backed the judge off"

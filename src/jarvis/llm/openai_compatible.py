@@ -431,10 +431,19 @@ class OpenAICompatibleBackend(LLMBackend):
                 stream=streaming,
             ) as resp:
                 resp.raise_for_status()
-                data = (
-                    self._consume_chat_stream(resp, on_token)
-                    if streaming else resp.json()
-                )
+                if streaming:
+                    try:
+                        data = self._consume_chat_stream(resp, on_token)
+                    except requests.exceptions.ConnectionError:
+                        # The server answered, then went quiet past the read
+                        # timeout (requests reports that as a ConnectionError)
+                        # or dropped the stream. It was reachable: this is the
+                        # buffered path's read timeout, not a refusal.
+                        print("  ⏱️ LLM stream stalled", flush=True)
+                        debug_log("OpenAICompatibleBackend.chat: stream stalled or cut", "llm")
+                        return None
+                else:
+                    data = resp.json()
             if isinstance(data, dict):
                 return _normalise_response(data)
         except requests.exceptions.Timeout:

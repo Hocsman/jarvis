@@ -2770,8 +2770,14 @@ class VoiceListener(threading.Thread):
             _print_status("router", "Tool router", "🔧")
 
         if self.tts is not None and getattr(self.tts, "enabled", False):
-            engine = str(getattr(self.cfg, "tts_engine", "") or "voice")
-            ready = self.tts.wait_until_ready(max(0.0, deadline - time.time()))
+            engine = self.cfg.tts_engine
+            try:
+                ready = self.tts.wait_until_ready(max(0.0, deadline - time.time()))
+            except Exception as e:
+                # Like every warm-up, the voice's never keeps her deaf: it
+                # is taken for one still warming, and the first reply pays.
+                debug_log(f"voice warm-up: wait failed ({type(e).__name__})", "voice")
+                ready = None
             debug_log(f"voice warm-up: {ready}", "voice")
             if ready is True:
                 print(f"     🔊 Voice '{engine}' ready", flush=True)

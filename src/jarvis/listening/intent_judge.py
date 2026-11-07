@@ -126,8 +126,8 @@ def _extract_json_object(text: str, last: bool = False) -> str:
     return candidates[-1] if last else candidates[0]
 
 
-# The fields the listener reads from a verdict that says she is spoken to.
-# The judge writes them before its reasoning, which nothing reads from such
+# The fields the listener acts on in a verdict that says she is spoken to.
+# The judge writes them before its reasoning, which nothing acts on in such
 # a verdict, so it is acted on once they are written.
 _DECISION_FIELDS = ("directed", "query", "stop", "confidence")
 
@@ -137,8 +137,8 @@ _DECISION_FIELDS = ("directed", "query", "stop", "confidence")
 _REASONING_KEY = re.compile(r'[{,]\s*"reasoning"\s*:')
 
 # How long past its own timeout the judge waits on a backend that has not
-# answered. Backends bound their calls by the timeout; this bounds one that
-# does not.
+# answered. A buffered call ends at the timeout; a streamed one is bounded
+# per read, so a stream that keeps trickling would not end on its own.
 _PAST_THE_TIMEOUT_SECONDS = 2.0
 
 
@@ -188,7 +188,8 @@ class IntentJudgment:
     query: str               # Extracted query (cleaned of filler, echo, pre-wake-word)
     stop: bool               # Is this a stop command?
     confidence: str          # "high", "medium", or "low"
-    reasoning: str           # Brief explanation for debugging
+    reasoning: str           # Brief explanation for debugging; empty on a
+                             # directed verdict taken before its reasoning
     noise: bool = False      # Not speech at all: text Whisper made out of silence
     raw_response: str = ""   # Raw LLM response for debugging
 
@@ -568,8 +569,9 @@ Examples:
                             "temperature": 0.0,
                             # Reasoning models count thinking tokens against
                             # this cap, so 1500 tokens covers reasoning plus
-                            # the JSON answer while ``intent_judge_timeout_sec``
-                            # still bounds slow or runaway generations.
+                            # the JSON answer. The judge stops waiting for a
+                            # slow or runaway generation at
+                            # ``intent_judge_timeout_sec`` plus a grace.
                             "max_tokens": 1500,
                             "num_ctx": 8192,
                             "keep_alive": _ollama_keep_alive_for_power_mode(
@@ -585,14 +587,21 @@ Examples:
                     answer.ready.set()
                 if answer.early is not None:
                     # The verdict was acted on before its reasoning was
-                    # written; the log gets it once the answer is whole.
+                    # written; the log gets it once the answer is whole,
+                    # and says so if the whole answer reads otherwise.
                     resp = answer.response
                     message = resp.get("message") if isinstance(resp, dict) else None
                     content = message.get("content") if isinstance(message, dict) else None
-                    if isinstance(content, str) and content:
-                        later = self._parse_response(content)
-                        if later is not None:
-                            debug_log(f"   Reasoning: {later.reasoning}", "voice")
+                    later = (self._parse_response(content)
+                             if isinstance(content, str) and content else None)
+                    if later is None:
+                        debug_log("   Reasoning: none, the whole answer did not come or did not parse", "voice")
+                    else:
+                        debug_log(f"   Reasoning: {later.reasoning}", "voice")
+                        differ = [f for f in _DECISION_FIELDS
+                                  if getattr(later, f) != getattr(answer.early, f)]
+                        if differ:
+                            debug_log(f"   The whole answer reads otherwise on {differ}", "voice")
 
             threading.Thread(target=call, name="intent-judge", daemon=True).start()
             if not answer.ready.wait(self.config.timeout_sec + _PAST_THE_TIMEOUT_SECONDS):

@@ -1663,7 +1663,8 @@ class _AnswerRecorded:
             self.done.set()
 
 
-_FIELDS_THE_LISTENER_READS = ("directed", "query", "stop", "confidence")
+# The fields a verdict taken before its reasoning is acted on by.
+from jarvis.listening.intent_judge import _DECISION_FIELDS  # noqa: E402
 
 
 @pytest.mark.skipif(not NOT_SPEECH_ARMS, reason="name one or more judge models in EVAL_INTENT_JUDGE_ARMS")
@@ -1709,7 +1710,7 @@ class TestADirectedVerdictComesBeforeItsReasoning:
                 if whole is None:
                     continue
                 compared += 1
-                fields = [f for f in _FIELDS_THE_LISTENER_READS
+                fields = [f for f in _DECISION_FIELDS
                           if getattr(verdict, f) != getattr(whole, f)]
                 if fields:
                     changed.append(f"{model} {case.name}: {fields}")
