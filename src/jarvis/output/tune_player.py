@@ -7,6 +7,7 @@ import numpy as np
 
 from ..debug import debug_log
 from ..utils.audio_lock import portaudio_lock
+from ..utils.audio_stream import open_output_stream
 
 
 def _generate_thinking_pad_samples() -> tuple[np.ndarray, int]:
@@ -190,18 +191,18 @@ class TunePlayer:
                     position[0] = remainder
 
             try:
-                with portaudio_lock:
-                    stream = sd.OutputStream(
-                        samplerate=sample_rate,
-                        channels=1,
-                        dtype='int16',
-                        # Large block + high latency: fewer callbacks, fewer
-                        # GIL acquisitions, lighter touch on the rest of the
-                        # app. 8192 frames ≈ 186ms per wakeup vs 23ms before.
-                        blocksize=8192,
-                        latency='high',
-                        callback=callback,
-                    )
+                stream = open_output_stream(
+                    sd,
+                    samplerate=sample_rate,
+                    channels=1,
+                    dtype='int16',
+                    # Large block + high latency: fewer callbacks, fewer
+                    # GIL acquisitions, lighter touch on the rest of the
+                    # app. 8192 frames ≈ 186ms per wakeup vs 23ms before.
+                    blocksize=8192,
+                    latency='high',
+                    callback=callback,
+                )
             except Exception as exc:
                 debug_log(f"thinking tune: stream open failed: {exc!r}", category="tune")
                 self._play_fallback_tune()

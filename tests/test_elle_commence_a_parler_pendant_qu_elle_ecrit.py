@@ -22,6 +22,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.jarvis.listening.echo_detection import EchoDetector
+from src.jarvis.listening.room_floor import RoomFloor
 
 
 def _listener():
@@ -34,7 +35,7 @@ def _listener():
     obj.cfg = MagicMock()
     obj._tune_player = None
     obj.state_manager = MagicMock()
-    obj._recent_audio_energy = []
+    obj._room_floor = RoomFloor(frame_ms=20)
     obj._streamed_chars = 0
     obj._last_detected_language = None
     obj._reply_queue = None

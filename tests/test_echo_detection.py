@@ -8,6 +8,7 @@ when heard audio is an echo of TTS output vs genuine user speech.
 import time
 import pytest
 from jarvis.listening.echo_detection import EchoDetector
+from jarvis.listening.room_floor import RoomFloor
 
 
 class TestTextNormalization:
@@ -857,7 +858,7 @@ class TestTheListenerPassesTheVoiceDelay:
 
         tts = SimpleNamespace(enabled=True, voice_delay=lambda: delay)
         listener = SimpleNamespace(tts=tts, echo_detector=EchoDetector(echo_tolerance=0.3),
-                                   _recent_audio_energy=[])
+                                   _room_floor=RoomFloor(frame_ms=20))
         return listener, VoiceListener.track_tts_start
 
     def test_an_echo_of_her_first_words_heard_after_the_face_delay_is_caught(self):

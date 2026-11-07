@@ -110,9 +110,8 @@ def _soft_voice(d):
 
 def test_the_floor_is_the_first_chunks_not_the_last():
     """The voice proof weighs an utterance against the floor recorded when
-    she started speaking. Here each later chunk is queued while the
-    microphone hears her say the one before: a floor read then is her
-    voice, and his soft answer would not clear the bar it sets."""
+    she started speaking. A reply keeps the floor it began with, whatever
+    level comes with a later chunk, queued while she says the one before."""
     d = EchoDetector()
     d.track_tts_start(UNE, baseline_energy=FLOOR)
     d.track_tts_start(DEUX, baseline_energy=HER_VOICE, continues=True)

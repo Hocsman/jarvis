@@ -15,12 +15,44 @@ continuous capture use this negotiation and input selection.
 
 The input comes from `voice_device` through `resolve_input_device`
 (`jarvis.utils.audio_stream`), the resolver hold-to-dictate also uses: blank,
-`default` or `system` is the system default input, a number is the index of an
-input-capable device, and any other text is the first input-capable device whose
-name contains it, ignoring case, so output-only devices are skipped. A missing
-named microphone, or an index that names no input (out of range, or an
-output-only device), produces an actionable error rather than silently
-selecting another input.
+`default` or `system` is the system default input; any other text is the first
+input-capable device whose name contains it, ignoring case, so output-only
+devices are skipped; and a number is an index into the first device list the
+process read. The index names the input at that position in that list, and
+once the list has been read afresh it selects that input by its exact name,
+never whatever device has taken its position since. An index that names no
+input on the first list (out of range, or an output-only device) has no
+microphone to wait for: listening ends at start-up with
+`❌ Selected microphone not found. Choose an available input in Settings.`
+
+Any other microphone that is not there is waited for, never replaced by
+another input: a name that matches no input, the input an index names once it
+has left the list, or a system default with no input at all. The console says
+so once, without the device's name
+(`🎤 Microphone not connected: waiting for it...`), and the listener reads the
+device list afresh (see §0) every 2.5 s for the first minute of the wait, then
+every 15 s; a new loss, or a hold-to-dictate press that misses the microphone,
+brings back the 2.5 s readings. Once the same setting resolves, it opens it
+and says `✅ Microphone connected: listening`. A microphone that resolves but
+will not open or start is waited for the same way, from start-up as later,
+unless the error reads as access denied before any wait, which ends listening;
+while waiting it is tried again after each reading that holds it, its error
+said once per wait. `🎤 Using audio device: ...` is said at start-up and once
+per wait, not on every attempt.
+
+On Windows the permission probe runs once the microphone is there, and, once
+the session is under way, only on a tick when no stream is open in the
+process. A probe that hangs past five seconds ends listening with the
+access-blocked box, and so does an error that reads as access denied, but
+only at start-up: a device just plugged in can fail with the same codes before
+it is ready. Any other probe error is said once per wait, and the microphone
+is waited for and probed again.
+
+The wait looks for a stop or shutdown every tenth of a second and ends on it.
+While she waits, the reply thread runs, so a reminder or a Claude Code report
+is still spoken, but no hot window opens after it, since nothing would hear a
+follow-up: her speech ends on `IDLE` (`state.spec.md`). The `Listening!`
+banner waits for the first capture.
 Multichannel samples are averaged to mono before framing and speech detection.
 
 Frames always span the configured 10, 20 or
@@ -38,6 +70,22 @@ Warnings are transition-based; dictation pauses suspend health checks. With
 `voice_debug`, diagnostics include callback/frame counts, speech-frame counts,
 peak level and capture rate, without saving microphone audio. Linux warnings
 point users to PipeWire/PulseAudio recording-source routing.
+
+A microphone lost while she listens is reopened, not abandoned. Once a second
+the listener asks whether its stream is still alive: a stream that reports
+itself inactive, or raises when asked, is dead, and so is one that has
+delivered no callback for 10 s, twice the five-second health warning, so a
+stall that the warning reports and that recovers on its own is left alone.
+The check is suspended while dictation pauses the listener. A dead stream is
+aborted and closed under the lock, the audio still queued from it and any
+unfinished utterance are dropped, the console says once
+`⚠️  Microphone lost: waiting for it to come back...`, and the listener waits
+for the same `voice_device` exactly as at start-up, never another input. The
+first reading of the device list comes at once, unless the dead stream lived
+less than 5 s: a device that keeps dying as soon as it opens is then read on
+the wait's schedule, not reopened once a second. When
+the reopened stream delivers its first callback, the console says once
+`✅ Microphone back: listening`; the `Listening!` banner is not repeated.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -110,6 +158,37 @@ holding the process-wide lock would freeze every audio user), and its
 timeout path abandons a blocked stream instead of aborting/closing it from
 another thread: the check thread may still be inside `start()`/`stop()`
 on it, and a cross-thread close is a native use-after-free.
+
+PortAudio reads the device list when it is initialised and keeps it, so a
+microphone connected later is not in it. `refresh_input_devices`
+(`jarvis.utils.audio_stream`) reads it afresh by terminating and
+re-initialising PortAudio, which closes every stream in the process, so it
+does so only when none is open. It returns the fresh list, or None when a
+stream held it back; a PortAudio that will not initialise again, tried twice,
+raises `DeviceListUnavailable`, and the listener logs that once per wait and
+tries on the next reading. It holds `portaudio_lock` throughout, and the count
+of open streams lives beside the lock (`jarvis.utils.audio_lock`): every
+stream the process opens is constructed and tracked in one hold of the lock,
+through `open_input_stream` (the listener's and dictation's) or
+`open_output_stream` (each speech engine's and the thinking tune's), and
+counted open until its `closed` is true; a stream whose state cannot be read
+counts as open. The dictation beep's blocking `sd.play` is not tracked: it
+opens and closes its stream inside one hold of the lock, so no reading can
+fall in between. The permission probe, which opens without the lock, resolves
+the microphone and opens it inside `unguarded_open()`, which marks the open
+under the lock before it starts and keeps the mark until it returns, so a
+reading never overlaps it either, even when the probe abandons a blocked
+stream; mid-session it waits for a tick when no stream is open, so it does not
+overlap her voice, the tune or a dictation. A count that is wrong can only
+hold a reading back: the listener keeps waiting on the old list and logs when
+a reading is held back, and once a reading has been held back for a minute
+the console says so once, without naming a device
+(`⏳ Microphone check waits for other audio to finish...`). Every
+`query_devices` call runs under the lock (the settings window's included,
+since the daemon can run in the desktop app's process), and a microphone is
+resolved and opened in one hold of it: a position in the list is only valid
+for the list it was read from. The lock stays innermost and is never held
+across a wait.
 
 ### 1. Transcript-First
 
@@ -184,7 +263,7 @@ Before the listener announces "Listening!", it pre-loads every model the first e
 
 The weather example adapts to location availability: if `location_enabled` is true, a location source is configured (`location_auto_detect` or a manual `location_ip_address`), **and** the GeoLite2 database is present (`is_location_available()` returns true), the plain form is shown; otherwise the `[your city]` placeholder form is shown so the user understands they must substitute a real city name in their query.
 
-On small models, a caveat line is appended above a more involved example to set expectations (`⚠️ Small model in use (…). Assume it can't infer — spell out the steps for anything more involved:`). The Chrome MCP tip continues to appear as its own block when the browser tool is detected.
+On small models, a caveat line is appended above a more involved example to set expectations (`⚠️ Small model in use (…). Assume it can't infer. Spell out the steps for anything more involved:`). The Chrome MCP tip continues to appear as its own block when the browser tool is detected.
 
 **What gets warmed:**
 - **Whisper**: loading the model; additionally a silent-audio transcribe so the first real utterance doesn't pay the cold-decode cost. Both the MLX and faster-whisper backends do this. On faster-whisper that transcribe runs without the voice detector, which would cut the warm-up noise before the decoder ran; with `whisper_vad` on, the detector's model is then loaded on its own (`prepare_voice_detector`, about 0.1 s, kept for the life of the process), which otherwise the first utterance would pay. A detector that cannot load is announced there, at each start-up, and every utterance is transcribed without it ("Text Whisper Makes Out of Silence").
@@ -434,24 +513,48 @@ The fuzzy check acts as a fast, reliable safety net. The intent judge provides d
 
    What separates them is that one of them moved air. Overriding an echo
    verdict therefore needs both: words she did not say, and an utterance
-   whose energy rises above the ambient floor recorded when she started
-   speaking, by the same `energy_spike_threshold` the detector already
-   applies to this question in the post-TTS cooldown. Either test alone
-   was fooled — text by a hallucination, energy by a door slamming.
+   whose energy rises above the room's quiet level recorded when she
+   started speaking, by the same `energy_spike_threshold` the detector
+   already applies to this question in the post-TTS cooldown. Either test
+   alone was fooled — text by a hallucination, energy by a door slamming.
 
-   The floor is read once per reply, when her first sentence is queued:
-   the mean level of the last 50 frames the listening loop has read (a
-   second at the default 20 ms frame, and older than that while the loop
-   is busy with Whisper or the judge). It holds for the whole reply. A
-   reply spoken as it is written (`output/streaming.spec.md`) can queue a
-   later sentence while the microphone hears her say an earlier one,
-   whenever she is heard before the reply is written in full; a floor read
-   then would be her own voice, and his soft answer right after her last
-   word would fall under the bar it sets. Whatever the microphone heard in
-   that second is in the floor, and raises the bar with it: the thinking
-   tune, which plays until her reply is handed over, and, for a reply from
-   elsewhere said the moment another ends (see "Speaking Something
-   Produced Elsewhere"), the end of the one before.
+   **The floor is the room, never her nor him** (`room_floor.py`). The
+   microphone's last second as her reply starts is rarely the room: the
+   thinking tune plays until her reply is handed over, and a reply spoken
+   as it is written (`output/streaming.spec.md`) queues its first sentence
+   while the tune still plays; the end of his question can be in it; a
+   reply from elsewhere said the moment another ends (see "Speaking
+   Something Produced Elsewhere") follows her voice. A floor read there
+   sits at several times the room's level, and his soft answer right after
+   her last word, louder than the room and softer than the tune, falls
+   under the bar it sets and is shown to the judge as her echo. So:
+
+   - The listening loop measures each frame's level as it reads it. A
+     frame counts as the room when:
+     - nothing of hers plays as the loop reads it, neither the thinking
+       tune nor her voice;
+     - it was captured at most `ROOM_FRAME_MAX_AGE_SECONDS` (0.5 s) before.
+       The loop knows what plays when it reads a frame, not when the frame
+       was captured, and it falls behind while Whisper or the judge holds
+       it;
+     - it holds a sound: samples of exactly nothing are a muted or missing
+       input, not a quiet room.
+   - The floor is the `ROOM_FLOOR_PERCENTILE` (10th) percentile of the last
+     `ROOM_FLOOR_WINDOW_SECONDS` (15 s) of such frames, however long ago
+     they were heard. The stretch is longer than the longest utterance the
+     voice detector keeps whole at the default `max_utterance_ms` (12 s),
+     so his words, a cough or a door fill less than nine-tenths of it and
+     sit above the percentile; a steady room varies by a few percent from one
+     frame to the next, so the percentile lies within a few percent of
+     its mean. It follows the room within one stretch of quiet when a fan
+     starts.
+   - Before `ROOM_FLOOR_MIN_SECONDS` (1 s) of such frames has been heard
+     there is no room to read: the floor is `FALLBACK_FLOOR` (0.0045), and
+     a debug line says so.
+
+   The floor is taken once per reply, when her first sentence is queued,
+   and holds for the whole reply: a reply is weighed against the room as
+   it began.
 
    Both together are fooled by her own voice when Whisper makes words she
    never said of it, since her voice through the speakers clears the energy

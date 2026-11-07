@@ -731,7 +731,7 @@ Get API key at [composio.dev](https://composio.dev)
 
 **First startup downloads the speech model** - On the very first launch Jarvis downloads the Whisper model (up to ~3 GB depending on the chosen size) and shows progress lines (`⬇️ Downloading … X/Y MB · rate`) in the log. A slow connection keeps printing progress as long as data flows. An interrupted download resumes where it stopped on the next launch.
 
-**Jarvis doesn't hear me** - Check microphone permissions, speak clearly after "Jarvis"
+**Jarvis doesn't hear me** - Check microphone permissions, speak clearly after "Jarvis". If the log says `Microphone not connected` or `Microphone lost`, Jarvis cannot find the microphone chosen in Settings (unplugged, or not connected yet) and is waiting for it rather than recording from another one: plug it in and it starts listening within a few seconds (up to 15 once it has waited a minute), no restart needed.
 
 **A follow-up right after a reply goes unanswered** - If the console shows `🔇 Heard (echo)`, Jarvis took your words for its own voice coming back. This can happen when you answer quietly the instant it stops speaking, with mostly its own words, or with a short word said over its last word or just after it. Speak up a little, say a few more words, wait a moment after it finishes, or start with "Jarvis", which gets it answered unless its reply had just said its own name or a word it can mistake for it (common words such as "jours" or "chairs" among them).
 

@@ -50,9 +50,12 @@ What is recorded when she starts speaking is recorded once, at her first
 sentence, and kept for the rest of the reply: the start of her speech,
 from which echo windows are timed, and the floor of the voice proof
 (`listening/listening.spec.md`, "Overriding an echo verdict takes positive
-evidence"). A later sentence can be queued while the microphone hears her
-say an earlier one: a floor read then would be her own voice, and his
-soft answer right after her last word would be taken for her echo.
+evidence"). The floor is the room's quiet level, which the listener reads
+from what the microphone hears while neither the thinking tune nor her
+voice plays: the first sentence is queued while the tune still plays,
+and the floor is still the room's. A later sentence is queued while she
+speaks, when the room has been heard at most between her sentences, so
+the reply keeps the floor it began with.
 
 ## Segmentation
 
