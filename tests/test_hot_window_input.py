@@ -2464,12 +2464,14 @@ _HIS_SOFT_VOICE = 1.5
 _HER_STREAMED_WORDS_DECIMATED = "réunion lundi collègue documents autre question"
 
 
-def _the_microphone_hears(listener, level: float, seconds: float = 2.0) -> None:
+def _the_microphone_hears(listener, level: float, seconds: float = 2.0,
+                          late: float = 0.0) -> None:
     """*seconds* of audio at *level* through the audio loop's own voice
-    detector, frame by frame, each read the moment it is captured: the loop
-    keeps the room's quiet level the floor is read from."""
+    detector, frame by frame, each read *late* seconds after it was
+    captured: the loop keeps the room's quiet level the floor is read
+    from."""
     for _ in range(round(seconds * 1000 / listener._frame_ms)):
-        listener._frame_captured_at = time.time()
+        listener._frame_captured_at = time.time() - late
         listener._is_speech_frame(np.full(listener._frame_samples, level, dtype=np.float32))
 
 
@@ -2488,9 +2490,11 @@ def _she_streams(listener, reply: str) -> float:
         on_token(reply[i:i + 9])
         if listener.tts.speak.call_count > queued:
             queued = listener.tts.speak.call_count
+            listener.tts.is_speaking.return_value = True
             _the_microphone_hears(listener, _level(listener, _HER_VOICE))
     listener._speak_reply(reply)
     assert queued >= 2, "the reply was not spoken sentence by sentence"
+    listener.tts.is_speaking.return_value = False
     last_word = time.time()
     listener.tts.speak.call_args.kwargs["completion_callback"]()
     return last_word
@@ -2504,10 +2508,9 @@ class TestHisAnswerAfterAReplySpokenAsItWasWritten:
     The voice proof weighs his answer against `energy_spike_threshold` times
     the floor recorded when she started speaking (listening.spec.md,
     "Overriding an echo verdict takes positive evidence"). A later sentence
-    of such a reply can be queued while the microphone hears her say an
-    earlier one: a floor read then is her voice, and his soft answer right
-    after her last word, under the bar it sets, would be shown to the judge
-    as her echo and set aside."""
+    of such a reply is queued while the microphone hears her say an earlier
+    one, and the reply keeps the floor it began with: his soft answer right
+    after her last word still clears the bar the room sets."""
 
     def _her_reply_ends(self):
         listener, _ = _create_listener(echo_tolerance=0.1, hot_window_seconds=0.2)
@@ -2692,6 +2695,43 @@ class TestHisAnswerAfterTheThinkingTune:
             FALLBACK_FLOOR * threshold * 0.9)
         assert any(f"{FALLBACK_FLOOR:.4f}" in str(call.args[0])
                    for call in log.call_args_list)
+        listener.state_manager.stop()
+
+
+@pytest.mark.unit
+class TestHerVoiceIsNeverTheFloor:
+    """She speaks for longer than the stretch the floor is read over, and a
+    reply from elsewhere is said the moment hers ends (listening.spec.md,
+    "Speaking Something Produced Elsewhere"): its floor is read right after
+    her voice, and his soft answer must still clear the bar the room sets."""
+
+    def _she_spoke_at_length(self, *, the_loop_read_her: str):
+        from jarvis.listening.room_floor import (
+            ROOM_FLOOR_WINDOW_SECONDS, ROOM_FRAME_MAX_AGE_SECONDS)
+
+        listener, _ = _create_listener()
+        listener.tts.voice_delay.return_value = 0.0
+        _the_microphone_hears(listener, _FLOOR, seconds=2.0)
+        her_voice = _level(listener, _HER_VOICE)
+        at_length = ROOM_FLOOR_WINDOW_SECONDS * 1.2
+        if the_loop_read_her == "as she spoke":
+            listener.tts.is_speaking.return_value = True
+            _the_microphone_hears(listener, her_voice, seconds=at_length)
+            listener.tts.is_speaking.return_value = False
+        else:
+            # Whisper or the judge held the loop while she spoke: it reads
+            # her voice once nothing of hers plays any more.
+            _the_microphone_hears(listener, her_voice, seconds=at_length,
+                                  late=ROOM_FRAME_MAX_AGE_SECONDS * 2)
+        listener.track_tts_start(_HER_NEXT_REPLY)
+        return listener
+
+    @pytest.mark.parametrize("the_loop_read_her", ["as she spoke", "once she had stopped"])
+    def test_his_soft_voice_still_clears_the_bar(self, the_loop_read_her):
+        listener = self._she_spoke_at_length(the_loop_read_her=the_loop_read_her)
+
+        assert listener.echo_detector.utterance_carries_a_voice(
+            _level(listener, _HIS_SOFT_VOICE))
         listener.state_manager.stop()
 
 

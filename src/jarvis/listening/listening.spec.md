@@ -458,9 +458,9 @@ The fuzzy check acts as a fast, reliable safety net. The intent judge provides d
    - The floor is the `ROOM_FLOOR_PERCENTILE` (10th) percentile of the last
      `ROOM_FLOOR_WINDOW_SECONDS` (15 s) of such frames, however long ago
      they were heard. The stretch is longer than the longest utterance the
-     voice detector keeps whole (`max_utterance_ms`, 12 s by default), so
-     his words, a cough or a door fill less than nine-tenths of it and sit
-     above the percentile; a steady room varies by a few percent from one
+     voice detector keeps whole at the default `max_utterance_ms` (12 s),
+     so his words, a cough or a door fill less than nine-tenths of it and
+     sit above the percentile; a steady room varies by a few percent from one
      frame to the next, so the percentile lies within a few percent of
      its mean. It follows the room within one stretch of quiet when a fan
      starts.

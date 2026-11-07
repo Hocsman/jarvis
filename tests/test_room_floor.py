@@ -33,18 +33,19 @@ ROOM = 0.001
 
 class _Microphone:
     """Feeds a RoomFloor the way the listening loop does: one level per
-    frame, captured on a clock that advances a frame at a time, read by the
-    loop *late* seconds after capture, with or without her sound playing
-    when the loop reads it."""
+    frame of *frame_ms*, captured on a clock that advances a frame at a
+    time, read by the loop *late* seconds after capture, with or without her
+    sound playing when the loop reads it."""
 
-    def __init__(self, floor: RoomFloor) -> None:
+    def __init__(self, floor: RoomFloor, frame_ms: int = FRAME_MS) -> None:
         self.floor = floor
+        self.frame_ms = frame_ms
         self.clock = 1_000.0
 
     def hears(self, level: float, seconds: float, *, hers_playing: bool = False,
               late: float = 0.0) -> None:
-        for _ in range(round(seconds * 1000 / FRAME_MS)):
-            self.clock += FRAME_MS / 1000
+        for _ in range(round(seconds * 1000 / self.frame_ms)):
+            self.clock += self.frame_ms / 1000
             self.floor.hear(level, captured_at=self.clock, hers_playing=hers_playing,
                             now=self.clock + late)
 
@@ -138,17 +139,11 @@ def test_the_stretch_is_measured_in_seconds_whatever_the_frame(frame_ms):
     """The window and the minimum are durations: a shorter frame does not
     shorten the stretch the floor is read over."""
     floor = RoomFloor(frame_ms=frame_ms)
-    clock = 0.0
+    mic = _Microphone(floor, frame_ms=frame_ms)
 
-    def hears(level, seconds):
-        nonlocal clock
-        for _ in range(round(seconds * 1000 / frame_ms)):
-            clock += frame_ms / 1000
-            floor.hear(level, captured_at=clock, hers_playing=False, now=clock)
-
-    hears(ROOM, ROOM_FLOOR_MIN_SECONDS * 0.9)
+    mic.hears(ROOM, ROOM_FLOOR_MIN_SECONDS * 0.9)
     assert floor.level() is None
 
-    hears(ROOM, ROOM_FLOOR_WINDOW_SECONDS)
-    hears(ROOM * 20, ROOM_FLOOR_WINDOW_SECONDS * 0.8)
+    mic.hears(ROOM, ROOM_FLOOR_WINDOW_SECONDS)
+    mic.hears(ROOM * 20, ROOM_FLOOR_WINDOW_SECONDS * 0.8)
     assert floor.level() == pytest.approx(ROOM)

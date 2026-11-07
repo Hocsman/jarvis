@@ -19,10 +19,11 @@ from collections import deque
 from typing import Optional
 
 # How much quiet the floor is read over. Longer than the longest utterance
-# the voice detector keeps whole (`max_utterance_ms`, 12 s by default), so
-# even a question that long leaves a fifth of the stretch to the room, twice
-# what the percentile below needs; short enough that the floor follows the
-# room within seconds of quiet when a fan or a television starts.
+# the voice detector keeps whole at the default `max_utterance_ms` (12 s),
+# so even a question that long leaves a fifth of the stretch to the room,
+# twice what the percentile below needs; short enough that the floor
+# follows the room within seconds of quiet when a fan or a television
+# starts.
 ROOM_FLOOR_WINDOW_SECONDS = 15.0
 
 # The level the room stays above for nine-tenths of its quiet. His words, a
@@ -43,10 +44,10 @@ ROOM_FLOOR_MIN_SECONDS = 1.0
 # tune, read once neither plays any more.
 ROOM_FRAME_MAX_AGE_SECONDS = 0.5
 
-# The floor before a second of quiet has been heard: the echo detector's
-# default (`EchoDetector.track_tts_start`). A quiet room through a desk
-# microphone sits below it, so until the room is heard the bar leans
-# towards taking a soft voice for her echo rather than room noise for his.
+# The floor before `ROOM_FLOOR_MIN_SECONDS` of quiet has been heard. A
+# quiet room through a desk microphone sits below it, so until the room is
+# heard the bar leans towards taking a soft voice for her echo rather than
+# room noise for his.
 FALLBACK_FLOOR = 0.0045
 
 
@@ -80,8 +81,8 @@ class RoomFloor:
             self._levels.append(level)
 
     def level(self) -> Optional[float]:
-        """The room's quiet level, or None until a second of quiet has
-        been heard."""
+        """The room's quiet level, or None until `ROOM_FLOOR_MIN_SECONDS`
+        of quiet has been heard."""
         with self._lock:
             levels = list(self._levels)
         if len(levels) < self._min_frames:

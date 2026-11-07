@@ -837,8 +837,9 @@ class VoiceListener(threading.Thread):
         and a later sentence (*continues*) keeps its reply's floor. Read from
         what the microphone heard while neither the thinking tune nor her
         voice played, it is the room's even when the tune still plays as her
-        first sentence is queued. Before a second of quiet has been heard
-        there is no room to read, and the floor is `FALLBACK_FLOOR`.
+        first sentence is queued. Before `ROOM_FLOOR_MIN_SECONDS` of quiet
+        has been heard there is no room to read, and the floor is
+        `FALLBACK_FLOOR`.
         """
         if self.tts and self.tts.enabled:
             floor = self._room_floor.level()
@@ -846,7 +847,7 @@ class VoiceListener(threading.Thread):
                 floor = FALLBACK_FLOOR
                 if not continues:
                     debug_log(f"voice proof floor: {self._room_floor.seconds_heard():.1f}s of "
-                              f"quiet heard, under {ROOM_FLOOR_MIN_SECONDS:.0f}s, so the "
+                              f"quiet heard, under {ROOM_FLOOR_MIN_SECONDS:g}s, so the "
                               f"default {FALLBACK_FLOOR:.4f}", "echo")
 
             # A talking face holds her voice back: her words come that much later.

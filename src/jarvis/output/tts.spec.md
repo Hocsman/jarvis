@@ -252,7 +252,10 @@ said with `track_tts_start`, accumulating the sentences of one reply
 engine owes the listener five things:
 
 1. `is_speaking()`, which gates stop-word and echo handling while she
-   talks;
+   talks, and keeps what the microphone hears meanwhile out of the room's
+   quiet level, the floor of the voice proof (`listening.spec.md`, "The
+   floor is the room, never her nor him"): it must stay true until her
+   voice has played;
 2. `get_last_spoken_text()`, which is the current chunk only. It is not
    the echo reference, and must not be used as one;
 3. the duration callback, which replaces the detector's estimate with the
@@ -279,10 +282,12 @@ for interface compatibility only (Kyutai is handed neither).
 reply is being prepared and is owned by the listener, which starts it
 when a query is dispatched (never while she is already speaking) and
 stops it when the finished reply is handed over for speaking, or when
-there is nothing to say. It opens its output stream through the same
-`sounddevice` API and under the same process-wide `portaudio_lock` as the
-engines, so stopping it releases the device in milliseconds and the voice
-can open it straight away.
+there is nothing to say. While `is_playing()` is true, what the
+microphone hears is not the room's quiet level (`listening.spec.md`,
+"The floor is the room, never her nor him"). It opens its output stream
+through the same `sounddevice` API and under the same process-wide
+`portaudio_lock` as the engines, so stopping it releases the device in
+milliseconds and the voice can open it straight away.
 
 ## Audio output
 
