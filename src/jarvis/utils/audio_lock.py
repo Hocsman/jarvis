@@ -16,10 +16,15 @@ innermost, around the direct sounddevice call only.
 Accepted exceptions:
 - The dictation beep holds the lock across its blocking sd.play (sub-200ms, and
   splitting play and wait would leave the internal stream teardown unguarded).
-- The Windows microphone permission probe opens its stream without the lock: that
-  open can hang indefinitely when Windows blocks microphone access, and hanging
-  while holding this lock would freeze every audio user in the process.
-- Resolving a microphone and opening it happen in one hold of the lock (below).
+- The Windows microphone permission probe opens and starts its stream without
+  the lock: that open can hang indefinitely when Windows blocks microphone
+  access, and hanging while holding this lock would freeze every audio user in
+  the process. It runs before capture first opens, and again mid-session once a
+  microphone that was waited for appears; mid-session the listener runs it
+  only at a moment when no stream is counted open, so it does not overlap her
+  voice, the tune or a dictation, though one of those may still start while it
+  runs. It resolves the microphone inside ``unguarded_open`` (below), so no
+  re-read moves the list between resolving and opening.
 
 Re-reading the device list
 --------------------------
@@ -31,8 +36,10 @@ use-after-free, so the list is re-read under this lock and only while no stream
 is open:
 
 - every stream is handed to ``track_stream`` in the same hold of the lock as its
-  construction, and counts as open until its ``closed`` reads True, however it
-  was closed (``sd.play`` needs none: it opens and closes inside one hold);
+  construction (``audio_stream.open_input_stream`` and ``open_output_stream``
+  do both), and counts as open until its ``closed`` reads True, however it was
+  closed; the dictation beep's ``sd.play`` is not tracked, since it opens and
+  closes inside one hold;
 - an open made without the lock is wrapped in ``unguarded_open``, which takes
   the lock to begin, so it cannot start while a re-read runs and no re-read
   starts until it is over;
@@ -65,8 +72,9 @@ def _is_closed(stream) -> bool:
 def track_stream(stream) -> None:
     """Count ``stream`` as open until it is closed.
 
-    Call it right after the stream's construction succeeds, in the same hold
-    of ``portaudio_lock`` (or inside ``unguarded_open``).
+    Called right after the stream's construction succeeds, in the same hold
+    of ``portaudio_lock`` (or inside ``unguarded_open``), by the openers in
+    ``jarvis.utils.audio_stream``; streams are opened through those.
     """
     with portaudio_lock:
         _streams[:] = [s for s in _streams if not _is_closed(s)]

@@ -127,23 +127,29 @@ After transcription, text passes through these stages in order:
   the daemon's configured device, and resolves it on every press with the
   shared resolver the wake-word listener also uses (`resolve_input_device` in
   `jarvis.utils.audio_stream`), so both record from the same microphone:
-  blank, `default` or `system` is the system default input, a number is the
-  index of an input-capable device, and any other text is the first
-  input-capable device whose
-  name contains it, ignoring case.
+  blank, `default` or `system` is the system default input, a number is an
+  index into the first device list the process read, which keeps naming the
+  input at that position by its exact name once the list has been read
+  afresh, and any other text is the first input-capable device whose name
+  contains it, ignoring case.
 - PortAudio keeps the device list it last read. A press resolves against it,
   and when the microphone is not in it, reads it afresh with
   `refresh_input_devices` and resolves again, so a microphone connected since
   is found on that press. The list is read afresh only while no stream is
   open in the process (the listener holds none while it waits for its
-  microphone); otherwise the press keeps the list it has. The input is
-  resolved again in the hold of `portaudio_lock` that opens its stream, since
-  an index is only valid for the list it was read from.
+  microphone); otherwise the press keeps the list it has, and a PortAudio
+  that will not initialise again counts as the microphone not found. An index
+  that names no input on the first list is not looked for afresh. The input
+  is resolved again in the hold of `portaudio_lock` that opens its stream,
+  since a position in the list is only valid for the list it was read from.
 - The device is resolved first, before the Whisper check and before anything
   announces a recording. A name that matches no input, even in a list read
   afresh, records nothing: no other input is opened, no start beep plays, and
-  the console says the selected microphone was not found. A failed device
-  lookup is handled the same way, without the console line.
+  the console says the selected microphone was not found. The engine then
+  calls its optional `on_microphone_missing` callback, which the daemon wires
+  to the listener: a listener waiting for the same microphone goes back to
+  reading the device list every 2.5 s (`listening.spec.md`). A failed device
+  lookup is handled the same way, without the console line and the callback.
 - A microphone unplugged while the app runs stays in the list until it is read
   afresh (the listener does so once its own stream has died and closed), so
   until then its name still matches: the start beep plays, its stream fails

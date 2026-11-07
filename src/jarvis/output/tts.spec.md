@@ -294,8 +294,9 @@ blocks of 1024 frames so an abort lands quickly. Chatterbox writes a temporary W
 and plays it through the pygame mixer. Opening, starting, aborting and
 closing a stream all happen under `portaudio_lock`
 (`listening.spec.md`, "Serialised PortAudio Lifecycle"). Each output stream,
-the thinking tune's included, is tracked as it is constructed
-(`track_stream`) and counted open until it is closed, so the device list is
+the thinking tune's included, is opened through `open_output_stream`
+(`jarvis.utils.audio_stream`), which constructs it and tracks it in one hold
+of the lock, and counted open until it is closed, so the device list is
 never read afresh while she speaks or the tune plays: reading it terminates
 PortAudio, which would close the stream under her voice.
 

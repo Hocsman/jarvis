@@ -19,7 +19,8 @@ from urllib.parse import urlparse
 from ..debug import debug_log
 from ..latency import get_latency_journal
 from ..state import JarvisState, get_jarvis_state
-from ..utils.audio_lock import portaudio_lock, track_stream
+from ..utils.audio_lock import portaudio_lock
+from ..utils.audio_stream import open_output_stream
 
 
 def _sound_started() -> None:
@@ -1287,14 +1288,14 @@ class PiperTTS:
             try:
                 with self._audio_lock:
                     with portaudio_lock:
-                        self._audio_stream = sd.OutputStream(
+                        self._audio_stream = open_output_stream(
+                            sd,
                             samplerate=sample_rate,
                             channels=1,
                             dtype='int16',
                             blocksize=blocksize,
                             callback=audio_callback,
                         )
-                        track_stream(self._audio_stream)
                         self._audio_stream.start()
 
                 _sound_started()
@@ -1745,14 +1746,14 @@ class KokoroTTS:
             try:
                 with self._audio_lock:
                     with portaudio_lock:
-                        self._audio_stream = sd.OutputStream(
+                        self._audio_stream = open_output_stream(
+                            sd,
                             samplerate=self._sample_rate,
                             channels=1,
                             dtype='float32',
                             blocksize=blocksize,
                             callback=audio_callback,
                         )
-                        track_stream(self._audio_stream)
                         self._audio_stream.start()
 
                 _sound_started()
@@ -2513,14 +2514,14 @@ class KyutaiTTS:
             try:
                 with self._audio_lock:
                     with portaudio_lock:
-                        self._audio_stream = sd.OutputStream(
+                        self._audio_stream = open_output_stream(
+                            sd,
                             samplerate=self._sample_rate,
                             channels=1,
                             dtype='float32',
                             blocksize=blocksize,
                             callback=audio_callback,
                         )
-                        track_stream(self._audio_stream)
                         stream_latency[0] = float(getattr(self._audio_stream, "latency", 0.0) or 0.0)
                         self._output_latency = stream_latency[0]
                         self._audio_stream.start()
