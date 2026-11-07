@@ -1871,7 +1871,8 @@ def _run_until_the_microphone_opens(voice, budget=5.0, engine="kyutai", low_powe
 
     def _open(*args, **kwargs):
         opened.append(voice.is_ready() if voice is not None else None)
-        raise RuntimeError("stop here")
+        # Access denied ends run(): any other failure is waited out.
+        raise RuntimeError("stop here: microphone access denied")
 
     def _llm_warm_ups(listener):
         thread = threading.Thread(target=time.sleep, args=(llm_warm_up_seconds,), daemon=True)
