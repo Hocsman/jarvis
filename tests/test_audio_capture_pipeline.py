@@ -219,17 +219,3 @@ def test_stream_open_lock_policy_includes_retries(monkeypatch, serialise):
     })
     assert capture._open_input_stream(16000, 20, {}, serialise=serialise)[0] == 'stream'
     assert not locked
-
-
-@pytest.mark.parametrize('configured', ['Disconnected Headset', '0', '5'])
-def test_missing_named_input_does_not_record_another_microphone(monkeypatch, capsys, configured):
-    # Device 0 is output-only and 5 names no device: neither is a microphone.
-    obj = listener()
-    obj.cfg.voice_device = configured
-    monkeypatch.setattr(capture.sd, 'query_devices', lambda: [
-        {'name': 'Speakers', 'max_input_channels': 0},
-        {'name': 'Built-in Microphone', 'max_input_channels': 1},
-    ])
-    monkeypatch.setattr(capture.sd, 'InputStream', lambda **kwargs: pytest.fail('unexpected capture'))
-    obj.run()
-    assert 'Selected microphone not found' in capsys.readouterr().out

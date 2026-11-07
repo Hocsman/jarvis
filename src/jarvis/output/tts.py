@@ -20,6 +20,7 @@ from ..debug import debug_log
 from ..latency import get_latency_journal
 from ..state import JarvisState, get_jarvis_state
 from ..utils.audio_lock import portaudio_lock
+from ..utils.audio_stream import open_output_stream
 
 
 def _sound_started() -> None:
@@ -1287,7 +1288,8 @@ class PiperTTS:
             try:
                 with self._audio_lock:
                     with portaudio_lock:
-                        self._audio_stream = sd.OutputStream(
+                        self._audio_stream = open_output_stream(
+                            sd,
                             samplerate=sample_rate,
                             channels=1,
                             dtype='int16',
@@ -1744,7 +1746,8 @@ class KokoroTTS:
             try:
                 with self._audio_lock:
                     with portaudio_lock:
-                        self._audio_stream = sd.OutputStream(
+                        self._audio_stream = open_output_stream(
+                            sd,
                             samplerate=self._sample_rate,
                             channels=1,
                             dtype='float32',
@@ -2511,7 +2514,8 @@ class KyutaiTTS:
             try:
                 with self._audio_lock:
                     with portaudio_lock:
-                        self._audio_stream = sd.OutputStream(
+                        self._audio_stream = open_output_stream(
+                            sd,
                             samplerate=self._sample_rate,
                             channels=1,
                             dtype='float32',

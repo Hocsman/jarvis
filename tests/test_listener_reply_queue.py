@@ -56,6 +56,8 @@ def listener():
     obj._stop_epoch = 0
     obj._asked = None
     obj.db = None
+    # Her microphone is there: the hot window opens after she speaks.
+    obj._microphone_wait = None
     return obj
 
 

@@ -2,6 +2,10 @@
 Tests for voice listener module.
 
 These tests verify the Whisper model loading and fallback logic.
+
+Most run the listener's start-up up to its microphone and end it there with
+an open that fails as access denied: any other failure is waited out, as for
+a microphone just plugged in, and `run()` would not return.
 """
 
 from unittest.mock import patch, MagicMock, call
@@ -47,7 +51,7 @@ class TestWhisperComputeTypeFallback:
                         with patch("jarvis.listening.listener.sd") as mock_sd:
                             # Mock query_devices to return a fake input device
                             mock_sd.query_devices.return_value = [{"name": "Test Mic", "max_input_channels": 1}]
-                            mock_sd.InputStream.side_effect = Exception("Stop test here")
+                            mock_sd.InputStream.side_effect = Exception("Stop test here: microphone access denied")
 
                             from jarvis.listening.listener import VoiceListener
 
@@ -84,7 +88,7 @@ class TestWhisperComputeTypeFallback:
                     with patch("jarvis.listening.listener.WhisperModel", side_effect=whisper_model_side_effect) as mock_class:
                         with patch("jarvis.listening.listener.sd") as mock_sd:
                             mock_sd.query_devices.return_value = [{"name": "Test Mic", "max_input_channels": 1}]
-                            mock_sd.InputStream.side_effect = Exception("Stop test here")
+                            mock_sd.InputStream.side_effect = Exception("Stop test here: microphone access denied")
 
                             from jarvis.listening.listener import VoiceListener
 
@@ -122,7 +126,7 @@ class TestWhisperComputeTypeFallback:
                     with patch("jarvis.listening.listener.WhisperModel", side_effect=whisper_model_side_effect) as mock_class:
                         with patch("jarvis.listening.listener.sd") as mock_sd:
                             mock_sd.query_devices.return_value = [{"name": "Test Mic", "max_input_channels": 1}]
-                            mock_sd.InputStream.side_effect = Exception("Stop test here")
+                            mock_sd.InputStream.side_effect = Exception("Stop test here: microphone access denied")
 
                             from jarvis.listening.listener import VoiceListener
 
@@ -217,7 +221,7 @@ class TestWhisperComputeTypeFallback:
                     with patch("jarvis.listening.listener.WhisperModel", side_effect=whisper_model_side_effect) as mock_class:
                         with patch("jarvis.listening.listener.sd") as mock_sd:
                             mock_sd.query_devices.return_value = [{"name": "Test Mic", "max_input_channels": 1}]
-                            mock_sd.InputStream.side_effect = Exception("Stop test here")
+                            mock_sd.InputStream.side_effect = Exception("Stop test here: microphone access denied")
 
                             from jarvis.listening.listener import VoiceListener
 
@@ -393,7 +397,7 @@ class TestLargeV3TurboFallback:
                     with patch("jarvis.listening.listener.WhisperModel", return_value=mock_whisper_model) as mock_class:
                         with patch("jarvis.listening.listener.sd") as mock_sd:
                             mock_sd.query_devices.return_value = [{"name": "Test Mic", "max_input_channels": 1}]
-                            mock_sd.InputStream.side_effect = Exception("Stop test here")
+                            mock_sd.InputStream.side_effect = Exception("Stop test here: microphone access denied")
 
                             from jarvis.listening.listener import VoiceListener
 
@@ -420,7 +424,7 @@ class TestLargeV3TurboFallback:
                     with patch("jarvis.listening.listener.WhisperModel", return_value=mock_whisper_model) as mock_class:
                         with patch("jarvis.listening.listener.sd") as mock_sd:
                             mock_sd.query_devices.return_value = [{"name": "Test Mic", "max_input_channels": 1}]
-                            mock_sd.InputStream.side_effect = Exception("Stop test here")
+                            mock_sd.InputStream.side_effect = Exception("Stop test here: microphone access denied")
 
                             from jarvis.listening.listener import VoiceListener
 
@@ -568,7 +572,7 @@ class TestCpuOptimisations:
                     with patch("jarvis.listening.listener.WhisperModel", return_value=mock_whisper_model) as mock_class:
                         with patch("jarvis.listening.listener.sd") as mock_sd:
                             mock_sd.query_devices.return_value = [{"name": "Test Mic", "max_input_channels": 1}]
-                            mock_sd.InputStream.side_effect = Exception("Stop test here")
+                            mock_sd.InputStream.side_effect = Exception("Stop test here: microphone access denied")
                             with patch("jarvis.listening.listener.os.cpu_count", return_value=8):
                                 from jarvis.listening.listener import VoiceListener
 
@@ -590,7 +594,7 @@ class TestCpuOptimisations:
                     with patch("jarvis.listening.listener.WhisperModel", return_value=mock_whisper_model) as mock_class:
                         with patch("jarvis.listening.listener.sd") as mock_sd:
                             mock_sd.query_devices.return_value = [{"name": "Test Mic", "max_input_channels": 1}]
-                            mock_sd.InputStream.side_effect = Exception("Stop test here")
+                            mock_sd.InputStream.side_effect = Exception("Stop test here: microphone access denied")
                             with patch("jarvis.listening.listener.os.cpu_count", return_value=12):
                                 from jarvis.listening.listener import VoiceListener
 
@@ -612,7 +616,7 @@ class TestCpuOptimisations:
                     with patch("jarvis.listening.listener.WhisperModel", return_value=mock_whisper_model):
                         with patch("jarvis.listening.listener.sd") as mock_sd:
                             mock_sd.query_devices.return_value = [{"name": "Test Mic", "max_input_channels": 1}]
-                            mock_sd.InputStream.side_effect = Exception("Stop test here")
+                            mock_sd.InputStream.side_effect = Exception("Stop test here: microphone access denied")
 
                             from jarvis.listening.listener import VoiceListener
 
@@ -637,7 +641,7 @@ class TestCpuOptimisations:
                     with patch("jarvis.listening.listener.WhisperModel", return_value=mock_whisper_model):
                         with patch("jarvis.listening.listener.sd") as mock_sd:
                             mock_sd.query_devices.return_value = [{"name": "Test Mic", "max_input_channels": 1}]
-                            mock_sd.InputStream.side_effect = Exception("Stop test here")
+                            mock_sd.InputStream.side_effect = Exception("Stop test here: microphone access denied")
 
                             from jarvis.listening.listener import VoiceListener
 
@@ -835,7 +839,7 @@ class TestCrossPlatformDeviceLogging:
                                 {"name": "Linux PulseAudio Mic", "max_input_channels": 1}
                                 if args else [{"name": "Linux PulseAudio Mic", "max_input_channels": 1}]
                             )
-                            mock_sd.InputStream.side_effect = Exception("Stop test here")
+                            mock_sd.InputStream.side_effect = Exception("Stop test here: microphone access denied")
 
                             from jarvis.listening.listener import VoiceListener
 
@@ -871,7 +875,7 @@ class TestCrossPlatformDeviceLogging:
                                 {"name": "MacBook Pro Microphone", "max_input_channels": 1}
                                 if args else [{"name": "MacBook Pro Microphone", "max_input_channels": 1}]
                             )
-                            mock_sd.InputStream.side_effect = Exception("Stop test here")
+                            mock_sd.InputStream.side_effect = Exception("Stop test here: microphone access denied")
 
                             from jarvis.listening.listener import VoiceListener
 
@@ -1189,7 +1193,7 @@ class TestCorruptedWhisperCacheRecovery:
                     with patch("jarvis.listening.listener.WhisperModel", side_effect=whisper_model_side_effect) as mock_class:
                         with patch("jarvis.listening.listener.sd") as mock_sd:
                             mock_sd.query_devices.return_value = [{"name": "Test Mic", "max_input_channels": 1}]
-                            mock_sd.InputStream.side_effect = Exception("Stop test here")
+                            mock_sd.InputStream.side_effect = Exception("Stop test here: microphone access denied")
 
                             from jarvis.listening.listener import VoiceListener
 
@@ -1272,7 +1276,7 @@ class TestCorruptedWhisperCacheRecovery:
                     with patch("jarvis.listening.listener.WhisperModel", side_effect=whisper_model_side_effect):
                         with patch("jarvis.listening.listener.sd") as mock_sd:
                             mock_sd.query_devices.return_value = [{"name": "Test Mic", "max_input_channels": 1}]
-                            mock_sd.InputStream.side_effect = Exception("Stop test here")
+                            mock_sd.InputStream.side_effect = Exception("Stop test here: microphone access denied")
 
                             from jarvis.listening.listener import VoiceListener
 
@@ -1414,7 +1418,7 @@ class TestCorruptedWhisperCacheRecovery:
                     with patch("jarvis.listening.listener.WhisperModel", side_effect=whisper_model_side_effect) as mock_class:
                         with patch("jarvis.listening.listener.sd") as mock_sd:
                             mock_sd.query_devices.return_value = [{"name": "Test Mic", "max_input_channels": 1}]
-                            mock_sd.InputStream.side_effect = Exception("Stop test here")
+                            mock_sd.InputStream.side_effect = Exception("Stop test here: microphone access denied")
 
                             from jarvis.listening.listener import VoiceListener
 
@@ -1456,7 +1460,7 @@ class TestWhisperRateLimitRetry:
                     with patch("jarvis.listening.listener.WhisperModel", side_effect=whisper_model_side_effect) as mock_class:
                         with patch("jarvis.listening.listener.sd") as mock_sd:
                             mock_sd.query_devices.return_value = [{"name": "Test Mic", "max_input_channels": 1}]
-                            mock_sd.InputStream.side_effect = Exception("Stop test here")
+                            mock_sd.InputStream.side_effect = Exception("Stop test here: microphone access denied")
 
                             with patch("jarvis.listening.listener.time.sleep"):  # Skip actual sleep
                                 from jarvis.listening.listener import VoiceListener
@@ -1541,7 +1545,7 @@ class TestWhisperRateLimitRetry:
                     with patch("jarvis.listening.listener.WhisperModel", side_effect=whisper_model_side_effect) as mock_class:
                         with patch("jarvis.listening.listener.sd") as mock_sd:
                             mock_sd.query_devices.return_value = [{"name": "Test Mic", "max_input_channels": 1}]
-                            mock_sd.InputStream.side_effect = Exception("Stop test here")
+                            mock_sd.InputStream.side_effect = Exception("Stop test here: microphone access denied")
 
                             with patch("jarvis.listening.listener.time.sleep"):
                                 from jarvis.listening.listener import VoiceListener
@@ -1845,7 +1849,7 @@ class TestWhisperWarmup:
                                 {"name": "Test Mic", "max_input_channels": 1}
                             ]
                             # Skip actual audio streaming — we only care about init.
-                            mock_sd.InputStream.side_effect = RuntimeError("stop here")
+                            mock_sd.InputStream.side_effect = RuntimeError("stop here: microphone access denied")
 
                             from jarvis.listening.listener import VoiceListener
 
@@ -2061,7 +2065,7 @@ class TestWhisperDownloadProgressWiring:
                                side_effect=whisper_side_effect or (lambda *a, **k: mock_whisper_model)) as mock_class:
                         with patch("jarvis.listening.listener.sd") as mock_sd:
                             mock_sd.query_devices.return_value = [{"name": "Test Mic", "max_input_channels": 1}]
-                            mock_sd.InputStream.side_effect = Exception("Stop test here")
+                            mock_sd.InputStream.side_effect = Exception("Stop test here: microphone access denied")
 
                             from jarvis.listening.listener import VoiceListener
                             listener = VoiceListener(MagicMock(), mock_cfg, MagicMock(), MagicMock())

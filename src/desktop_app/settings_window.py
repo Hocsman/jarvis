@@ -664,11 +664,17 @@ def get_input_devices() -> List[tuple[str, str]]:
     of its audio systems; each name is listed once, since every entry would
     save the same value. Returns [("", "System Default")] if sounddevice is
     not available.
+
+    The list is read under ``portaudio_lock``: in the bundled app the
+    listener shares this process and may be reading it afresh.
     """
     devices: List[tuple[str, str]] = [("", "🔧 System Default")]
     try:
         import sounddevice as sd
-        for idx, dev in enumerate(sd.query_devices()):
+        from jarvis.utils.audio_lock import portaudio_lock
+        with portaudio_lock:
+            listed = sd.query_devices()
+        for idx, dev in enumerate(listed):
             try:
                 max_in = int(dev.get("max_input_channels", 0))
             except Exception:
@@ -686,8 +692,10 @@ def _input_device_name(index: str) -> Optional[str]:
     """The name of the microphone a stored index selects, or None."""
     try:
         import sounddevice as sd
+        from jarvis.utils.audio_lock import portaudio_lock
         from jarvis.utils.audio_stream import resolve_input_device
-        devices = sd.query_devices()
+        with portaudio_lock:
+            devices = sd.query_devices()
         return str(devices[resolve_input_device(index, lambda: devices)]["name"]).strip()
     except Exception:
         return None

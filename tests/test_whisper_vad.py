@@ -405,7 +405,7 @@ def _start_listener(whisper_vad, detector_loads):
             patch("jarvis.listening.listener.sd") as mock_sd:
         mock_sys.platform = "linux"
         mock_sd.query_devices.return_value = [{"name": "Test Mic", "max_input_channels": 1}]
-        mock_sd.InputStream.side_effect = RuntimeError("stop here")
+        mock_sd.InputStream.side_effect = RuntimeError("stop here: microphone access denied")
         from jarvis.listening.listener import VoiceListener
 
         listener = VoiceListener(MagicMock(), cfg, MagicMock(), MagicMock())
