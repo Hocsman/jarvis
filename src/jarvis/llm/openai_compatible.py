@@ -270,7 +270,8 @@ class OpenAICompatibleBackend(LLMBackend):
         """Reassemble a streamed chat completion into the buffered shape.
 
         Content deltas are forwarded to ``on_token`` as they arrive and also
-        accumulated; tool-call deltas are keyed by ``index`` and their
+        accumulated; a reasoning model's ``reasoning_content`` deltas are
+        accumulated only; tool-call deltas are keyed by ``index`` and their
         ``arguments`` fragments concatenated (a single call's JSON arrives
         split across chunks). The result is returned in the server's
         non-streaming ``{"choices": [{"message": ...}]}`` shape so the same
@@ -281,6 +282,9 @@ class OpenAICompatibleBackend(LLMBackend):
         so the fully accumulated message is still returned.
         """
         content: List[str] = []
+        # A reasoning model's thinking, which the buffered answer carries as
+        # the message's ``reasoning_content``. It is kept, never forwarded.
+        reasoning: List[str] = []
         # index -> partial tool call (arguments accumulated as a string)
         tool_calls: Dict[int, Dict[str, Any]] = {}
 
@@ -312,6 +316,10 @@ class OpenAICompatibleBackend(LLMBackend):
                 except Exception as e:
                     debug_log(f"OpenAICompatibleBackend: on_token raised — {e}", "llm")
 
+            thought = delta.get("reasoning_content")
+            if isinstance(thought, str) and thought:
+                reasoning.append(thought)
+
             for tc in delta.get("tool_calls") or []:
                 if not isinstance(tc, dict):
                     continue
@@ -332,6 +340,8 @@ class OpenAICompatibleBackend(LLMBackend):
                         slot["function"]["arguments"] += args
 
         message: Dict[str, Any] = {"role": "assistant", "content": "".join(content)}
+        if reasoning:
+            message["reasoning_content"] = "".join(reasoning)
         if tool_calls:
             message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
         return {"choices": [{"message": message}]}

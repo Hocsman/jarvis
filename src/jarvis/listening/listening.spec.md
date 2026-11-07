@@ -411,6 +411,8 @@ Current state: wake_word_mode
 }
 ```
 
+**A directed verdict is acted on once it is decided.** The judge's answer is streamed, and its reasoning comes last. Nothing reads the reasoning of a verdict that says she is spoken to, so that verdict is acted on as soon as `directed`, `query`, `stop` and `confidence` are written and the reasoning's key follows them: what precedes the key is closed into an object and parsed as the whole answer would be. The verdict is the one the whole answer gives, its reasoning empty; the debug log gets the reasoning once the answer is whole. A verdict that says she is not spoken to is read whole, since the echo check reads its reasoning, and so is one that writes any of those fields after its reasoning, or none at all. A backend that does not stream (Ollama) answers whole, and its verdict is read then. The judge waits for an answer `intent_judge_timeout_sec` plus 2 seconds at most; past that there is no verdict, and the judge does not back off.
+
 ### Multi-Layer Echo Detection
 
 Echo detection uses a layered approach for reliability:

@@ -62,6 +62,31 @@ class TestStreamedContent:
         assert out["message"]["role"] == "assistant"
 
     @patch("requests.Session.post")
+    def test_a_reasoning_models_thinking_is_kept_as_on_the_buffered_path(self, mock_post):
+        # Reasoning servers send the thinking as ``reasoning_content``
+        # deltas. The buffered answer carries it in the message, and a
+        # streamed one must too: the intent judge recovers its verdict
+        # from it when the token cap cut the answer short.
+        mock_post.return_value = _stream_response(_sse(
+            _delta(reasoning_content="The speaker "),
+            _delta(reasoning_content="names the assistant."),
+            _delta(content='{"directed": tr'),
+        ))
+        seen = []
+        be = OpenAICompatibleBackend("http://x/v1")
+        out = be.chat("m", [{"role": "user", "content": "hi"}], on_token=seen.append)
+        assert out["message"]["reasoning_content"] == "The speaker names the assistant."
+        assert out["message"]["content"] == '{"directed": tr'
+        assert seen == ['{"directed": tr']
+
+    @patch("requests.Session.post")
+    def test_an_answer_without_thinking_has_none_in_its_message(self, mock_post):
+        mock_post.return_value = _stream_response(_sse(_delta(content="Bonjour")))
+        be = OpenAICompatibleBackend("http://x/v1")
+        out = be.chat("m", [{"role": "user", "content": "hi"}], on_token=lambda t: None)
+        assert "reasoning_content" not in out["message"]
+
+    @patch("requests.Session.post")
     def test_requests_a_stream_when_streaming(self, mock_post):
         mock_post.return_value = _stream_response(_sse(_delta(content="x")))
         be = OpenAICompatibleBackend("http://x/v1")

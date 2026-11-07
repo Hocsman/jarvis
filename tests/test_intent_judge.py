@@ -1,5 +1,7 @@
 """Tests for the intent judge module."""
 
+import threading
+
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -1176,3 +1178,164 @@ class TestReasoningModelHandling:
         assert judge._parse_response(
             '{"directed": "false", "noise": "yes", "confidence": "high"}'
         ).noise is True
+
+
+class _WritingBackend:
+    """A backend that writes its answer as a stream, a few characters at a
+    time, and stops at ``pause_at`` until the test lets it go on."""
+
+    def __init__(self, answer: str, pause_at: str = "", fail_at_end: Exception = None):
+        self.answer = answer
+        self.pause_at = pause_at
+        self.fail_at_end = fail_at_end
+        self.go_on = threading.Event()
+        self.finished = threading.Event()
+
+    def chat(self, model, messages, timeout_sec=30.0, extra_options=None,
+             tools=None, thinking=False, on_token=None):
+        try:
+            cut = (self.answer.index(self.pause_at) + len(self.pause_at)
+                   if self.pause_at else len(self.answer))
+            for n, part in enumerate((self.answer[:cut], self.answer[cut:])):
+                if n == 1:
+                    self.go_on.wait(5.0)
+                for i in range(0, len(part), 4):
+                    if on_token is not None:
+                        on_token(part[i:i + 4])
+            if self.fail_at_end is not None:
+                raise self.fail_at_end
+            return {"message": {"role": "assistant", "content": self.answer}}
+        finally:
+            self.finished.set()
+
+
+def _judge_in_background(judge, segments):
+    """Run ``judge.judge`` on a thread: (thread, box) where box["result"]
+    holds its verdict once the thread is done."""
+    import threading
+
+    box = {}
+
+    def run():
+        box["result"] = judge.judge(segments)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread, box
+
+
+class TestADirectedVerdictIsActedOnOnceDecided:
+    """The judge's answer ends with its reasoning, which nothing reads when
+    the speech is directed at her. A directed verdict is acted on as soon as
+    every field the listener reads from it is written, not when the model
+    has finished explaining it."""
+
+    _SEGMENTS = [TranscriptSegment("jarvis quelle heure est-il", 1000.0, 1002.0)]
+
+    def _directed(self):
+        return ('{"directed": true, "query": "quelle heure est-il", "stop": false, '
+                '"confidence": "high", "reasoning": "wake word then a question about the time"}')
+
+    def test_the_verdict_comes_before_the_reasoning_is_written(self):
+        backend = _WritingBackend(self._directed(), pause_at='"reasoning": "')
+        judge = IntentJudge()
+        try:
+            with patch("jarvis.listening.intent_judge.get_auxiliary_backend", return_value=backend):
+                thread, box = _judge_in_background(judge, self._SEGMENTS)
+                thread.join(2.0)
+            assert not thread.is_alive(), "the verdict waited for the reasoning"
+            result = box["result"]
+            assert result.directed is True
+            assert result.query == "quelle heure est-il"
+            assert result.stop is False
+            assert result.confidence == "high"
+        finally:
+            backend.go_on.set()
+
+    def test_it_is_the_verdict_the_whole_answer_gives_but_for_the_reasoning(self):
+        backend = _WritingBackend(self._directed(), pause_at='"reasoning": "')
+        judge = IntentJudge()
+        whole = judge._parse_response(self._directed())
+        try:
+            with patch("jarvis.listening.intent_judge.get_auxiliary_backend", return_value=backend):
+                thread, box = _judge_in_background(judge, self._SEGMENTS)
+                thread.join(2.0)
+            early = box["result"]
+            for field in ("directed", "query", "stop", "noise", "confidence"):
+                assert getattr(early, field) == getattr(whole, field), field
+        finally:
+            backend.go_on.set()
+
+    def test_a_verdict_that_she_is_not_spoken_to_waits_for_its_reasoning(self):
+        # The echo check reads the reasoning of a verdict that says she is
+        # not spoken to, so that one is taken whole.
+        answer = ('{"directed": false, "query": "", "stop": false, "confidence": "high", '
+                  '"reasoning": "echo of her own reply"}')
+        backend = _WritingBackend(answer, pause_at='"reasoning": "')
+        judge = IntentJudge()
+        try:
+            with patch("jarvis.listening.intent_judge.get_auxiliary_backend", return_value=backend):
+                thread, box = _judge_in_background(judge, self._SEGMENTS)
+                thread.join(0.5)
+                assert thread.is_alive(), "a rejection was taken before its reasoning"
+                backend.go_on.set()
+                thread.join(5.0)
+            assert box["result"].directed is False
+            assert box["result"].reasoning == "echo of her own reply"
+        finally:
+            backend.go_on.set()
+
+    def test_a_field_written_after_the_reasoning_is_waited_for(self):
+        answer = ('{"directed": true, "query": "quelle heure est-il", "reasoning": "a question", '
+                  '"stop": false, "confidence": "high"}')
+        backend = _WritingBackend(answer, pause_at='"reasoning": "')
+        judge = IntentJudge()
+        try:
+            with patch("jarvis.listening.intent_judge.get_auxiliary_backend", return_value=backend):
+                thread, box = _judge_in_background(judge, self._SEGMENTS)
+                thread.join(0.5)
+                assert thread.is_alive(), "a verdict missing its confidence was taken"
+                backend.go_on.set()
+                thread.join(5.0)
+            assert box["result"].confidence == "high"
+            assert box["result"].stop is False
+        finally:
+            backend.go_on.set()
+
+    def test_a_stream_that_fails_after_the_verdict_leaves_the_verdict_standing(self):
+        import requests as real_requests
+
+        backend = _WritingBackend(
+            self._directed(), pause_at='"reasoning": "',
+            fail_at_end=real_requests.ConnectionError("dropped"),
+        )
+        judge = IntentJudge()
+        with patch("jarvis.listening.intent_judge.get_auxiliary_backend", return_value=backend):
+            thread, box = _judge_in_background(judge, self._SEGMENTS)
+            thread.join(2.0)
+            backend.go_on.set()
+            assert backend.finished.wait(5.0)
+        assert box["result"].directed is True
+        assert judge.available is True, "a failure after the verdict backed the judge off"
+
+    def test_a_backend_that_never_answers_is_given_up_on(self):
+        import threading
+
+        hung = threading.Event()
+
+        class _Hung:
+            def chat(self, *args, **kwargs):
+                hung.wait(10.0)
+                return None
+
+        judge = IntentJudge(IntentJudgeConfig(timeout_sec=0.1))
+        try:
+            with patch("jarvis.listening.intent_judge.get_auxiliary_backend", return_value=_Hung()):
+                thread, box = _judge_in_background(judge, self._SEGMENTS)
+                thread.join(5.0)
+            assert not thread.is_alive(), "the judge waited on a backend past its timeout"
+            assert box["result"] is None
+            assert judge.last_failure_reason
+            assert judge.available is True
+        finally:
+            hung.set()

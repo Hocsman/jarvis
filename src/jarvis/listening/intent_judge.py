@@ -9,9 +9,10 @@ unless it is the provider's own chat model.
 
 import json
 import re
+import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Optional, List
+from typing import Any, Callable, Optional, List
 
 from ..debug import debug_log
 from ..llm import get_auxiliary_backend
@@ -123,6 +124,60 @@ def _extract_json_object(text: str, last: bool = False) -> str:
     if not candidates:
         return ""
     return candidates[-1] if last else candidates[0]
+
+
+# The fields the listener reads from a verdict that says she is spoken to.
+# The judge writes them before its reasoning, which nothing reads from such
+# a verdict, so it is acted on once they are written.
+_DECISION_FIELDS = ("directed", "query", "stop", "confidence")
+
+# Where the reasoning starts: its key standing as a key, after the object's
+# opening brace or a comma. Inside a string value its quotes are escaped,
+# so a query that mentions it never matches.
+_REASONING_KEY = re.compile(r'[{,]\s*"reasoning"\s*:')
+
+# How long past its own timeout the judge waits on a backend that has not
+# answered. Backends bound their calls by the timeout; this bounds one that
+# does not.
+_PAST_THE_TIMEOUT_SECONDS = 2.0
+
+
+class _AnswerAsWritten:
+    """The judge's answer, read as the backend writes it.
+
+    ``ready`` is set when a directed verdict is decided (``early``), or when
+    the call is over, however it ended (``response`` or ``error``). The
+    verdict is read once, when the reasoning's key is written: what comes
+    before it is closed into an object and parsed, and kept when it holds
+    every decision field and says she is spoken to. Anything else waits for
+    the whole answer.
+    """
+
+    def __init__(self, decide: Callable[[str], Optional["IntentJudgment"]]):
+        self._decide = decide
+        self._parts: List[str] = []
+        self._read = False
+        self.early: Optional["IntentJudgment"] = None
+        self.response: Any = None
+        self.error: Optional[BaseException] = None
+        self.ready = threading.Event()
+
+    def on_token(self, text: str) -> None:
+        self._parts.append(text)
+        if self._read:
+            return
+        written = "".join(self._parts)
+        start = written.find("{")
+        if start < 0:
+            return
+        key = _REASONING_KEY.search(written, start)
+        if key is None:
+            return
+        self._read = True
+        verdict = self._decide(written[start:key.start()] + "}")
+        if verdict is not None and verdict.directed:
+            self.early = verdict
+            self.ready.set()
 
 
 @dataclass
@@ -412,6 +467,27 @@ Examples:
             debug_log(f"intent judge: failed to parse response: {e}", "voice")
             return None
 
+    def _decided_verdict(self, head: str) -> Optional[IntentJudgment]:
+        """The verdict in ``head``, the answer written up to its reasoning
+        and closed, when every decision field is in it; None otherwise."""
+        try:
+            data = json.loads(head)
+        except ValueError:
+            return None
+        if not isinstance(data, dict) or any(k not in data for k in _DECISION_FIELDS):
+            return None
+        return self._parse_response(head)
+
+    @staticmethod
+    def _log_verdict(judgment: IntentJudgment, how: str = "") -> None:
+        direction = "✅ DIRECTED" if judgment.directed else "❌ NOT DIRECTED"
+        stop_str = " [STOP]" if judgment.stop else ""
+        query_str = f" → \"{judgment.query}\"" if judgment.query else ""
+        debug_log(
+            f"🧠 Intent judge: {direction} ({judgment.confidence}){stop_str}{query_str}{how}",
+            "voice"
+        )
+
     def warm_up(self) -> bool:
         """Page the configured judge model into the active backend."""
         return warm_up_chat_model(
@@ -475,31 +551,71 @@ Examples:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ]
-            try:
-                resp = get_auxiliary_backend(self.config.cfg, self.config.model).chat(
-                    self.config.model,
-                    messages,
-                    timeout_sec=self.config.timeout_sec,
-                    extra_options={
-                        "temperature": 0.0,
-                        # Reasoning models count thinking tokens against
-                        # this cap, so 1500 tokens covers reasoning plus
-                        # the JSON answer while ``intent_judge_timeout_sec``
-                        # still bounds slow or runaway generations.
-                        "max_tokens": 1500,
-                        "num_ctx": 8192,
-                        "keep_alive": _ollama_keep_alive_for_power_mode(
-                            self.config.cfg
-                        ),
-                    },
-                    thinking=self.config.thinking,
-                )
-            except Exception as e:
+            backend = get_auxiliary_backend(self.config.cfg, self.config.model)
+            answer = _AnswerAsWritten(self._decided_verdict)
+
+            # The answer is streamed on a thread of its own, so a directed
+            # verdict is acted on while the model is still writing its
+            # reasoning. A backend that does not stream answers whole, and
+            # the verdict is read then.
+            def call() -> None:
+                try:
+                    answer.response = backend.chat(
+                        self.config.model,
+                        messages,
+                        timeout_sec=self.config.timeout_sec,
+                        extra_options={
+                            "temperature": 0.0,
+                            # Reasoning models count thinking tokens against
+                            # this cap, so 1500 tokens covers reasoning plus
+                            # the JSON answer while ``intent_judge_timeout_sec``
+                            # still bounds slow or runaway generations.
+                            "max_tokens": 1500,
+                            "num_ctx": 8192,
+                            "keep_alive": _ollama_keep_alive_for_power_mode(
+                                self.config.cfg
+                            ),
+                        },
+                        thinking=self.config.thinking,
+                        on_token=answer.on_token,
+                    )
+                except Exception as e:
+                    answer.error = e
+                finally:
+                    answer.ready.set()
+                if answer.early is not None:
+                    # The verdict was acted on before its reasoning was
+                    # written; the log gets it once the answer is whole.
+                    resp = answer.response
+                    message = resp.get("message") if isinstance(resp, dict) else None
+                    content = message.get("content") if isinstance(message, dict) else None
+                    if isinstance(content, str) and content:
+                        later = self._parse_response(content)
+                        if later is not None:
+                            debug_log(f"   Reasoning: {later.reasoning}", "voice")
+
+            threading.Thread(target=call, name="intent-judge", daemon=True).start()
+            if not answer.ready.wait(self.config.timeout_sec + _PAST_THE_TIMEOUT_SECONDS):
+                # No answer past the timeout the backend was given. Like a
+                # timeout, it does not back off.
+                self._last_failure_reason = "no response from backend"
+                debug_log(f"intent judge: {self._last_failure_reason} "
+                          f"after {self.config.timeout_sec:.0f}s", "voice")
+                return None
+
+            if answer.early is not None:
+                self._last_failure_reason = ""
+                self._log_verdict(answer.early, ", decided before its reasoning")
+                return answer.early
+
+            if answer.error is not None:
+                e = answer.error
                 self._last_failure_reason = f"request error: {type(e).__name__}"
                 debug_log(f"intent judge: {self._last_failure_reason}", "voice")
                 self._last_error_time = time.time()
                 return None
 
+            resp = answer.response
             if not isinstance(resp, dict):
                 # ``chat()`` returns ``None`` on transient HTTP errors and
                 # timeouts. Don't back off — voice is high-turn and a single
@@ -547,13 +663,7 @@ Examples:
 
             if judgment:
                 self._last_failure_reason = ""
-                direction = "✅ DIRECTED" if judgment.directed else "❌ NOT DIRECTED"
-                stop_str = " [STOP]" if judgment.stop else ""
-                query_str = f" → \"{judgment.query}\"" if judgment.query else ""
-                debug_log(
-                    f"🧠 Intent judge: {direction} ({judgment.confidence}){stop_str}{query_str}",
-                    "voice"
-                )
+                self._log_verdict(judgment)
                 debug_log(f"   Reasoning: {judgment.reasoning}", "voice")
             else:
                 self._last_failure_reason = f"unparseable response: {response_text[:80]}"
