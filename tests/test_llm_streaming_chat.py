@@ -62,6 +62,31 @@ class TestStreamedContent:
         assert out["message"]["role"] == "assistant"
 
     @patch("requests.Session.post")
+    def test_a_reasoning_models_thinking_is_kept_as_on_the_buffered_path(self, mock_post):
+        # Reasoning servers send the thinking as ``reasoning_content``
+        # deltas. The buffered answer carries it in the message, and a
+        # streamed one must too: the intent judge recovers its verdict
+        # from it when the token cap cut the answer short.
+        mock_post.return_value = _stream_response(_sse(
+            _delta(reasoning_content="The speaker "),
+            _delta(reasoning_content="names the assistant."),
+            _delta(content='{"directed": tr'),
+        ))
+        seen = []
+        be = OpenAICompatibleBackend("http://x/v1")
+        out = be.chat("m", [{"role": "user", "content": "hi"}], on_token=seen.append)
+        assert out["message"]["reasoning_content"] == "The speaker names the assistant."
+        assert out["message"]["content"] == '{"directed": tr'
+        assert seen == ['{"directed": tr']
+
+    @patch("requests.Session.post")
+    def test_an_answer_without_thinking_has_none_in_its_message(self, mock_post):
+        mock_post.return_value = _stream_response(_sse(_delta(content="Bonjour")))
+        be = OpenAICompatibleBackend("http://x/v1")
+        out = be.chat("m", [{"role": "user", "content": "hi"}], on_token=lambda t: None)
+        assert "reasoning_content" not in out["message"]
+
+    @patch("requests.Session.post")
     def test_requests_a_stream_when_streaming(self, mock_post):
         mock_post.return_value = _stream_response(_sse(_delta(content="x")))
         be = OpenAICompatibleBackend("http://x/v1")
@@ -216,3 +241,53 @@ class TestStreamedFailures:
         be = OpenAICompatibleBackend("http://x/v1")
         out = be.chat("m", [{"role": "user", "content": "hi"}], on_token=boom)
         assert out["message"]["content"] == "ab"
+
+
+def _a_stream_that_stalls_after(lines):
+    """A streamed response whose server sends ``lines`` and then goes quiet
+    past the read timeout: requests reports that as a ConnectionError
+    wrapping urllib3's ReadTimeoutError, not as a Timeout."""
+    import requests
+    from urllib3.exceptions import ReadTimeoutError
+
+    def iter_lines():
+        yield from lines
+        raise requests.exceptions.ConnectionError(
+            ReadTimeoutError(None, "http://x/v1", "Read timed out.")
+        )
+
+    resp = _stream_response([])
+    resp.iter_lines = iter_lines
+    return resp
+
+
+class TestAStreamThatStalls:
+    """A server that sends its headers and then nothing for the timeout
+    has timed out, as the buffered path's read timeout says. It is no
+    sign the server is unreachable: callers back off on that."""
+
+    @patch("requests.Session.post")
+    def test_it_is_a_timeout_not_a_connection_error(self, mock_post):
+        mock_post.return_value = _a_stream_that_stalls_after([])
+        be = OpenAICompatibleBackend("http://x/v1")
+        assert be.chat("m", [{"role": "user", "content": "hi"}], on_token=lambda t: None) is None
+
+    @patch("requests.Session.post")
+    def test_it_is_a_timeout_after_some_of_the_answer(self, mock_post):
+        mock_post.return_value = _a_stream_that_stalls_after(
+            [b"data: " + json.dumps(_delta(content='{"dir')).encode()]
+        )
+        seen = []
+        be = OpenAICompatibleBackend("http://x/v1")
+        assert be.chat("m", [{"role": "user", "content": "hi"}], on_token=seen.append) is None
+        assert seen == ['{"dir']
+
+    @patch("requests.Session.post")
+    def test_a_server_that_cannot_be_reached_is_still_reported(self, mock_post):
+        import pytest
+        import requests
+
+        mock_post.side_effect = requests.exceptions.ConnectionError("refused")
+        be = OpenAICompatibleBackend("http://x/v1")
+        with pytest.raises(requests.exceptions.ConnectionError):
+            be.chat("m", [{"role": "user", "content": "hi"}], on_token=lambda t: None)

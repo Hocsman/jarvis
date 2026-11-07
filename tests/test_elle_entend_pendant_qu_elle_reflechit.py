@@ -949,9 +949,11 @@ def test_a_stall_as_long_as_the_backlog_loses_nothing():
 
 
 def test_the_backlog_outlasts_the_intent_judge():
-    """With room to spare over the judge's default per-read deadline, the
-    longest single wait the loop has on an utterance."""
+    """With room to spare over the longest the judge waits for an answer by
+    default, the longest single wait the loop has on an utterance."""
     from jarvis.config import get_default_config
+    from jarvis.listening.intent_judge import _PAST_THE_TIMEOUT_SECONDS
     from jarvis.listening.listener import AUDIO_BACKLOG_SECONDS
 
-    assert AUDIO_BACKLOG_SECONDS > get_default_config()["intent_judge_timeout_sec"]
+    longest = get_default_config()["intent_judge_timeout_sec"] + _PAST_THE_TIMEOUT_SECONDS
+    assert AUDIO_BACKLOG_SECONDS > longest

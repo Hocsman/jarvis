@@ -1987,6 +1987,123 @@ class TestIntentJudgeNotSpeechArms:
         assert not mute, f"no answer at all from {mute}: check the model names and the provider"
 
 
+def _the_judges_arguments(case) -> dict:
+    """What the listener hands the judge for a single- or multi-segment case."""
+    pairs = [(case.transcript, False)] if isinstance(case, IntentJudgeTestCase) else case.segments
+    return dict(
+        segments=[create_transcript_segment(text, start_time=1000.0 + 2.0 * i, is_during_tts=tts)
+                  for i, (text, tts) in enumerate(pairs)],
+        wake_timestamp=case.wake_timestamp,
+        last_tts_text=case.last_tts_text,
+        last_tts_finish_time=999.0 if case.last_tts_text else 0.0,
+        in_hot_window=case.in_hot_window,
+        current_text=next((t for t, tts in reversed(pairs) if not tts), ""),
+    )
+
+
+class _AnswerRecorded:
+    """The judge's backend, recording when its answer ended and what it was.
+    ``whole`` keeps the stream from the judge, which then reads the answer
+    whole, as a backend that does not stream gives it."""
+
+    def __init__(self, backend, whole: bool):
+        import threading
+
+        self._backend = backend
+        self._whole = whole
+        self.ended = None
+        self.content = ""
+        self.done = threading.Event()
+
+    def chat(self, *args, on_token=None, **kwargs):
+        import time
+
+        try:
+            resp = self._backend.chat(*args, on_token=None if self._whole else on_token, **kwargs)
+            self.ended = time.perf_counter()
+            message = resp.get("message") if isinstance(resp, dict) else None
+            self.content = (message or {}).get("content") or ""
+            return resp
+        finally:
+            self.done.set()
+
+
+# The fields a verdict taken before its reasoning is acted on by.
+from jarvis.listening.intent_judge import _DECISION_FIELDS  # noqa: E402
+
+
+@pytest.mark.skipif(not NOT_SPEECH_ARMS, reason="name one or more judge models in EVAL_INTENT_JUDGE_ARMS")
+class TestADirectedVerdictComesBeforeItsReasoning:
+    """A directed verdict is acted on once its decision fields are written,
+    before the reasoning that ends the answer. It must be the verdict the
+    whole answer gives. Every directed case is judged twice on each arm,
+    streamed and read whole, alternating call by call (`-k comes_before_it`
+    runs it alone); the time is from the call to the verdict."""
+
+    def test_the_verdict_is_the_whole_answers_and_comes_before_it(self, capsys):
+        import statistics
+        import time
+
+        from jarvis.llm import get_auxiliary_backend
+
+        cases = [c for c in INTENT_JUDGE_TEST_CASES + MULTI_SEGMENT_TEST_CASES if c.expected_directed]
+        lines = [""]
+        changed = []
+        for model in NOT_SPEECH_ARMS:
+            judge = _judge_on(model)
+            judge.judge(**_the_judges_arguments(cases[0]))  # loading is not timed
+            took = {"whole": [], "streamed": []}
+            saved, before, same, compared, silent = [], 0, 0, 0, 0
+            for case, how in _interleaved(["whole", "streamed"], cases):
+                recorded = _AnswerRecorded(get_auxiliary_backend(judge.config.cfg, model),
+                                           whole=how == "whole")
+                with patch("jarvis.listening.intent_judge.get_auxiliary_backend",
+                           return_value=recorded):
+                    start = time.perf_counter()
+                    verdict = judge.judge(**_the_judges_arguments(case))
+                    returned = time.perf_counter()
+                assert recorded.done.wait(60.0), f"{model}: the answer never ended"
+                if verdict is None or recorded.ended is None:
+                    silent += 1
+                    continue
+                took[how].append(returned - start)
+                if how == "whole":
+                    continue
+                saved.append(max(0.0, recorded.ended - returned))
+                before += recorded.ended > returned
+                whole = judge._parse_response(recorded.content)
+                if whole is None:
+                    continue
+                compared += 1
+                fields = [f for f in _DECISION_FIELDS
+                          if getattr(verdict, f) != getattr(whole, f)]
+                if fields:
+                    changed.append(f"{model} {case.name}: {fields}")
+                else:
+                    same += 1
+
+            def summary(values):
+                if not values:
+                    return "no call"
+                return (f"median {statistics.median(values):.2f} s, "
+                        f"p90 {sorted(values)[int(0.9 * (len(values) - 1))]:.2f} s")
+
+            n = len(took["streamed"])
+            lines += [
+                f"⚡ {model}: a directed verdict before its reasoning, {len(cases)} cases, "
+                f"{NOT_SPEECH_ROUNDS} round(s), no verdict {silent}",
+                f"   📦 read whole:   {summary(took['whole'])} ({len(took['whole'])} calls)",
+                f"   🌊 streamed:     {summary(took['streamed'])} ({n} calls)",
+                f"   ⏱️  before the answer ended: {rate(before, n)}, "
+                f"by {summary(saved)}",
+                f"   ✅ the whole answer's verdict: {rate(same, compared)}",
+            ]
+        lines += [f"   ↳ differs: {c}" for c in changed]
+        to_terminal(capsys, lines)
+
+        assert not changed, "a verdict taken before its reasoning is not the whole answer's"
+
+
 class TestProcessedSegmentFiltering:
     """Tests for processed segment filtering in intent judge."""
 

@@ -242,6 +242,30 @@ def _voice_detector_not_yet_failed(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_stream_counted_open(monkeypatch):
+    """Start each test with no stream counted open and the device list never
+    read afresh.
+
+    Both are the process's: the streams counted open live in
+    ``jarvis.utils.audio_lock``, and the first device list PortAudio read,
+    which an index setting is resolved against, in
+    ``jarvis.utils.audio_stream``. A stand-in stream that cannot say it is
+    closed (a string, a mock) stays counted for good, so one test's leftovers
+    would hold every later reading of the list back, and one test's reading
+    would decide what another's indices name. The suite imports modules both
+    as ``jarvis.x`` and as ``src.jarvis.x``; each copy loaded is reset.
+    """
+    for prefix in ("jarvis", "src.jarvis"):
+        lock_module = sys.modules.get(f"{prefix}.utils.audio_lock")
+        if lock_module is not None:
+            monkeypatch.setattr(lock_module, "_streams", [])
+            monkeypatch.setattr(lock_module, "_unguarded_opens", 0)
+        stream_module = sys.modules.get(f"{prefix}.utils.audio_stream")
+        if stream_module is not None:
+            monkeypatch.setattr(stream_module, "_first_list", None)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_jarvis_state(_bac_a_sable, request, monkeypatch):
     """Keep the suite's state changes off the live state file.
 

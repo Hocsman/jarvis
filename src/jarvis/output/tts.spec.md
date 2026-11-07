@@ -65,6 +65,7 @@ The four engines are interchangeable to the listener. Each exposes:
 | `is_speaking()` | Whether an item is being synthesised or played |
 | `get_last_spoken_text()` | The processed text of the item most recently started |
 | `voice_delay()` | How much later than usual her voice will be heard: the talking face's delay while a face is ready and watched (Kyutai, see "The face"), otherwise 0 |
+| `wait_until_ready(timeout)` | Waits up to `timeout` seconds for the load (and warm-up) `start` began. `True` once the engine can speak without paying it, `False` once it settled without a voice (it could not load, or the engine is off), `None` when it is still loading at the deadline, or when `start` has not been called and nothing is loading (then it returns at once). Piper and Chatterbox load inside `start`, so they never wait. The listener calls it before it announces "Listening!" (`listening.spec.md`, "Startup & Model Warmup") |
 
 `speak` starts the worker if nobody has. Calling `start` on Piper loads
 the voice on the calling thread (downloading it if absent) so the wait
@@ -252,7 +253,10 @@ said with `track_tts_start`, accumulating the sentences of one reply
 engine owes the listener five things:
 
 1. `is_speaking()`, which gates stop-word and echo handling while she
-   talks;
+   talks, and keeps what the microphone hears meanwhile out of the room's
+   quiet level, the floor of the voice proof (`listening.spec.md`, "The
+   floor is the room, never her nor him"): it must stay true until her
+   voice has played;
 2. `get_last_spoken_text()`, which is the current chunk only. It is not
    the echo reference, and must not be used as one;
 3. the duration callback, which replaces the detector's estimate with the
@@ -279,10 +283,12 @@ for interface compatibility only (Kyutai is handed neither).
 reply is being prepared and is owned by the listener, which starts it
 when a query is dispatched (never while she is already speaking) and
 stops it when the finished reply is handed over for speaking, or when
-there is nothing to say. It opens its output stream through the same
-`sounddevice` API and under the same process-wide `portaudio_lock` as the
-engines, so stopping it releases the device in milliseconds and the voice
-can open it straight away.
+there is nothing to say. While `is_playing()` is true, what the
+microphone hears is not the room's quiet level (`listening.spec.md`,
+"The floor is the room, never her nor him"). It opens its output stream
+through the same `sounddevice` API and under the same process-wide
+`portaudio_lock` as the engines, so stopping it releases the device in
+milliseconds and the voice can open it straight away.
 
 ## Audio output
 
@@ -293,7 +299,12 @@ voice's own sample rate, Kokoro and Kyutai in `float32` at 24 kHz) in
 blocks of 1024 frames so an abort lands quickly. Chatterbox writes a temporary WAV
 and plays it through the pygame mixer. Opening, starting, aborting and
 closing a stream all happen under `portaudio_lock`
-(`listening.spec.md`, "Serialised PortAudio Lifecycle").
+(`listening.spec.md`, "Serialised PortAudio Lifecycle"). Each output stream,
+the thinking tune's included, is opened through `open_output_stream`
+(`jarvis.utils.audio_stream`), which constructs it and tracks it in one hold
+of the lock, and counted open until it is closed, so the device list is
+never read afresh while she speaks or the tune plays: reading it terminates
+PortAudio, which would close the stream under her voice.
 
 ## Piper voices
 
@@ -695,6 +706,11 @@ language. The line is not added for Kokoro or Kyutai.
   with a reproduction, as it needs the GPU.
 - Kyutai's initialisation ends with one throwaway synthesis (audio
   discarded, nothing queued or played).
+- Each engine's `wait_until_ready`: Kyutai and Kokoro answer `None` while
+  their background load or warm-up runs and `True` once the warm-up
+  synthesis is done; an engine that could not load answers `False`, a
+  disabled one `False`, and one nobody started `None` without spending the
+  wait. Piper and Chatterbox answer at once from what `start` loaded.
 - A voice name is resolved through the model's voice repository, a
   `.safetensors` path is used as it is, and a path that does not exist
   fails initialisation before the model is loaded. A value that is not a

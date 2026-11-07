@@ -185,6 +185,30 @@ class TestPiperTTSWithMocking:
             assert result is False
             assert tts._init_error is not None
 
+    def test_piper_is_ready_once_started_and_settled_when_it_cannot_load(self):
+        """Piper loads its voice on ``start``: once it has returned there is
+        nothing left to wait for."""
+        from src.jarvis.output.tts import PiperTTS
+
+        tts = PiperTTS(enabled=True, model_path="/fake/model.onnx")
+        assert tts.wait_until_ready(5) is None, "not started: nothing is loading"
+
+        with patch.object(PiperTTS, "_load_voice_file", return_value=(object(), 22050, None)):
+            tts.start()
+        try:
+            assert tts.wait_until_ready(5) is True
+        finally:
+            tts.stop()
+
+        broken = PiperTTS(enabled=True, model_path="/fake/model.onnx")
+        with patch.object(PiperTTS, "_load_voice_file", return_value=(None, 0, "no voice")):
+            broken.start()
+        try:
+            assert broken.wait_until_ready(5) is False
+        finally:
+            broken.stop()
+        assert PiperTTS(enabled=False).wait_until_ready(5) is False
+
     @patch("src.jarvis.output.tts.os.path.exists", return_value=True)
     def test_piper_import_error_handling(self, mock_exists):
         """PiperTTS should handle missing piper-tts library gracefully."""
@@ -386,6 +410,35 @@ class TestPiperTTSFactory:
 
         tts = create_tts_engine(engine="chatterbox", enabled=False)
         assert isinstance(tts, ChatterboxTTS)
+
+    def test_chatterbox_is_ready_once_started_and_settled_when_it_cannot_load(
+            self, monkeypatch):
+        """Chatterbox loads on ``start``, so there is nothing left to wait
+        for once it has returned: ready, or settled without a model."""
+        import sys
+        import pytest
+        from src.jarvis.output.tts import ChatterboxTTS
+
+        tts = ChatterboxTTS(enabled=True)
+        assert tts.wait_until_ready(5) is None, "not started: nothing is loading"
+
+        monkeypatch.setitem(sys.modules, "chatterbox", None)
+        with pytest.warns(UserWarning):
+            tts.start()
+        try:
+            assert tts.wait_until_ready(5) is False
+        finally:
+            tts.stop()
+
+        loaded = ChatterboxTTS(enabled=True)
+        monkeypatch.setattr(loaded, "_initialize_with_logging",
+                            lambda: setattr(loaded, "_model", object()))
+        loaded.start()
+        try:
+            assert loaded.wait_until_ready(5) is True
+        finally:
+            loaded.stop()
+        assert ChatterboxTTS(enabled=False).wait_until_ready(5) is False
 
     def test_chatterbox_without_the_package_speaks_nothing(self, monkeypatch):
         """chatterbox-tts is an optional manual install (its torch==2.6.0 pin

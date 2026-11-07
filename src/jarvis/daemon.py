@@ -1721,6 +1721,7 @@ def main() -> None:
                 on_dictation_start=_on_dictation_start,
                 on_dictation_processing_start=_on_dictation_processing_start,
                 on_dictation_end=_on_dictation_end,
+                on_microphone_missing=voice_thread.microphone_missed,
                 transcribe_lock=voice_thread.transcribe_lock,
                 voice_device=getattr(cfg, "voice_device", None),
                 filler_removal=getattr(cfg, "dictation_filler_removal", False),
