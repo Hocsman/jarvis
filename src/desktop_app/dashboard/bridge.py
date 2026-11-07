@@ -1,14 +1,17 @@
 """Python<->JS bridge for the HUD dashboard.
 
 Exposed to the page over ``QWebChannel`` as ``window.jarvis``. The page
-calls slots (``submitQuery``, ``openSettings``, ``ready``) and listens to signals (``statsUpdated``,
+calls slots (``submitQuery``, ``openSettings``, ``refreshStats``,
+``refreshWeather``, ``ready``), reads one constant property
+(``weatherAvailable``) and listens to signals (``statsUpdated``,
 ``stateChanged``, ``weatherUpdated``, ``replyReceived`` …). Complex
 payloads cross as JSON strings to keep the channel marshalling trivial.
 
-The bridge owns two timers:
-- a system-stats timer (psutil) that pushes CPU / RAM / disk, and
+The bridge owns three timers:
+- a system-stats timer (psutil) that pushes CPU / RAM / disk,
 - a JarvisState poll that maps the shared cross-process voice state to
-  an orb accent colour + status label.
+  an orb accent colour + status label, and
+- a weather timer, running only while there is weather to fetch.
 
 Chat is wired by the host (the tray): it sets ``submit_fn`` to the
 daemon submission callable and calls ``deliver_reply`` / ``deliver_busy``
@@ -21,7 +24,7 @@ from __future__ import annotations
 import json
 from typing import Any, Callable, Optional
 
-from PyQt6.QtCore import QObject, QTimer, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import QObject, QTimer, pyqtProperty, pyqtSignal, pyqtSlot
 
 from jarvis.debug import debug_log
 from jarvis.state import get_jarvis_state
@@ -172,6 +175,7 @@ class DashboardBridge(QObject):
                 pass
 
         self._weather_city: Optional[str] = city if (self._location_enabled and city) else None
+        self._weather_fetching: bool = False
 
         # System stats: poll every 2 s.
         self._stats_timer = QTimer(self)
@@ -187,7 +191,7 @@ class DashboardBridge(QObject):
         # Weather: refresh every 10 min only when location is enabled AND a city is known
         self._weather_timer = QTimer(self)
         self._weather_timer.timeout.connect(self._fetch_weather_async)
-        if self._weather_city and self._location_enabled:
+        if self.weatherAvailable:
             self._weather_timer.start(600_000)
 
     # ── setters used by the host (tray) ────────────────────────────────
@@ -272,29 +276,59 @@ class DashboardBridge(QObject):
         QTimer.singleShot(0, self._open_settings)
 
     @pyqtSlot()
+    def refreshStats(self) -> None:
+        """The page's ⟳ on the stats card: a reading now, not at the next tick."""
+        self._emit_stats()
+
+    @pyqtSlot()
+    def refreshWeather(self) -> None:
+        """The page's ⟳ on the weather card. With no weather to fetch this
+        does nothing; the page keeps that button disabled then."""
+        debug_log(f"dashboard weather refresh (available={self.weatherAvailable})", "desktop")
+        self._fetch_weather_async()
+
+    @pyqtProperty(bool, constant=True)
+    def weatherAvailable(self) -> bool:
+        """Whether there is weather to fetch: location on and a city known
+        (``_weather_city`` is only set when both hold). Settled when the
+        bridge is built, so the page reads it once."""
+        return self._weather_city is not None
+
+    @pyqtSlot()
     def ready(self) -> None:
         """The page finished wiring; push an initial frame so it isn't
         blank until the first timer tick."""
         self._emit_stats()
         self._emit_state(force=True)
-        if self._weather_city and self._location_enabled:
-            self._fetch_weather_async()
+        self._fetch_weather_async()
 
     # ── weather ────────────────────────────────────────────────────────
     def _fetch_weather_async(self) -> None:
-        if not self._weather_city or not self._location_enabled:
+        """Fetch the weather on a worker thread, one fetch at a time: a
+        refresh or a tick while one is on its way would bring the same
+        weather, so it adds nothing."""
+        if not self.weatherAvailable:
             return
+        if self._weather_fetching:
+            debug_log("dashboard weather fetch already on its way; skipped", "desktop")
+            return
+        self._weather_fetching = True
         import threading
 
         def _work():
+            data = None
             try:
                 data = fetch_weather_summary(self._weather_city, language=self._language)
-                if data:
-                    # Emitted from a worker thread; Qt queues it onto the
-                    # main thread for the JS push.
-                    self.weatherUpdated.emit(json.dumps(data, ensure_ascii=False))
             except Exception as exc:
                 debug_log(f"dashboard weather fetch failed: {exc}", "desktop")
+            finally:
+                # Cleared before the push, so a refresh sent on seeing this
+                # weather is never turned away.
+                self._weather_fetching = False
+            if data:
+                # Emitted from a worker thread; Qt queues it onto the
+                # main thread for the JS push.
+                self.weatherUpdated.emit(json.dumps(data, ensure_ascii=False))
 
         threading.Thread(target=_work, name="dashboard-weather", daemon=True).start()
 
