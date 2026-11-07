@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 from ..debug import debug_log
 from ..latency import get_latency_journal
 from ..state import JarvisState, get_jarvis_state
-from ..utils.audio_lock import portaudio_lock
+from ..utils.audio_lock import portaudio_lock, track_stream
 
 
 def _sound_started() -> None:
@@ -1294,6 +1294,7 @@ class PiperTTS:
                             blocksize=blocksize,
                             callback=audio_callback,
                         )
+                        track_stream(self._audio_stream)
                         self._audio_stream.start()
 
                 _sound_started()
@@ -1751,6 +1752,7 @@ class KokoroTTS:
                             blocksize=blocksize,
                             callback=audio_callback,
                         )
+                        track_stream(self._audio_stream)
                         self._audio_stream.start()
 
                 _sound_started()
@@ -2518,6 +2520,7 @@ class KyutaiTTS:
                             blocksize=blocksize,
                             callback=audio_callback,
                         )
+                        track_stream(self._audio_stream)
                         stream_latency[0] = float(getattr(self._audio_stream, "latency", 0.0) or 0.0)
                         self._output_latency = stream_latency[0]
                         self._audio_stream.start()

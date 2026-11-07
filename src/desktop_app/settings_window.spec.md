@@ -190,7 +190,7 @@ works when the user asks (see "Update System" in `desktop_app.spec.md`).
 
 ## Hardware Device Selection
 
-The Voice Input tab includes a device dropdown populated at window open time via `sounddevice.query_devices()`. It lists each input-capable device name once, without surrounding spaces: Windows lists one microphone under each of its audio systems, and every entry would save the same value. Choosing one stores that name; choosing System Default stores nothing. A name stays true across a replug, where an index can move onto another device.
+The Voice Input tab includes a device dropdown populated at window open time via `sounddevice.query_devices()`, called under `portaudio_lock` because the daemon can run in the same process and read the device list afresh (see "Serialised PortAudio Lifecycle" in `listening.spec.md`). It lists each input-capable device name once, without surrounding spaces: Windows lists one microphone under each of its audio systems, and every entry would save the same value. Choosing one stores that name; choosing System Default stores nothing. A name stays true across a replug, where an index can move onto another device.
 
 The listener and hold-to-dictate match a stored name against the input device names (`resolve_input_device`, see `listening.spec.md`), so the config can also name a microphone by part of its name (`"voice_device": "MSI GV60"`). A stored name that is exactly a listed one selects that option. Any other value that does not read as an index is added as its own option, shown as `🎤 <name> (by name)` whether or not a connected device matches it, and selected, so a Save writes it back as it was read. Choosing a listed option, or Reset, replaces it.
 

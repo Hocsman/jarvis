@@ -17,10 +17,20 @@ The input comes from `voice_device` through `resolve_input_device`
 (`jarvis.utils.audio_stream`), the resolver hold-to-dictate also uses: blank,
 `default` or `system` is the system default input, a number is the index of an
 input-capable device, and any other text is the first input-capable device whose
-name contains it, ignoring case, so output-only devices are skipped. A missing
-named microphone, or an index that names no input (out of range, or an
-output-only device), produces an actionable error rather than silently
-selecting another input.
+name contains it, ignoring case, so output-only devices are skipped. A
+microphone that is not there is waited for, never replaced by another input:
+a named microphone that matches no input, an index that names no input (out of
+range, or an output-only device), or a system default with no input at all.
+The console says so once, without the device's name
+(`🎤 Microphone not connected: waiting for it...`), and the listener reads the
+device list afresh every 2.5 s (see §0) until the same setting resolves, then
+opens it and says `✅ Microphone connected: listening`. A microphone that
+resolves but will not open or start yet is tried again on the same schedule,
+its error reported once. On Windows the permission probe runs once the
+microphone is there. The wait looks for a stop or shutdown every tenth of a
+second and ends on it. While she waits, the reply thread runs, so a reminder or a Claude Code
+report is still spoken; the `Listening!` banner and the `IDLE` state wait for
+the first capture.
 Multichannel samples are averaged to mono before framing and speech detection.
 
 Frames always span the configured 10, 20 or
@@ -38,6 +48,19 @@ Warnings are transition-based; dictation pauses suspend health checks. With
 `voice_debug`, diagnostics include callback/frame counts, speech-frame counts,
 peak level and capture rate, without saving microphone audio. Linux warnings
 point users to PipeWire/PulseAudio recording-source routing.
+
+A microphone lost while she listens is reopened, not abandoned. Once a second
+the listener asks whether its stream is still alive: a stream that reports
+itself inactive, or raises when asked, is dead, and so is one that has
+delivered no callback for 10 s, twice the five-second health warning, so a
+stall that the warning reports and that recovers on its own is left alone.
+The check is suspended while dictation pauses the listener. A dead stream is
+aborted and closed under the lock, the audio still queued from it and any
+unfinished utterance are dropped, the console says once
+`⚠️  Microphone lost: waiting for it to come back...`, and the listener waits
+for the same `voice_device` exactly as at start-up, never another input. When
+the reopened stream delivers its first callback, the console says once
+`✅ Microphone back: listening`; the `Listening!` banner is not repeated.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -110,6 +133,27 @@ holding the process-wide lock would freeze every audio user), and its
 timeout path abandons a blocked stream instead of aborting/closing it from
 another thread: the check thread may still be inside `start()`/`stop()`
 on it, and a cross-thread close is a native use-after-free.
+
+PortAudio reads the device list when it is initialised and keeps it, so a
+microphone connected later is not in it. `refresh_input_devices`
+(`jarvis.utils.audio_stream`) reads it afresh by terminating and
+re-initialising PortAudio, which closes every stream in the process, so it
+does so only when none is open, and returns the fresh list, or None when it
+did not read it. It holds `portaudio_lock` throughout, and the count of open
+streams lives beside the lock (`jarvis.utils.audio_lock`): every stream the
+process opens is tracked as it is constructed (the listener's, dictation's,
+each speech engine's output and the thinking tune's) and counted open until
+its `closed` is true; a stream whose state cannot be read counts as open. The
+permission probe, which opens without the lock, marks its open with
+`unguarded_open()` under the lock before it starts and keeps the mark until
+it returns, so a reading never overlaps it either, even when the probe
+abandons a blocked stream. A count that is wrong can only hold a reading back:
+the listener keeps waiting on the old list and logs once when a reading is
+held back, and again if it still is a minute later. Every `query_devices` call
+runs under the lock (the settings window's included, since the daemon can run
+in the desktop app's process), and a microphone is resolved and opened in one
+hold of it: an index is only valid for the list it was read from. The lock
+stays innermost and is never held across a wait.
 
 ### 1. Transcript-First
 

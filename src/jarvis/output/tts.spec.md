@@ -293,7 +293,11 @@ voice's own sample rate, Kokoro and Kyutai in `float32` at 24 kHz) in
 blocks of 1024 frames so an abort lands quickly. Chatterbox writes a temporary WAV
 and plays it through the pygame mixer. Opening, starting, aborting and
 closing a stream all happen under `portaudio_lock`
-(`listening.spec.md`, "Serialised PortAudio Lifecycle").
+(`listening.spec.md`, "Serialised PortAudio Lifecycle"). Each output stream,
+the thinking tune's included, is tracked as it is constructed
+(`track_stream`) and counted open until it is closed, so the device list is
+never read afresh while she speaks or the tune plays: reading it terminates
+PortAudio, which would close the stream under her voice.
 
 ## Piper voices
 

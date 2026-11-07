@@ -22,7 +22,7 @@ from rapidfuzz import fuzz
 from .audio_capture import UtteranceCapture
 from .echo_detection import EchoDetector
 from .state_manager import StateManager, ListeningState
-from ..utils.audio_lock import portaudio_lock
+from ..utils.audio_lock import open_stream_count, portaudio_lock
 from .wake_detection import is_wake_word_detected, extract_query_after_wake, is_stop_command
 from .transcript_buffer import TranscriptBuffer, TranscriptSegment
 from .whisper_turbo import is_faster_whisper_turbo_supported
@@ -50,6 +50,7 @@ from ..utils.audio_stream import (
     InputDeviceNotFound,
     is_input_format_error,
     open_input_stream,
+    refresh_input_devices,
     resolve_input_device,
 )
 
@@ -86,6 +87,19 @@ STOP_WORDS_WHILE_THINKING = 3
 # most: past it the oldest is dropped, so a wake word repeated by a film or
 # a video cannot stack up replies that would run minutes later.
 MAX_WAITING_TURNS = 2
+
+# While the selected microphone is missing, PortAudio's device list is read
+# afresh this often, in seconds.
+MICROPHONE_RESCAN_SECONDS = 2.5
+
+# No microphone callback for this long, in seconds, and the input stream is
+# taken for dead: closed, waited for and opened again. Twice the capture-health
+# warning's five seconds, so a stall long enough to be reported is not yet
+# enough to cycle the stream.
+CAPTURE_LOST_SECONDS = 10.0
+
+# How often, in seconds, the input stream is checked for death.
+CAPTURE_CHECK_SECONDS = 1.0
 
 
 def _vad_frame_ms(cfg) -> int:
@@ -663,6 +677,15 @@ class VoiceListener(threading.Thread):
         self._pending_audio = None
         self._vad_error_logged = False
         self._reset_audio_health()
+
+        # Set while the microphone is waited for: "missing" when it was not
+        # connected, "lost" when its stream died. Cleared, with a console
+        # line, once audio arrives from it again.
+        self._microphone_wait: Optional[str] = None
+        # When the device list is next read afresh while waiting (monotonic).
+        self._next_rescan_at = 0.0
+        # A failed open while waiting is printed once per wait.
+        self._open_failure_reported = False
 
         # Voice activity detection
         self.is_speech_active = False
@@ -2609,6 +2632,7 @@ class VoiceListener(threading.Thread):
         self._audio_started = now
         self._last_audio_callback = now
         self._last_health_check = now
+        self._last_capture_check = now
         self._audio_peak = 0.0
         self._audio_frames_seen = 0
         self._speech_frames_seen = 0
@@ -2848,96 +2872,88 @@ class VoiceListener(threading.Thread):
             return f"\"How's the weather, {wake_title}?\""
         return f"\"How's the weather in [your city], {wake_title}?\""
 
-    def run(self) -> None:
-        """Main voice listening loop."""
-        if sd is None:
-            debug_log("sounddevice not available", "voice")
-            print("  ❌ Audio system not available - sounddevice failed to load", flush=True)
-            return
+    def _microphone_permission_ok(self, stream_kwargs: dict) -> bool:
+        """Windows: whether the microphone can be recorded from, tried with a
+        brief recording before capture first opens. False, with what to
+        change printed, when Windows blocks it.
 
-        # Verify PortAudio is working by querying devices (catches Windows DLL issues)
+        This catches privacy settings that silently block audio access. A
+        5-second timeout prevents indefinite hangs when Windows blocks the
+        audio device at the system level without raising an error. Uses
+        InputStream (not sd.rec) so the stream can be explicitly closed on
+        timeout, avoiding resource leaks that could block later audio init.
+        """
         try:
-            devices = sd.query_devices()
-            input_devices = [d for d in devices if d.get('max_input_channels', 0) > 0]
-            debug_log(f"PortAudio initialised: {len(input_devices)} input device(s) found", "voice")
-            if not input_devices:
-                print("  ❌ No microphone found. Please connect a microphone.", flush=True)
-                return
-        except Exception as e:
-            debug_log(f"PortAudio device query failed: {e}", "voice")
-            print(f"  ❌ Audio system error: {e}", flush=True)
-            print("     PortAudio may not be properly installed", flush=True)
-            if sys.platform == 'linux':
-                print("     On Linux, ensure PortAudio is installed: sudo apt install libportaudio2", flush=True)
-            return
+            print("  🔐 Checking microphone permission...", flush=True)
+            mic_ok = threading.Event()
+            mic_error: list = [None]
 
-        # Resolve the same input for the permission probe and continuous capture.
-        stream_kwargs = {}
-        try:
-            device = resolve_input_device(self.cfg.voice_device, lambda: devices)
-        except InputDeviceNotFound:
-            print("  ❌ Selected microphone not found. Choose an available input in Settings.", flush=True)
-            debug_log("configured input device did not match an available microphone", "voice")
-            return
-        if device is not None:
-            stream_kwargs['device'] = device
-
-        # Windows 11: Test microphone permission by attempting a brief recording
-        # This catches privacy settings that silently block audio access.
-        # A 5-second timeout prevents indefinite hangs when Windows blocks
-        # the audio device at the system level without raising an error.
-        # Uses InputStream (not sd.rec) so the stream can be explicitly closed
-        # on timeout, avoiding resource leaks that could block later audio init.
-        if sys.platform == 'win32':
-            try:
-                print("  🔐 Checking microphone permission...", flush=True)
-                mic_ok = threading.Event()
-                mic_error: list = [None]
-
-                def _mic_check():
-                    # Deliberately NOT under portaudio_lock: this probe's
-                    # open/start can hang indefinitely when Windows blocks
-                    # mic access at the system level (that is what the 5s
-                    # timeout below is for), and hanging while holding the
-                    # process-wide lock would freeze every other audio user
-                    # (listener, dictation, TTS). The probe runs once at
-                    # startup before the listener's main stream opens, so
-                    # the residual open/open race is minimal; the quick
-                    # stop/close after a successful start stays guarded.
+            def _mic_check():
+                # Deliberately NOT under portaudio_lock: this probe's
+                # open/start can hang indefinitely when Windows blocks
+                # mic access at the system level (that is what the 5s
+                # timeout below is for), and hanging while holding the
+                # process-wide lock would freeze every other audio user
+                # (listener, dictation, TTS). The probe runs once, before
+                # the listener's main stream first opens, so the residual
+                # open/open race is minimal; the quick stop/close after a
+                # successful start stays guarded. Its open runs inside
+                # `unguarded_open` and its stream is tracked, so the
+                # device list is never read afresh under it.
+                stream = None
+                try:
+                    stream, _, _ = _open_input_stream(
+                        self._samplerate, 100, stream_kwargs, serialise=False,
+                    )
+                    stream.start()
+                    time.sleep(0.15)
+                    with portaudio_lock:
+                        stream.stop()
+                        stream.close()
                     stream = None
-                    try:
-                        stream, _, _ = _open_input_stream(
-                            self._samplerate, 100, stream_kwargs, serialise=False,
-                        )
-                        stream.start()
-                        time.sleep(0.15)
-                        with portaudio_lock:
-                            stream.stop()
-                            stream.close()
-                        stream = None
-                        mic_ok.set()
-                    except Exception as exc:
-                        mic_error[0] = exc
-                        if stream is not None:
-                            try:
-                                with portaudio_lock:
-                                    stream.close()
-                            except Exception:
-                                pass
+                    mic_ok.set()
+                except Exception as exc:
+                    mic_error[0] = exc
+                    if stream is not None:
+                        try:
+                            with portaudio_lock:
+                                stream.close()
+                        except Exception:
+                            pass
 
-                check_thread = threading.Thread(target=_mic_check, daemon=True)
-                check_thread.start()
-                check_thread.join(timeout=5.0)
+            check_thread = threading.Thread(target=_mic_check, daemon=True)
+            check_thread.start()
+            check_thread.join(timeout=5.0)
 
-                if check_thread.is_alive():
-                    # Do NOT abort/close the stream from this thread: the
-                    # check thread may still be blocked inside start()/stop()
-                    # on it, and closing a stream under another thread's feet
-                    # is a native use-after-free that aborts the whole app on
-                    # Windows. Abandon it: the daemon check thread
-                    # will finish the stop/close itself if it ever unblocks.
-                    debug_log("microphone permission check timed out after 5s", "voice")
-                    print("  ❌ Microphone permission check timed out (access blocked by Windows)", flush=True)
+            if check_thread.is_alive():
+                # Do NOT abort/close the stream from this thread: the
+                # check thread may still be blocked inside start()/stop()
+                # on it, and closing a stream under another thread's feet
+                # is a native use-after-free that aborts the whole app on
+                # Windows. Abandon it: the daemon check thread
+                # will finish the stop/close itself if it ever unblocks.
+                debug_log("microphone permission check timed out after 5s", "voice")
+                print("  ❌ Microphone permission check timed out (access blocked by Windows)", flush=True)
+                print("", flush=True)
+                print("  ┌─────────────────────────────────────────────────────────┐", flush=True)
+                print("  │  🔒 MICROPHONE ACCESS BLOCKED BY WINDOWS               │", flush=True)
+                print("  │                                                         │", flush=True)
+                print("  │  To fix this:                                          │", flush=True)
+                print("  │  1. Open Windows Settings                              │", flush=True)
+                print("  │  2. Go to Privacy & security → Microphone              │", flush=True)
+                print("  │  3. Turn ON 'Microphone access'                        │", flush=True)
+                print("  │  4. Turn ON 'Let apps access your microphone'          │", flush=True)
+                print("  │  5. Turn ON 'Let desktop apps access your microphone'  │", flush=True)
+                print("  │                                                         │", flush=True)
+                print("  │  Then restart Jarvis.                                  │", flush=True)
+                print("  └─────────────────────────────────────────────────────────┘", flush=True)
+                print("", flush=True)
+                return False
+            elif mic_error[0] is not None:
+                e = mic_error[0]
+                error_str = str(e).lower()
+                print(f"  ❌ Microphone permission check failed: {e}", flush=True)
+                if "unapproved" in error_str or "denied" in error_str or "access" in error_str or "-9999" in str(e):
                     print("", flush=True)
                     print("  ┌─────────────────────────────────────────────────────────┐", flush=True)
                     print("  │  🔒 MICROPHONE ACCESS BLOCKED BY WINDOWS               │", flush=True)
@@ -2952,34 +2968,51 @@ class VoiceListener(threading.Thread):
                     print("  │  Then restart Jarvis.                                  │", flush=True)
                     print("  └─────────────────────────────────────────────────────────┘", flush=True)
                     print("", flush=True)
-                    return
-                elif mic_error[0] is not None:
-                    e = mic_error[0]
-                    error_str = str(e).lower()
-                    print(f"  ❌ Microphone permission check failed: {e}", flush=True)
-                    if "unapproved" in error_str or "denied" in error_str or "access" in error_str or "-9999" in str(e):
-                        print("", flush=True)
-                        print("  ┌─────────────────────────────────────────────────────────┐", flush=True)
-                        print("  │  🔒 MICROPHONE ACCESS BLOCKED BY WINDOWS               │", flush=True)
-                        print("  │                                                         │", flush=True)
-                        print("  │  To fix this:                                          │", flush=True)
-                        print("  │  1. Open Windows Settings                              │", flush=True)
-                        print("  │  2. Go to Privacy & security → Microphone              │", flush=True)
-                        print("  │  3. Turn ON 'Microphone access'                        │", flush=True)
-                        print("  │  4. Turn ON 'Let apps access your microphone'          │", flush=True)
-                        print("  │  5. Turn ON 'Let desktop apps access your microphone'  │", flush=True)
-                        print("  │                                                         │", flush=True)
-                        print("  │  Then restart Jarvis.                                  │", flush=True)
-                        print("  └─────────────────────────────────────────────────────────┘", flush=True)
-                        print("", flush=True)
-                    return
-                elif mic_ok.is_set():
-                    print("  ✅ Microphone permission OK", flush=True)
-                else:
-                    print("  ⚠️  Microphone returned empty audio", flush=True)
-            except Exception as e:
-                debug_log(f"microphone permission check error: {e}", "voice")
-                print(f"  ⚠️  Microphone check error: {e}", flush=True)
+                return False
+            elif mic_ok.is_set():
+                print("  ✅ Microphone permission OK", flush=True)
+            else:
+                print("  ⚠️  Microphone returned empty audio", flush=True)
+        except Exception as e:
+            debug_log(f"microphone permission check error: {e}", "voice")
+            print(f"  ⚠️  Microphone check error: {e}", flush=True)
+        return True
+
+    def run(self) -> None:
+        """Main voice listening loop."""
+        if sd is None:
+            debug_log("sounddevice not available", "voice")
+            print("  ❌ Audio system not available - sounddevice failed to load", flush=True)
+            return
+
+        # Verify PortAudio is working by querying devices (catches Windows DLL issues)
+        try:
+            with portaudio_lock:
+                devices = sd.query_devices()
+            input_devices = [d for d in devices if d.get('max_input_channels', 0) > 0]
+            debug_log(f"PortAudio initialised: {len(input_devices)} input device(s) found", "voice")
+        except Exception as e:
+            debug_log(f"PortAudio device query failed: {e}", "voice")
+            print(f"  ❌ Audio system error: {e}", flush=True)
+            print("     PortAudio may not be properly installed", flush=True)
+            if sys.platform == 'linux':
+                print("     On Linux, ensure PortAudio is installed: sudo apt install libportaudio2", flush=True)
+            return
+
+        # The same input for the permission probe and continuous capture. A
+        # microphone that is not connected is waited for
+        # (`_listen_until_stopped`), and no other input is ever opened in its
+        # place.
+        stream_kwargs = self._selected_input(devices)
+        if stream_kwargs is None:
+            self._say_microphone_missing()
+
+        # Windows: a microphone its privacy settings block is caught before
+        # capture. One that is not connected yet is checked once it is.
+        permission_checked = sys.platform != 'win32' or stream_kwargs is not None
+        if sys.platform == 'win32' and stream_kwargs is not None:
+            if not self._microphone_permission_ok(stream_kwargs):
+                return
 
         # Kick off LLM warmups in parallel with Whisper load so the first
         # user engagement doesn't pay cold-load cost on either model. All
@@ -3294,7 +3327,9 @@ class VoiceListener(threading.Thread):
         if self.cfg.voice_debug:
             debug_log("available input devices:", "voice")
             try:
-                for idx, dev in enumerate(sd.query_devices()):
+                with portaudio_lock:
+                    listed = sd.query_devices()
+                for idx, dev in enumerate(listed):
                     try:
                         max_in = int(dev.get("max_input_channels", 0))
                     except Exception:
@@ -3306,150 +3341,361 @@ class VoiceListener(threading.Thread):
             except Exception:
                 pass
 
-        # Log which device will be used
+        self._stream_samplerate = self._samplerate
+        self._listen_until_stopped(permission_checked)
+
+    def _listen_until_stopped(self, permission_checked: bool) -> None:
+        """Capture from the selected microphone until the listener stops.
+
+        A microphone that is not connected, or whose stream dies, is waited
+        for and opened again (`_wait_for_microphone`); no other input is ever
+        opened in its place. ``permission_checked`` is False on Windows when
+        the microphone was not connected at start-up: the permission probe
+        then runs once it is.
+        """
+        frame_ms = self._frame_ms
+        ready = False
+        while not self._should_stop:
+            if self._microphone_wait is not None:
+                if not self._wait_for_microphone():
+                    return
+                if not permission_checked:
+                    with portaudio_lock:
+                        stream_kwargs = self._selected_input(sd.query_devices())
+                    if stream_kwargs is None:
+                        continue
+                    if not self._microphone_permission_ok(stream_kwargs):
+                        return
+                    permission_checked = True
+            if not ready:
+                self._announce_input_device()
+            try:
+                stream = self._open_capture(frame_ms, announce=not ready)
+            except Exception as e:
+                if self._microphone_wait is None:
+                    self._report_open_failure(e)
+                    return
+                # The microphone is listed but will not open yet: said once,
+                # then tried again on the next reading of the device list.
+                if not self._open_failure_reported:
+                    self._open_failure_reported = True
+                    self._report_open_failure(e)
+                else:
+                    debug_log(f"failed to open input stream again: {e}", "voice")
+                continue
+            if stream is None:
+                self._say_microphone_missing()
+                continue
+
+            self._reset_audio_health()
+            lost = None
+            started = False
+            try:
+                with _serialised_stream(stream):
+                    # Verify stream is actually recording (helps catch permission issues)
+                    if not stream.active:
+                        with portaudio_lock:
+                            stream.start()
+                    started = True
+
+                    # Show ready message only after stream is confirmed active
+                    if not ready:
+                        self._announce_listening()
+                        ready = True
+
+                    lost = self._read_microphone(stream)
+                    if lost is not None:
+                        # Aborted rather than stopped: a dead device has no
+                        # buffers worth waiting for.
+                        try:
+                            with portaudio_lock:
+                                stream.abort()
+                        except Exception:
+                            pass
+            except Exception as e:
+                if started:
+                    raise
+                # The stream is closed. While the microphone is waited for,
+                # it is tried again on the next reading of the device list.
+                debug_log(f"failed to start audio stream: {e}", "voice")
+                if self._microphone_wait is not None:
+                    continue
+                error_msg = str(e).lower()
+                if "access" in error_msg or "permission" in error_msg:
+                    print(f"  ❌ Microphone access denied. Please check: {_get_mic_permission_hint()}", flush=True)
+                else:
+                    print(f"  ❌ Failed to start recording: {e}", flush=True)
+                return
+            if lost is None:
+                return
+            self._say_microphone_lost(lost)
+            self._forget_unfinished_audio()
+
+    def _announce_listening(self) -> None:
+        """The ready banner, then the published state and the reply thread:
+        capture has started for the first time."""
+        wake_word = getattr(self.cfg, "wake_word", "jarvis").lower()
+        wake_title = wake_word.title()
+        print(f"\n{'─' * 50}\n🎙️  Listening! Try:", flush=True)
+        print(f"      {self._weather_example(wake_title)}", flush=True)
+        print(f"      \"I just ate a Big Mac, {wake_title}.\"", flush=True)
+        print(f"      \"What are you thinking, {wake_title}?\"", flush=True)
+        print(f"      \"What do you know about me, {wake_title}?\"", flush=True)
+
+        # Small-model disclaimer: SMALL models can't infer your intent
+        # from vague prompts, but they can still execute complex flows
+        # if you spell out the steps. Assume the model is dumb and lay
+        # things out for it. Classification lives in model_variants so
+        # it stays in sync when supported models change.
+        from ..reply.prompts.model_variants import detect_model_size, ModelSize
+        chat_model_name = str(getattr(self.cfg, "llm_chat_model", "") or "").strip()
+        if chat_model_name and detect_model_size(chat_model_name) == ModelSize.SMALL:
+            print(
+                f"  ⚠️  Small model in use ({chat_model_name}). Assume it can't infer — spell out the steps for anything more involved:",
+                flush=True,
+            )
+            print(
+                f"      \"Tell me tomorrow's weather, then find local events for tomorrow, then recommend ones that suit the weather, {wake_title}.\"",
+                flush=True,
+            )
+
+        # Chrome MCP tip: the chrome MCP exposes a `navigate` tool that
+        # takes a URL. Vague phrasing like "Open YouTube" forces the model
+        # to guess a URL; "Navigate to youtube.com" maps directly to the
+        # tool's argument and is more reliable on small models.
         try:
+            from ..tools.registry import get_cached_mcp_tools
+            mcp_tool_names = list(get_cached_mcp_tools().keys())
+            has_chrome_mcp = any("chrome" in name.lower() for name in mcp_tool_names)
+        except Exception:
+            has_chrome_mcp = False
+        if has_chrome_mcp:
+            print(
+                f"  🌐 Chrome MCP detected. Name the destination URL so the browser tool can act directly:",
+                flush=True,
+            )
+            print(
+                f"      \"Navigate to youtube.com, {wake_title}.\"",
+                flush=True,
+            )
+
+        # Awake and ready, waiting for the wake word
+        get_jarvis_state().set_state(JarvisState.IDLE)
+
+        # Before the loop: a narration handed over by another thread is
+        # said by the reply thread whether or not anyone speaks.
+        self._start_replies()
+
+    def _read_microphone(self, stream) -> Optional[str]:
+        """Take what the microphone hears until the listener stops (None) or
+        its stream is taken for dead (why)."""
+        callbacks_at_open = self._callback_count
+        while not self._should_stop:
+            now = time.monotonic()
+            self._check_audio_health(now)
+            if self._microphone_wait is not None and self._callback_count > callbacks_at_open:
+                self._say_microphone_back()
+            lost = self._capture_lost(stream, now)
+            if lost is not None:
+                return lost
+
+            try:
+                entry = self._audio_q.get(timeout=0.2)
+            except queue.Empty:
+                # Critical: Check timeouts even when no audio is being received
+                # This ensures hot window expiry fires reliably
+                self._check_query_timeout()
+                continue
+
+            if entry is None:
+                # Reset marker
+                self.is_speech_active = False
+                self._silence_frames = 0
+                self._utterance_frames = []
+                self._pre_roll.clear()
+                self._pending_audio = None
+                continue
+
+            if np is None:
+                continue
+
+            captured_at, item = entry
+            for frame in self._audio_frames(item):
+                self._take_frame(frame, captured_at)
+        return None
+
+    def _capture_lost(self, stream, now: float) -> Optional[str]:
+        """Why the input stream is taken for dead, or None while it lives.
+
+        Dead is no callback for ``CAPTURE_LOST_SECONDS``, or a stream that is
+        no longer active or fails when asked. Looked at once every
+        ``CAPTURE_CHECK_SECONDS``, and not while he dictates: the dictation
+        pause resets the capture-health clock.
+        """
+        if self._dictation_active or now - self._last_capture_check < CAPTURE_CHECK_SECONDS:
+            return None
+        self._last_capture_check = now
+        silent_for = now - self._last_audio_callback
+        if silent_for >= CAPTURE_LOST_SECONDS:
+            return f"no microphone callback for {silent_for:.0f} s"
+        try:
+            if not stream.active:
+                return "the stream is no longer active"
+        except Exception as exc:
+            return f"the stream failed: {exc}"
+        return None
+
+    def _selected_input(self, devices) -> Optional[dict]:
+        """The stream arguments that select the configured input in
+        ``devices``, or None when it selects none there: a name or an index
+        that matches no input, or no input at all for the system default."""
+        try:
+            device = resolve_input_device(self.cfg.voice_device, lambda: devices)
+        except InputDeviceNotFound:
+            return None
+        if device is not None:
+            return {'device': device}
+        if not any(d.get('max_input_channels', 0) > 0 for d in devices):
+            return None
+        return {}
+
+    def _wait_for_microphone(self) -> bool:
+        """Read the device list afresh every ``MICROPHONE_RESCAN_SECONDS``
+        until it holds the selected microphone. False when the listener stops
+        first.
+
+        The list is read afresh only while no stream is open in the process
+        (`refresh_input_devices`); until then the old one is kept and the
+        reading is tried again on the next tick. Meanwhile her replies go
+        on, and a question being collected or a hot window still ends on time.
+        """
+        self._start_replies()
+        held_back_since = None
+        while not self._should_stop:
+            now = time.monotonic()
+            if now >= self._next_rescan_at:
+                self._next_rescan_at = now + MICROPHONE_RESCAN_SECONDS
+                devices = refresh_input_devices(sd)
+                if devices is not None:
+                    if held_back_since is not None:
+                        debug_log("device list read afresh", "voice")
+                    held_back_since = None
+                    if self._selected_input(devices) is not None:
+                        return True
+                else:
+                    still_open = open_stream_count()
+                    if held_back_since is None:
+                        held_back_since = now
+                        debug_log(f"device list not read afresh: {still_open} stream(s) open", "voice")
+                    elif now - held_back_since >= 60.0 and still_open:
+                        # Once: a stream that stays counted this long may be one
+                        # left unclosed, and the old list is kept for as long.
+                        held_back_since = float("inf")
+                        debug_log(f"device list still held back after a minute: {still_open} "
+                                  "stream(s) counted as open", "voice")
+            self._check_query_timeout()
+            time.sleep(0.1)
+        return False
+
+    def _open_capture(self, frame_ms: int, announce: bool):
+        """Open the selected microphone, or None when the device list as it is
+        now holds no such input. The input is resolved in the hold of
+        portaudio_lock that opens it: another thread may read the device
+        list afresh, and an index is only valid for the list it was read
+        from."""
+        with portaudio_lock:
+            stream_kwargs = self._selected_input(sd.query_devices())
+            if stream_kwargs is None:
+                return None
+            stream, self._stream_samplerate, channels = _open_input_stream(
+                self._samplerate, frame_ms, stream_kwargs, callback=self._on_audio,
+            )
+        self._frame_samples = max(1, int(self._stream_samplerate * frame_ms / 1000))
+        if announce and (self._stream_samplerate != self._samplerate or channels != 1):
+            print(f"  🎤 Using {self._stream_samplerate} Hz, {channels} input channel(s); "
+                  "converting to mono and resampling for speech recognition", flush=True)
+        return stream
+
+    def _announce_input_device(self) -> None:
+        """Say which microphone she is about to listen to."""
+        try:
+            with portaudio_lock:
+                stream_kwargs = self._selected_input(sd.query_devices())
+                if stream_kwargs is None:
+                    return
+                if "device" in stream_kwargs:
+                    device_name = sd.query_devices(stream_kwargs["device"]).get('name', 'Unknown')
+                else:
+                    try:
+                        device_name = sd.query_devices(sd.default.device[0]).get('name', 'Unknown')
+                    except Exception:
+                        device_name = None
             if "device" in stream_kwargs:
-                dev = sd.query_devices(stream_kwargs["device"])
-                device_name = dev.get('name', 'Unknown')
                 self._input_device_name = device_name
                 debug_log(f"using input device: {device_name} (index {stream_kwargs['device']})", "voice")
                 print(f"  🎤 Using audio device: {device_name}", flush=True)
             else:
                 debug_log("using system default input device", "voice")
-                try:
-                    default_dev = sd.query_devices(sd.default.device[0])
-                    self._input_device_name = default_dev.get('name', 'Unknown')
-                    print(f"  🎤 Using default device: {default_dev.get('name', 'Unknown')}", flush=True)
-                except Exception:
+                if device_name is not None:
+                    self._input_device_name = device_name
+                    print(f"  🎤 Using default device: {device_name}", flush=True)
+                else:
                     print("  🎤 Using system default input device", flush=True)
         except Exception:
             pass
 
-        self._stream_samplerate = self._samplerate
-        open_error = None
-        try:
-            stream, self._stream_samplerate, channels = _open_input_stream(
-                self._samplerate, frame_ms, stream_kwargs, callback=self._on_audio,
-            )
-            self._frame_samples = max(1, int(self._stream_samplerate * frame_ms / 1000))
-            if self._stream_samplerate != self._samplerate or channels != 1:
-                print(f"  🎤 Using {self._stream_samplerate} Hz, {channels} input channel(s); "
-                      "converting to mono and resampling for speech recognition", flush=True)
-        except Exception as e:
-            open_error = e
+    def _report_open_failure(self, error: Exception) -> None:
+        """Say why the microphone would not open."""
+        error_msg = str(error).lower()
+        debug_log(f"failed to open input stream: {error}", "voice")
 
-        if open_error is not None:
-            error_msg = str(open_error).lower()
-            debug_log(f"failed to open input stream: {open_error}", "voice")
+        # Provide helpful error messages for common issues
+        if "access" in error_msg or "permission" in error_msg:
+            print(f"  ❌ Microphone access denied. Please check: {_get_mic_permission_hint()}", flush=True)
+        elif "device" in error_msg and ("use" in error_msg or "busy" in error_msg):
+            print("  ❌ Microphone is being used by another application", flush=True)
+        elif "device" in error_msg:
+            print(f"  ❌ Failed to open microphone: {error}", flush=True)
+            print("     Try selecting a different audio device in settings", flush=True)
+        else:
+            print(f"  ❌ Failed to start audio recording: {error}", flush=True)
 
-            # Provide helpful error messages for common issues
-            if "access" in error_msg or "permission" in error_msg:
-                print(f"  ❌ Microphone access denied. Please check: {_get_mic_permission_hint()}", flush=True)
-            elif "device" in error_msg and ("use" in error_msg or "busy" in error_msg):
-                print("  ❌ Microphone is being used by another application", flush=True)
-            elif "device" in error_msg:
-                print(f"  ❌ Failed to open microphone: {open_error}", flush=True)
-                print("     Try selecting a different audio device in settings", flush=True)
-            else:
-                print(f"  ❌ Failed to start audio recording: {open_error}", flush=True)
+    def _say_microphone_missing(self) -> None:
+        """Say once that the microphone is not connected and is waited for.
+        Its name stays out of the line: a device name can carry a person's."""
+        if self._microphone_wait is not None:
             return
+        self._microphone_wait = "missing"
+        self._next_rescan_at = 0.0
+        print("  🎤 Microphone not connected: waiting for it...", flush=True)
+        debug_log("the configured input is not in the device list: waiting for it", "voice")
 
-        # Main audio processing loop
-        self._reset_audio_health()
-        with _serialised_stream(stream):
-            # Verify stream is actually recording (helps catch permission issues)
-            if not stream.active:
-                try:
-                    with portaudio_lock:
-                        stream.start()
-                except Exception as e:
-                    error_msg = str(e).lower()
-                    debug_log(f"failed to start audio stream: {e}", "voice")
-                    if "access" in error_msg or "permission" in error_msg:
-                        print(f"  ❌ Microphone access denied. Please check: {_get_mic_permission_hint()}", flush=True)
-                    else:
-                        print(f"  ❌ Failed to start recording: {e}", flush=True)
-                    return
+    def _say_microphone_lost(self, why: str) -> None:
+        """Say once that the microphone's stream died and is waited for."""
+        debug_log(f"input stream taken for dead ({why}): closed, waiting for the microphone", "voice")
+        if self._microphone_wait is not None:
+            return
+        self._microphone_wait = "lost"
+        self._next_rescan_at = 0.0
+        print("  ⚠️  Microphone lost: waiting for it to come back...", flush=True)
 
-            # Show ready message only after stream is confirmed active
-            wake_word = getattr(self.cfg, "wake_word", "jarvis").lower()
-            wake_title = wake_word.title()
-            print(f"\n{'─' * 50}\n🎙️  Listening! Try:", flush=True)
-            print(f"      {self._weather_example(wake_title)}", flush=True)
-            print(f"      \"I just ate a Big Mac, {wake_title}.\"", flush=True)
-            print(f"      \"What are you thinking, {wake_title}?\"", flush=True)
-            print(f"      \"What do you know about me, {wake_title}?\"", flush=True)
+    def _say_microphone_back(self) -> None:
+        """Audio arrives again from the microphone waited for."""
+        word = "connected" if self._microphone_wait == "missing" else "back"
+        self._microphone_wait = None
+        self._open_failure_reported = False
+        print(f"  ✅ Microphone {word}: listening", flush=True)
+        debug_log(f"microphone {word}: audio is arriving", "voice")
 
-            # Small-model disclaimer: SMALL models can't infer your intent
-            # from vague prompts, but they can still execute complex flows
-            # if you spell out the steps. Assume the model is dumb and lay
-            # things out for it. Classification lives in model_variants so
-            # it stays in sync when supported models change.
-            from ..reply.prompts.model_variants import detect_model_size, ModelSize
-            chat_model_name = str(getattr(self.cfg, "llm_chat_model", "") or "").strip()
-            if chat_model_name and detect_model_size(chat_model_name) == ModelSize.SMALL:
-                print(
-                    f"  ⚠️  Small model in use ({chat_model_name}). Assume it can't infer — spell out the steps for anything more involved:",
-                    flush=True,
-                )
-                print(
-                    f"      \"Tell me tomorrow's weather, then find local events for tomorrow, then recommend ones that suit the weather, {wake_title}.\"",
-                    flush=True,
-                )
-
-            # Chrome MCP tip: the chrome MCP exposes a `navigate` tool that
-            # takes a URL. Vague phrasing like "Open YouTube" forces the model
-            # to guess a URL; "Navigate to youtube.com" maps directly to the
-            # tool's argument and is more reliable on small models.
+    def _forget_unfinished_audio(self) -> None:
+        """Drop what a dead stream left behind: the blocks still queued and
+        the utterance it cut off. Words heard after it reopens start afresh."""
+        while True:
             try:
-                from ..tools.registry import get_cached_mcp_tools
-                mcp_tool_names = list(get_cached_mcp_tools().keys())
-                has_chrome_mcp = any("chrome" in name.lower() for name in mcp_tool_names)
-            except Exception:
-                has_chrome_mcp = False
-            if has_chrome_mcp:
-                print(
-                    f"  🌐 Chrome MCP detected. Name the destination URL so the browser tool can act directly:",
-                    flush=True,
-                )
-                print(
-                    f"      \"Navigate to youtube.com, {wake_title}.\"",
-                    flush=True,
-                )
-
-            # Awake and ready, waiting for the wake word
-            get_jarvis_state().set_state(JarvisState.IDLE)
-
-            # Before the loop: a narration handed over by another thread is
-            # said by the reply thread whether or not anyone speaks.
-            self._start_replies()
-
-            while not self._should_stop:
-                self._check_audio_health()
-
-                try:
-                    entry = self._audio_q.get(timeout=0.2)
-                except queue.Empty:
-                    # Critical: Check timeouts even when no audio is being received
-                    # This ensures hot window expiry fires reliably
-                    self._check_query_timeout()
-                    continue
-
-                if entry is None:
-                    # Reset marker
-                    self.is_speech_active = False
-                    self._silence_frames = 0
-                    self._utterance_frames = []
-                    self._pre_roll.clear()
-                    self._pending_audio = None
-                    continue
-
-                if np is None:
-                    continue
-
-                captured_at, item = entry
-                for frame in self._audio_frames(item):
-                    self._take_frame(frame, captured_at)
+                self._audio_q.get_nowait()
+            except queue.Empty:
+                break
+        self._clear_audio_buffers()
 
     def _configure_frames(self) -> None:
         """The frame length and the voice detector's limits, in frames."""

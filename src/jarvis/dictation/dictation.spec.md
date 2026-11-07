@@ -131,19 +131,24 @@ After transcription, text passes through these stages in order:
   index of an input-capable device, and any other text is the first
   input-capable device whose
   name contains it, ignoring case.
-- PortAudio reads the device list once, when the app starts, and every press
-  resolves against that list. A microphone connected later is found once the
-  app is quit and reopened.
+- PortAudio keeps the device list it last read. A press resolves against it,
+  and when the microphone is not in it, reads it afresh with
+  `refresh_input_devices` and resolves again, so a microphone connected since
+  is found on that press. The list is read afresh only while no stream is
+  open in the process (the listener holds none while it waits for its
+  microphone); otherwise the press keeps the list it has. The input is
+  resolved again in the hold of `portaudio_lock` that opens its stream, since
+  an index is only valid for the list it was read from.
 - The device is resolved first, before the Whisper check and before anything
-  announces a recording. A name that matches no input (the microphone was not
-  connected when the app started, so the listener refused it too) records
-  nothing: no other input is opened, no start beep plays, and the console says
-  the selected microphone was not found. A failed device lookup is handled the
-  same way, without the console line.
-- A microphone unplugged while the app runs is still in that list, so its name
-  still matches: the start beep plays, its stream fails to open, the console
-  says the microphone could not be opened, and the recording ends with nothing
-  captured.
+  announces a recording. A name that matches no input, even in a list read
+  afresh, records nothing: no other input is opened, no start beep plays, and
+  the console says the selected microphone was not found. A failed device
+  lookup is handled the same way, without the console line.
+- A microphone unplugged while the app runs stays in the list until it is read
+  afresh (the listener does so once its own stream has died and closed), so
+  until then its name still matches: the start beep plays, its stream fails
+  to open, the console says the microphone could not be opened, and the
+  recording ends with nothing captured.
 - The stream opens at the selected input's native sample rate (requesting
   16 kHz fails on many devices, e.g. PortAudio error -50 on macOS), with
   `open_input_stream`'s format negotiation, and stores the rate in
@@ -163,8 +168,9 @@ After transcription, text passes through these stages in order:
 | macOS 26+ (Tahoe)         | `pynput` disabled — TSM main-thread assertion crash |
 | Linux / Wayland           | `pynput` requires X11 (limited Wayland support)    |
 | Audio rate mismatch       | Resample via linear interpolation to Whisper rate  |
-| Named microphone missing at startup | Records nothing, opens no other input, no start beep; console line |
-| Named microphone unplugged while running | Start beep, stream fails to open, console line, nothing recorded |
+| Named microphone not connected | Device list read afresh; still missing: records nothing, opens no other input, no start beep; console line |
+| Named microphone connected after start-up | Found on the next press |
+| Named microphone unplugged while running | Until the list is read afresh: start beep, stream fails to open, console line, nothing recorded |
 | Hotkey held after a refused press | Key repeat does not retry it; the next fresh press does |
 | LLM filler removal fails  | Falls back to raw transcription (5 s timeout)     |
 | Custom dictionary empty   | No-op, text passes through unchanged               |

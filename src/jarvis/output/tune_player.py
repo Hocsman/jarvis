@@ -6,7 +6,7 @@ from typing import Optional
 import numpy as np
 
 from ..debug import debug_log
-from ..utils.audio_lock import portaudio_lock
+from ..utils.audio_lock import portaudio_lock, track_stream
 
 
 def _generate_thinking_pad_samples() -> tuple[np.ndarray, int]:
@@ -202,6 +202,7 @@ class TunePlayer:
                         latency='high',
                         callback=callback,
                     )
+                    track_stream(stream)
             except Exception as exc:
                 debug_log(f"thinking tune: stream open failed: {exc!r}", category="tune")
                 self._play_fallback_tune()
