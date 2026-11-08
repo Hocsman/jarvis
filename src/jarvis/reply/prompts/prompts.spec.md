@@ -36,6 +36,7 @@ from jarvis.reply.prompts import (
     get_system_prompts,  # (model_size: ModelSize, *, spoken: bool = False) -> PromptComponents
     PromptComponents,    # Dataclass with all prompt strings
     SPOKEN_FORM,         # The spoken-form rule (see below)
+    SAID_ALOUD,          # The said-aloud rule (see below)
 )
 ```
 
@@ -56,6 +57,9 @@ Model-size-specific components:
   auto-derive rules because gpt-oss:20b and similar also confabulate
   specifics for unfamiliar entities and occasionally ask for arguments
   (e.g. `location` for `getWeather`) the tool already auto-derives.
+- `said_aloud`: Whoever is with the user hears the reply, so what she is
+  asked to say to someone she says in it. Large models only, and present
+  only when `get_system_prompts(..., spoken=True)`; see **Said Aloud** below
 
 ### Small Model Tool Constraints
 
@@ -123,7 +127,8 @@ models have not been measured.
 
 **It reaches a spoken reply only.** `get_system_prompts(model_size,
 spoken=True)` adds it right after `voice_style`; `spoken=False`, the
-default, leaves it out, and nothing else differs between the two. The reply
+default, leaves it out, and nothing but it and, on a large model, the
+said-aloud rule (below) differs between the two. The reply
 engine passes `spoken=True` for a turn whose `origin` is `"voix"`, the one
 turn whose reply is read aloud (including the narration of an action
 approved from a voice question). A turn from the text chat (`"chat"`) is
@@ -138,6 +143,45 @@ report, keeps whatever symbols it carries.
 
 It is a prompt rule, not a rewrite of the text before the voice: a table of
 symbols to words would have to know every language's words for them.
+
+### Said Aloud
+
+A reply the voice reads aloud is heard by whoever is with the user. Asked
+to greet a person by name, a large model without this rule mostly answers
+that it does not know who that is or cannot pass messages on, and leaves the
+greeting to the user, when saying it in the reply is the whole request.
+
+So `SAID_ALOUD` tells the model that its reply is spoken and heard by whoever
+is with the user; that a request to say something to someone (greet them,
+welcome them, wish them well, thank them) is done in the reply, addressed to
+that person by name, with any words the user gave kept as they are; that it
+needs to know nothing about the person; and that this is not sending a
+message. Sending a message, a text or an email to someone is a different
+request, done with a tool that sends: the one in its list, or one it finds
+with `toolSearchTool` before saying it cannot. It never says a message was
+sent or passed on unless such a tool has sent it. That second half keeps the
+first from turning "text him that I am late" into a reply spoken to an empty
+room and reported as delivered, and from answering "I have no tool" when a
+tool that sends is one search away; on the turn that narrates an approved
+send, the tool has sent it, so saying so is true.
+
+Measured on Claude Haiku 5.5 by `evals/test_she_says_it.py`, the arms
+alternating call by call, 20 calls an arm a kind: she says it 6 times in 20
+without the rule and 20 in 20 with it (p = 3e-6). Asked to send a message
+with no tool that sends anywhere, she claims it was sent 0 times in 20 in
+both arms. With a tool that sends which the router left out, she sends
+through it 12 times in 20 without the rule and 17 in 20 with it (p = 0.16):
+no worse, and the gain is not established. Of the three sends still missed
+with the rule, two offer to say the message aloud instead, on "write to"
+wording.
+
+**It reaches a large model's spoken reply only**, right after
+`spoken_form`: the same `spoken=True` that adds the spoken-form rule adds
+it, and a reply from the text chat, a routine or no named origin goes
+without it. Small models are not given it: they have not been measured on
+it, and their tool constraints already answer a request to send with a
+search. The max-turn digest is not given it: it writes a reply from the
+activity of a loop that called tools, and a greeting calls none.
 
 ### Integration with Reply Engine
 
@@ -164,9 +208,12 @@ All prompts are language-agnostic:
 1. **Unit tests** (`tests/test_prompts.py`, `tests/test_spoken_form.py`):
    - Model size detection for various model names
    - Prompt component selection
-   - The spoken-form rule reaches a turn from the voice, and not one from
-     the text chat, a routine, or no named origin; on a turn from the voice
-     it also reaches the max-turn digest
+   - The spoken-form rule, and on a large model the said-aloud rule, reach a
+     turn from the voice, and not one from the text chat, a routine, or no
+     named origin, and they are all that sets a spoken prompt apart from a
+     read one; a small model is not given the said-aloud rule; on a turn
+     from the voice the spoken-form rule also reaches the max-turn digest,
+     and the said-aloud rule does not
 
 2. **Eval tests**:
    - `evals/test_greeting_no_tools.py`: greetings in multiple languages
@@ -186,3 +233,11 @@ All prompts are language-agnostic:
      that is read, without the spoken-form rule.
      `EVAL_SPOKEN_UNITS_ROUNDS` compares the prompt without the rule against
      the prompt with it, the arms alternating call by call
+   - `evals/test_she_says_it.py`: voice turns on a large chat model.
+     Requests to say something to a named person are judged on whether the
+     reply says it; requests to send a message with no tool that sends, on
+     whether the reply claims it was sent; the same requests with an
+     invented tool that sends, left out by the router, on whether that tool
+     is called. `EVAL_SAID_ALOUD_ROUNDS` compares the prompt without
+     `SAID_ALOUD` against the prompt as shipped, the arms alternating call
+     by call

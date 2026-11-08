@@ -57,6 +57,25 @@ SPOKEN_FORM = (
     "(about 30 thousand, about 2.5 million)."
 )
 
+# A reply the voice reads aloud is heard by whoever is with the user, so a
+# request to say something to someone is done in the reply itself. Sending a
+# message is a different request, done with a tool that sends, one in the
+# list or one toolSearchTool finds, and claimed only once such a tool has
+# sent it. Given to a large model's turn from the voice only: a typed reply
+# is read by the user alone, and small models have not been measured on it.
+SAID_ALOUD = (
+    "Your reply is spoken aloud, and whoever is with the user hears it. "
+    "When the user asks you to say something to someone (greet them, welcome them, "
+    "wish them well, thank them), say it in this reply, addressed to that person by name, "
+    "keeping any words the user gave you as they are. "
+    "That is the whole request: you need to know nothing about the person, and it is "
+    "not sending a message. "
+    "Sending a message, a text or an email to someone is a different request, done with "
+    "a tool that sends: use the one in your list, or call toolSearchTool to find one "
+    "before saying you cannot. Never say a message was sent or passed on unless such a "
+    "tool has sent it."
+)
+
 
 @dataclass
 class PromptComponents:
@@ -73,6 +92,7 @@ class PromptComponents:
     tool_guidance: str
     tool_constraints: Optional[str] = None
     spoken_form: Optional[str] = None  # Only for a reply the voice reads aloud
+    said_aloud: Optional[str] = None  # Only for a reply the voice reads aloud
 
     def to_list(self) -> list[str]:
         """Convert to list of non-empty prompt strings."""
@@ -82,6 +102,7 @@ class PromptComponents:
             self.tool_incentives,
             self.voice_style,
             self.spoken_form,
+            self.said_aloud,
             self.tool_guidance,
         ]
         if self.tool_constraints:

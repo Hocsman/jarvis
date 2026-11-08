@@ -12,6 +12,7 @@ from .system import (
     PromptComponents,
     ASR_NOTE,
     INFERENCE_GUIDANCE,
+    SAID_ALOUD,
     SPOKEN_FORM,
     VOICE_STYLE,
 )
@@ -252,8 +253,9 @@ def get_system_prompts(model_size: ModelSize, *, spoken: bool = False) -> Prompt
     Args:
         model_size: The detected model size
         spoken: Whether the reply will be read aloud. Only then does it get
-            the spoken-form rule (units, signs and dates in words); a reply
-            that is read keeps its symbols.
+            the spoken-form rule (units, signs and dates in words) and, on a
+            large model, the said-aloud rule (what she is asked to say to
+            someone, she says); a reply that is read keeps its symbols.
 
     Returns:
         PromptComponents with all necessary prompt strings
@@ -278,4 +280,5 @@ def get_system_prompts(model_size: ModelSize, *, spoken: bool = False) -> Prompt
             tool_guidance=TOOL_GUIDANCE_LARGE,
             tool_constraints=TOOL_CONSTRAINTS_LARGE,
             spoken_form=spoken_form,
+            said_aloud=SAID_ALOUD if spoken else None,
         )

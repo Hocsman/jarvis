@@ -6,7 +6,9 @@ tool usage accuracy across different LLM sizes.
 """
 
 from .model_variants import ModelSize, detect_model_size, get_system_prompts
-from .system import PromptComponents, ASR_NOTE, INFERENCE_GUIDANCE, SPOKEN_FORM, VOICE_STYLE
+from .system import (
+    PromptComponents, ASR_NOTE, INFERENCE_GUIDANCE, SAID_ALOUD, SPOKEN_FORM, VOICE_STYLE,
+)
 
 __all__ = [
     "ModelSize",
@@ -15,6 +17,7 @@ __all__ = [
     "PromptComponents",
     "ASR_NOTE",
     "INFERENCE_GUIDANCE",
+    "SAID_ALOUD",
     "SPOKEN_FORM",
     "VOICE_STYLE",
 ]
