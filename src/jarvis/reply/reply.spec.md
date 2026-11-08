@@ -73,7 +73,7 @@ Design principles enforced by the engine:
    System message composition:
    - Start with the unified persona prompt rendered by `build_system_prompt(cfg.wake_word.capitalize())`, so the butler's name matches the user's wake word.
    - Append ASR note: inputs come from speech transcription and may include errors; prefer user intent and ask brief clarifying questions when uncertain.
-   - Append the voice style and, on a turn from the voice (`origin="voix"`) only, the spoken-form rule: units, signs and dates written as the words a person says, in the reply's language, since the voice misreads "°", "/h", a minus sign, a slash date and a long run of digits. A reply from the text chat or a routine is read, and keeps its symbols. See `src/jarvis/reply/prompts/prompts.spec.md`, Spoken Form.
+   - Append the voice style and, on a turn from the voice (`origin="voix"`) only, the spoken-form rule: units, signs and dates written as the words a person says, in the reply's language, since the voice misreads "°", "/h", a minus sign, a slash date and a long run of digits. A reply from the text chat or a routine is read, and keeps its symbols. See `src/jarvis/reply/prompts/prompts.spec.md`, Spoken Form. On a large chat model the same turns also get the said-aloud rule: whoever is with the user hears the reply, so what she is asked to say to someone she says in it, and sending a message is done with a tool that sends, looked for with `toolSearchTool` before she says she cannot (Said Aloud, same spec).
    - Append the projects block (`format_projets_block`) when the turn's catalogue offers `claudeCode` (a projects folder is named), the folder exists, the user's `outils.md` does not file `claudeCode` under `## Jamais`, the chat model is not small (a small one does not search for a tool its router left out), the turn is not a routine's, and it is not the turn that runs a call the user approved: what she can do with the user's code projects through Claude Code, how to reach the tool when the router left it out (`toolSearchTool` with its exact name), and that work on a project goes to Claude Code alone, whatever other tool the turn offers. It is said whatever the router offered, because a question about what she can do reads to the router as conversation. See `src/jarvis/projets/projets.spec.md`, What she knows she can do.
    - Append the tool-use protocol (allowed response formats and MCP invocation format if configured).
    - Append diary enrichment under a combined reference-only + recency-weighting framing when enrichment produced context. Entries are ordered newest-first with `[YYYY-MM-DD]` prefixes preserved. The preamble carries two load-bearing clauses:
@@ -336,7 +336,7 @@ prompts = get_system_prompts(model_size, spoken=origin == "voix")
 |-----------|-------------------|---------------------|
 | `tool_incentives` | "Proactively use available tools..." | "Use tools ONLY when explicitly required..." |
 | `tool_guidance` | "Use them proactively..." | Brief guidance without proactive language |
-| `tool_constraints` | Not included | Explicit list of when NOT to use tools |
+| `tool_constraints` | Shorter rules: action requests, unknown named entities, arguments the tool auto-derives, self-contained arguments | Explicit list of when NOT to use tools, repeated twice |
 
 **Small Model Constraints:**
 Small models receive explicit guidance on when NOT to use tools and, symmetrically, when they MUST use them:

@@ -32,7 +32,9 @@ used for end-of-session UI updates.
 - `origin="chat"`: the reply is read, not heard, so it is not given the
   spoken-form rule a voice turn gets (units, signs and dates written as
   words, `src/jarvis/reply/prompts/prompts.spec.md`), and a typed weather
-  question can be answered "11,2 °C".
+  question can be answered "11,2 °C". Nor is it given the said-aloud rule
+  (what she is asked to say to someone she says in the reply, since
+  whoever is with the user hears it): a typed reply reaches the user alone.
 - `language=None`: text input has no Whisper-detected language; tools fall
   back to their own defaults, same as a voice query with no language hint.
 - Redaction still applies (`run_reply_engine` calls `redact(text)` before

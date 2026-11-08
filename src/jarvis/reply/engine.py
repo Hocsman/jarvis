@@ -1285,7 +1285,9 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
             they asked for from one that happened while they were away.
             ``"voix"`` is also the one turn whose reply is read aloud, so it
             alone gets the spoken-form rule (units, signs and dates in
-            words); any other origin, or none, gets a reply that is read.
+            words) and, on a large model, the said-aloud rule (what she is
+            asked to say to someone, she says); any other origin, or none,
+            gets a reply that is read.
         granted / granted_action: a decision already taken by a
             deliberate gesture, so this turn runs the approved call and
             narrates it. The click has already claimed the question from

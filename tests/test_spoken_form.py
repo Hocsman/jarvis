@@ -1,11 +1,13 @@
 """
-The spoken-form rule: units, signs and dates written as the words a person
-says, for a reply the voice will read aloud.
+The rules of a reply the voice reads aloud: the spoken-form rule (units,
+signs and dates written as the words a person says) and, on a large model,
+the said-aloud rule (whoever is with the user hears her, so what she is
+asked to say to someone she says in the reply).
 
-It reaches a turn from the voice and nothing else. A reply typed in the chat
+They reach a turn from the voice and nothing else. A reply typed in the chat
 window is read, not heard, and keeps "11 °C"; a routine's reply is written to
-its journal. The evals that measure what the rule does to the replies live in
-``evals/test_spoken_units_as_words.py``.
+its journal. The evals that measure what the rules do to the replies live in
+``evals/test_spoken_units_as_words.py`` and ``evals/test_she_says_it.py``.
 """
 
 from __future__ import annotations
@@ -15,27 +17,40 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.jarvis.memory.conversation import DialogueMemory
-from src.jarvis.reply.prompts import ModelSize, SPOKEN_FORM, get_system_prompts
+from src.jarvis.reply.prompts import ModelSize, SAID_ALOUD, SPOKEN_FORM, get_system_prompts
+
+VOICE_RULES = (SPOKEN_FORM, SAID_ALOUD)
+
+# Which voice rules each model size is given on a spoken turn.
+_GIVEN = [
+    (ModelSize.LARGE, SPOKEN_FORM),
+    (ModelSize.LARGE, SAID_ALOUD),
+    (ModelSize.SMALL, SPOKEN_FORM),
+]
 
 
 @pytest.mark.unit
 class TestThePromptComponents:
 
+    @pytest.mark.parametrize("size, rule", _GIVEN)
+    def test_a_spoken_reply_is_given_the_rule(self, size, rule):
+        assert rule in get_system_prompts(size, spoken=True).to_list()
+
+    @pytest.mark.parametrize("rule", VOICE_RULES)
     @pytest.mark.parametrize("size", list(ModelSize))
-    def test_a_spoken_reply_is_given_the_rule(self, size):
-        assert SPOKEN_FORM in get_system_prompts(size, spoken=True).to_list()
+    def test_a_written_reply_is_not(self, size, rule):
+        assert rule not in get_system_prompts(size, spoken=False).to_list()
+        assert rule not in get_system_prompts(size).to_list()
+
+    def test_a_small_model_is_not_given_said_aloud(self):
+        assert SAID_ALOUD not in get_system_prompts(ModelSize.SMALL, spoken=True).to_list()
 
     @pytest.mark.parametrize("size", list(ModelSize))
-    def test_a_written_reply_is_not(self, size):
-        assert SPOKEN_FORM not in get_system_prompts(size, spoken=False).to_list()
-        assert SPOKEN_FORM not in get_system_prompts(size).to_list()
-
-    @pytest.mark.parametrize("size", list(ModelSize))
-    def test_the_rule_is_all_that_tells_them_apart(self, size):
+    def test_the_voice_rules_are_all_that_tells_them_apart(self, size):
         spoken = get_system_prompts(size, spoken=True).to_list()
         written = get_system_prompts(size, spoken=False).to_list()
 
-        assert [c for c in spoken if c != SPOKEN_FORM] == written
+        assert [c for c in spoken if c not in VOICE_RULES] == written
 
 
 def _cfg(tmp_path):
@@ -94,19 +109,20 @@ def _system_message(db, cfg, **kw) -> str:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("rule", VOICE_RULES)
 class TestWhichTurnsAreGivenTheRule:
 
-    def test_a_turn_from_the_voice_is(self, db, tmp_path):
+    def test_a_turn_from_the_voice_is(self, db, tmp_path, rule):
         system = _system_message(db, _cfg(tmp_path), origin="voix", language="fr")
 
-        assert SPOKEN_FORM in system
+        assert rule in system
 
-    def test_a_turn_from_the_text_chat_is_not(self, db, tmp_path):
+    def test_a_turn_from_the_text_chat_is_not(self, db, tmp_path, rule):
         system = _system_message(db, _cfg(tmp_path), origin="chat")
 
-        assert SPOKEN_FORM not in system
+        assert rule not in system
 
-    def test_a_routine_turn_is_not(self, db, tmp_path):
+    def test_a_routine_turn_is_not(self, db, tmp_path, rule):
         from src.jarvis.routines.scope import RoutineScope
 
         system = _system_message(
@@ -114,12 +130,12 @@ class TestWhichTurnsAreGivenTheRule:
             scope=RoutineScope(nom="matin", outils=["getWeather"], memoire=False),
         )
 
-        assert SPOKEN_FORM not in system
+        assert rule not in system
 
-    def test_a_turn_that_names_no_origin_is_not(self, db, tmp_path):
+    def test_a_turn_that_names_no_origin_is_not(self, db, tmp_path, rule):
         system = _system_message(db, _cfg(tmp_path))
 
-        assert SPOKEN_FORM not in system
+        assert rule not in system
 
 
 def _digest_system_prompt(db, cfg, **kw) -> str:
@@ -172,6 +188,11 @@ class TestTheReplyWrittenWhenTheLoopRunsOut:
         system = _digest_system_prompt(db, _cfg(tmp_path), origin="voix", language="fr")
 
         assert SPOKEN_FORM in system
+
+    def test_it_is_not_given_the_said_aloud_rule(self, db, tmp_path):
+        system = _digest_system_prompt(db, _cfg(tmp_path), origin="voix", language="fr")
+
+        assert SAID_ALOUD not in system
 
     def test_on_a_turn_from_the_text_chat_it_is_not(self, db, tmp_path):
         system = _digest_system_prompt(db, _cfg(tmp_path), origin="chat")
