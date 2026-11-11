@@ -1206,21 +1206,24 @@ def _she_says(listener, reply: str) -> float:
     return last_word
 
 
-def _whisper_hears(listener, text: str, *, started: float, level: float,
+def _whisper_hears(listener, text, *, started: float, level: float,
                    voice_ended: float = None, closed: float = None) -> None:
     """One utterance through the audio loop's own path, from the voice
     detector closing it to the decision: it started at *started* on the
     capture clock (pre-roll included), its voice went on until
     *voice_ended* (by default until it was closed), the detector closes it
     at *closed* (by default now) after the silence since, its audio sits at
-    *level*, and Whisper (faked) makes *text* of it."""
+    *level*, and Whisper (faked) makes *text* of it: one segment, or one
+    for each text of a list."""
+    texts = [text] if isinstance(text, str) else list(text)
     cfg = listener.cfg
     cfg.whisper_min_audio_duration, cfg.whisper_min_confidence = 0.15, 0.3
     cfg.whisper_no_speech_threshold = 0.5
     listener._whisper_backend, listener._whisper_device = "faster-whisper", "cuda"
     listener.model = MagicMock()
     listener.model.transcribe.return_value = (
-        [SimpleNamespace(text=f" {text}", avg_logprob=-0.1, no_speech_prob=0.01)],
+        [SimpleNamespace(text=f" {piece}", avg_logprob=-0.1, no_speech_prob=0.01)
+         for piece in texts],
         SimpleNamespace(language="fr"))
     listener.echo_detector.track_utterance_timing(started, 0.0)
     if closed is None:

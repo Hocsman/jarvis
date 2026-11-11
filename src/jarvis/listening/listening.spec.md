@@ -855,3 +855,17 @@ The prefix test uses `ratio`, not `partial_ratio`: the discarded half must be su
 The trigger upstream is purely temporal: he began speaking within the echo tolerance of her finishing. "There was no echo" is therefore exactly the case this fires on, which is why the text-level test has to carry the decision.
 
 A known, measured limit: the scan takes the rightmost matching window, so it eats the first word of his real speech — "who else is coming" comes back as "else is coming". Left alone deliberately, and pinned by a test so a future change has something to compare against.
+
+## Her sentences at the edges of what he said
+
+Whisper makes several segments of one utterance. When he speaks over her, or the moment she stops, the first or the last of them can be a sentence of her reply coming back through the microphone, and the rest his. Left together, her sentence goes to the model stuck to his question, or her sentences on both sides drown the few words of his that say he spoke, and the whole utterance is taken for her echo.
+
+So an utterance heard in her time (see "During TTS") that Whisper made of more than one segment loses the sentences of her reply that open and close it, before anything else reads it: the transcript buffer, the "(during TTS)" mark, the echo checks, the judge and the wake-word check all read what is left. The console says `✂️ Left out her own words, kept: "…"`; the `📝 Heard` line above it gives the utterance as Whisper heard it.
+
+**A segment is a sentence of hers on two tests, both.** It carries no more words she did not say than her echo does (the share of "Overriding an echo verdict takes positive evidence"), and it is one run of her reply (`partial_ratio` of 85 or more against the reply being weighed). The share alone is met by a short answer of his made of words she also used; the run alone by a sentence of his that quotes a few of her words. A segment under `EchoDetector.min_salvage_words` words is never hers: a word or two is too little to tell. Measured on two days of real transcripts, segment by segment: hers scored 87 and above on the run, his 65 and below.
+
+**Only the edges, and only when words of his are left.** A sentence of hers between two of his stays where it is. Nothing is taken out when what would be left is under `EchoDetector.min_salvage_words` words or carries no words she did not say: a word or two after her sentences is what Whisper makes of the quiet after her voice ("Merci."), and split from them it would stand alone as words she never said, in the hot window, where such words are answered.
+
+Outside her time nothing is taken out: a sentence of hers he repeats then is his.
+
+Kept on purpose: a sentence of his that repeats one of hers nearly word for word, at an edge of an utterance heard in her time, cannot be told from her sentence bent by Whisper, and is taken out with it. A correction that changes more than a word of hers falls under the run test and is kept (70 to 81 on corrections written for the measure).
