@@ -1395,6 +1395,23 @@ class VoiceListener(threading.Thread):
                     self._drop_the_early_beep()
                     return
 
+                # In the hot window, what he says to someone else (a guest,
+                # a caller, the people watching a live stream) is not for
+                # her, and the overrides below would answer it as speech in
+                # her window. It is still words someone said: it stays in
+                # the transcript as context for what he asks her next, and
+                # the window stays open. Her name in it is his call, as
+                # everywhere, and a verdict that also says directed falls to
+                # his side.
+                if (intent_judgment.aside and not intent_judgment.directed
+                        and could_be_hot_window
+                        and not self._carries_the_wake_word(text_lower)):
+                    debug_log(f"🔇 Said to someone else (judge): \"{text_lower}\"", "voice")
+                    print(f"  🔇 Heard (not to her): \"{text_lower[:50]}"
+                          f"{'...' if len(text_lower) > 50 else ''}\"", flush=True)
+                    self._drop_the_early_beep()
+                    return
+
                 # In the hot window a verdict the judge is unsure of weighs
                 # what a sure one does: both go through the paths below, and
                 # each of them says on the console what became of the

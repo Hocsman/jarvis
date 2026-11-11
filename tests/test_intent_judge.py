@@ -236,6 +236,34 @@ class TestIntentJudge:
         assert result is not None
         assert result.noise is False
 
+    def test_parse_response_reads_words_said_to_someone_else(self):
+        """The judge can say the words were said to another person."""
+        judge = IntentJudge()
+        response = ('{"directed": false, "query": "", "stop": false, "noise": false, '
+                    '"aside": true, "confidence": "high", "reasoning": "said to a guest"}')
+        result = judge._parse_response(response)
+
+        assert result is not None
+        assert result.aside is True
+        assert result.directed is False
+
+    def test_parse_response_without_aside_is_said_to_her(self):
+        """A model that leaves the field out has not called anything an aside."""
+        judge = IntentJudge()
+        response = '{"directed": false, "query": "", "stop": false, "confidence": "high", "reasoning": "x"}'
+        result = judge._parse_response(response)
+
+        assert result is not None
+        assert result.aside is False
+
+    def test_the_prompt_asks_for_the_aside_field(self):
+        """The judge is asked whether the words were said to someone else,
+        in the answer it writes and in hot window mode, where it decides."""
+        prompt = IntentJudge()._build_system_prompt()
+
+        assert '"aside": true/false' in prompt
+        assert "TO SOMEONE ELSE" in prompt
+
     def test_parse_response_with_extra_text(self):
         """Parses response with extra text around JSON."""
         judge = IntentJudge()
