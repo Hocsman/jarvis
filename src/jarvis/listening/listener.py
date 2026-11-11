@@ -482,6 +482,63 @@ def _tokens_she_did_not_say(heard: str, spoken: str) -> list:
             if not all(_her_word(m, siens) for m in re.findall(r"\w+", t, re.UNICODE))]
 
 
+# A piece of an utterance is a sentence of her reply coming back when it is
+# one run of that reply this closely. Measured piece by piece on two days of
+# real transcripts, hers scored 87 and above and his 65 and below;
+# corrections of his written in her own wording for the measure, 70 to 81.
+_HER_SENTENCE_MATCH = 85
+
+# Under this many words a piece is never hers: three words in a row are few
+# enough for him to say by chance after a long reply of hers ("à la
+# maison"), and what is taken out cannot be recovered.
+_HER_SENTENCE_MIN_WORDS = 4
+
+
+def _her_sentence(piece: str, spoken: str) -> bool:
+    """Whether *piece*, one of the segments Whisper made of an utterance, is
+    a sentence of her reply *spoken* coming back: long enough to tell, and
+    one run of her reply.
+
+    The run is read in one direction only. `partial_ratio` lays the shorter
+    text along the longer, so against a reply shorter than the piece it
+    would ask whether her reply is a run of the piece, and a segment
+    holding her whole reply and then words of his would pass. Such a piece
+    is weighed whole against her reply (`ratio`).
+    """
+    if len(piece.split()) < _HER_SENTENCE_MIN_WORDS:
+        return False
+    heard, said = piece.strip().lower(), spoken.strip().lower()
+    run = fuzz.partial_ratio if len(heard) <= len(said) else fuzz.ratio
+    return run(heard, said) >= _HER_SENTENCE_MATCH
+
+
+def _without_her_sentences_at_the_edges(pieces: list, spoken: str, min_words: int) -> tuple:
+    """*pieces*, the segments Whisper made of one utterance heard in her
+    time, without the sentences of her reply *spoken* that open and close
+    it. Returns what is kept and what was taken out.
+
+    Nothing is taken out when what would be left is under *min_words* words
+    or carries no words she did not say: a word or two after her sentences
+    is what Whisper makes of the quiet after her voice, and split from them
+    it would stand alone as words she never said. A sentence of hers between
+    two of his stays where it is.
+    """
+    pieces = [piece for piece in pieces if piece and piece.strip()]
+    if len(pieces) < 2 or not (spoken or "").strip():
+        return pieces, []
+    first, last = 0, len(pieces)
+    while first < last and _her_sentence(pieces[first], spoken):
+        first += 1
+    while last > first and _her_sentence(pieces[last - 1], spoken):
+        last -= 1
+    his, hers = pieces[first:last], pieces[:first] + pieces[last:]
+    left = " ".join(his)
+    if (not hers or len(left.split()) < min_words
+            or not _carries_speech_she_did_not_say(left, spoken)):
+        return pieces, []
+    return his, hers
+
+
 _TRUNCATION_MARKS = ("...", "…")
 
 
@@ -1774,6 +1831,23 @@ class VoiceListener(threading.Thread):
             spoken = self.echo_detector._last_tts_text or ""
         return (_carries_speech_she_did_not_say(heard, spoken)
                 and self.echo_detector.utterance_carries_a_voice(utterance_energy))
+
+    def _his_words_among_her_sentences(self, text: str, pieces: list) -> str:
+        """*text*, an utterance heard in her time that Whisper made of
+        *pieces*, without the sentences of her reply that open and close it
+        (`_without_her_sentences_at_the_edges`), and the console told what
+        was kept. Unchanged when nothing of it is hers to take out."""
+        his, hers = _without_her_sentences_at_the_edges(
+            pieces, self.echo_detector._last_tts_text or "",
+            self.echo_detector.min_salvage_words)
+        if not hers:
+            return text
+        kept = " ".join(his).strip()
+        debug_log(f"✂️ her sentences at the edges left out: {[h.strip() for h in hers]}, "
+                  f"kept: \"{kept}\"", "voice")
+        print(f"  ✂️ Left out her own words, kept: \"{kept[:60]}"
+              f"{'...' if len(kept) > 60 else ''}\"", flush=True)
+        return kept
 
     def _in_her_time(self, utterance_start_time: float) -> bool:
         """Whether an utterance can hold her own voice coming back: she is
@@ -4024,6 +4098,9 @@ class VoiceListener(threading.Thread):
         # `whisper_language`, or the one it detected), kept below only if
         # the utterance is heard as something.
         detected: Optional[str] = None
+        # The segments Whisper made of the utterance that the confidence
+        # filter let through; none when it gave only a whole text.
+        pieces: list = []
 
         # Speech recognition with appropriate backend
         try:
@@ -4082,6 +4159,7 @@ class VoiceListener(threading.Thread):
 
                         filtered_texts.append(seg.get("text", ""))
 
+                    pieces = filtered_texts
                     text = " ".join(filtered_texts).strip()
                 else:
                     # Fallback to full text if no segments
@@ -4101,7 +4179,8 @@ class VoiceListener(threading.Thread):
                 # variants may not carry the attribute.
                 detected = getattr(_info, "language", None)
                 filtered_segments = self._filter_noisy_segments(segments_list)
-                text = " ".join(seg.text for seg in filtered_segments).strip()
+                pieces = [seg.text for seg in filtered_segments]
+                text = " ".join(pieces).strip()
         except Exception as e:
             debug_log(f"transcription error: {e}", "voice")
             if sys.platform == 'win32':
@@ -4155,6 +4234,10 @@ class VoiceListener(threading.Thread):
         # their voice stopped with hers (`_could_be_hers`). Both are read
         # once, so the line logged gives the reading that decided.
         in_her_time = self._in_her_time(utterance_start_time)
+        if in_her_time:
+            # Her sentences that open and close it go first, so everything
+            # below reads his words alone.
+            text = self._his_words_among_her_sentences(text, pieces)
         stopped_with_hers = self._voice_stopped_with_hers(utterance_end_time, trailing_silence)
         is_during_tts = self._could_be_hers(text, utterance_energy, in_her_time,
                                             stopped_with_hers)

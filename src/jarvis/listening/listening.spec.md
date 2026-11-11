@@ -375,6 +375,9 @@ While TTS is playing, echo rejection and stop commands are handled with fast tex
   clears the energy bar, so for her voice coming back they come down to its
   words.
 - Intent judge uses this context to identify echo
+- All of this is read on the utterance once the sentences of her reply that
+  open and close it are out (see "Her sentences at the edges of what he
+  said"), so his words between two sentences of hers are weighed alone.
 
 ## Rolling Transcript Buffer
 
@@ -688,6 +691,8 @@ Speech Detected → Accumulate Frames
     ↓
 Silence Timeout → Whisper Transcription
     ↓
+In her time, several segments → her sentences at the edges left out (✂️)
+    ↓
 Add to Transcript Buffer (with timestamps; flagged "(during TTS)" when it could be her echo)
     ↓
 Wake Detection Check:
@@ -855,3 +860,25 @@ The prefix test uses `ratio`, not `partial_ratio`: the discarded half must be su
 The trigger upstream is purely temporal: he began speaking within the echo tolerance of her finishing. "There was no echo" is therefore exactly the case this fires on, which is why the text-level test has to carry the decision.
 
 A known, measured limit: the scan takes the rightmost matching window, so it eats the first word of his real speech — "who else is coming" comes back as "else is coming". Left alone deliberately, and pinned by a test so a future change has something to compare against.
+
+## Her sentences at the edges of what he said
+
+Whisper makes several segments of one utterance. When he speaks over her, or the moment she stops, the first or the last of them can be a sentence of her reply coming back through the microphone, and the rest his. Left together, her sentence goes to the model stuck to his question, or her sentences on both sides drown the few words of his that say he spoke, and the whole utterance is taken for her echo.
+
+So an utterance heard in her time (see "During TTS") that Whisper made of more than one segment loses the sentences of her reply that open and close it. The transcript buffer, the "(during TTS)" mark, the echo checks and strippers, the judge and the wake-word check all read what is left. The copy kept of the utterance (see "Keeping a Copy of an Utterance"), the repetition filter and the `📝 Heard` line read it as Whisper heard it; the console then says `✂️ Left out her own words, kept: "…"`.
+
+**A segment is a sentence of hers when it is one run of her reply**, the reply the echo detector holds, whole (`output/streaming.spec.md`): `partial_ratio` of 85 or more (`_HER_SENTENCE_MATCH`). Measured segment by segment on two days of real transcripts, hers scored 87 and above and his 65 and below; corrections of his written in her own wording for the measure scored 70 to 81.
+
+- The run is read in one direction. A segment longer than her whole reply is weighed whole against it (`ratio`): `partial_ratio` lays the shorter text along the longer, so it would ask whether her reply is a run of the segment, and a segment holding her short reply and then the start of his question would be taken out, his question with it.
+- A segment under four words (`_HER_SENTENCE_MIN_WORDS`) is never hers. Three words in a row are few enough for him to say after a long reply of hers, and what is taken out cannot be recovered; her words left at the edge of his are noise the judge reads past.
+
+**Only the edges, and only when words of his are left.** A sentence of hers between two of his stays where it is. Nothing is taken out when what would be left is under `EchoDetector.min_salvage_words` words, counted as every salvage counts them, or carries no words she did not say (the share of "Overriding an echo verdict takes positive evidence"): a word or two after her sentences is what Whisper makes of the quiet after her voice ("Merci."), and split from them it would stand alone as words she never said, in the hot window, where such words are answered.
+
+Outside her time nothing is taken out: a sentence of hers he repeats then is his.
+
+Kept on purpose:
+
+- A sentence of his, four words or more, that repeats words of hers nearly as she said them, at an edge of an utterance heard in her time, cannot be told from her sentence bent by Whisper, and is taken out with it.
+- Her sentences followed by three words or more that nobody said to her (a television, a phrase Whisper makes of the room) leave those words standing alone, unmarked, as they stand when Whisper hears them as an utterance of their own. While she speaks nothing is made of them without her name; in the hot window the rules for words that could be hers apply to them as to any utterance.
+- The cut works on Whisper's segments, never inside one: a segment holding a sentence of hers and words of his is left to the strippers of "Salvaging his speech out of a merged echo chunk".
+- Words are counted between spaces, so in a script written without them a sentence counts as one word and nothing is taken out.
