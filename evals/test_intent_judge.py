@@ -1252,15 +1252,9 @@ LONE_THANKS_CASES = [
 # Track regressions / future prompt improvements here.
 KNOWN_FAILING_CASES: set = {
     # His words to someone else are left alone only on an `aside` verdict.
-    # gemma4:e2b has not been read on them: a judge that never says `aside`
+    # Expected of gemma4:e2b, not measured: a judge that never says `aside`
     # answers them all, as it answers any speech in the hot window.
-    *(f"{language}_{case}" for language, case in (
-        ("french", "to_someone_else_music"), ("french", "to_someone_else_wait"),
-        ("french", "to_someone_else_keys"), ("english", "to_someone_else_door"),
-        ("english", "to_someone_else_wait"), ("french", "to_a_viewer_thanks"),
-        ("french", "to_a_viewer_welcome"), ("french", "about_her_to_them"),
-        ("french", "to_his_mother"), ("english", "to_a_viewer_thanks"),
-        ("english", "about_her_to_them"), ("english", "on_a_call"))),
+    *(case.name for case in TO_SOMEONE_ELSE_CASES),
     # gemma4:e2b calls subtitle credits noise but not the closing lines of a
     # video or a broadcast (docs/llm_contexts.md, "2. Intent Judge").
     "russian_outro_after_french",
@@ -1589,9 +1583,9 @@ class TestIntentJudgeMultiSegment:
 def _answered_in_the_hot_window(case, verdict) -> bool:
     """What the listener does in the hot window with a verdict on a segment
     it did not mark as possibly hers: it dispatches a directed one, and its
-    overrides take any rejection that says neither noise nor, with high
-    confidence, words to someone else, whatever the confidence otherwise. A rejection whose reasoning says echo is overridden only on
-    words she did not say, spoken in a voice: the words are weighed here as
+    overrides take a rejection at any confidence, unless it says noise, or
+    says aside with high confidence. A rejection whose reasoning says echo
+    is overridden only on words she did not say, spoken in a voice: the words are weighed here as
     the listener weighs them, and his words carry a voice where text Whisper
     makes of silence carries none. The cases carry no wake word, so the
     wake-word check never takes the decision."""
@@ -1805,12 +1799,12 @@ def test_a_remark_to_her_control_reaches_the_judge_whole(case, voice_stops_with_
 
 class TestIntentJudgeHearsARemarkToHer:
     """Right after her reply, a remark said to her that asks for nothing (a
-    greeting, thanks, a compliment) is answered: a not-directed noise verdict
-    is the one the hot window never overrides, and so is a follow-up that
-    names another person. Left alone: his words to someone else, on a
-    not-directed `aside` verdict given with high confidence, Whisper's
-    inventions, her own warm sign-off misheard as words she never said, and
-    a lone "Thank you." after an English reply."""
+    greeting, thanks, a compliment) is answered, and so is a follow-up that
+    names another person: the hot window overrides every rejection but a
+    not-directed noise verdict and a not-directed `aside` given with high
+    confidence. Left alone: his words to someone else, on such an aside,
+    Whisper's inventions, her own warm sign-off misheard as words she never
+    said, and a lone "Thank you." after an English reply."""
 
     @pytest.mark.parametrize("case", REMARK_EVAL_CASES, ids=lambda case: case.name)
     def test_a_remark_to_her_case(self, case: NotSpeechCase):
@@ -1825,7 +1819,8 @@ class TestIntentJudgeHearsARemarkToHer:
 
         group = _REMARK_GROUP_OF[case.name]
         msg = (f"{case.name} ({group}, needs: {REMARK_GROUPS[group][1]}): "
-               f"directed={result.directed}, noise={result.noise}, query='{result.query}'. "
+               f"directed={result.directed}, noise={result.noise}, aside={result.aside}, "
+               f"confidence={result.confidence}, query='{result.query}'. "
                f"Reasoning: {result.reasoning}")
         print(f"\nTest Case: {case.name} | current: \"{case.segments[-1][0]}\"")
         if not _remark_verdict_ok(case, result):
@@ -1966,8 +1961,7 @@ class TestIntentJudgeNotSpeechArms:
     def test_her_voice_rewritten_unmarked_against_marked_call_by_call(self, capsys):
         """Her last sentence coming back as words she never said, its voice
         stopping with hers. Each arm reads every case unmarked, as the judge
-        is shown it when the two proofs alone decide, where any verdict but
-        noise has it answered, and marked "(during TTS)", as the listener
+        is shown it when the two proofs alone decide, where any verdict but noise or a sure aside has it answered, and marked "(during TTS)", as the listener
         shows an utterance whose voice stops with hers, where only a
         directed verdict with a query is answered, the two alternating call
         by call. Every answer is a miss: these are her words."""

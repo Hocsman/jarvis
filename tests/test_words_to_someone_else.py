@@ -14,14 +14,18 @@ returns the verdict each test names.
 """
 
 import time
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
+from jarvis.config import get_default_config
+from jarvis.listening.wake_detection import is_wake_word_detected
+from jarvis.tools.confirmation import CHANNEL_PAROLE
 from test_hot_window_input import (
-    _accepted_query, _console_lines, _create_listener, _install_intent_judge,
-    _is_beeping, _make_judgment, _prompt_shown_to, _simulate_tts_finish,
-    _wait_for_hot_window_active,
+    _accepted_query, _console_lines, _console_says_heard_as_her_echo, _create_listener,
+    _install_intent_judge, _is_beeping, _make_judgment, _prompt_shown_to,
+    _simulate_tts_finish, _wait_for_hot_window_active, _wait_for_hot_window_expiry,
 )
 
 _HER_REPLY = "Pour demain, le ciel sera dégagé, Monsieur."
@@ -34,19 +38,36 @@ def _to_someone_else(**kwargs):
                           reasoning="said to a guest he names, not to the assistant", **kwargs)
 
 
-def _in_the_window(reply=_HER_REPLY):
-    listener, _ = _create_listener(echo_tolerance=0.02, hot_window_seconds=3.0)
+def _in_the_window(reply=_HER_REPLY, **kwargs):
+    listener, _ = _create_listener(**{"echo_tolerance": 0.02, "hot_window_seconds": 3.0,
+                                      **kwargs})
     listener.echo_detector.track_tts_start(reply)
     _simulate_tts_finish(listener)
     assert _wait_for_hot_window_active(listener)
     return listener
 
 
-def _hear(listener, text):
+def _hear(listener, text, **when):
     """What the audio loop does before handing the text over."""
     now = time.time()
     listener._transcript_buffer.add(text, now - 1.0, now, 0.01)
-    listener._process_transcript(text, utterance_energy=0.01)
+    listener._process_transcript(text, utterance_energy=0.01, **when)
+
+
+def _said_not_to_her(mock_print) -> bool:
+    return any("not to her" in line for line in _console_lines(mock_print))
+
+
+def _a_first_name_close_to_hers(cfg) -> str:
+    """A first name the wake-word check takes for a spelling of her name,
+    and that is none of her names."""
+    names = {cfg.wake_word, *cfg.wake_aliases}
+    close = [name for name in ("boris", "chris", "doris", "harris", "mavis")
+             if name not in names
+             and is_wake_word_detected(name, cfg.wake_word, list(cfg.wake_aliases),
+                                       cfg.wake_fuzzy_ratio)]
+    assert close, "no first name here is close to her name as configured"
+    return close[0]
 
 
 @pytest.mark.unit
@@ -97,11 +118,14 @@ class TestHisWordsToSomeoneElse:
         _install_intent_judge(listener, _to_someone_else())
         _hear(listener, _TO_A_GUEST)
 
+        assert _accepted_query(listener) == ""
+
         judge = _install_intent_judge(listener, _make_judgment(
             directed=True, query=_HIS_FOLLOW_UP, confidence="high"))
         _hear(listener, _HIS_FOLLOW_UP)
 
         assert "camille" in _prompt_shown_to(judge).lower()
+        assert _accepted_query(listener) == _HIS_FOLLOW_UP
         listener.state_manager.stop()
 
     @pytest.mark.parametrize("confidence", ["medium", "low"])
@@ -135,7 +159,7 @@ class TestHisWordsToSomeoneElse:
     @patch("builtins.print")
     def test_a_rejection_that_does_not_say_so_is_still_overridden(self, _print):
         """Only the judge's word for it sets his speech aside: any other
-        rejection of speech in the hot window is answered as before."""
+        rejection of speech in the hot window is overridden, and answered."""
         listener = _in_the_window()
         _install_intent_judge(listener, _make_judgment(
             directed=False, confidence="high", reasoning="not a question"))
@@ -154,6 +178,89 @@ class TestHisWordsToSomeoneElse:
         _hear(listener, "jarvis, quelle heure est-il ?")
 
         assert "quelle heure" in _accepted_query(listener)
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_a_configured_spelling_of_her_name_is_his_call_too(self, _print):
+        listener = _in_the_window()
+        listener.cfg.wake_aliases = list(get_default_config()["wake_aliases"])
+        _install_intent_judge(listener, _to_someone_else())
+
+        _hear(listener, f"{listener.cfg.wake_aliases[0]}, quelle heure est-il ?")
+
+        assert "quelle heure" in _accepted_query(listener)
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_a_first_name_close_to_hers_is_not_her_name(self, mock_print):
+        """The wake-word check takes close spellings for her name, and a
+        guest can be called one of them. The judge was sure the words were
+        for that guest: a name that is only close to hers does not undo it."""
+        listener = _in_the_window()
+        listener.cfg.wake_aliases = list(get_default_config()["wake_aliases"])
+        guest = _a_first_name_close_to_hers(listener.cfg)
+        _install_intent_judge(listener, _to_someone_else())
+
+        _hear(listener, f"merci {guest} pour le café, tu vas bien ?")
+
+        assert _accepted_query(listener) == ""
+        assert _said_not_to_her(mock_print)
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_his_answer_to_her_question_is_never_set_aside(self, mock_print):
+        """She asked before acting and waits for his yes or no. What he says
+        then is his answer, whoever he names in it: it goes to the reader of
+        answers, which closes the question, and is never left behind."""
+        listener = _in_the_window("Voulez-vous que j'envoie le message à Hugo ?")
+        asked = SimpleNamespace(channel=CHANNEL_PAROLE, origin="voix", request_id="q1")
+        listener.dialogue_memory = SimpleNamespace(peek_pending=lambda: asked)
+        assert listener.awaiting_spoken_answer()
+        _install_intent_judge(listener, _to_someone_else())
+
+        _hear(listener, "non, camille, laisse tomber")
+
+        assert _accepted_query(listener) == "non, camille, laisse tomber"
+        assert not _said_not_to_her(mock_print)
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_what_he_adds_to_his_question_joins_it(self, mock_print):
+        """His follow-up and what he adds to it both began in the window,
+        and Whisper handed the first over once the window had closed. The
+        addition completes his question, whatever the judge says of it."""
+        listener = _in_the_window(hot_window_seconds=0.4)
+        began = time.time()
+        assert _wait_for_hot_window_expiry(listener)
+        _install_intent_judge(listener, _make_judgment(
+            directed=True, query=_HIS_FOLLOW_UP, confidence="high"))
+        _hear(listener, _HIS_FOLLOW_UP,
+              utterance_start_time=began, utterance_end_time=began + 0.10)
+        assert listener.state_manager.is_collecting()
+
+        _install_intent_judge(listener, _to_someone_else())
+        _hear(listener, "et aussi pour lille, camille me le demande",
+              utterance_start_time=began + 0.20, utterance_end_time=began + 0.35)
+
+        assert "camille me le demande" in _accepted_query(listener)
+        assert not _said_not_to_her(mock_print)
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_words_that_could_be_hers_are_still_her_echo(self, mock_print):
+        """Words heard as her voice stops, which nothing proves he said, are
+        set aside as her echo whatever the judge calls them."""
+        heard = "à demain alors, camille"
+        listener = _in_the_window(echo_tolerance=0.3)
+        last_word = listener.echo_detector._last_tts_finish_time
+        _install_intent_judge(listener, _to_someone_else())
+
+        _hear(listener, heard, utterance_start_time=last_word - 0.5,
+              utterance_end_time=last_word + 0.1, trailing_silence=0.0)
+
+        assert _accepted_query(listener) == ""
+        assert _console_says_heard_as_her_echo(mock_print, heard)
+        assert not _said_not_to_her(mock_print)
         listener.state_manager.stop()
 
     @patch("builtins.print")
