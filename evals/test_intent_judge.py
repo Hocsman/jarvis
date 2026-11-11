@@ -27,11 +27,14 @@ utterance whose voice stops with hers (`-k rewritten` runs it alone, after
 a check that needs no model: the listener shows each case to the judge
 whole, marked only when its voice stops with hers). A fifth reads a remark
 said to her that asks for nothing (a greeting, thanks, a compliment) right
-after her reply, with its controls heard at the same moment: his words to
-someone else, Whisper's inventions, her own warm sign-off misheard as
-words she never said, unmarked, and a lone "Thank you." after an English
-reply (`-k a_remark_to_her` runs it alone, with its check that needs no
-model and its per-case reading on the eval model).
+after her reply, and his follow-ups that name another person, with what
+must be left alone heard at the same moment: his words to someone else (a
+guest, a caller, the people watching a live stream), which only a
+not-directed `aside` verdict given with high confidence sets aside,
+Whisper's inventions, her own warm sign-off misheard as words she never
+said, unmarked, and a lone "Thank you." after an English reply
+(`-k a_remark_to_her` runs it alone, with its check that needs no model
+and its per-case reading on the eval model).
 `EVAL_INTENT_JUDGE_PROMPT_REF` names a git ref: each model then also runs
 with the system prompt at that ref, as an arm of its own interleaved with
 the others, so a prompt change is measured against the prompt it replaces
@@ -1094,7 +1097,8 @@ REMARK_TO_HER_CASES = [
 # His words to someone else, heard at the same moment: a guest in the room,
 # someone on a call, the people watching a live stream. They are his words,
 # never noise, and not for her: the hot window leaves them alone on a
-# not-directed verdict that says ``aside``, and answers them on any other.
+# not-directed verdict that says ``aside`` with high confidence, and answers
+# them on any other.
 TO_SOMEONE_ELSE_CASES = [
     NotSpeechCase("french_to_someone_else_music",
                   _right_after(_FR_REPLY, "Camille, tu peux baisser la musique, s'il te plaît ?"),
@@ -1247,6 +1251,16 @@ LONE_THANKS_CASES = [
 # Cases known to fail with the small model on the current prompt.
 # Track regressions / future prompt improvements here.
 KNOWN_FAILING_CASES: set = {
+    # His words to someone else are left alone only on an `aside` verdict.
+    # gemma4:e2b has not been read on them: a judge that never says `aside`
+    # answers them all, as it answers any speech in the hot window.
+    *(f"{language}_{case}" for language, case in (
+        ("french", "to_someone_else_music"), ("french", "to_someone_else_wait"),
+        ("french", "to_someone_else_keys"), ("english", "to_someone_else_door"),
+        ("english", "to_someone_else_wait"), ("french", "to_a_viewer_thanks"),
+        ("french", "to_a_viewer_welcome"), ("french", "about_her_to_them"),
+        ("french", "to_his_mother"), ("english", "to_a_viewer_thanks"),
+        ("english", "about_her_to_them"), ("english", "on_a_call"))),
     # gemma4:e2b calls subtitle credits noise but not the closing lines of a
     # video or a broadcast (docs/llm_contexts.md, "2. Intent Judge").
     "russian_outro_after_french",
@@ -1575,15 +1589,15 @@ class TestIntentJudgeMultiSegment:
 def _answered_in_the_hot_window(case, verdict) -> bool:
     """What the listener does in the hot window with a verdict on a segment
     it did not mark as possibly hers: it dispatches a directed one, and its
-    overrides take any rejection that says neither noise nor words to someone
-    else, whatever the confidence. A rejection whose reasoning says echo is overridden only on
+    overrides take any rejection that says neither noise nor, with high
+    confidence, words to someone else, whatever the confidence otherwise. A rejection whose reasoning says echo is overridden only on
     words she did not say, spoken in a voice: the words are weighed here as
     the listener weighs them, and his words carry a voice where text Whisper
     makes of silence carries none. The cases carry no wake word, so the
     wake-word check never takes the decision."""
     if verdict.directed:
         return True
-    if verdict.noise or verdict.aside:
+    if verdict.noise or (verdict.aside and verdict.confidence == "high"):
         return False
     if "echo" in (verdict.reasoning or "").lower():
         return (not case.expected_noise
@@ -1792,10 +1806,11 @@ def test_a_remark_to_her_control_reaches_the_judge_whole(case, voice_stops_with_
 class TestIntentJudgeHearsARemarkToHer:
     """Right after her reply, a remark said to her that asks for nothing (a
     greeting, thanks, a compliment) is answered: a not-directed noise verdict
-    is the one the hot window never overrides. The controls: his words to
-    someone else are never noise, and neither Whisper's inventions, nor her
-    own warm sign-off misheard as words she never said, nor a lone "Thank
-    you." after an English reply are answered."""
+    is the one the hot window never overrides, and so is a follow-up that
+    names another person. Left alone: his words to someone else, on a
+    not-directed `aside` verdict given with high confidence, Whisper's
+    inventions, her own warm sign-off misheard as words she never said, and
+    a lone "Thank you." after an English reply."""
 
     @pytest.mark.parametrize("case", REMARK_EVAL_CASES, ids=lambda case: case.name)
     def test_a_remark_to_her_case(self, case: NotSpeechCase):
@@ -2003,7 +2018,7 @@ class TestIntentJudgeNotSpeechArms:
         `EVAL_INTENT_JUDGE_PROMPT_REF` set, each model's two prompts are
         compared on both, group by group."""
         judges = _warm_judges()
-        # right, directed, answered, noise, calls, no verdict, aside
+        # right, directed, answered, noise, calls, no verdict, aside at high confidence
         tally = {(arm, group): [0, 0, 0, 0, 0, 0, 0] for arm in JUDGE_ARMS for group in REMARK_GROUPS}
         misses = {}   # (arm, case) -> wrong verdicts
         for case, arm in _interleaved(JUDGE_ARMS, REMARK_EVAL_CASES):
@@ -2020,7 +2035,7 @@ class TestIntentJudgeNotSpeechArms:
             row[1] += int(verdict.directed)
             row[2] += int(_answered_in_the_hot_window(case, verdict))
             row[3] += int(verdict.noise)
-            row[6] += int(verdict.aside)
+            row[6] += int(verdict.aside and verdict.confidence == "high")
             if not right:
                 misses[(arm, case.name)] = misses.get((arm, case.name), 0) + 1
 
@@ -2029,7 +2044,8 @@ class TestIntentJudgeNotSpeechArms:
             scored = calls - silent
             lines.append(f"🧪 {arm:{_ARM_WIDTH}} {group:21}  right {rate(right, scored)}, "
                          f"answered {answered}/{scored}, directed {directed}/{scored}, "
-                         f"noise {noise}/{scored}, aside {aside}/{scored}, no verdict {silent}")
+                         f"noise {noise}/{scored}, sure aside {aside}/{scored}, "
+                         f"no verdict {silent}")
         for (arm, name), count in sorted(misses.items()):
             lines.append(f"   ↳ {arm}: {name} wrong {count}/{NOT_SPEECH_ROUNDS}")
         if PROMPT_REF:

@@ -104,6 +104,22 @@ class TestHisWordsToSomeoneElse:
         assert "camille" in _prompt_shown_to(judge).lower()
         listener.state_manager.stop()
 
+    @pytest.mark.parametrize("confidence", ["medium", "low"])
+    @patch("builtins.print")
+    def test_an_aside_the_judge_is_unsure_of_is_answered(self, _print, confidence):
+        """A follow-up left unanswered costs him more than an aside answered,
+        and the judge's doubtful asides are mostly his words to her: only one
+        it is sure of sets his speech aside."""
+        listener = _in_the_window()
+        _install_intent_judge(listener, _make_judgment(
+            directed=False, confidence=confidence, aside=True,
+            reasoning="may be said to someone else, a close call"))
+
+        _hear(listener, _HIS_FOLLOW_UP)
+
+        assert _accepted_query(listener) == _HIS_FOLLOW_UP
+        listener.state_manager.stop()
+
     @patch("builtins.print")
     def test_a_judge_that_also_says_directed_is_believed(self, _print):
         """A verdict that contradicts itself falls to his side."""

@@ -1402,8 +1402,11 @@ class VoiceListener(threading.Thread):
                 # the transcript as context for what he asks her next, and
                 # the window stays open. Her name in it is his call, as
                 # everywhere, and a verdict that also says directed falls to
-                # his side.
+                # his side. So does an aside the judge is not sure of: its
+                # doubtful ones are mostly his words to her, and a follow-up
+                # left unanswered costs him more than an aside answered.
                 if (intent_judgment.aside and not intent_judgment.directed
+                        and intent_judgment.confidence == "high"
                         and could_be_hot_window
                         and not self._carries_the_wake_word(text_lower)):
                     debug_log(f"🔇 Said to someone else (judge): \"{text_lower}\"", "voice")
