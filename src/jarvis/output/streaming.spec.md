@@ -35,7 +35,10 @@ only the last sentence, and every guard downstream reads it:
   `_not_her_echo`, which transcripts the judge is shown "(during TTS)" and
   which no hot-window override takes, with a verdict or without one. Its
   word test also tells which words of a hot-window utterance are hers when
-  the listener asks whether a wake word in it can only be his.
+  the listener asks whether a wake word in it can only be his,
+- the cut of her sentences at the edges of an utterance heard in her time
+  (`listening.spec.md`, "Her sentences at the edges of what he said"): a
+  sentence coming back while a later one plays is found in the reply.
 
 An echo of sentence one, arriving while sentence three is being spoken,
 would be compared against sentence three, match nothing, and be taken for

@@ -483,24 +483,33 @@ def _tokens_she_did_not_say(heard: str, spoken: str) -> list:
 
 
 # A piece of an utterance is a sentence of her reply coming back when it is
-# one run of that reply this closely (`partial_ratio`). Measured on two
-# days of real transcripts, piece by piece: hers scored 87 and above, his
-# 65 and below, and a correction of his made of her own wording 70 to 81.
+# one run of that reply this closely. Measured piece by piece on two days of
+# real transcripts, hers scored 87 and above and his 65 and below;
+# corrections of his written in her own wording for the measure, 70 to 81.
 _HER_SENTENCE_MATCH = 85
 
+# Under this many words a piece is never hers: three words in a row are few
+# enough for him to say by chance after a long reply of hers ("à la
+# maison"), and what is taken out cannot be recovered.
+_HER_SENTENCE_MIN_WORDS = 4
 
-def _her_sentence(piece: str, spoken: str, min_words: int) -> bool:
+
+def _her_sentence(piece: str, spoken: str) -> bool:
     """Whether *piece*, one of the segments Whisper made of an utterance, is
-    a sentence of her reply *spoken* coming back: long enough to tell, with
-    no more words she did not say than her echo carries, and one run of her
-    reply. Both tests, because either alone takes his words for hers: the
-    share of words is met by a short answer made of words she also used,
-    the run by a sentence of his that quotes a few words of hers."""
-    if len(piece.split()) < min_words:
+    a sentence of her reply *spoken* coming back: long enough to tell, and
+    one run of her reply.
+
+    The run is read in one direction only. `partial_ratio` lays the shorter
+    text along the longer, so against a reply shorter than the piece it
+    would ask whether her reply is a run of the piece, and a segment
+    holding her whole reply and then words of his would pass. Such a piece
+    is weighed whole against her reply (`ratio`).
+    """
+    if len(piece.split()) < _HER_SENTENCE_MIN_WORDS:
         return False
-    if _carries_speech_she_did_not_say(piece, spoken):
-        return False
-    return fuzz.partial_ratio(piece.strip().lower(), spoken.lower()) >= _HER_SENTENCE_MATCH
+    heard, said = piece.strip().lower(), spoken.strip().lower()
+    run = fuzz.partial_ratio if len(heard) <= len(said) else fuzz.ratio
+    return run(heard, said) >= _HER_SENTENCE_MATCH
 
 
 def _without_her_sentences_at_the_edges(pieces: list, spoken: str, min_words: int) -> tuple:
@@ -518,9 +527,9 @@ def _without_her_sentences_at_the_edges(pieces: list, spoken: str, min_words: in
     if len(pieces) < 2 or not (spoken or "").strip():
         return pieces, []
     first, last = 0, len(pieces)
-    while first < last and _her_sentence(pieces[first], spoken, min_words):
+    while first < last and _her_sentence(pieces[first], spoken):
         first += 1
-    while last > first and _her_sentence(pieces[last - 1], spoken, min_words):
+    while last > first and _her_sentence(pieces[last - 1], spoken):
         last -= 1
     his, hers = pieces[first:last], pieces[:first] + pieces[last:]
     left = " ".join(his)
@@ -4089,7 +4098,8 @@ class VoiceListener(threading.Thread):
         # `whisper_language`, or the one it detected), kept below only if
         # the utterance is heard as something.
         detected: Optional[str] = None
-        # The segments Whisper made of the utterance, the ones kept.
+        # The segments Whisper made of the utterance that the confidence
+        # filter let through; none when it gave only a whole text.
         pieces: list = []
 
         # Speech recognition with appropriate backend
