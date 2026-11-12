@@ -394,12 +394,12 @@ Both thresholds are exposed in the Settings window under *Speech Recognition*.
 What gets past them, typically a subtitle credit or the closing line of a video ("Thank you.", "See you in the next video") in a language nobody in the room speaks, is left to the intent judge: when it says a phrase is not speech, the assistant does not answer it, even just after a reply when it is otherwise waiting for your follow-up, and does not add it to a question you are still asking. How much it catches depends on the judge model: the default small `gemma4:e2b` recognises most subtitle credits but usually not the closing lines of videos, which a larger judge model catches.
 
 #### Names It Should Know
-Whisper tends to turn a rare name into a word it knows ("Bagneux" can come back "Bagnus"). Your `weather_city` is passed to Whisper as a hint on every transcription, and you can add other names (places, people, products) to `"whisper_vocabulary"`, also under *Whisper* in Settings:
+Whisper tends to turn a rare name into a word it knows (a town called "Varnelle" can come back "Varnel"). Your `weather_city` is passed to Whisper as a hint on every transcription, and you can add other names (places, people, products) to `"whisper_vocabulary"` (*Names to Know* under *Speech Recognition* in Settings):
 
 ```json
 {
-  "weather_city": "Bagneux",
-  "whisper_vocabulary": ["Axendly", "Mon Rempart"]
+  "weather_city": "Varnelle",
+  "whisper_vocabulary": ["Ostrevane", "Pont Sarrel"]
 }
 ```
 
