@@ -110,28 +110,58 @@ def test_fonts_come_from_local_stacks(viewer):
     assert "sans-serif" in html
 
 
-@pytest.mark.unit
-def test_loopback_and_internal_urls_pass_the_guard():
+def _guard(is_main_frame):
+    """The guard's answer for an address, for a viewer served on a port
+    other than the window's default: a guard that read the default
+    instead of the port it is handed fails these tests. ``{port}`` and
+    ``{default}`` in an address stand for the two."""
     from PyQt6.QtCore import QUrl
 
-    from desktop_app.app import _is_local_navigation
+    from desktop_app.app import MemoryViewerWindow, _is_local_navigation
 
-    assert _is_local_navigation(QUrl("http://localhost:5050/"))
-    assert _is_local_navigation(QUrl("http://127.0.0.1:5050/api/graph/node/3"))
-    assert _is_local_navigation(QUrl("http://[::1]:5050/"))
-    assert _is_local_navigation(QUrl("about:blank"))
-    # setHtml is a navigation to a self-contained data: document under
-    # Qt 6; the error page rides it, so the guard must let it through.
-    assert _is_local_navigation(QUrl("data:text/html;charset=UTF-8,<b>x</b>"))
+    default = MemoryViewerWindow.MEMORY_VIEWER_PORT
+    port = default + 1
+
+    def passes(address):
+        url = QUrl(address.format(port=port, default=default))
+        return _is_local_navigation(url, port=port, is_main_frame=is_main_frame)
+
+    return passes
 
 
 @pytest.mark.unit
-def test_remote_urls_are_refused_by_the_guard():
-    from PyQt6.QtCore import QUrl
+@pytest.mark.parametrize("is_main_frame", [True, False])
+def test_the_viewers_server_and_internal_urls_pass_the_guard(is_main_frame):
+    passes = _guard(is_main_frame)
 
-    from desktop_app.app import _is_local_navigation
+    assert passes("http://127.0.0.1:{port}/")
+    assert passes("http://127.0.0.1:{port}/api/graph/node/3")
+    assert passes("about:blank")
 
-    assert not _is_local_navigation(QUrl("https://fonts.googleapis.com/css2"))
-    assert not _is_local_navigation(QUrl("https://evil.example/"))
-    assert not _is_local_navigation(QUrl("http://192.168.1.5/"))
-    assert not _is_local_navigation(QUrl("file:///etc/passwd"))
+
+@pytest.mark.unit
+def test_the_error_pages_data_document_passes_in_the_main_frame_alone():
+    # setHtml is a main-frame navigation to a self-contained data:
+    # document under Qt 6; the error page rides it.
+    document = "data:text/html;charset=UTF-8,<b>x</b>"
+    assert _guard(is_main_frame=True)(document)
+    assert not _guard(is_main_frame=False)(document)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("is_main_frame", [True, False])
+def test_other_urls_are_refused_by_the_guard(is_main_frame):
+    passes = _guard(is_main_frame)
+
+    assert not passes("https://fonts.googleapis.com/css2")
+    assert not passes("https://evil.example/")
+    assert not passes("http://192.168.1.5/")
+    assert not passes("file:///etc/passwd")
+    assert not passes("file://localhost/etc/passwd")
+    assert not passes("http://localhost:{port}/")
+    assert not passes("http://[::1]:{port}/")
+    assert not passes("http://localhost:11434/")
+    assert not passes("http://127.0.0.1/")
+    assert not passes("http://127.0.0.1:{default}/")
+    assert not passes("https://127.0.0.1:{port}/")
+    assert not passes("ftp://127.0.0.1:{port}/")
