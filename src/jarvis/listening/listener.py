@@ -25,7 +25,8 @@ from .echo_detection import EchoDetector
 from .room_floor import FALLBACK_FLOOR, ROOM_FLOOR_MIN_SECONDS, RoomFloor
 from .state_manager import StateManager, ListeningState
 from ..utils.audio_lock import open_stream_count, portaudio_lock, unguarded_open
-from .wake_detection import is_wake_word_detected, extract_query_after_wake, is_stop_command
+from .wake_detection import (is_wake_word_detected, extract_query_after_wake,
+                             is_stop_command, names_her)
 from .transcript_buffer import TranscriptBuffer, TranscriptSegment
 from .whisper_turbo import is_faster_whisper_turbo_supported
 from .whisper_vad import (
@@ -1395,6 +1396,38 @@ class VoiceListener(threading.Thread):
                     self._drop_the_early_beep()
                     return
 
+                # In the hot window, what he says to someone else (a guest,
+                # a caller, the people watching a live stream) is not for
+                # her, and the overrides below would answer it as speech in
+                # her window. It stays in the transcript as context for what
+                # he asks her next, and the window is left as it is. A
+                # verdict that also says directed falls to his side. So does
+                # an aside the judge is not sure of: its doubtful ones are
+                # mostly his words to her, and a follow-up left unanswered
+                # costs him more than an aside answered. And so do:
+                # - words that could be hers, which the paths below set
+                #   aside as her echo;
+                # - what he adds to a question still being collected, which
+                #   completes it;
+                # - his answer to a question she asked before acting, which
+                #   the reader of answers must get, or the question stays
+                #   open for a later turn to answer;
+                # - an utterance that names her, his call as everywhere.
+                #   Her name spelled as configured, not a word close to it:
+                #   a guest can be called one, and the judge was sure.
+                if (intent_judgment.aside and not intent_judgment.directed
+                        and intent_judgment.confidence == "high"
+                        and could_be_hot_window
+                        and not could_be_hers
+                        and not self.state_manager.is_collecting()
+                        and not self.awaiting_spoken_answer()
+                        and not self._names_her(text_lower)):
+                    debug_log(f"🔇 Said to someone else (judge): \"{text_lower}\"", "voice")
+                    print(f"  🔇 Heard (not to her): \"{text_lower[:50]}"
+                          f"{'...' if len(text_lower) > 50 else ''}\"", flush=True)
+                    self._drop_the_early_beep()
+                    return
+
                 # In the hot window a verdict the judge is unsure of weighs
                 # what a sure one does: both go through the paths below, and
                 # each of them says on the console what became of the
@@ -1926,6 +1959,14 @@ class VoiceListener(threading.Thread):
         aliases = set(getattr(self.cfg, "wake_aliases", [])) | {wake_word}
         fuzzy_ratio = float(getattr(self.cfg, "wake_fuzzy_ratio", 0.78))
         return is_wake_word_detected(text_lower, wake_word, list(aliases), fuzzy_ratio)
+
+    def _names_her(self, text_lower: str) -> bool:
+        """Whether *text_lower* holds the wake word or one of its aliases
+        spelled as configured, as whole words (`names_her`): no close
+        spelling counts."""
+        wake_word = getattr(self.cfg, "wake_word", "jarvis")
+        aliases = set(getattr(self.cfg, "wake_aliases", [])) | {wake_word}
+        return names_her(text_lower, wake_word, list(aliases))
 
     def _what_follows_her_name(self, text_lower: str) -> str:
         """What *text_lower* says once the wake word and its aliases are

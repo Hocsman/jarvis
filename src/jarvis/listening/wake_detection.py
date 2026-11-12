@@ -140,6 +140,13 @@ def is_wake_word_detected(text_lower: str, wake_word: str, aliases: List[str], f
     return False
 
 
+def names_her(text_lower: str, wake_word: str, aliases: List[str]) -> bool:
+    """Whether *text_lower* holds the wake word or an alias as whole words,
+    spelled as configured: her name said, not a word close to it. The names
+    the intent judge is shown as hers are these (`_normalize_aliases`)."""
+    return bool(text_lower and _her_names_in(text_lower, wake_word, aliases)[0])
+
+
 def extract_query_after_wake(text_lower: str, wake_word: str, aliases: List[str]) -> str:
     """
     Extract the query portion after removing wake word.

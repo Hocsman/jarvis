@@ -191,6 +191,7 @@ class IntentJudgment:
     reasoning: str           # Brief explanation for debugging; empty on a
                              # directed verdict taken before its reasoning
     noise: bool = False      # Not speech at all: text Whisper made out of silence
+    aside: bool = False      # Words a person said to someone else, not to her
     raw_response: str = ""   # Raw LLM response for debugging
 
 
@@ -248,7 +249,7 @@ WAKE WORD MODE:
 - Query must be answerable alone (without the transcript). When resolving to a sub-item ("pro model", "the red one"), also include the parent noun/brand from earlier segments — "pro model" alone is not self-contained; "iPhone pro model" is.
 
 HOT WINDOW MODE (no wake word needed):
-- User IS DIRECTED (directed=true) — always, unless the current segment is not speech (see NOT SPEECH). This overrides any "topic-less question" heuristic above; follow-ups like "tell me more" are directed in hot window.
+- User IS DIRECTED (directed=true) — always, unless the current segment is not speech (see NOT SPEECH) or is said to someone else (see TO SOMEONE ELSE). This overrides any "topic-less question" heuristic above; follow-ups like "tell me more" are directed in hot window.
 - Extract from segments WITHOUT "(during TTS)" marker
 - Question, statement, greeting, thanks or compliment to {name}: all valid, all directed
 
@@ -267,6 +268,11 @@ NOT SPEECH:
 - When the CURRENT segment is such an invention rather than words someone said -> noise=true, directed=false, query="". This holds in hot window mode too: the follow-up rule is about the user, and this is not the user.
 - Words a person said are never noise, however short, thankful, off-topic or oddly phrased. When in doubt, noise=false.
 
+TO SOMEONE ELSE:
+- The user is not always alone: other people can be in the room, on a call with him, or watching him on a live stream, and he talks to them too.
+- When the CURRENT segment is plainly said to one of them and not to {name} (he calls that person by name, answers them, or talks to them about {name}) -> aside=true, directed=false, query="". This holds in hot window mode too: the follow-up rule is about what he says to {name}.
+- A follow-up that addresses nobody else is to {name}, and so is a request to {name} that mentions another person ("tell Sam I am running late"). When in doubt, aside=false.
+
 STOP DETECTION:
 - "stop", "quiet" (standalone or short command) -> directed=true, stop=true, query=""
 
@@ -275,7 +281,7 @@ NOT DIRECTED:
 - Wake word used only as a narrative mention ("I told my friend about {name}") -> directed=false
 
 Output JSON only:
-{{"directed": true/false, "query": "...", "stop": true/false, "noise": true/false, "confidence": "high/medium/low", "reasoning": "brief"}}
+{{"directed": true/false, "query": "...", "stop": true/false, "noise": true/false, "aside": true/false, "confidence": "high/medium/low", "reasoning": "brief"}}
 
 Examples:
 - "Jarvis what time is it" -> {{"directed": true, "query": "what time is it", "stop": false, "confidence": "high", "reasoning": "wake word + question"}}
@@ -290,6 +296,7 @@ Examples:
 - Previous "What's the capital of Portugal" + Current "Jarvis go ahead and answer" -> {{"directed": true, "query": "what is the capital of Portugal", "stop": false, "confidence": "high", "reasoning": "multi-word imperative ('go ahead and answer') is the same pattern as 'answer that' -> re-issue prior question; do NOT pass the imperative through literally"}}
 - Hot window, user says "I think absurdism is better" -> {{"directed": true, "query": "I think absurdism is better", "stop": false, "confidence": "high", "reasoning": "user statement in hot window"}}
 - Hot window after an English reply, Current "Sottotitoli creati dalla comunità Amara.org" -> {{"directed": false, "query": "", "stop": false, "noise": true, "confidence": "high", "reasoning": "subtitle credit Whisper made out of silence, not speech"}}
+- Hot window, Current "Hold on Maya, I'm nearly done here" -> {{"directed": false, "query": "", "stop": false, "aside": true, "confidence": "high", "reasoning": "said to Maya, someone else in the room, not to the assistant"}}
 - "(during TTS)" segments only -> {{"directed": false, "query": "", "stop": false, "confidence": "high", "reasoning": "only echo"}}
 - "stop" -> {{"directed": true, "query": "", "stop": true, "confidence": "high", "reasoning": "stop command"}}
 - No wake word, not hot window -> {{"directed": false, "query": "", "stop": false, "confidence": "high", "reasoning": "no wake word"}}'''
@@ -462,6 +469,7 @@ Examples:
                 confidence=str(data.get("confidence", "low")).lower(),
                 reasoning=str(data.get("reasoning", "")),
                 noise=_parse_bool(data.get("noise"), default=False),
+                aside=_parse_bool(data.get("aside"), default=False),
                 raw_response=response_text,
             )
         except (json.JSONDecodeError, KeyError, AttributeError) as e:

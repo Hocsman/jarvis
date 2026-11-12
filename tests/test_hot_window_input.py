@@ -88,11 +88,11 @@ def _create_listener(**kwargs):
 
 
 def _make_judgment(directed=True, query="", stop=False, confidence="high", reasoning="test",
-                   noise=False):
+                   noise=False, aside=False):
     """Build an IntentJudgment."""
     return IntentJudgment(
         directed=directed, query=query, stop=stop,
-        confidence=confidence, reasoning=reasoning, noise=noise,
+        confidence=confidence, reasoning=reasoning, noise=noise, aside=aside,
     )
 
 

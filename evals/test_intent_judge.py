@@ -27,11 +27,14 @@ utterance whose voice stops with hers (`-k rewritten` runs it alone, after
 a check that needs no model: the listener shows each case to the judge
 whole, marked only when its voice stops with hers). A fifth reads a remark
 said to her that asks for nothing (a greeting, thanks, a compliment) right
-after her reply, with its controls heard at the same moment: his words to
-someone else, Whisper's inventions, her own warm sign-off misheard as
-words she never said, unmarked, and a lone "Thank you." after an English
-reply (`-k a_remark_to_her` runs it alone, with its check that needs no
-model and its per-case reading on the eval model).
+after her reply, and his follow-ups that name another person, with what
+must be left alone heard at the same moment: his words to someone else (a
+guest, a caller, the people watching a live stream), which only a
+not-directed `aside` verdict given with high confidence sets aside,
+Whisper's inventions, her own warm sign-off misheard as words she never
+said, unmarked, and a lone "Thank you." after an English reply
+(`-k a_remark_to_her` runs it alone, with its check that needs no model
+and its per-case reading on the eval model).
 `EVAL_INTENT_JUDGE_PROMPT_REF` names a git ref: each model then also runs
 with the system prompt at that ref, as an arm of its own interleaved with
 the others, so a prompt change is measured against the prompt it replaces
@@ -1091,11 +1094,11 @@ REMARK_TO_HER_CASES = [
                   _EN_REPLY, expected_noise=False),
 ]
 
-# The controls, heard at the same moment. His words to someone else in the
-# room are his words, never noise, and the hot window answers them whatever
-# the judge calls them. Whether it calls them directed is still read: a
-# marked segment is answered only on a directed verdict, and a wording that
-# stretches "to {name}" to anyone he addresses would push it up.
+# His words to someone else, heard at the same moment: a guest in the room,
+# someone on a call, the people watching a live stream. They are his words,
+# never noise, and not for her: the hot window leaves them alone on a
+# not-directed verdict that says ``aside`` with high confidence, and answers
+# them on any other.
 TO_SOMEONE_ELSE_CASES = [
     NotSpeechCase("french_to_someone_else_music",
                   _right_after(_FR_REPLY, "Camille, tu peux baisser la musique, s'il te plaît ?"),
@@ -1111,6 +1114,70 @@ TO_SOMEONE_ELSE_CASES = [
                   _EN_REPLY, expected_noise=False),
     NotSpeechCase("english_to_someone_else_wait",
                   _right_after(_EN_BACK, "Hang on, Priya, I'll be right with you."),
+                  _EN_BACK, expected_noise=False),
+    # To the people watching a live stream, and about her to them.
+    NotSpeechCase("french_to_a_viewer_thanks",
+                  _right_after(_FR_REPLY, "Merci Inès pour le cadeau, ça va toi ? Tout le monde m'entend bien ?"),
+                  _FR_REPLY, expected_noise=False),
+    NotSpeechCase("french_to_a_viewer_welcome",
+                  _right_after(_FR_BACK, "Bonsoir Théo, bienvenue dans le live."),
+                  _FR_BACK, expected_noise=False),
+    NotSpeechCase("french_about_her_to_them",
+                  _right_after(_FR_REPLY, "Vous avez vu, elle répond vite quand même."),
+                  _FR_REPLY, expected_noise=False),
+    NotSpeechCase("french_to_his_mother",
+                  _right_after(_FR_GOOD_EVENING, "Oui maman, je descends manger dans cinq minutes."),
+                  _FR_GOOD_EVENING, expected_noise=False),
+    NotSpeechCase("english_to_a_viewer_thanks",
+                  _right_after(_EN_REPLY, "Thanks for the follow, Noah, glad you're here."),
+                  _EN_REPLY, expected_noise=False),
+    NotSpeechCase("english_about_her_to_them",
+                  _right_after(_EN_BACK, "Did you guys hear that? She's pretty quick."),
+                  _EN_BACK, expected_noise=False),
+    NotSpeechCase("english_on_a_call",
+                  _right_after(_EN_GOOD_NIGHT, "Yeah, I'll call you back in ten, Dana."),
+                  _EN_GOOD_NIGHT, expected_noise=False),
+]
+
+# His follow-ups to her that look most like words to someone else: they name
+# another person, ask her to pass something on, or open on the word an aside
+# opens on. Each is for her and is answered.
+FOLLOW_UPS_NAMING_SOMEONE_CASES = [
+    NotSpeechCase("french_weather_for_someone",
+                  _right_after(_FR_REPLY, "Et pour Hugo, il fera quel temps à Lille ?"),
+                  _FR_REPLY, expected_noise=False),
+    NotSpeechCase("french_pass_it_on",
+                  _right_after(_FR_BACK, "Dis à Camille que j'arrive dans dix minutes."),
+                  _FR_BACK, expected_noise=False),
+    NotSpeechCase("french_say_it_again",
+                  _right_after(_FR_REPLY, "Tu peux répéter plus lentement ?"),
+                  _FR_REPLY, expected_noise=False),
+    NotSpeechCase("french_wait_i_missed_it",
+                  _right_after(_FR_REPLY, "Attends, j'ai pas compris la fin."),
+                  _FR_REPLY, expected_noise=False),
+    NotSpeechCase("french_are_you_sure",
+                  _right_after(_FR_REPLY, "Non mais sérieusement, tu es sûre de toi ?"),
+                  _FR_REPLY, expected_noise=False),
+    NotSpeechCase("french_remind_me_to_call_someone",
+                  _right_after(_FR_GOOD_EVENING, "D'accord, et rappelle-moi d'appeler Théo demain."),
+                  _FR_GOOD_EVENING, expected_noise=False),
+    NotSpeechCase("english_text_someone",
+                  _right_after(_EN_BACK, "Can you text Sam that I'm running late?"),
+                  _EN_BACK, expected_noise=False),
+    NotSpeechCase("english_say_it_again",
+                  _right_after(_EN_REPLY, "Hold on, say that last part again."),
+                  _EN_REPLY, expected_noise=False),
+    NotSpeechCase("english_someones_flight",
+                  _right_after(_EN_REPLY, "And what about Priya's flight, is it on time?"),
+                  _EN_REPLY, expected_noise=False),
+    NotSpeechCase("english_are_you_sure",
+                  _right_after(_EN_REPLY, "Wait, are you sure about that?"),
+                  _EN_REPLY, expected_noise=False),
+    NotSpeechCase("english_remind_me_to_call_someone",
+                  _right_after(_EN_GOOD_NIGHT, "Okay, and remind me to call Dana tomorrow."),
+                  _EN_GOOD_NIGHT, expected_noise=False),
+    NotSpeechCase("english_who_is_someone",
+                  _right_after(_EN_BACK, "By the way, do you know who Noah Lindqvist is?"),
                   _EN_BACK, expected_noise=False),
 ]
 
@@ -1184,6 +1251,10 @@ LONE_THANKS_CASES = [
 # Cases known to fail with the small model on the current prompt.
 # Track regressions / future prompt improvements here.
 KNOWN_FAILING_CASES: set = {
+    # His words to someone else are left alone only on an `aside` verdict.
+    # Expected of gemma4:e2b, not measured: a judge that never says `aside`
+    # answers them all, as it answers any speech in the hot window.
+    *(case.name for case in TO_SOMEONE_ELSE_CASES),
     # gemma4:e2b calls subtitle credits noise but not the closing lines of a
     # video or a broadcast (docs/llm_contexts.md, "2. Intent Judge").
     "russian_outro_after_french",
@@ -1512,15 +1583,15 @@ class TestIntentJudgeMultiSegment:
 def _answered_in_the_hot_window(case, verdict) -> bool:
     """What the listener does in the hot window with a verdict on a segment
     it did not mark as possibly hers: it dispatches a directed one, and its
-    overrides take any rejection that does not say noise, whatever the
-    confidence. A rejection whose reasoning says echo is overridden only on
-    words she did not say, spoken in a voice: the words are weighed here as
+    overrides take a rejection at any confidence, unless it says noise, or
+    says aside with high confidence. A rejection whose reasoning says echo
+    is overridden only on words she did not say, spoken in a voice: the words are weighed here as
     the listener weighs them, and his words carry a voice where text Whisper
     makes of silence carries none. The cases carry no wake word, so the
     wake-word check never takes the decision."""
     if verdict.directed:
         return True
-    if verdict.noise:
+    if verdict.noise or (verdict.aside and verdict.confidence == "high"):
         return False
     if "echo" in (verdict.reasoning or "").lower():
         return (not case.expected_noise
@@ -1694,12 +1765,14 @@ class TestIntentJudgeKnowsSilenceFromSpeech:
 
 
 # The remark eval's groups, each with what the listener must do with its
-# cases (all unmarked, so it answers any verdict but noise): answer a remark
-# to her, hear his words to someone else as speech, answer neither an
-# invention, nor her sign-off misheard, nor a lone thanks.
+# cases (all unmarked, so it answers any verdict but noise and words to
+# someone else): answer a remark to her and a follow-up that names someone,
+# and answer neither his words to someone else, nor an invention, nor her
+# sign-off misheard, nor a lone thanks.
 REMARK_GROUPS = {
     "remarks_to_her": (REMARK_TO_HER_CASES, "answered"),
-    "to_someone_else": (TO_SOMEONE_ELSE_CASES, "speech"),
+    "follow_ups_naming": (FOLLOW_UPS_NAMING_SOMEONE_CASES, "answered"),
+    "to_someone_else": (TO_SOMEONE_ELSE_CASES, "left alone"),
     "inventions": (INVENTIONS_RIGHT_AFTER_HER_CASES, "left alone"),
     "her_sign_off_misheard": (HER_SIGN_OFF_MISHEARD_CASES, "left alone"),
     "lone_thanks": (LONE_THANKS_CASES, "left alone"),
@@ -1712,8 +1785,6 @@ _REMARK_GROUP_OF = {case.name: group for group, (cases, _) in REMARK_GROUPS.item
 def _remark_verdict_ok(case: NotSpeechCase, verdict) -> bool:
     """Whether the listener does with the verdict what the case's group needs."""
     needs = REMARK_GROUPS[_REMARK_GROUP_OF[case.name]][1]
-    if needs == "speech":
-        return not verdict.noise
     return _answered_in_the_hot_window(case, verdict) == (needs == "answered")
 
 
@@ -1728,11 +1799,12 @@ def test_a_remark_to_her_control_reaches_the_judge_whole(case, voice_stops_with_
 
 class TestIntentJudgeHearsARemarkToHer:
     """Right after her reply, a remark said to her that asks for nothing (a
-    greeting, thanks, a compliment) is answered: a not-directed noise verdict
-    is the one the hot window never overrides. The controls: his words to
-    someone else are never noise, and neither Whisper's inventions, nor her
-    own warm sign-off misheard as words she never said, nor a lone "Thank
-    you." after an English reply are answered."""
+    greeting, thanks, a compliment) is answered, and so is a follow-up that
+    names another person: the hot window overrides every rejection but a
+    not-directed noise verdict and a not-directed `aside` given with high
+    confidence. Left alone: his words to someone else, on such an aside,
+    Whisper's inventions, her own warm sign-off misheard as words she never
+    said, and a lone "Thank you." after an English reply."""
 
     @pytest.mark.parametrize("case", REMARK_EVAL_CASES, ids=lambda case: case.name)
     def test_a_remark_to_her_case(self, case: NotSpeechCase):
@@ -1747,7 +1819,8 @@ class TestIntentJudgeHearsARemarkToHer:
 
         group = _REMARK_GROUP_OF[case.name]
         msg = (f"{case.name} ({group}, needs: {REMARK_GROUPS[group][1]}): "
-               f"directed={result.directed}, noise={result.noise}, query='{result.query}'. "
+               f"directed={result.directed}, noise={result.noise}, aside={result.aside}, "
+               f"confidence={result.confidence}, query='{result.query}'. "
                f"Reasoning: {result.reasoning}")
         print(f"\nTest Case: {case.name} | current: \"{case.segments[-1][0]}\"")
         if not _remark_verdict_ok(case, result):
@@ -1888,8 +1961,7 @@ class TestIntentJudgeNotSpeechArms:
     def test_her_voice_rewritten_unmarked_against_marked_call_by_call(self, capsys):
         """Her last sentence coming back as words she never said, its voice
         stopping with hers. Each arm reads every case unmarked, as the judge
-        is shown it when the two proofs alone decide, where any verdict but
-        noise has it answered, and marked "(during TTS)", as the listener
+        is shown it when the two proofs alone decide, where any verdict but noise or a sure aside has it answered, and marked "(during TTS)", as the listener
         shows an utterance whose voice stops with hers, where only a
         directed verdict with a query is answered, the two alternating call
         by call. Every answer is a miss: these are her words."""
@@ -1940,8 +2012,8 @@ class TestIntentJudgeNotSpeechArms:
         `EVAL_INTENT_JUDGE_PROMPT_REF` set, each model's two prompts are
         compared on both, group by group."""
         judges = _warm_judges()
-        # right, directed, answered, noise, calls, no verdict
-        tally = {(arm, group): [0, 0, 0, 0, 0, 0] for arm in JUDGE_ARMS for group in REMARK_GROUPS}
+        # right, directed, answered, noise, calls, no verdict, aside at high confidence
+        tally = {(arm, group): [0, 0, 0, 0, 0, 0, 0] for arm in JUDGE_ARMS for group in REMARK_GROUPS}
         misses = {}   # (arm, case) -> wrong verdicts
         for case, arm in _interleaved(JUDGE_ARMS, REMARK_EVAL_CASES):
             judges[arm]._last_error_time = 0.0
@@ -1957,15 +2029,17 @@ class TestIntentJudgeNotSpeechArms:
             row[1] += int(verdict.directed)
             row[2] += int(_answered_in_the_hot_window(case, verdict))
             row[3] += int(verdict.noise)
+            row[6] += int(verdict.aside and verdict.confidence == "high")
             if not right:
                 misses[(arm, case.name)] = misses.get((arm, case.name), 0) + 1
 
         lines = [""]
-        for (arm, group), (right, directed, answered, noise, calls, silent) in tally.items():
+        for (arm, group), (right, directed, answered, noise, calls, silent, aside) in tally.items():
             scored = calls - silent
             lines.append(f"🧪 {arm:{_ARM_WIDTH}} {group:21}  right {rate(right, scored)}, "
                          f"answered {answered}/{scored}, directed {directed}/{scored}, "
-                         f"noise {noise}/{scored}, no verdict {silent}")
+                         f"noise {noise}/{scored}, sure aside {aside}/{scored}, "
+                         f"no verdict {silent}")
         for (arm, name), count in sorted(misses.items()):
             lines.append(f"   ↳ {arm}: {name} wrong {count}/{NOT_SPEECH_ROUNDS}")
         if PROMPT_REF:
