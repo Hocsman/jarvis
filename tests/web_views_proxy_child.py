@@ -133,13 +133,20 @@ dashboard = dashboard_window.DashboardWindow()
 loaded = show(dashboard, dashboard.view)
 report["dashboard"] = {"loaded": loaded, "scheme": dashboard.view.url().scheme()}
 
-viewer = app_mod.MemoryViewerWindow()
+class _Viewer(app_mod.MemoryViewerWindow):
+    # The window hands its port to the page it installs as it is built, and
+    # that page shows the viewer's own server on that port and nothing else.
+    MEMORY_VIEWER_PORT = viewer_server.server_address[1]
+
+
+viewer = _Viewer()
 viewer.start_server = lambda: True
-viewer.MEMORY_VIEWER_PORT = viewer_server.server_address[1]
 loaded = show(viewer, viewer.web_view)
 report["memory_viewer"] = {
     "loaded": loaded,
     "host": viewer.web_view.url().host(),
+    # The address the window reaches its server by, as the app has it.
+    "its_servers_host": app_mod._VIEWER_HOST,
     "shows_its_page": viewer.web_view.page().title() == VIEWER_TITLE,
 }
 

@@ -132,12 +132,13 @@ class TestThePagesLoad:
     def test_the_memory_viewer_shows_its_servers_page(self, report):
         shown = report["memory_viewer"]
         assert shown["loaded"]
-        assert shown["host"] == "localhost"
+        assert shown["host"] == shown["its_servers_host"]
         assert shown["shows_its_page"]
 
-    def test_the_net_log_holds_the_memory_viewers_load(self, net_log):
+    def test_the_net_log_holds_the_memory_viewers_load(self, report, net_log):
+        viewer = f"http://{report['memory_viewer']['its_servers_host']}:"
         urls = [params.get("url", "") for name, params in net_log if name == "URL_REQUEST_START_JOB"]
-        assert any(url.startswith("http://localhost:") for url in urls), urls
+        assert any(url.startswith(viewer) for url in urls), urls
 
 
 class TestNoProxyLookup:
