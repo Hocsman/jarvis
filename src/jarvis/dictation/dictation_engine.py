@@ -19,10 +19,14 @@ import time
 from typing import Any, Callable, Optional
 
 from ..debug import debug_log
+from ..listening.whisper_vad import transcribe as transcribe_faster_whisper
 from ..utils.audio_lock import portaudio_lock
 from ..utils.audio_stream import (
+    DeviceListUnavailable,
+    IndexNamesNoInput,
     InputDeviceNotFound,
     open_input_stream,
+    refresh_input_devices,
     resolve_input_device,
 )
 from .history import DictationHistory
@@ -609,12 +613,14 @@ class DictationEngine:
         on_dictation_start: Optional[Callable[[], None]] = None,
         on_dictation_processing_start: Optional[Callable[[], None]] = None,
         on_dictation_end: Optional[Callable[[], None]] = None,
+        on_microphone_missing: Optional[Callable[[], None]] = None,
         transcribe_lock: Optional[threading.Lock] = None,
         on_dictation_result: Optional[Callable] = None,
         history: Optional[DictationHistory] = None,
         voice_device: Optional[str] = None,
         filler_removal: bool = False,
         custom_dictionary: Optional[list] = None,
+        whisper_language: Optional[str] = None,
         cfg: Any = None,
         chat_model: str = "gemma4:e2b",
         thinking: bool = False,
@@ -627,6 +633,9 @@ class DictationEngine:
         self._on_dictation_start = on_dictation_start
         self._on_dictation_processing_start = on_dictation_processing_start
         self._on_dictation_end = on_dictation_end
+        # A press that did not find its microphone (the daemon tells the
+        # listener, which then looks for it often again).
+        self._on_microphone_missing = on_microphone_missing
         self._on_dictation_result = on_dictation_result
         self._transcribe_lock = transcribe_lock or threading.Lock()
         self.history = history or DictationHistory()
@@ -634,6 +643,13 @@ class DictationEngine:
         self._filler_removal = filler_removal
         self._custom_dictionary = custom_dictionary or []
         self._cfg = cfg
+        # The language Whisper transcribes in, as for the listener; None: it detects.
+        self._whisper_language = whisper_language
+        # Whether the setting asks for Whisper's voice detector, as for the
+        # listener: a press with nothing said then pastes nothing. A detector
+        # that has failed is skipped by `whisper_vad.transcribe` for the
+        # whole process, whoever saw it fail.
+        self._whisper_vad = bool(getattr(cfg, "whisper_vad", True))
         self._chat_model = chat_model
         self._thinking = thinking
 
@@ -893,18 +909,49 @@ class DictationEngine:
             self._recording = False
             return True
 
+    def _find_input(self) -> Optional[int]:
+        """The input ``voice_device`` selects, None for the system default.
+
+        Looked up in the device list as PortAudio last read it; on a miss the
+        list is read afresh, when no stream is open, and looked up again, so a
+        microphone connected since is found. Raises ``InputDeviceNotFound``
+        when it is still missing; an index that named no input when the app
+        started is not looked for again.
+        """
+        try:
+            with portaudio_lock:
+                return resolve_input_device(self._voice_device, sd.query_devices)
+        except IndexNamesNoInput:
+            raise
+        except InputDeviceNotFound:
+            try:
+                devices = refresh_input_devices(sd_backend=sd)
+            except DeviceListUnavailable as exc:
+                debug_log(f"dictation could not read the device list afresh: {exc}", "dictation")
+                raise InputDeviceNotFound("the device list could not be read afresh") from exc
+            if devices is None:
+                debug_log("dictation kept the device list it has: a stream is open", "dictation")
+                raise
+            debug_log("dictation read the device list afresh", "dictation")
+            return resolve_input_device(self._voice_device, lambda: devices)
+
     def _begin_recording(self, token: int) -> None:
         """Worker: open the audio stream and start capturing."""
         # Resolve the microphone before anything announces a recording: a
         # named one that matches no input gets no beep and no other input.
-        # This comes before the Whisper check because the listener refuses
-        # the same microphone at startup, before it loads Whisper.
+        # This comes before the Whisper check, so a press without its
+        # microphone is told so while Whisper is still loading too.
         try:
-            device = resolve_input_device(self._voice_device, sd.query_devices)
+            device = self._find_input()
         except InputDeviceNotFound:
             debug_log("dictation input device did not match an available microphone", "dictation")
             print("  ❌ Dictation: selected microphone not found. Choose an available input in Settings.", flush=True)
             self._abandon_session(token)
+            if self._on_microphone_missing:
+                try:
+                    self._on_microphone_missing()
+                except Exception as exc:
+                    debug_log(f"on_microphone_missing callback error: {exc}", "dictation")
             return
         except Exception as exc:
             debug_log(f"dictation input device lookup failed: {exc}", "dictation")
@@ -940,40 +987,42 @@ class DictationEngine:
         # Play start beep
         _play_beep(_get_start_beep())
 
-        # Open dedicated audio stream.
-        # Always use the device's native sample rate to avoid PortAudio errors
-        # (e.g. -50 on macOS when requesting 16 kHz on a 48 kHz device).
-        # Audio is resampled to the Whisper target rate after recording.
-        stream_kwargs: dict[str, Any] = {}
-        if device is not None:
-            stream_kwargs["device"] = device
-
-        # Query native sample rate
-        try:
-            if "device" in stream_kwargs:
-                dev_info = sd.query_devices(stream_kwargs["device"])
-            else:
-                dev_info = sd.query_devices(kind="input")
-            native_rate = int(dev_info.get("default_samplerate", self._target_sample_rate))
-        except Exception:
-            native_rate = self._target_sample_rate
-
-        # Check whether session was cancelled while beep was playing or device queried
+        # Check whether session was cancelled while the beep was playing
         with self._lock:
             if self._session != token or not self._recording:
                 return
 
+        # Open dedicated audio stream.
+        # Always use the device's native sample rate to avoid PortAudio errors
+        # (e.g. -50 on macOS when requesting 16 kHz on a 48 kHz device).
+        # Audio is resampled to the Whisper target rate after recording.
+        # The microphone is resolved again in the hold that opens it: another
+        # thread may have re-read the device list since, and an index is
+        # only valid for the list it was read from.
         try:
-            with _suppress_stderr():
-                stream, self._stream_sample_rate, _channels = open_input_stream(
-                    native_rate,
-                    100,
-                    stream_kwargs,
-                    callback=self._audio_callback,
-                    serialise=True,
-                    sd_backend=sd,
-                    lock=portaudio_lock,
-                )
+            with portaudio_lock:
+                device = resolve_input_device(self._voice_device, sd.query_devices)
+                stream_kwargs: dict[str, Any] = {}
+                if device is not None:
+                    stream_kwargs["device"] = device
+                try:
+                    if "device" in stream_kwargs:
+                        dev_info = sd.query_devices(stream_kwargs["device"])
+                    else:
+                        dev_info = sd.query_devices(kind="input")
+                    native_rate = int(dev_info.get("default_samplerate", self._target_sample_rate))
+                except Exception:
+                    native_rate = self._target_sample_rate
+                with _suppress_stderr():
+                    stream, self._stream_sample_rate, _channels = open_input_stream(
+                        native_rate,
+                        100,
+                        stream_kwargs,
+                        callback=self._audio_callback,
+                        serialise=True,
+                        sd_backend=sd,
+                        lock=portaudio_lock,
+                    )
             if self._stream_sample_rate != self._target_sample_rate:
                 debug_log(f"dictation stream at native {self._stream_sample_rate} Hz (will resample to {self._target_sample_rate})", "dictation")
         except Exception as exc:
@@ -1192,7 +1241,8 @@ class DictationEngine:
             return ""
         try:
             import mlx_whisper
-            result = mlx_whisper.transcribe(audio, path_or_hf_repo=repo, language=None)
+            result = mlx_whisper.transcribe(audio, path_or_hf_repo=repo,
+                                            language=self._whisper_language)
             text = result.get("text", "").strip() if isinstance(result, dict) else ""
             return text
         except Exception as exc:
@@ -1201,10 +1251,8 @@ class DictationEngine:
 
     def _transcribe_faster_whisper(self, model, audio) -> str:
         try:
-            try:
-                segments, _info = model.transcribe(audio, language=None, vad_filter=False)
-            except TypeError:
-                segments, _info = model.transcribe(audio, language=None)
+            segments, _info = transcribe_faster_whisper(
+                model, audio, language=self._whisper_language, voice_detector=self._whisper_vad)
             return " ".join(seg.text for seg in segments).strip()
         except Exception as exc:
             debug_log(f"faster-whisper transcription error: {exc}", "dictation")

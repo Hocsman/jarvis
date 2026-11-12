@@ -762,6 +762,35 @@ def _isolate_memory_core(_bac_a_sable, request, monkeypatch):
     assert patched, "neither memory core module could be imported"
 
 
+@pytest.fixture(autouse=True)
+def _isolate_jarvis_state(_bac_a_sable, request, monkeypatch):
+    """Keep the evals' state changes off the live state file.
+
+    The assistant's state (idle, listening, speaking, ...) is shared with the
+    desktop app through a file in the system temp directory, and the orb of a
+    running Jarvis polls it. An eval that drives the listener publishes to
+    it, so without this an eval run would move the orb of the app the
+    developer has open. Each eval gets its own file and a fresh process-wide
+    holder.
+    """
+    target = str(_bac_a_sable / f"state-{abs(hash(request.node.nodeid)):x}")
+
+    # As for the core: ``jarvis.state`` and ``src.jarvis.state`` are two
+    # module objects, and both share the sandbox file.
+    import importlib
+
+    patched = 0
+    for path in ("jarvis.state", "src.jarvis.state"):
+        try:
+            module = importlib.import_module(path)
+        except ImportError:
+            continue
+        monkeypatch.setattr(module, "_state_file_path", lambda: target)
+        monkeypatch.setattr(module, "_jarvis_state_instance", None)
+        patched += 1
+    assert patched, "neither jarvis state module could be imported"
+
+
 @pytest.fixture
 def mock_config():
     """Provide a mock configuration for eval tests."""
@@ -813,7 +842,7 @@ def eval_db():
 def eval_dialogue_memory():
     """Provide a dialogue memory instance for eval tests."""
     from jarvis.memory.conversation import DialogueMemory
-    return DialogueMemory(inactivity_timeout=300, max_interactions=20)
+    return DialogueMemory(inactivity_timeout=300)
 
 
 @pytest.fixture

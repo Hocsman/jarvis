@@ -1,12 +1,14 @@
 """The talking-face renderer's logic (`src/jarvis/output/face/face.spec.md`, "The
-process", "Watching and resting", "Interrupting", "Failure").
+process", "Watching and resting", "Her lips at rest", "Interrupting", "Failure").
 
 Ditto is faked: these tests drive the renderer with a real timeline and a real
 shared-memory writer, and stand in for the model's frames themselves.
 """
 
+import importlib
 import io
 import json
+import sys
 import time
 
 import numpy as np
@@ -23,6 +25,7 @@ class FakeStream:
 
     def __init__(self):
         self.chunks = []
+        self.ctrl_info = {}       # frame index -> Ditto's per-frame controls
         self.worker_exception = None
         self.stopped = False
 
@@ -31,6 +34,29 @@ class FakeStream:
 
     def stop(self):
         self.stopped = True
+
+
+class HoldingStream(FakeStream):
+    """Ditto as it hands frames back: a chunk's frames come out only once the
+    next chunk is fed, and none come out while the GPU is taken elsewhere."""
+
+    def __init__(self):
+        super().__init__()
+        self.renderer = None
+        self.stalled = False
+        self.inside = 0   # frames fed and not handed back yet
+
+    def run_chunk(self, audio):
+        super().run_chunk(audio)
+        self.inside += tl.CHUNK_FRAMES
+        if not self.stalled:
+            self.hand_back()
+
+    def hand_back(self):
+        """Everything Ditto can draw: all but the last chunk's frames."""
+        while self.inside > tl.CHUNK_FRAMES:
+            self.inside -= 1
+            self.renderer.on_frame(_picture(1))
 
 
 def _picture(value):
@@ -139,6 +165,21 @@ class TestPublishing:
         assert renderer.feeder.next_start is None
         assert _shown(renderer, reader, stamp + 0.01) is None
 
+    def test_frames_published_before_the_face_rests_are_withdrawn(self, renderer, reader):
+        """Whoever watches next never sees a frame from before the rest, however
+        long a front end holds her last frame."""
+        now = time.perf_counter()
+        _watch(renderer, reader, now)
+        renderer.tick(now)
+        stamp = renderer.due[0].stamp
+        for _ in range(tl.CHUNK_FRAMES):
+            renderer.on_frame(_picture(9))
+        assert _shown(renderer, reader, stamp) == 9
+
+        renderer.tick(now + process.WATCH_SECONDS + 1.0)   # nobody has read since: the face rests
+
+        assert _shown(renderer, reader, stamp + 0.01) is None
+
     def test_frames_drawn_before_a_cut_and_stamped_after_it_are_not_shown(self, renderer, reader):
         now = time.perf_counter()
         _watch(renderer, reader, now)
@@ -174,14 +215,96 @@ class TestFeeding:
         now = time.perf_counter()
         _watch(renderer, reader, now)
         renderer.tick(now)
+        second = renderer.feeder.due(renderer.feeder.next_start)
+        _watch(renderer, reader, second)
+        renderer.tick(second)      # Ditto can now draw the first chunk, and has not
         start = renderer.feeder.next_start
-        late = renderer.due[0].stamp + 2 / tl.FPS   # the first frame fed is still inside Ditto
+        late = renderer.due[0].stamp + 2 / tl.FPS
         _watch(renderer, reader, late)
 
         renderer.tick(late)
 
-        assert len(renderer.stream.chunks) == 1
+        assert len(renderer.stream.chunks) == 2
         assert renderer.feeder.next_start is not None and renderer.feeder.next_start > start
+
+    def test_the_chunk_ditto_holds_until_the_next_is_fed_is_not_owed(self, renderer, reader):
+        """Ditto hands a chunk's frames back once the next chunk is fed: a
+        renderer that waited for them first would wait for ever."""
+        now = time.perf_counter()
+        _watch(renderer, reader, now)
+        renderer.tick(now)
+        late = renderer.due[-1].stamp + 2 / tl.FPS
+        _watch(renderer, reader, late)
+
+        renderer.tick(late)
+
+        assert len(renderer.stream.chunks) == 2
+
+    def test_after_a_stall_the_face_comes_back_once_ditto_catches_up(self, reader):
+        stream = HoldingStream()
+        renderer = process.Renderer(stream, FrameWriter())
+        stream.renderer = renderer
+        clock = [time.perf_counter()]
+
+        def watch_for(seconds):
+            end = clock[0] + seconds
+            while clock[0] < end:
+                _watch(renderer, reader, clock[0])
+                renderer.tick(clock[0])
+                clock[0] += 0.02
+            return clock[0] - 0.02
+
+        try:
+            watch_for(1.0)            # Ditto keeps up
+            stream.stalled = True     # the GPU is taken elsewhere: nothing comes out
+            watch_for(1.0)
+            stream.stalled = False
+            stream.hand_back()        # what Ditto could draw comes out, late
+            last = watch_for(1.0)
+
+            shown = reader.read(last)
+            assert shown is not None and last - shown.stamp <= 2 / tl.FPS
+        finally:
+            renderer.close()
+
+    def _stall(self, reader, capsys, seconds):
+        """Watch for a second, stall Ditto for ``seconds``, watch for two more;
+        returns what the renderer logged before it rests, and how many chunks it
+        skipped."""
+        stream = HoldingStream()
+        renderer = process.Renderer(stream, FrameWriter())
+        stream.renderer = renderer
+        clock = [time.perf_counter()]
+
+        def watch_for(span):
+            end = clock[0] + span
+            while clock[0] < end:
+                _watch(renderer, reader, clock[0])
+                renderer.tick(clock[0])
+                clock[0] += 0.02
+
+        try:
+            watch_for(1.0)
+            stream.stalled = True
+            watch_for(seconds)
+            stream.stalled = False
+            stream.hand_back()
+            watch_for(2.0)
+            return capsys.readouterr().err, renderer.skipped
+        finally:
+            renderer.close()
+
+    def test_a_long_stall_is_logged_as_it_starts_and_as_ditto_catches_up(self, reader, capsys):
+        err, _skipped = self._stall(reader, capsys, 3.0)
+
+        assert "Ditto fell behind" in err
+        assert "Ditto caught up after" in err
+
+    def test_a_hiccup_shorter_than_a_second_of_her_face_logs_nothing_while_watched(self, reader, capsys):
+        err, skipped = self._stall(reader, capsys, 0.8)
+
+        assert skipped > 0
+        assert "Ditto fell behind" not in err and "caught up" not in err
 
     def test_feeding_goes_on_while_ditto_keeps_up(self, renderer, reader):
         now = time.perf_counter()
@@ -195,6 +318,159 @@ class TestFeeding:
         renderer.tick(renderer.feeder.due(start))
 
         assert len(renderer.stream.chunks) == 2
+
+
+class TestHerLipsAtRest:
+    """While she is silent her lips are the portrait's.
+
+    Ditto drives the mouth from the audio it is fed, silence included, and
+    drawn from silence the lips drift and then press in, as if she bit them.
+    So each frame tells Ditto how much its lips follow the voice: fully while
+    she is heard, not at all in silence, with a short ramp at either end so
+    the pauses between words do not close her mouth.
+    """
+
+    T = 1000.0
+    SPEECH = 0.07         # Kyutai's speech, per frame
+    NOISE_FLOOR = 0.0003  # and its silences
+
+    def _voice(self, renderer, start, seconds):
+        renderer.timeline.lay(start, self.SPEECH * np.ones(int(seconds * tl.RATE), np.float32), tl.RATE)
+
+    def _weights(self, renderer):
+        """What Ditto is handed for each frame it has been fed, in order: the
+        k-th frame it draws is the k-th frame fed."""
+        fed = len(renderer.stream.chunks) * tl.CHUNK_FRAMES
+        return [renderer.stream.ctrl_info.get(i, {}).get("vad_alpha", 1.0) for i in range(fed)]
+
+    def _feed(self, renderer, chunks):
+        for n in range(chunks):
+            renderer._feed(self.T + n * tl.CHUNK_SECONDS, publish=True)
+        return self._weights(renderer)
+
+    def test_in_silence_the_lips_are_the_portrait_s(self, renderer):
+        weights = self._feed(renderer, 4)
+
+        assert weights == [0.0] * len(weights)
+
+    def test_her_silences_are_silence_though_not_quite_zero(self, renderer):
+        noise = np.random.default_rng(7).normal(0.0, self.NOISE_FLOOR, 3 * tl.RATE).astype(np.float32)
+        renderer.timeline.lay(self.T - 1.0, noise, tl.RATE)
+
+        weights = self._feed(renderer, 4)
+
+        assert weights == [0.0] * len(weights)
+
+    def test_while_she_is_heard_they_follow_her_voice(self, renderer):
+        self._voice(renderer, self.T - 1.0, 3.0)
+
+        weights = self._feed(renderer, 4)
+
+        assert weights == [1.0] * len(weights)
+
+    def test_after_she_stops_they_return_to_the_portrait_s_gradually(self, renderer):
+        self._voice(renderer, self.T - 1.0, 1.2)   # her voice ends 0.2 s in
+
+        weights = self._feed(renderer, 4)
+
+        after = weights[int(0.2 * tl.FPS):]
+        ramp = after[:process.LIPS_RELEASE_FRAMES]
+        assert all(0.0 < w < 1.0 for w in ramp), after
+        assert all(a > b for a, b in zip(ramp, ramp[1:])), after
+        assert after[process.LIPS_RELEASE_FRAMES:] == [0.0] * (len(after) - process.LIPS_RELEASE_FRAMES)
+
+    def test_they_start_to_follow_just_before_she_speaks(self, renderer):
+        """Her voice starts on a chunk's first frame: the frames before it,
+        in the chunk before, see it coming in what that chunk carries."""
+        onset = 2 * tl.CHUNK_FRAMES
+        self._voice(renderer, self.T + onset / tl.FPS, 1.0)
+
+        weights = self._feed(renderer, 4)
+
+        ramp = weights[onset - process.LIPS_ATTACK_FRAMES:onset]
+        assert weights[onset - process.LIPS_ATTACK_FRAMES - 1] == 0.0
+        assert all(0.0 < w < 1.0 for w in ramp), weights
+        assert all(a < b for a, b in zip(ramp, ramp[1:])), weights
+        assert weights[onset] == 1.0
+
+    def test_a_pause_between_words_does_not_close_her_mouth(self, renderer):
+        self._voice(renderer, self.T - 1.0, 1.2)
+        self._voice(renderer, self.T + 0.32, 1.0)   # 120 ms without a sound
+
+        weights = self._feed(renderer, 4)
+
+        assert min(weights[int(0.2 * tl.FPS):int(0.32 * tl.FPS)]) > 0.0
+
+    def test_each_frame_is_named_by_its_place_in_what_ditto_draws(self, renderer):
+        """Ditto counts the frames it draws from the first chunk fed, warm-up
+        included; the control must land on the frame it was meant for."""
+        self._voice(renderer, self.T - 1.0, 1.0)
+        renderer._feed(self.T - tl.CHUNK_SECONDS, publish=False)    # a warm-up chunk, voiced
+
+        renderer._feed(self.T, publish=True)            # silent: every frame is held
+
+        assert sorted(renderer.stream.ctrl_info) == list(range(tl.CHUNK_FRAMES, 2 * tl.CHUNK_FRAMES))
+
+    def test_a_skipped_chunk_takes_no_place_in_what_ditto_draws(self, renderer, reader):
+        now = time.perf_counter()
+        _watch(renderer, reader, now)
+        renderer.tick(now)
+        second = renderer.feeder.due(renderer.feeder.next_start)
+        _watch(renderer, reader, second)
+        renderer.tick(second)
+        late = renderer.due[0].stamp + 2 / tl.FPS
+        _watch(renderer, reader, late)
+        renderer.tick(late)                             # skipped: Ditto owes a frame already due
+        for _ in range(tl.CHUNK_FRAMES):
+            renderer.on_frame(_picture(1))
+        start = renderer.feeder.next_start
+        _watch(renderer, reader, renderer.feeder.due(start))
+
+        renderer.tick(renderer.feeder.due(start))
+
+        assert len(renderer.stream.chunks) == 3
+        assert sorted(renderer.stream.ctrl_info) == list(range(3 * tl.CHUNK_FRAMES))
+
+    def test_after_a_rest_her_lips_start_at_rest(self, renderer, reader):
+        """Someone stopped watching while she spoke and comes back to her
+        silence: nothing is left of the ramp that followed her voice."""
+        now = time.perf_counter()
+        self._voice(renderer, now - 1.0, 5.0)
+        _watch(renderer, reader, now)
+        renderer.tick(now)
+        renderer.tick(now + 2 * process.WATCH_SECONDS)     # nobody watches: the face rests
+        back = now + 20.0
+        _watch(renderer, reader, back)
+
+        renderer.tick(back)
+
+        assert len(renderer.stream.chunks) == 2
+        assert self._weights(renderer)[:tl.CHUNK_FRAMES] == [1.0] * tl.CHUNK_FRAMES
+        assert self._weights(renderer)[tl.CHUNK_FRAMES:] == [0.0] * tl.CHUNK_FRAMES
+
+    def _ctrl_vad(self, monkeypatch):
+        """Ditto's lip control, loaded as the suite loads the face: without PyTorch."""
+        monkeypatch.setitem(sys.modules, "torch", None)
+        for name in ("jarvis.output.face.ditto.atomic_components.motion_stitch",
+                     "jarvis.output.face.ditto.models.stitch_network"):
+            monkeypatch.delitem(sys.modules, name, raising=False)
+        return importlib.import_module("jarvis.output.face.ditto.atomic_components.motion_stitch").ctrl_vad
+
+    def test_ditto_holds_the_lips_and_nothing_else_to_the_portrait_s(self, monkeypatch):
+        """Every other keypoint stays as driven, so a silent face goes on blinking."""
+        ctrl_vad = self._ctrl_vad(monkeypatch)
+        lips = [6, 12, 14, 17, 19, 20]
+        others = [k for k in range(21) if k not in lips]
+        driven = np.arange(63, dtype=np.float32).reshape(1, 63) + 1.0
+        portrait = {"exp": np.zeros((1, 63), np.float32)}
+
+        held = ctrl_vad({"exp": driven.copy()}, portrait, 0.0)["exp"].reshape(21, 3)
+        ramped = ctrl_vad({"exp": driven.copy()}, portrait, 0.25)["exp"].reshape(21, 3)
+
+        assert not held[lips].any()
+        assert np.allclose(ramped[lips], 0.25 * driven.reshape(21, 3)[lips])
+        for blended in (held, ramped):
+            assert (blended[others] == driven.reshape(21, 3)[others]).all()
 
 
 class TestTellingTheHandle:

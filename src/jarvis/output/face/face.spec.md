@@ -69,7 +69,13 @@ and never the voice.
   `ready` with the renderer's delay once it can draw (a delay that is not a
   number between 0 and 2 s turns the face off), `watched` whenever
   someone starts or stops watching the face, or `failed` with a reason.
-  Everything else it prints goes to its stderr, which the handle logs.
+  Everything else it prints goes to its stderr, which the handle logs as
+  plain text, colour codes dropped. onnxruntime writes its warnings on Windows
+  in UTF-16: a line where NUL bytes make up a third or more, which Latin text
+  in UTF-16 always does, is decoded as UTF-16; a line mostly in another script
+  is logged as best it decodes. The renderer is started without
+  `JARVIS_DEBUG_FILE`, so its lines reach the log file once, through this
+  relay.
 - **`FaceRenderer` never raises to its caller and never blocks it.** Sending
   is a write to a pipe from a worker thread fed by an unbounded queue, so a
   renderer that stops reading costs memory, not time, until it is declared
@@ -132,17 +138,46 @@ The face costs the GPU nothing while no one can see it.
 - Otherwise it rests, whatever audio it is handed: no chunk, no frame, no GPU
   work. A viewer who arrives while she speaks sees her from the next chunk
   that can still be drawn on time.
-- Frames still inside Ditto when it rests are never published.
+- Frames still inside Ditto when it rests are never published, and those
+  already published are withdrawn: whoever watches next never sees a frame
+  from before the rest, however long a front end holds her last frame. The
+  rest works as a cut covering every stamp, so the writer itself refuses a
+  frame drawn before it, even one Ditto's thread hands back as it happens.
 - The renderer tells its handle each time that changes (`watched`), and
   Kyutai holds her voice back for the face only while someone watches:
   with nobody watching she speaks at once.
 
+## Her lips at rest
+
+Drawn from silence, Ditto's lips do not rest: they drift, then press together
+as if she were biting them. So while she is silent the renderer holds her lips
+to the portrait's.
+
+- **Silence.** A frame is silent when the RMS of its 40 ms of audio is at most
+  0.005. Kyutai's speech sits near 0.07 per frame and its silences near
+  0.0003.
+- **A weight per frame.** It is 1 while she is heard, so her lips follow her
+  voice as Ditto draws them, and 0 in silence, so they are the portrait's.
+  After she is heard it falls to 0 over six frames, so a pause between two
+  words keeps her mouth. It starts to rise two frames before she is heard
+  again, read from the two frames of what follows that every chunk carries.
+  A rest ends the fall: whoever watches next finds her lips at rest.
+- **The lips only.** The weight moves the lip keypoints and nothing else: the
+  rest of the expression stays as Ditto draws it, so in silence she goes on
+  blinking and moving.
+- **Handed to Ditto** as the frame's `vad_alpha`, keyed by the frame's place
+  among those Ditto draws; a frame at 1 needs none, since Ditto reads a missing
+  one as 1. Ditto draws one frame per frame fed, in order, which the stamps
+  rely on too, so a chunk skipped takes no place; it takes each frame's entry
+  as it draws it.
+
 ## Interrupting
 
 `cut(at)` means she stops talking at `at`. The renderer drops every sample
-heard at or after `at`, so what it draws from then on is silence: the mouth
-closes. Frames drawn before the cut but stamped after it show words she will
-not say. The cut withdraws those already published, and the renderer refuses
+heard at or after `at`, so what it draws from then on is silence: her lips
+return to the portrait's (see Her lips at rest). Frames drawn before the cut
+but stamped after it show words she will not say. The cut withdraws those
+already published, and the renderer refuses
 to publish those still being drawn, whichever cut since they were drawn
 covers them: a second cut never brings back what an earlier one took. The
 face holds its last frame until the first frame drawn after the cut is due,
@@ -159,7 +194,8 @@ It holds a header and a ring of 24 frames of 512 by 512 RGB pixels.
   viewer heartbeat and the renderer heartbeat.
 - **A slot** holds a sequence number, a stamp and the pixels. The renderer
   writes the pixels and the stamp first and the sequence number last, and a
-  cut withdraws a slot by clearing its sequence number. A reader copies a slot
+  cut withdraws a slot by clearing its sequence number; a rest clears them
+  all. A reader copies a slot
   and keeps the copy only if the sequence number was the same before and
   after, so a copy torn by a concurrent write is thrown away, never shown.
 - **The renderer beats** into the header on every turn of its loop, resting
@@ -245,10 +281,16 @@ is off until the daemon starts again, and nothing she says depends on it.
 
 A frame that comes after its stamp is not a failure: a front end shows the
 newest frame due and skips the rest. When Ditto falls behind, so that a frame
-it still owes should already be on screen, the renderer skips the chunk that
-falls due rather than queue it behind, so the face catches up with the voice
-instead of trailing it. It counts the frames it published after their stamp
-and the chunks it skipped, and logs both when it rests.
+it could already have drawn should already be on screen, the renderer skips
+the chunk that falls due rather than queue it behind, so the face catches up
+with the voice instead of trailing it. Ditto hands a chunk's frames back only
+once the next chunk is fed, so the last chunk's frames are never counted as
+owed: counting them would skip every chunk after the GPU was taken elsewhere
+for a moment, and the face would never come back while someone watched. A run
+of skipped chunks that reaches a second of her face is logged as it happens,
+and again when Ditto catches up; shorter runs are only counted. The renderer
+counts the frames it published after their stamp and the chunks it skipped,
+and logs both when it rests.
 
 ## Configuration
 
@@ -271,15 +313,25 @@ is checked by hand.
   mid-sentence, a feeder that fell behind.
 - `tests/test_face_frames.py`: the shared memory between two processes, the
   newest frame due, nothing early, torn copies thrown away, cuts withdrawing
-  and refusing frames (two cuts included), the heartbeats, a reader that
+  and refusing frames (two cuts included), a rest withdrawing every frame and
+  refusing those drawn before it, the heartbeats, a reader that
   outlives its renderer and finds the next one, a segment it cannot map passed
   over.
 - `tests/test_face_process.py`: the renderer with Ditto faked; messages read,
   cut and the end of the daemon, frames published at their stamps, warm-up
   frames and frames left inside Ditto at a rest never shown, frames after a
-  cut refused, late frames counted, a chunk skipped while Ditto owes a frame already due, nothing
+  cut refused, frames published before a rest withdrawn, late frames
+  counted, a chunk skipped while Ditto owes a frame it could already have
+  drawn but never for the chunk Ditto holds until the next is fed, the face
+  back on time once Ditto catches up after a stall, a long stall logged and
+  a short one not, nothing
   fed while no one watches, `watched` reported as it changes, `failed` with
-  its reason.
+  its reason; her lips held to the portrait's in silence (her own noise floor
+  included) and following her voice while she is heard, the ramps either
+  side, a pause between words, her lips at rest after a rest, each weight
+  named by its frame's place in what Ditto draws (warm-up counted, a skipped
+  chunk not), and Ditto's `vad_alpha` moving the lip keypoints only, loaded
+  without PyTorch.
 - `tests/test_face_client.py`: the renderer process faked; `ready`,
   `watched` and `failed`, an impossible delay refused, a child that dies, cannot start or ignores quit, the packaged app
   refused, the portrait in the environment and not the command line, messages

@@ -4,9 +4,9 @@ Diary-to-Enrichment Flow Integration Tests
 Tests the critical flow where dialogue memory is saved to the diary, cleaned
 up from in-memory, and then retrieved via FTS search on a follow-up query.
 
-This validates that after the unified RECENT_WINDOW_SEC = MAX_UNSAVED_AGE_SEC
-change, context is not lost when messages are cleaned from memory — the
-FTS pipeline successfully retrieves just-saved diary entries.
+This validates that context is not lost when the messages of a conversation
+that has ended are cleaned from memory — the FTS pipeline successfully
+retrieves just-saved diary entries.
 """
 
 import time
@@ -194,7 +194,7 @@ class TestDiaryToEnrichmentFlow:
         print(f"\n  📝 Diary entry saved with ID: {summary_id}")
 
         # Step 3: Force messages old and trigger cleanup
-        self._force_messages_old(dm, dm.RECENT_WINDOW_SEC + 60)
+        self._force_messages_old(dm, dm.CONVERSATION_GAP_SEC + 60)
         dm.mark_saved_up_to(time.time())
 
         # Verify messages were cleaned up
@@ -269,8 +269,8 @@ class TestDiaryToEnrichmentFlow:
 
         assert summary_id is not None
 
-        # Clean up in-memory messages (simulates the unified window expiry)
-        self._force_messages_old(dm, dm.RECENT_WINDOW_SEC + 60)
+        # Clean up in-memory messages (simulates the conversation ending)
+        self._force_messages_old(dm, dm.CONVERSATION_GAP_SEC + 60)
         dm.mark_saved_up_to(time.time())
         assert len(dm.get_recent_messages()) == 0, "Memory should be empty"
 
@@ -328,7 +328,7 @@ class TestDiaryToEnrichmentFlow:
             )
 
         assert id1 is not None
-        self._force_messages_old(dm, dm.RECENT_WINDOW_SEC + 60)
+        self._force_messages_old(dm, dm.CONVERSATION_GAP_SEC + 60)
         dm.mark_saved_up_to(time.time())
 
         # Second conversation: fitness
@@ -351,7 +351,7 @@ class TestDiaryToEnrichmentFlow:
             )
 
         assert id2 is not None
-        self._force_messages_old(dm, dm.RECENT_WINDOW_SEC + 60)
+        self._force_messages_old(dm, dm.CONVERSATION_GAP_SEC + 60)
         dm.mark_saved_up_to(time.time())
 
         # Both should be empty from memory

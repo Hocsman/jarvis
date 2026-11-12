@@ -9,7 +9,7 @@ same conversation, memory, and tools.
 Voice and text are two views onto the **same** conversation. Both feed the
 single `_global_dialogue_memory` owned by the daemon. A question asked by voice
 and a follow-up typed in the chat window are part of one continuous turn
-sequence, share the same hot window, and produce a single diary entry at the
+sequence, share the same conversation, and produce a single diary entry at the
 end of the session. There is no "text conversation" vs "voice conversation"
 split in storage.
 
@@ -27,8 +27,14 @@ used for end-of-session UI updates.
   value. This mirrors how `_check_and_update_diary` is invoked from a worker
   QThread in the existing desktop app.
 - The worker thread runs
-  `run_reply_engine(db, cfg, tts=None, text, _global_dialogue_memory, language=None)`.
+  `run_reply_engine(db, cfg, tts=None, text, _global_dialogue_memory, language=None, origin="chat")`.
 - `tts=None`: text chat never speaks. Audio output stays a voice-only concern.
+- `origin="chat"`: the reply is read, not heard, so it is not given the
+  spoken-form rule a voice turn gets (units, signs and dates written as
+  words, `src/jarvis/reply/prompts/prompts.spec.md`), and a typed weather
+  question can be answered "11,2 °C". Nor is it given the said-aloud rule
+  (what she is asked to say to someone she says in the reply, since
+  whoever is with the user hears it): a typed reply reaches the user alone.
 - `language=None`: text input has no Whisper-detected language; tools fall
   back to their own defaults, same as a voice query with no language hint.
 - Redaction still applies (`run_reply_engine` calls `redact(text)` before
@@ -256,7 +262,8 @@ There is exactly one chat: the daemon's single dialogue memory, displayed as a
 text-message thread. There is no session list, no "new session" button, and
 nothing is written to disk, so a fresh app run starts blank (the transcript is
 in-memory and authoritative for the session thereafter; in bundled mode the
-daemon's hot window seeds recent voice turns on first show).
+part of the current conversation the model reads word for word seeds
+recent voice turns on first show).
 
 ### Rewind
 
@@ -281,14 +288,18 @@ telling identical messages apart (`DialogueMemory.rewind_before_user_message`).
 The transcript can hold fewer user turns than the memory (a voice exchange
 while the window is open, turns older than the seeding window) or more (a
 message the daemon never took), so a positional count alone would name the
-wrong turn. A turn the memory no longer holds (pruned by a diary pass,
-rebuilt by a daemon restart) is refused, never approximated.
+wrong turn. A turn the memory no longer holds (pruned by a diary pass once
+its conversation ended, rebuilt by a daemon restart) is refused, never
+approximated.
 
 A rewind drops the turn itself so the regeneration does not duplicate it,
 clears the hot-window caches and tool carryover, and closes a question still
 waiting for a decision as `expiré` (the context that produced it is being
 rewritten; see `policy.spec.md`). Rewinding rolls back the voice context
-too: it is the same memory. Rewind is disabled while a query or another
+too: it is the same memory. It does not reach the diary: an exchange it
+drops that the diary had already summarised stays in the day's summary,
+which reaches the model as the earlier part of a conversation too long to
+be read word for word (`reply.spec.md`, Recent Dialogue Context). Rewind is disabled while a query or another
 rewind is in flight and when the daemon is not running.
 
 Rows keep their ordinals in step with the memory: a message the daemon
@@ -324,7 +335,8 @@ dark-themed and consistent with the rest of the app.
 ### Lifecycle
 
 - Created lazily on first tray open.
-- First show seeds the transcript from the daemon's current hot window
+- First show seeds the transcript from the part of the daemon's current
+  conversation the model reads word for word
   (`jarvis.daemon.get_hot_window_messages()`), so a user who has been talking
   by voice sees their recent turns instead of a blank panel. Seeding runs once
   per daemon life: re-showing (from the tray or after a hide) never duplicates

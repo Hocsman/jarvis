@@ -12,6 +12,8 @@ from .system import (
     PromptComponents,
     ASR_NOTE,
     INFERENCE_GUIDANCE,
+    SAID_ALOUD,
+    SPOKEN_FORM,
     VOICE_STYLE,
 )
 
@@ -51,6 +53,36 @@ def detect_model_size(model_name: Optional[str]) -> ModelSize:
             return ModelSize.SMALL
 
     return ModelSize.LARGE
+
+
+def dialogue_context_budget(cfg) -> int:
+    """Characters of the current conversation the chat model reads word
+    for word: ``dialogue_context_max_chars``, or, left at 0, what its
+    window holds.
+
+    A model run at home gets the small budget whatever its size: Ollama
+    runs every chat model in an 8 192-token window, which the system
+    prompt and the tools share with the dialogue, and a local
+    OpenAI-compatible server's window is not known. A provider off home
+    gets the budget of the model's size.
+    """
+    from ...llm import chat_is_remote
+    from ...memory.conversation import (
+        DIALOGUE_CONTEXT_CHARS_LARGE,
+        DIALOGUE_CONTEXT_CHARS_SMALL,
+    )
+
+    try:
+        configured = int(getattr(cfg, "dialogue_context_max_chars", 0) or 0)
+    except (TypeError, ValueError):
+        configured = 0
+    if configured > 0:
+        return configured
+    if not chat_is_remote(cfg):
+        return DIALOGUE_CONTEXT_CHARS_SMALL
+    if detect_model_size(getattr(cfg, "llm_chat_model", None)) == ModelSize.SMALL:
+        return DIALOGUE_CONTEXT_CHARS_SMALL
+    return DIALOGUE_CONTEXT_CHARS_LARGE
 
 
 # =============================================================================
@@ -214,16 +246,21 @@ TOOL_CONSTRAINTS_SMALL = _TOOL_CONSTRAINTS_BASE + "\n\n" + _TOOL_CONSTRAINTS_BAS
 # Prompt Assembly
 # =============================================================================
 
-def get_system_prompts(model_size: ModelSize) -> PromptComponents:
+def get_system_prompts(model_size: ModelSize, *, spoken: bool = False) -> PromptComponents:
     """
     Get prompt components appropriate for the given model size.
 
     Args:
         model_size: The detected model size
+        spoken: Whether the reply will be read aloud. Only then does it get
+            the spoken-form rule (units, signs and dates in words) and, on a
+            large model, the said-aloud rule (what she is asked to say to
+            someone, she says); a reply that is read keeps its symbols.
 
     Returns:
         PromptComponents with all necessary prompt strings
     """
+    spoken_form = SPOKEN_FORM if spoken else None
     if model_size == ModelSize.SMALL:
         return PromptComponents(
             asr_note=ASR_NOTE,
@@ -232,6 +269,7 @@ def get_system_prompts(model_size: ModelSize) -> PromptComponents:
             voice_style=VOICE_STYLE,
             tool_guidance=TOOL_GUIDANCE_SMALL,
             tool_constraints=TOOL_CONSTRAINTS_SMALL,
+            spoken_form=spoken_form,
         )
     else:
         return PromptComponents(
@@ -241,4 +279,6 @@ def get_system_prompts(model_size: ModelSize) -> PromptComponents:
             voice_style=VOICE_STYLE,
             tool_guidance=TOOL_GUIDANCE_LARGE,
             tool_constraints=TOOL_CONSTRAINTS_LARGE,
+            spoken_form=spoken_form,
+            said_aloud=SAID_ALOUD if spoken else None,
         )

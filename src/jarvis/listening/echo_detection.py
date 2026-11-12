@@ -5,6 +5,7 @@ from typing import Optional, List
 import re
 
 from ..debug import debug_log
+from .room_floor import FALLBACK_FLOOR
 
 from rapidfuzz import fuzz
 
@@ -52,7 +53,7 @@ class EchoDetector:
         self._utterance_start_time: float = 0.0
         self._utterance_end_time: float = 0.0
     
-    def track_tts_start(self, tts_text: str, baseline_energy: float = 0.0045,
+    def track_tts_start(self, tts_text: str, baseline_energy: float = FALLBACK_FLOOR,
                         exact_duration: Optional[float] = None,
                         continues: bool = False, start_delay: float = 0.0) -> None:
         """
@@ -60,11 +61,16 @@ class EchoDetector:
 
         Args:
             tts_text: Text being spoken by TTS
-            baseline_energy: Current audio energy baseline
+            baseline_energy: The room's quiet level as this text is queued:
+                what the microphone hears while neither the thinking tune
+                nor her voice plays (`room_floor.py`). When the text starts
+                a reply it becomes the floor the voice proof weighs
+                utterances against (`utterance_carries_a_voice`).
             exact_duration: Exact audio duration in seconds (from Piper synthesis)
             continues: True when this is a later chunk of a reply already
                 being spoken. The reference text then accumulates instead
-                of being replaced, and the start time is left alone.
+                of being replaced, and the start time and the floor are
+                left alone.
 
                 A streamed reply arrives sentence by sentence, and every
                 consumer of ``_last_tts_text`` compares what the microphone
@@ -78,21 +84,29 @@ class EchoDetector:
                 timed from when she began speaking, and pushing that
                 forward on each chunk would let a late echo look like
                 fresh speech.
+
+                Nor is the floor taken again: a reply is weighed against
+                one floor, the room's as it began. A later chunk is queued
+                while she speaks, when the room has been heard at most in
+                the gaps between her sentences.
             start_delay: How much later than usual her voice will be heard
                 (a talking face holds it back by its delay). Her words are
                 timed from that much later.
         """
+        duration_info = f", exact_duration={exact_duration:.2f}s" if exact_duration else ""
         if continues and self._last_tts_text:
             self._last_tts_text = (
                 self._last_tts_text + " " + tts_text.lower().strip()).strip()
+            debug_log(f"TTS continues the reply, text_len={len(tts_text)}, floor kept at "
+                      f"{self._tts_energy_baseline:.4f} from its first sentence "
+                      f"(room now {baseline_energy:.4f}){duration_info}", "echo")
         else:
             self._tts_start_time = time.time() + start_delay
             self._last_tts_text = tts_text.lower().strip()
-        self._tts_energy_baseline = baseline_energy
+            self._tts_energy_baseline = baseline_energy
+            debug_log(f"TTS started, text_len={len(tts_text)}, "
+                      f"floor={baseline_energy:.4f}{duration_info}", "echo")
         self._tts_exact_duration = exact_duration
-
-        duration_info = f", exact_duration={exact_duration:.2f}s" if exact_duration else ""
-        debug_log(f"TTS started, text_len={len(tts_text)}, baseline_energy={baseline_energy:.4f}{duration_info}", "echo")
     
     def utterance_carries_a_voice(self, utterance_energy: float) -> bool:
         """True when the utterance has someone's voice on top of the echo.
@@ -104,8 +118,8 @@ class EchoDetector:
 
         What separates them is that one of them moved air. A person
         talking over her puts their voice on top of the echo and the level
-        rises above the ambient floor recorded when she started speaking;
-        noise dreamt into words does not.
+        rises above the room's quiet level recorded when she started
+        speaking; noise dreamt into words does not.
 
         Reuses `energy_spike_threshold`, the multiplier the detector
         already applies to this same question in the post-TTS cooldown,

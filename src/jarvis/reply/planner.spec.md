@@ -181,7 +181,11 @@ The engine consumes the plan in two phases.
   `resolve_next_tool_call` to convert the next step into a concrete
   `{name, arguments}` JSON and dispatches the tool directly, bypassing
   the chat model for that turn. This keeps small models on-rails without
-  relying on their native tool-call reliability.
+  relying on their native tool-call reliability. Several steps naming one
+  tool on different arguments each run (three folders, three cities); a
+  resolved step whose name and arguments match a call already run in
+  this reply is not dispatched, and the chat model takes the turn (see
+  `reply.spec.md`, Tool protocol details, duplicate suppression).
 - The chat model still runs the final synthesis turn so the reply is
   phrased in the daemon's voice using its own profile and persona.
 

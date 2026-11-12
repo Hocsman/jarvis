@@ -65,6 +65,7 @@ The four engines are interchangeable to the listener. Each exposes:
 | `is_speaking()` | Whether an item is being synthesised or played |
 | `get_last_spoken_text()` | The processed text of the item most recently started |
 | `voice_delay()` | How much later than usual her voice will be heard: the talking face's delay while a face is ready and watched (Kyutai, see "The face"), otherwise 0 |
+| `wait_until_ready(timeout)` | Waits up to `timeout` seconds for the load (and warm-up) `start` began. `True` once the engine can speak without paying it, `False` once it settled without a voice (it could not load, or the engine is off), `None` when it is still loading at the deadline, or when `start` has not been called and nothing is loading (then it returns at once). Piper and Chatterbox load inside `start`, so they never wait. The listener calls it before it announces "Listening!" (`listening.spec.md`, "Startup & Model Warmup") |
 
 `speak` starts the worker if nobody has. Calling `start` on Piper loads
 the voice on the calling thread (downloading it if absent) so the wait
@@ -107,6 +108,14 @@ markdown (bold, italics, code, headings, quotes, bullets, and numbered
 markers only when two or more adjacent lines form a real list). The
 processed text is what the worker speaks and what
 `get_last_spoken_text()` returns. Words inside the markup are kept.
+Symbols are not rewritten here. The words for "°" or "km/h" belong to the
+language of the reply, and the language this layer is given is the one the
+user was heard in, an assumption about the reply (see "Which language
+wins"). The reply the engine writes for a turn from the voice already has
+its units, signs and dates in words, because the prompt asks for them
+(`src/jarvis/reply/prompts/prompts.spec.md`, Spoken Form). Text spoken
+without that prompt, a reminder or a Claude Code report, keeps whatever
+symbols it carries.
 
 **Empty text is dropped, unless it carries a callback.** Whitespace
 with no completion callback queues nothing. Empty text *with* a
@@ -212,10 +221,11 @@ worker taking an item up and starting it impossible to lose, and it is
 what lets the reply that follows a stop be spoken, since its items carry
 the new count.
 
-Nothing upstream does this work. A stop word is heard on the listener's
-own thread, which also dispatches the reply, so it is only heard once
-generation has ended and the whole reply (every chunk, the tail and the
-marker) is already waiting in the engine's queue.
+The listener does its part upstream. A stop can land while the reply is
+still being written, with only some of it queued: the engine drops what it
+holds, and the listener queues nothing more of that reply, no later
+sentence, no tail and no marker (`listening/listening.spec.md`, "The
+Microphone Is Always Read").
 
 An interrupted reply never reaches its completion callback, so nothing the
 engine does takes the published state out of SPEAKING: the listener, which
@@ -243,7 +253,10 @@ said with `track_tts_start`, accumulating the sentences of one reply
 engine owes the listener five things:
 
 1. `is_speaking()`, which gates stop-word and echo handling while she
-   talks;
+   talks, and keeps what the microphone hears meanwhile out of the room's
+   quiet level, the floor of the voice proof (`listening.spec.md`, "The
+   floor is the room, never her nor him"): it must stay true until her
+   voice has played;
 2. `get_last_spoken_text()`, which is the current chunk only. It is not
    the echo reference, and must not be used as one;
 3. the duration callback, which replaces the detector's estimate with the
@@ -270,10 +283,12 @@ for interface compatibility only (Kyutai is handed neither).
 reply is being prepared and is owned by the listener, which starts it
 when a query is dispatched (never while she is already speaking) and
 stops it when the finished reply is handed over for speaking, or when
-there is nothing to say. It opens its output stream through the same
-`sounddevice` API and under the same process-wide `portaudio_lock` as the
-engines, so stopping it releases the device in milliseconds and the voice
-can open it straight away.
+there is nothing to say. While `is_playing()` is true, what the
+microphone hears is not the room's quiet level (`listening.spec.md`,
+"The floor is the room, never her nor him"). It opens its output stream
+through the same `sounddevice` API and under the same process-wide
+`portaudio_lock` as the engines, so stopping it releases the device in
+milliseconds and the voice can open it straight away.
 
 ## Audio output
 
@@ -284,7 +299,12 @@ voice's own sample rate, Kokoro and Kyutai in `float32` at 24 kHz) in
 blocks of 1024 frames so an abort lands quickly. Chatterbox writes a temporary WAV
 and plays it through the pygame mixer. Opening, starting, aborting and
 closing a stream all happen under `portaudio_lock`
-(`listening.spec.md`, "Serialised PortAudio Lifecycle").
+(`listening.spec.md`, "Serialised PortAudio Lifecycle"). Each output stream,
+the thinking tune's included, is opened through `open_output_stream`
+(`jarvis.utils.audio_stream`), which constructs it and tracks it in one hold
+of the lock, and counted open until it is closed, so the device list is
+never read afresh while she speaks or the tune plays: reading it terminates
+PortAudio, which would close the stream under her voice.
 
 ## Piper voices
 
@@ -528,8 +548,9 @@ said without them has been heard.
 - When synthesis falls behind playback the voice waits for its audio as it
   does without a face, and the pieces handed over after the wait are stamped
   later by as much. A stretch that reaches the face less than its delay
-  before it is heard comes too late to be drawn: there the mouth stays closed
-  until synthesis is ahead again. The debug log counts how far the voice ran
+  before it is heard comes too late to be drawn: there her lips rest as in the
+  portrait (`face/face.spec.md`, "Her lips at rest") until synthesis is ahead
+  again. The debug log counts how far the voice ran
   behind its moment.
 - A stop resets the schedule: the next reply waits for the face's delay
   only, not for what the stop cut.
@@ -685,6 +706,11 @@ language. The line is not added for Kokoro or Kyutai.
   with a reproduction, as it needs the GPU.
 - Kyutai's initialisation ends with one throwaway synthesis (audio
   discarded, nothing queued or played).
+- Each engine's `wait_until_ready`: Kyutai and Kokoro answer `None` while
+  their background load or warm-up runs and `True` once the warm-up
+  synthesis is done; an engine that could not load answers `False`, a
+  disabled one `False`, and one nobody started `None` without spending the
+  wait. Piper and Chatterbox answer at once from what `start` loaded.
 - A voice name is resolved through the model's voice repository, a
   `.safetensors` path is used as it is, and a path that does not exist
   fails initialisation before the model is loaded. A value that is not a

@@ -175,6 +175,7 @@ class TestPossessorFieldRepro:
         ):
             response = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text=query, dialogue_memory=eval_dialogue_memory,
             )
 
@@ -342,6 +343,7 @@ class TestPossessorFieldRepro:
             query = "Tell me more about the movie possessor"
             response = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text=query, dialogue_memory=eval_dialogue_memory,
             )
 
@@ -524,6 +526,7 @@ class TestPossessorFieldRepro:
             query = "Tell me about the movie possessor"
             response = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text=query, dialogue_memory=eval_dialogue_memory,
             )
 
@@ -667,6 +670,7 @@ class TestPossessorFieldRepro:
             query = "Tell me about the movie possessor"
             response = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text=query, dialogue_memory=eval_dialogue_memory,
             )
 

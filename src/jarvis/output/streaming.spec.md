@@ -31,7 +31,14 @@ only the last sentence, and every guard downstream reads it:
 - the fuzzy `partial_ratio` safety net,
 - the intent judge, which receives it as context,
 - `_carries_speech_she_did_not_say`, which decides whether to override an
-  echo verdict and whether a stripped remainder is speech.
+  echo verdict, whether a stripped remainder is speech, and, through
+  `_not_her_echo`, which transcripts the judge is shown "(during TTS)" and
+  which no hot-window override takes, with a verdict or without one. Its
+  word test also tells which words of a hot-window utterance are hers when
+  the listener asks whether a wake word in it can only be his,
+- the cut of her sentences at the edges of an utterance heard in her time
+  (`listening.spec.md`, "Her sentences at the edges of what he said"): a
+  sentence coming back while a later one plays is found in the reply.
 
 An echo of sentence one, arriving while sentence three is being spoken,
 would be compared against sentence three, match nothing, and be taken for
@@ -41,6 +48,17 @@ failure fixed on 2026-08-16, reintroduced by the feature.
 So `_last_tts_text` accumulates across the sentences of one reply and
 resets when a new reply begins. The reference text is the reply, never
 the chunk.
+
+What is recorded when she starts speaking is recorded once, at her first
+sentence, and kept for the rest of the reply: the start of her speech,
+from which echo windows are timed, and the floor of the voice proof
+(`listening/listening.spec.md`, "Overriding an echo verdict takes positive
+evidence"). The floor is the room's quiet level, which the listener reads
+from what the microphone hears while neither the thinking tune nor her
+voice plays: the first sentence is queued while the tune still plays,
+and the floor is still the room's. A later sentence is queued while she
+speaks, when the room has been heard at most between her sentences, so
+the reply keeps the floor it began with.
 
 ## Segmentation
 
@@ -59,8 +77,8 @@ If the stream ends with an unterminated tail, that tail is spoken as-is.
 
 A sentence closes only when something follows its punctuation, so the last
 sentence of a reply, and the only one of a short reply, is not spoken while
-the reply is generated: the listener speaks it as the tail once the engine
-returns. The latency journal relies on this (`jarvis/latency.spec.md`): the
+the reply is generated: the listener's reply thread speaks it as the tail
+once the engine returns. The latency journal relies on this (`jarvis/latency.spec.md`): the
 first sound of a short reply arrives after the engine returned.
 
 ## What must not change
@@ -72,10 +90,11 @@ next sentence in as a follow-up.
 
 **Interruption still stops everything.** `stop` mid-reply drops the
 queued chunks as well as the one playing, and cancels what has not been
-synthesised yet.
+synthesised yet. The reply may still be being written when she is
+stopped: nothing it streams afterwards is said, and neither is its tail.
 
 **One reply is spoken in one voice.** The language the user was heard in
-is read when the stream begins, and every chunk, the tail and the
+is read when the query is handed to the reply thread, and every chunk, the tail and the
 end-of-reply marker carries that same language to the engine (see
 `tts.spec.md`, "Which voice"). A transcript of something else landing
 mid-reply moves the detected language, and must not move the voice of the
@@ -107,6 +126,11 @@ than a lost answer.
 - A three-sentence reply is spoken as three chunks, in order.
 - The echo reference after the third chunk contains all three sentences,
   and an echo of the first is still recognised.
+- The floor of the voice proof is the one read when the first chunk was
+  queued: later chunks, queued while the microphone hears her, leave it
+  alone, and his soft answer right after her last word still counts as a
+  voice, while her own words coming back as she stops are still set aside
+  as hers. A new reply reads it again.
 - The hot window opens once, after the last chunk.
 - A stop during chunk one leaves chunks two and three unspoken.
 - Every chunk and the tail of a reply carry the same language, even when

@@ -172,7 +172,8 @@ def set_diary_update_callbacks(
 
 
 def get_hot_window_messages() -> list:
-    """Return the hot window messages from the shared dialogue memory.
+    """Return the part of the current conversation the model reads word for
+    word, from the shared dialogue memory.
 
     Used by the chat window to populate its transcript with any prior voice
     or text turns that are still warm in memory. Returns [] if memory is
@@ -1298,6 +1299,125 @@ def build_tts_engine(cfg, face=None):
     )
 
 
+def _say(text: str) -> None:
+    """A shutdown line printed outside any step, on a console that may already
+    be gone: no step is there to contain its failure. A line printed inside a
+    step costs at most that step."""
+    try:
+        print(text, flush=True)
+    except Exception:
+        pass
+
+
+def _shutdown_step(name: str, action: Callable[[], object]) -> None:
+    """One step of the shutdown, logged, and contained: a step that raises
+    costs that step and nothing after it. A second Ctrl+C, which the signal
+    handlers raise as KeyboardInterrupt, cuts short the step it lands in."""
+    debug_log(f"shutdown: {name}", "jarvis")
+    try:
+        action()
+    except KeyboardInterrupt:
+        debug_log(f"shutdown: {name} interrupted", "jarvis")
+        _say(f"  ⚠️ Shutdown: {name} interrupted")
+    except Exception as e:
+        debug_log(f"shutdown: {name} failed: {e!r}", "jarvis")
+        _say(f"  ⚠️ Shutdown: {name} failed: {e}")
+
+
+def _shut_down(db: Database, cfg, *, dictation, voice_thread, tts, face) -> None:
+    """Stop what the daemon started and save the diary, every step whatever
+    the one before it did (`desktop_app.spec.md`, "Shutdown and the Console").
+
+    The order is the one each step needs: nothing new is started while the
+    rest is waited on, the diary pass runs once no reply is writing to the
+    dialogue memory, and the database is closed once nothing needs it.
+    """
+    global _warm_profile_core_listener
+
+    _say("🔄 Daemon shutting down - saving memory...")
+
+    if dictation is not None:
+        _shutdown_step("dictation", dictation.stop)
+
+    # Before the speaker dies. The shutdown diary pass can take 45
+    # seconds after this and the database outlives both, so a
+    # reminder firing in that window would be settled as said with
+    # nothing able to say it.
+    if _global_reminders is not None:
+        _shutdown_step("reminder scheduler", _global_reminders.stop)
+
+    # The dispatcher first, so nothing new is handed over while the
+    # runner is being waited on.
+    if _global_routines is not None:
+        _shutdown_step("routine dispatcher", _global_routines.stop)
+    if _global_routine_runner is not None:
+        _shutdown_step("routine in flight", _global_routine_runner.stop)
+
+    # Closed before the voice thread and the chat worker are waited
+    # on: a turn still in flight must not start a job that outlives
+    # the daemon, and a job still running has nobody left to report to.
+    def _close_delegations() -> None:
+        from .projets.delegation import DELEGATIONS
+
+        DELEGATIONS.close()
+
+    _shutdown_step("Claude Code job", _close_delegations)
+
+    if voice_thread is not None:
+        def _stop_listener() -> None:
+            voice_thread.stop()
+            voice_thread.join(timeout=2.0)
+
+        _shutdown_step("voice listener", _stop_listener)
+
+    # A chat worker that started just before the stop request is still
+    # inside run_reply_engine, holding the database connection the
+    # diary pass below is about to use and the one db.close() will
+    # shut. Wait for it, bounded: quitting a moment late beats a
+    # closed-handle raise or a diary pass racing its writes.
+    _shutdown_step("chat worker", lambda: wait_for_chat_worker(timeout_sec=5.0))
+
+    if _global_skip_shutdown_diary_update:
+        debug_log("shutdown diary update skipped by fast stop request", "jarvis")
+        _say("⏭️ Skipping diary update before shutdown")
+    else:
+        _shutdown_step("diary", lambda: _save_diary_before_shutdown(db, cfg))
+
+    if tts is not None:
+        _shutdown_step("speech", tts.stop)
+    if face is not None:
+        _shutdown_step("face", face.stop)
+
+    # Tear down persistent MCP sessions so subprocess-launched
+    # children (e.g. chrome-devtools-mcp's Chrome) close cleanly.
+    def _close_mcp_sessions() -> None:
+        from .tools.external.mcp_runtime import shutdown_runtime
+
+        shutdown_runtime()
+
+    _shutdown_step("MCP sessions", _close_mcp_sessions)
+
+    _shutdown_step("database", db.close)
+
+    # Drop the core write listener so the module registry does not
+    # retain a closure pointing at this run's DialogueMemory after
+    # shutdown — relevant for tests and any embedder that re-runs the
+    # daemon in-process.
+    if _warm_profile_core_listener is not None:
+        listener = _warm_profile_core_listener
+
+        def _drop_core_listener() -> None:
+            from .memory.core import unregister_core_mutation_listener
+
+            unregister_core_mutation_listener(listener)
+
+        _shutdown_step("profile cache listener", _drop_core_listener)
+        _warm_profile_core_listener = None
+
+    debug_log("daemon stopped", "jarvis")
+    _say("👋 Daemon stopped")
+
+
 def main() -> None:
     """Main daemon entry point."""
     global _global_dialogue_memory, _global_stop_requested, _global_dictation_engine, _global_listener
@@ -1385,9 +1505,11 @@ def main() -> None:
 
     # Initialize dialogue memory with timeout
     print("💾 Initializing dialogue memory...", flush=True)
+    from .reply.prompts.model_variants import dialogue_context_budget
+
     _global_dialogue_memory = DialogueMemory(
         inactivity_timeout=cfg.dialogue_memory_timeout,
-        max_interactions=20
+        context_max_chars=dialogue_context_budget(cfg),
     )
     print("✓ Dialogue memory initialized", flush=True)
 
@@ -1599,10 +1721,12 @@ def main() -> None:
                 on_dictation_start=_on_dictation_start,
                 on_dictation_processing_start=_on_dictation_processing_start,
                 on_dictation_end=_on_dictation_end,
+                on_microphone_missing=voice_thread.microphone_missed,
                 transcribe_lock=voice_thread.transcribe_lock,
                 voice_device=getattr(cfg, "voice_device", None),
                 filler_removal=getattr(cfg, "dictation_filler_removal", False),
                 custom_dictionary=getattr(cfg, "dictation_custom_dictionary", []),
+                whisper_language=getattr(cfg, "whisper_language", None),
                 cfg=cfg,
                 chat_model=cfg.llm_chat_model,
                 thinking=getattr(cfg, "dictation_thinking_enabled", False),
@@ -1700,93 +1824,7 @@ def main() -> None:
     except KeyboardInterrupt:
         debug_log("daemon received KeyboardInterrupt", "jarvis")
     finally:
-        print("🔄 Daemon shutting down - saving memory...", flush=True)
-        debug_log("daemon finally block starting - performing cleanup", "jarvis")
-
-        # Clean shutdown - stop dictation first
-        if dictation is not None:
-            debug_log("stopping dictation engine...", "jarvis")
-            dictation.stop()
-            debug_log("dictation engine stopped", "jarvis")
-
-        # Before the speaker dies. The shutdown diary pass can take 45
-        # seconds after this and the database outlives both, so a
-        # reminder firing in that window would be settled as said with
-        # nothing able to say it.
-        if _global_reminders is not None:
-            debug_log("stopping reminder scheduler...", "jarvis")
-            _global_reminders.stop()
-
-        # The dispatcher first, so nothing new is handed over while the
-        # runner is being waited on.
-        if _global_routines is not None:
-            debug_log("stopping routine dispatcher...", "jarvis")
-            _global_routines.stop()
-        if _global_routine_runner is not None:
-            debug_log("waiting for the routine in flight...", "jarvis")
-            _global_routine_runner.stop()
-
-        # Closed before the voice thread and the chat worker are waited
-        # on: a turn still in flight must not start a job that outlives
-        # the daemon, and a job still running has nobody left to report to.
-        try:
-            from .projets.delegation import DELEGATIONS
-
-            DELEGATIONS.close()
-        except Exception as e:
-            debug_log(f"Claude Code job not stopped: {e}", "jarvis")
-
-        if voice_thread is not None:
-            debug_log("stopping voice thread...", "jarvis")
-            voice_thread.stop()
-            try:
-                voice_thread.join(timeout=2.0)
-            except Exception:
-                pass
-            debug_log("voice thread stopped", "jarvis")
-
-        # A chat worker that started just before the stop request is still
-        # inside run_reply_engine, holding the database connection the
-        # diary pass below is about to use and the one db.close() will
-        # shut. Wait for it, bounded: quitting a moment late beats a
-        # closed-handle raise or a diary pass racing its writes.
-        wait_for_chat_worker(timeout_sec=5.0)
-
-        if _global_skip_shutdown_diary_update:
-            debug_log("shutdown diary update skipped by fast stop request", "jarvis")
-            print("⏭️ Skipping diary update before shutdown", flush=True)
-        else:
-            _save_diary_before_shutdown(db, cfg)
-
-        if tts is not None:
-            tts.stop()
-        if face is not None:
-            face.stop()
-
-        # Tear down persistent MCP sessions so subprocess-launched
-        # children (e.g. chrome-devtools-mcp's Chrome) close cleanly.
-        try:
-            from .tools.external.mcp_runtime import shutdown_runtime
-            shutdown_runtime()
-        except Exception as _e:
-            debug_log(f"MCP runtime shutdown error: {_e}", "jarvis")
-
-        db.close()
-
-        # Drop the core write listener so the module registry does not
-        # retain a closure pointing at this run's DialogueMemory after
-        # shutdown — relevant for tests and any embedder that re-runs the
-        # daemon in-process.
-        if _warm_profile_core_listener is not None:
-            try:
-                from .memory.core import unregister_core_mutation_listener
-                unregister_core_mutation_listener(_warm_profile_core_listener)
-            except Exception:
-                pass
-            _warm_profile_core_listener = None
-
-        debug_log("daemon stopped", "jarvis")
-        print("👋 Daemon stopped", flush=True)
+        _shut_down(db, cfg, dictation=dictation, voice_thread=voice_thread, tts=tts, face=face)
 
 
 if __name__ == "__main__":

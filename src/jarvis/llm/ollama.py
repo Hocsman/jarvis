@@ -1,16 +1,20 @@
 """Ollama implementation of :class:`LLMBackend`.
 
 HTTP calls against ``/api/chat``, ``/api/embeddings``, ``/api/tags`` and
-``/api/generate`` (the warm-up ping), native tool calling with the
+``/api/generate`` (the warm-up ping; a warm-up given a prompt goes to
+``/api/chat``), native tool calling with the
 ``tools`` parameter (Ollama 0.4+), and fail-soft error handling (return
 ``None`` on timeouts / connection errors; :class:`ToolsNotSupportedError`
 on HTTP 400 with tools).
 """
 
 from __future__ import annotations
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import json
+import math
+import os
+import re
 import requests
 
 from ..debug import debug_log
@@ -19,6 +23,58 @@ from .backend import (
     ToolsNotSupportedError,
     strip_nonstandard_message_fields,
 )
+
+# The context window of a :meth:`OllamaBackend.direct` call left at its
+# default. A prompted warm-up asks for the same one, or Ollama would load
+# the model again for the first real call.
+_DIRECT_NUM_CTX = 4096
+
+# A residency as Ollama reads it: whole seconds, or a Go duration (a sign,
+# then number-unit pairs such as ``24h`` or ``1h30m``).
+_WHOLE_SECONDS_RE = re.compile(r"[-+]?\d+")
+_GO_DURATION_RE = re.compile(r"[-+]?(?:(?:\d+(?:\.\d*)?|\.\d+)(?:ns|us|µs|μs|ms|s|m|h))+")
+_GO_DURATION_PART_RE = re.compile(r"(\d+(?:\.\d*)?|\.\d+)(ns|us|µs|μs|ms|s|m|h)")
+_GO_UNIT_SECONDS = {
+    "ns": 1e-9, "us": 1e-6, "µs": 1e-6, "μs": 1e-6, "ms": 1e-3, "s": 1.0, "m": 60.0, "h": 3600.0,
+}
+
+
+def _keep_alive_seconds(value: str) -> Optional[float]:
+    """Seconds Ollama keeps a model for ``value``, read the way it reads
+    ``OLLAMA_KEEP_ALIVE``: whole seconds or a Go duration, a negative one
+    meaning for ever (``inf``). ``None`` when it is neither."""
+    text = (value or "").strip()
+    if _WHOLE_SECONDS_RE.fullmatch(text):
+        seconds = float(int(text))
+    elif _GO_DURATION_RE.fullmatch(text):
+        seconds = sum(
+            float(number) * _GO_UNIT_SECONDS[unit]
+            for number, unit in _GO_DURATION_PART_RE.findall(text)
+        )
+        if text.startswith("-"):
+            seconds = -seconds
+    else:
+        return None
+    return math.inf if seconds < 0 else seconds
+
+
+def at_least_server_keep_alive(keep_alive: str) -> str:
+    """``keep_alive``, or the residency the Ollama server is set to when that
+    one is longer.
+
+    A request that names a residency replaces the server's own for the model
+    it loads, so asking for less would cut short what the user set. The
+    server's is ``OLLAMA_KEEP_ALIVE`` in this process's environment, the
+    variable Ollama reads on the machine it runs on; unset or unreadable, it
+    changes nothing. It is returned as a duration the API reads: a request's
+    ``keep_alive`` string needs a unit, which whole seconds lack.
+    """
+    server = os.environ.get("OLLAMA_KEEP_ALIVE", "").strip()
+    server_seconds = _keep_alive_seconds(server)
+    own_seconds = _keep_alive_seconds(keep_alive)
+    if server_seconds is None or own_seconds is None or server_seconds <= own_seconds:
+        return keep_alive
+    return f"{server}s" if _WHOLE_SECONDS_RE.fullmatch(server) else server
 
 
 def extract_text_from_response(data: Dict[str, Any]) -> Optional[str]:
@@ -66,6 +122,44 @@ class OllamaBackend(LLMBackend):
 
     # ── chat ───────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _direct_payload(
+        chat_model: str,
+        system_prompt: str,
+        user_content: str,
+        thinking: bool = False,
+        num_ctx: int = _DIRECT_NUM_CTX,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """The ``/api/chat`` body of a :meth:`direct` call.
+
+        Shared with the prompted :meth:`warm_up`, which has to send the
+        same request: the same messages under the same template, and the
+        same ``num_ctx``, since Ollama loads a model again for another
+        context size and the computed prompt goes with the old one.
+        """
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ]
+
+        options: Dict[str, Any] = {"num_ctx": num_ctx}
+        if temperature is not None:
+            options["temperature"] = temperature
+        if max_tokens is not None:
+            # Ollama spells the generation cap ``num_predict``.
+            options["num_predict"] = max_tokens
+
+        return {
+            "model": chat_model,
+            "messages": messages,
+            "stream": False,
+            "cache_prompt": True,
+            "options": options,
+            "think": thinking,
+        }
+
     def direct(
         self,
         chat_model: str,
@@ -73,7 +167,7 @@ class OllamaBackend(LLMBackend):
         user_content: str,
         timeout_sec: float = 10.0,
         thinking: bool = False,
-        num_ctx: int = 4096,
+        num_ctx: int = _DIRECT_NUM_CTX,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
     ) -> Optional[str]:
@@ -92,26 +186,11 @@ class OllamaBackend(LLMBackend):
         flake small models on rule-following tasks (e.g. the knowledge
         extractor's banned-form list).
         """
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
-        ]
-
-        options: Dict[str, Any] = {"num_ctx": num_ctx}
-        if temperature is not None:
-            options["temperature"] = temperature
-        if max_tokens is not None:
-            # Ollama spells the generation cap ``num_predict``.
-            options["num_predict"] = max_tokens
-
-        payload: Dict[str, Any] = {
-            "model": chat_model,
-            "messages": messages,
-            "stream": False,
-            "cache_prompt": True,
-            "options": options,
-            "think": thinking,
-        }
+        payload = self._direct_payload(
+            chat_model, system_prompt, user_content,
+            thinking=thinking, num_ctx=num_ctx,
+            temperature=temperature, max_tokens=max_tokens,
+        )
 
         try:
             with requests.post(
@@ -348,25 +427,40 @@ class OllamaBackend(LLMBackend):
         model: str,
         timeout_sec: float = 60.0,
         keep_alive: str = "30m",
+        prompt: Optional[Tuple[str, str]] = None,
     ) -> bool:
-        """Issue a minimal ``/api/generate`` request so Ollama loads ``model``
-        into resident memory for the requested ``keep_alive`` duration.
+        """Load ``model`` into resident memory for the requested
+        ``keep_alive`` duration.
+
+        Without ``prompt``: a minimal ``/api/generate`` request with an
+        empty prompt, which loads the model and computes nothing.
+
+        With ``prompt`` (``system``, ``user``): the ``/api/chat`` request a
+        :meth:`direct` call with its default options sends for them, asking
+        for one token. Ollama loads the model with the same options, runs
+        it once and keeps the prompt computed, so a later ``direct`` call
+        that opens with the same text reads only what follows.
+
         Best-effort: errors are swallowed so callers never crash on warmup
         failure."""
         if not self._base_url or not model:
             return False
+        if prompt is not None:
+            system_prompt, user_content = prompt
+            url = f"{self._base_url}/api/chat"
+            payload = self._direct_payload(model, system_prompt, user_content, max_tokens=1)
+        else:
+            url = f"{self._base_url}/api/generate"
+            payload = {
+                "model": model,
+                "prompt": "",
+                "stream": False,
+                "options": {"num_predict": 1},
+            }
+        payload["keep_alive"] = keep_alive
         try:
-            resp = requests.post(
-                f"{self._base_url}/api/generate",
-                json={
-                    "model": model,
-                    "prompt": "",
-                    "stream": False,
-                    "keep_alive": keep_alive,
-                    "options": {"num_predict": 1},
-                },
-                timeout=timeout_sec,
-            )
+            resp = requests.post(url, json=payload, timeout=timeout_sec)
             return resp.status_code == 200
-        except Exception:
+        except Exception as e:
+            debug_log(f"OllamaBackend.warm_up: {type(e).__name__} (model={model})", "llm")
             return False

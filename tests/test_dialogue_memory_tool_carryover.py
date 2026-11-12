@@ -1,6 +1,6 @@
 """Tests for DialogueMemory tool-message carryover across turns.
 
-Behaviour under test: within the hot-window (RECENT_WINDOW_SEC), tool-call
+Behaviour under test: within the current conversation, tool-call
 and tool-result messages generated during one reply must be retrievable as
 part of the next reply's initial messages, so follow-up turns can reuse the
 prior tool output instead of re-fetching.
@@ -111,9 +111,9 @@ class TestToolCarryover:
         # Tool rows gone, but user/assistant prose preserved
         assert roles == ["user", "assistant"]
 
-    def test_tool_turns_survive_past_recent_window_age(self):
-        """Tool carryover is conversation-scoped, not RECENT_WINDOW_SEC-
-        bounded. An ongoing conversation must keep prior tool results
+    def test_tool_turns_survive_however_old(self):
+        """Tool carryover is conversation-scoped, not bounded by
+        age. An ongoing conversation must keep prior tool results
         visible regardless of how long ago each tool fired; the engine
         clears them on new-conversation entry and on ``stop``.
         """
@@ -126,17 +126,17 @@ class TestToolCarryover:
                                           "arguments": {"q": "x"}}}]},
             {"role": "tool", "tool_call_id": "c1", "content": "r"},
         ])
-        # Even when we backdate the tool-turn timestamp past the window,
+        # Even when we backdate the tool-turn timestamp past the pause,
         # the carryover survives until explicitly cleared.
         with dm._lock:
             dm._tool_turns = [
-                (ts - (dm.RECENT_WINDOW_SEC + 10), msgs)
+                (ts - (dm.CONVERSATION_GAP_SEC + 10), msgs)
                 for ts, msgs in dm._tool_turns
             ]
 
         out = dm.get_recent_turns_with_tools()
         assert any(m.get("role") == "tool" for m in out), (
-            "tool carryover must persist beyond RECENT_WINDOW_SEC age"
+            "tool carryover must persist however old it is"
         )
 
         dm.clear_tool_carryover()

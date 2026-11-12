@@ -77,6 +77,7 @@ def _reply_to_failed_weather(cfg, dialogue_memory):
                    return_value={"keywords": []}):
             return run_reply_engine(
                 db=db, cfg=cfg, tts=None,
+                origin="voix",
                 text="quelle est la météo ?", dialogue_memory=dialogue_memory,
             )
     finally:

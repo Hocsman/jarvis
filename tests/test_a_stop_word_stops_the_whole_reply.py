@@ -13,11 +13,11 @@ still stops everything") promise that `interrupt()`:
   invite an answer to something she did not finish saying;
 - still speaks what is queued after the call.
 
-A reply streams into the queue a sentence at a time, and a stop word is
-only heard once generation has ended (the listener dispatches and
-transcribes on the same thread), so by the time it lands the whole reply
-is waiting: every chunk, the tail and the marker. The engine's queue is
-the only place that can honour the contract.
+A reply streams into the queue a sentence at a time, and a stop word can
+land at any point: with every chunk, the tail and the marker already
+waiting, or with only some of them queued. The engine's queue drops what
+it holds; the listener queues nothing more of that reply
+(tests/test_elle_entend_pendant_qu_elle_reflechit.py).
 
 The tests run each real engine over a stand-in for its model and its
 speakers, and observe what was asked of the model, what reached the

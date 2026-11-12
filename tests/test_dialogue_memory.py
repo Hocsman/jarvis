@@ -482,9 +482,9 @@ class TestDialogueMemoryEdgeCases:
         # Mark all as saved
         _mark_everything_saved(dm)
 
-        # Manually make messages old (beyond RECENT_WINDOW_SEC)
+        # Manually make messages old: their conversation has ended
         with dm._lock:
-            old_ts = time.time() - (dm.RECENT_WINDOW_SEC + 60)
+            old_ts = time.time() - (dm.CONVERSATION_GAP_SEC + 60)
             dm._messages = [
                 (old_ts, role, content) for _, role, content in dm._messages
             ]
@@ -502,7 +502,7 @@ class TestDialogueMemoryEdgeCases:
 
         # Manually make message old but don't mark as saved
         with dm._lock:
-            old_ts = time.time() - (dm.RECENT_WINDOW_SEC + 60)
+            old_ts = time.time() - (dm.CONVERSATION_GAP_SEC + 60)
             dm._messages = [
                 (old_ts, role, content) for _, role, content in dm._messages
             ]
@@ -636,10 +636,10 @@ class TestDialogueMemoryEdgeCases:
 class TestDialogueMemoryUnifiedDurations:
     """Test that DialogueMemory durations are unified from inactivity_timeout."""
 
-    def test_recent_window_matches_inactivity_timeout(self):
-        """Verify RECENT_WINDOW_SEC equals inactivity_timeout."""
+    def test_conversation_gap_matches_inactivity_timeout(self):
+        """Verify CONVERSATION_GAP_SEC equals inactivity_timeout."""
         dm = DialogueMemory(inactivity_timeout=300.0)
-        assert dm.RECENT_WINDOW_SEC == 300.0
+        assert dm.CONVERSATION_GAP_SEC == 300.0
 
     def test_max_unsaved_age_matches_inactivity_timeout(self):
         """Verify MAX_UNSAVED_AGE_SEC equals inactivity_timeout."""
@@ -649,13 +649,13 @@ class TestDialogueMemoryUnifiedDurations:
     def test_all_durations_unified(self):
         """Verify all durations match the configured inactivity_timeout."""
         dm = DialogueMemory(inactivity_timeout=600.0)
-        assert dm.RECENT_WINDOW_SEC == 600.0
+        assert dm.CONVERSATION_GAP_SEC == 600.0
         assert dm.MAX_UNSAVED_AGE_SEC == 600.0
 
     def test_custom_timeout_propagates(self):
         """Verify a custom timeout drives all durations."""
         dm = DialogueMemory(inactivity_timeout=120.0)
-        assert dm.RECENT_WINDOW_SEC == 120.0
+        assert dm.CONVERSATION_GAP_SEC == 120.0
         assert dm.MAX_UNSAVED_AGE_SEC == 120.0
 
 

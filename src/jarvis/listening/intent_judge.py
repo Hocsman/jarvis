@@ -9,12 +9,14 @@ unless it is the provider's own chat model.
 
 import json
 import re
+import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Optional, List
+from typing import Any, Callable, Optional, List
 
 from ..debug import debug_log
 from ..llm import get_auxiliary_backend
+from ..llm.ollama import at_least_server_keep_alive
 from .transcript_buffer import TranscriptSegment
 
 
@@ -30,10 +32,15 @@ def _is_low_power_mode_enabled(cfg: Any) -> bool:
 
 
 def _ollama_keep_alive_for_power_mode(cfg: Any) -> str:
-    """Return the Ollama residency duration for the active power mode."""
+    """Return the Ollama residency duration for the active power mode.
+
+    Brief in low-power mode, where the user asked for less. Otherwise 30
+    minutes, or the residency the Ollama server is set to when that one is
+    longer: a request that names a residency replaces the server's.
+    """
     if _is_low_power_mode_enabled(cfg):
         return LOW_POWER_OLLAMA_KEEP_ALIVE
-    return DEFAULT_OLLAMA_KEEP_ALIVE
+    return at_least_server_keep_alive(DEFAULT_OLLAMA_KEEP_ALIVE)
 
 
 def warm_up_chat_model(cfg, model: str, timeout: float) -> bool:
@@ -119,6 +126,60 @@ def _extract_json_object(text: str, last: bool = False) -> str:
     return candidates[-1] if last else candidates[0]
 
 
+# The fields the listener acts on in a verdict that says she is spoken to.
+# The judge writes them before its reasoning, which nothing acts on in such
+# a verdict, so it is acted on once they are written.
+_DECISION_FIELDS = ("directed", "query", "stop", "confidence")
+
+# Where the reasoning starts: its key standing as a key, after the object's
+# opening brace or a comma. Inside a string value its quotes are escaped,
+# so a query that mentions it never matches.
+_REASONING_KEY = re.compile(r'[{,]\s*"reasoning"\s*:')
+
+# How long past its own timeout the judge waits on a backend that has not
+# answered. A buffered call ends at the timeout; a streamed one is bounded
+# per read, so a stream that keeps trickling would not end on its own.
+_PAST_THE_TIMEOUT_SECONDS = 2.0
+
+
+class _AnswerAsWritten:
+    """The judge's answer, read as the backend writes it.
+
+    ``ready`` is set when a directed verdict is decided (``early``), or when
+    the call is over, however it ended (``response`` or ``error``). The
+    verdict is read once, when the reasoning's key is written: what comes
+    before it is closed into an object and parsed, and kept when it holds
+    every decision field and says she is spoken to. Anything else waits for
+    the whole answer.
+    """
+
+    def __init__(self, decide: Callable[[str], Optional["IntentJudgment"]]):
+        self._decide = decide
+        self._parts: List[str] = []
+        self._read = False
+        self.early: Optional["IntentJudgment"] = None
+        self.response: Any = None
+        self.error: Optional[BaseException] = None
+        self.ready = threading.Event()
+
+    def on_token(self, text: str) -> None:
+        self._parts.append(text)
+        if self._read:
+            return
+        written = "".join(self._parts)
+        start = written.find("{")
+        if start < 0:
+            return
+        key = _REASONING_KEY.search(written, start)
+        if key is None:
+            return
+        self._read = True
+        verdict = self._decide(written[start:key.start()] + "}")
+        if verdict is not None and verdict.directed:
+            self.early = verdict
+            self.ready.set()
+
+
 @dataclass
 class IntentJudgment:
     """Result of intent judgment."""
@@ -127,7 +188,10 @@ class IntentJudgment:
     query: str               # Extracted query (cleaned of filler, echo, pre-wake-word)
     stop: bool               # Is this a stop command?
     confidence: str          # "high", "medium", or "low"
-    reasoning: str           # Brief explanation for debugging
+    reasoning: str           # Brief explanation for debugging; empty on a
+                             # directed verdict taken before its reasoning
+    noise: bool = False      # Not speech at all: text Whisper made out of silence
+    aside: bool = False      # Words a person said to someone else, not to her
     raw_response: str = ""   # Raw LLM response for debugging
 
 
@@ -157,6 +221,8 @@ class IntentJudge:
     1. Whether speech is directed at the assistant
     2. What the actual query is (excluding echo, pre-wake-word chatter, filler)
     3. Whether this is a stop command
+    4. Whether the current segment is not speech at all (text Whisper made
+       out of silence)
 
     Uses a small model (gemma4) for better accuracy compared to
     the simpler intent_validator.
@@ -183,9 +249,9 @@ WAKE WORD MODE:
 - Query must be answerable alone (without the transcript). When resolving to a sub-item ("pro model", "the red one"), also include the parent noun/brand from earlier segments — "pro model" alone is not self-contained; "iPhone pro model" is.
 
 HOT WINDOW MODE (no wake word needed):
-- User IS DIRECTED (directed=true) — always. This overrides any "topic-less question" heuristic above; follow-ups like "tell me more" are directed in hot window.
+- User IS DIRECTED (directed=true) — always, unless the current segment is not speech (see NOT SPEECH) or is said to someone else (see TO SOMEONE ELSE). This overrides any "topic-less question" heuristic above; follow-ups like "tell me more" are directed in hot window.
 - Extract from segments WITHOUT "(during TTS)" marker
-- Question or statement both valid
+- Question, statement, greeting, thanks or compliment to {name}: all valid, all directed
 
 ECHO / MARKER RULES:
 - "(during TTS)" = echo of assistant -> skip, never extract
@@ -197,6 +263,16 @@ TRANSCRIPT NOISE:
 - When such a segment sits between a real question and an imperative wake-word call, treat it as noise and still re-issue the original question (see the Mount Everest + chatter + "answer that" example below).
 - Within the extracted query string, fix obvious ASR slips quietly (tense, fused words, homophones) so the query is answerable; do NOT rewrite content or change the user's intent.
 
+NOT SPEECH:
+- Whisper invents text out of silence, breath or room noise: mostly the closing lines of videos and subtitle credits ("thanks for watching", "see you in the next video", "subtitles by ...", a lone "thank you"), in any language, often one nobody in the transcript is speaking.
+- When the CURRENT segment is such an invention rather than words someone said -> noise=true, directed=false, query="". This holds in hot window mode too: the follow-up rule is about the user, and this is not the user.
+- Words a person said are never noise, however short, thankful, off-topic or oddly phrased. When in doubt, noise=false.
+
+TO SOMEONE ELSE:
+- The user is not always alone: other people can be in the room, on a call with him, or watching him on a live stream, and he talks to them too.
+- When the CURRENT segment is plainly said to one of them and not to {name} (he calls that person by name, answers them, or talks to them about {name}) -> aside=true, directed=false, query="". This holds in hot window mode too: the follow-up rule is about what he says to {name}.
+- A follow-up that addresses nobody else is to {name}, and so is a request to {name} that mentions another person ("tell Sam I am running late"). When in doubt, aside=false.
+
 STOP DETECTION:
 - "stop", "quiet" (standalone or short command) -> directed=true, stop=true, query=""
 
@@ -205,7 +281,7 @@ NOT DIRECTED:
 - Wake word used only as a narrative mention ("I told my friend about {name}") -> directed=false
 
 Output JSON only:
-{{"directed": true/false, "query": "...", "stop": true/false, "confidence": "high/medium/low", "reasoning": "brief"}}
+{{"directed": true/false, "query": "...", "stop": true/false, "noise": true/false, "aside": true/false, "confidence": "high/medium/low", "reasoning": "brief"}}
 
 Examples:
 - "Jarvis what time is it" -> {{"directed": true, "query": "what time is it", "stop": false, "confidence": "high", "reasoning": "wake word + question"}}
@@ -219,6 +295,8 @@ Examples:
 - Previous "How tall is Mount Everest" + Noise "some unrelated chatter" + Current "Jarvis answer that" -> {{"directed": true, "query": "how tall is Mount Everest", "stop": false, "confidence": "high", "reasoning": "imperative -> re-issue prior QUESTION; ignore the chatter segment, re-issue the original question even when noise sits between"}}
 - Previous "What's the capital of Portugal" + Current "Jarvis go ahead and answer" -> {{"directed": true, "query": "what is the capital of Portugal", "stop": false, "confidence": "high", "reasoning": "multi-word imperative ('go ahead and answer') is the same pattern as 'answer that' -> re-issue prior question; do NOT pass the imperative through literally"}}
 - Hot window, user says "I think absurdism is better" -> {{"directed": true, "query": "I think absurdism is better", "stop": false, "confidence": "high", "reasoning": "user statement in hot window"}}
+- Hot window after an English reply, Current "Sottotitoli creati dalla comunità Amara.org" -> {{"directed": false, "query": "", "stop": false, "noise": true, "confidence": "high", "reasoning": "subtitle credit Whisper made out of silence, not speech"}}
+- Hot window, Current "Hold on Maya, I'm nearly done here" -> {{"directed": false, "query": "", "stop": false, "aside": true, "confidence": "high", "reasoning": "said to Maya, someone else in the room, not to the assistant"}}
 - "(during TTS)" segments only -> {{"directed": false, "query": "", "stop": false, "confidence": "high", "reasoning": "only echo"}}
 - "stop" -> {{"directed": true, "query": "", "stop": true, "confidence": "high", "reasoning": "stop command"}}
 - No wake word, not hot window -> {{"directed": false, "query": "", "stop": false, "confidence": "high", "reasoning": "no wake word"}}'''
@@ -390,11 +468,34 @@ Examples:
                 stop=_parse_bool(data.get("stop"), default=False),
                 confidence=str(data.get("confidence", "low")).lower(),
                 reasoning=str(data.get("reasoning", "")),
+                noise=_parse_bool(data.get("noise"), default=False),
+                aside=_parse_bool(data.get("aside"), default=False),
                 raw_response=response_text,
             )
         except (json.JSONDecodeError, KeyError, AttributeError) as e:
             debug_log(f"intent judge: failed to parse response: {e}", "voice")
             return None
+
+    def _decided_verdict(self, head: str) -> Optional[IntentJudgment]:
+        """The verdict in ``head``, the answer written up to its reasoning
+        and closed, when every decision field is in it; None otherwise."""
+        try:
+            data = json.loads(head)
+        except ValueError:
+            return None
+        if not isinstance(data, dict) or any(k not in data for k in _DECISION_FIELDS):
+            return None
+        return self._parse_response(head)
+
+    @staticmethod
+    def _log_verdict(judgment: IntentJudgment, how: str = "") -> None:
+        direction = "✅ DIRECTED" if judgment.directed else "❌ NOT DIRECTED"
+        stop_str = " [STOP]" if judgment.stop else ""
+        query_str = f" → \"{judgment.query}\"" if judgment.query else ""
+        debug_log(
+            f"🧠 Intent judge: {direction} ({judgment.confidence}){stop_str}{query_str}{how}",
+            "voice"
+        )
 
     def warm_up(self) -> bool:
         """Page the configured judge model into the active backend."""
@@ -459,31 +560,79 @@ Examples:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ]
-            try:
-                resp = get_auxiliary_backend(self.config.cfg, self.config.model).chat(
-                    self.config.model,
-                    messages,
-                    timeout_sec=self.config.timeout_sec,
-                    extra_options={
-                        "temperature": 0.0,
-                        # Reasoning models count thinking tokens against
-                        # this cap, so 1500 tokens covers reasoning plus
-                        # the JSON answer while ``intent_judge_timeout_sec``
-                        # still bounds slow or runaway generations.
-                        "max_tokens": 1500,
-                        "num_ctx": 8192,
-                        "keep_alive": _ollama_keep_alive_for_power_mode(
-                            self.config.cfg
-                        ),
-                    },
-                    thinking=self.config.thinking,
-                )
-            except Exception as e:
+            backend = get_auxiliary_backend(self.config.cfg, self.config.model)
+            answer = _AnswerAsWritten(self._decided_verdict)
+
+            # The answer is streamed on a thread of its own, so a directed
+            # verdict is acted on while the model is still writing its
+            # reasoning. A backend that does not stream answers whole, and
+            # the verdict is read then.
+            def call() -> None:
+                try:
+                    answer.response = backend.chat(
+                        self.config.model,
+                        messages,
+                        timeout_sec=self.config.timeout_sec,
+                        extra_options={
+                            "temperature": 0.0,
+                            # Reasoning models count thinking tokens against
+                            # this cap, so 1500 tokens covers reasoning plus
+                            # the JSON answer. The judge stops waiting for a
+                            # slow or runaway generation at
+                            # ``intent_judge_timeout_sec`` plus a grace.
+                            "max_tokens": 1500,
+                            "num_ctx": 8192,
+                            "keep_alive": _ollama_keep_alive_for_power_mode(
+                                self.config.cfg
+                            ),
+                        },
+                        thinking=self.config.thinking,
+                        on_token=answer.on_token,
+                    )
+                except Exception as e:
+                    answer.error = e
+                finally:
+                    answer.ready.set()
+                if answer.early is not None:
+                    # The verdict was acted on before its reasoning was
+                    # written; the log gets it once the answer is whole,
+                    # and says so if the whole answer reads otherwise.
+                    resp = answer.response
+                    message = resp.get("message") if isinstance(resp, dict) else None
+                    content = message.get("content") if isinstance(message, dict) else None
+                    later = (self._parse_response(content)
+                             if isinstance(content, str) and content else None)
+                    if later is None:
+                        debug_log("   Reasoning: none, the whole answer did not come or did not parse", "voice")
+                    else:
+                        debug_log(f"   Reasoning: {later.reasoning}", "voice")
+                        differ = [f for f in _DECISION_FIELDS
+                                  if getattr(later, f) != getattr(answer.early, f)]
+                        if differ:
+                            debug_log(f"   The whole answer reads otherwise on {differ}", "voice")
+
+            threading.Thread(target=call, name="intent-judge", daemon=True).start()
+            if not answer.ready.wait(self.config.timeout_sec + _PAST_THE_TIMEOUT_SECONDS):
+                # No answer past the timeout the backend was given. Like a
+                # timeout, it does not back off.
+                self._last_failure_reason = "no response from backend"
+                debug_log(f"intent judge: {self._last_failure_reason} "
+                          f"after {self.config.timeout_sec:.0f}s", "voice")
+                return None
+
+            if answer.early is not None:
+                self._last_failure_reason = ""
+                self._log_verdict(answer.early, ", decided before its reasoning")
+                return answer.early
+
+            if answer.error is not None:
+                e = answer.error
                 self._last_failure_reason = f"request error: {type(e).__name__}"
                 debug_log(f"intent judge: {self._last_failure_reason}", "voice")
                 self._last_error_time = time.time()
                 return None
 
+            resp = answer.response
             if not isinstance(resp, dict):
                 # ``chat()`` returns ``None`` on transient HTTP errors and
                 # timeouts. Don't back off — voice is high-turn and a single
@@ -531,13 +680,7 @@ Examples:
 
             if judgment:
                 self._last_failure_reason = ""
-                direction = "✅ DIRECTED" if judgment.directed else "❌ NOT DIRECTED"
-                stop_str = " [STOP]" if judgment.stop else ""
-                query_str = f" → \"{judgment.query}\"" if judgment.query else ""
-                debug_log(
-                    f"🧠 Intent judge: {direction} ({judgment.confidence}){stop_str}{query_str}",
-                    "voice"
-                )
+                self._log_verdict(judgment)
                 debug_log(f"   Reasoning: {judgment.reasoning}", "voice")
             else:
                 self._last_failure_reason = f"unparseable response: {response_text[:80]}"
