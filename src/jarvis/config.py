@@ -52,6 +52,20 @@ def get_supported_model_ids() -> set[str]:
 # first. An id ending in ``.en`` is English-only; the others cover ~99
 # languages. File sizes from HuggingFace (Systran/faster-whisper-*), VRAM from
 # OpenAI.
+# The languages Whisper transcribes, by the code `whisper_language` takes. Kept
+# equal to the installed faster-whisper's own list by a test.
+WHISPER_LANGUAGES = (
+    'af', 'am', 'ar', 'as', 'az', 'ba', 'be', 'bg', 'bn', 'bo', 'br', 'bs',
+    'ca', 'cs', 'cy', 'da', 'de', 'el', 'en', 'es', 'et', 'eu', 'fa', 'fi',
+    'fo', 'fr', 'gl', 'gu', 'ha', 'haw', 'he', 'hi', 'hr', 'ht', 'hu', 'hy',
+    'id', 'is', 'it', 'ja', 'jw', 'ka', 'kk', 'km', 'kn', 'ko', 'la', 'lb',
+    'ln', 'lo', 'lt', 'lv', 'mg', 'mi', 'mk', 'ml', 'mn', 'mr', 'ms', 'mt',
+    'my', 'ne', 'nl', 'nn', 'no', 'oc', 'pa', 'pl', 'ps', 'pt', 'ro', 'ru',
+    'sa', 'sd', 'si', 'sk', 'sl', 'sn', 'so', 'sq', 'sr', 'su', 'sv', 'sw',
+    'ta', 'te', 'tg', 'th', 'tk', 'tl', 'tr', 'tt', 'uk', 'ur', 'uz', 'vi',
+    'yi', 'yo', 'zh', 'yue'
+)
+
 SUPPORTED_WHISPER_MODELS: Dict[str, Dict[str, str]] = {
     "tiny": {"name": "Tiny", "size": "~75MB", "vram": "~1GB VRAM",
              "description": "Fastest, lower accuracy"},
@@ -258,6 +272,7 @@ class Settings:
     whisper_vad: bool
     whisper_min_confidence: float
     whisper_no_speech_threshold: float
+    whisper_language: Optional[str]
     whisper_min_audio_duration: float
     whisper_min_word_length: int
 
@@ -331,8 +346,11 @@ class Settings:
     transcript_buffer_duration_sec: float
 
     # Memory & Dialogue
-    # Drives both the short-term memory window and forced diary update interval
+    # The pause that ends a conversation, and the forced diary update interval
     dialogue_memory_timeout: float
+    # Characters of the current conversation the model reads word for word;
+    # 0 = what the chat model's window holds (see dialogue_context_budget)
+    dialogue_context_max_chars: int
     memory_enrichment_max_results: int
     memory_enrichment_source: str  # "all", "diary", or "graph"
     # The model that reads a question for the memory lookup's keywords and
@@ -585,6 +603,27 @@ def load_config() -> Dict[str, Any]:
 # settings every couple of seconds, and a line repeated at that rate is a
 # line the user learns to scroll past.
 _announced_pins: set = set()
+_announced_languages: set = set()
+
+
+def _whisper_language(value: Any) -> Optional[str]:
+    """The code Whisper is told to transcribe in, or None to let it detect.
+
+    "fr-FR" and "fr_FR" read as "fr", and "auto" as nothing named. A value
+    Whisper does not know is announced once and read as None: passed on, it
+    would fail every transcription and leave her deaf.
+    """
+    raw = str(value or "").strip().lower()
+    code = raw.replace("_", "-").split("-")[0]
+    if code in ("", "auto"):
+        return None
+    if code in WHISPER_LANGUAGES:
+        return code
+    if raw not in _announced_languages:
+        _announced_languages.add(raw)
+        print(f"⚠️ Whisper language ignored: '{raw}' is not one Whisper knows", flush=True)
+        print("   ↪️ it detects the language of each sentence instead", flush=True)
+    return None
 
 
 def is_local_endpoint(base_url: str) -> bool:
@@ -883,6 +922,7 @@ def get_default_config() -> Dict[str, Any]:
         "whisper_vad": True,
         "whisper_min_confidence": 0.3,  # Filter low-confidence segments (hallucinations)
         "whisper_no_speech_threshold": 0.5,  # Hard cutoff: reject segments where no_speech_prob >= this
+        "whisper_language": "",  # Code of the one language Whisper transcribes in; empty: it detects
         "whisper_min_audio_duration": 0.15,
         "whisper_min_word_length": 1,
 
@@ -988,9 +1028,13 @@ def get_default_config() -> Dict[str, Any]:
         "transcript_buffer_duration_sec": 120.0,
 
         # Memory & Dialogue
-        # dialogue_memory_timeout drives the short-term memory window AND the forced
-        # diary update interval. After a diary update, enrichment retrieves older context.
+        # dialogue_memory_timeout is the pause that ends a conversation AND the
+        # forced diary update interval, so a long conversation is summarised as
+        # it goes. Its latest messages reach the model word for word, within
+        # dialogue_context_max_chars (0 = by the chat model's size); the diary's
+        # summary carries what was said before them.
         "dialogue_memory_timeout": 300.0,
+        "dialogue_context_max_chars": 0,
         "memory_enrichment_max_results": 3,
         "memory_enrichment_source": "all",  # "all", "diary", or "graph"
         # Empty = reuse the tool router's chain (tool_router_model →
@@ -1336,8 +1380,12 @@ def load_settings() -> Settings:
     # Transcript Buffer - ambient speech context for intent judge (separate from dialogue)
     transcript_buffer_duration_sec = float(merged.get("transcript_buffer_duration_sec", 120.0))
 
-    # Dialogue memory window and forced diary update share this duration
+    # The pause that ends a conversation and the forced diary update share this duration
     dialogue_memory_timeout = float(merged.get("dialogue_memory_timeout", 300.0))
+    try:
+        dialogue_context_max_chars = max(0, int(merged.get("dialogue_context_max_chars", 0) or 0))
+    except (TypeError, ValueError):
+        dialogue_context_max_chars = 0
     memory_enrichment_max_results = int(merged.get("memory_enrichment_max_results", 3))
     memory_enrichment_source = str(merged.get("memory_enrichment_source", "all")).lower()
     if memory_enrichment_source not in ("all", "diary", "graph"):
@@ -1428,6 +1476,17 @@ def load_settings() -> Settings:
 
     whisper_min_confidence = float(merged.get("whisper_min_confidence", 0.4))
     whisper_no_speech_threshold = float(merged.get("whisper_no_speech_threshold", 0.5))
+    whisper_language = _whisper_language(merged.get("whisper_language"))
+    if whisper_language not in (None, "en") and whisper_model.endswith(".en"):
+        # An English-only model transcribes English whatever it is told, and
+        # would report the named language for English text.
+        if ("en-only", whisper_language) not in _announced_languages:
+            _announced_languages.add(("en-only", whisper_language))
+            print(f"⚠️ Whisper language ignored: '{whisper_language}' with the "
+                  f"English-only model {whisper_model}", flush=True)
+            print("   ↪️ it transcribes English; pick a multilingual model to use another language",
+                  flush=True)
+        whisper_language = None
     whisper_min_audio_duration = float(merged.get("whisper_min_audio_duration", 0.3))
     whisper_min_word_length = int(merged.get("whisper_min_word_length", 2))
     llm_chat_timeout_sec = float(merged.get("llm_chat_timeout_sec", 180.0))
@@ -1521,6 +1580,7 @@ def load_settings() -> Settings:
         whisper_vad=whisper_vad,
         whisper_min_confidence=whisper_min_confidence,
         whisper_no_speech_threshold=whisper_no_speech_threshold,
+        whisper_language=whisper_language,
         whisper_min_audio_duration=whisper_min_audio_duration,
         whisper_min_word_length=whisper_min_word_length,
 
@@ -1579,6 +1639,7 @@ def load_settings() -> Settings:
 
         # Memory & Dialogue
         dialogue_memory_timeout=dialogue_memory_timeout,
+        dialogue_context_max_chars=dialogue_context_max_chars,
         memory_enrichment_max_results=memory_enrichment_max_results,
         memory_enrichment_source=memory_enrichment_source,
         memory_extractor_model=memory_extractor_model,

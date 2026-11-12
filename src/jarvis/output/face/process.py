@@ -29,6 +29,14 @@ STEPS = 10
 WARM_UP_SECONDS = 3.0
 WATCH_SECONDS = 2.0      # a viewer heartbeat younger than this means someone is watching
 KEEP_SECONDS = 5.0       # audio heard longer ago than this is forgotten
+# Her lips at rest: a frame whose audio has at most this RMS is silence. Kyutai's
+# speech sits near 0.07 RMS per frame and its silences near 0.0003.
+SILENCE_RMS = 0.005
+LIPS_ATTACK_FRAMES = 2    # the lips start to follow her voice this many frames before it
+LIPS_RELEASE_FRAMES = 6   # and return to the portrait's over this many after it
+# A run of skipped chunks this long, a second of her face, is logged as it
+# happens; shorter ones are only counted in the summary logged at the rest.
+LOGGED_SKIPS = round(1.0 / tl.CHUNK_SECONDS)
 
 
 def _log(text: str) -> None:
@@ -79,7 +87,10 @@ class Renderer:
         self.epoch = 0
         self.late: Dict[int, int] = {}       # frames published after their stamp, per epoch
         self.skipped = 0
+        self._skipping = 0                    # chunks skipped in a row, until Ditto catches up
         self.quit = threading.Event()
+        self.frames_fed = 0                   # frames fed to Ditto, which is how it names those it draws
+        self._since_voice = LIPS_RELEASE_FRAMES + 1   # frames since she was heard: past the release, at rest
 
     @classmethod
     def build(cls, portrait: str, framing: str) -> "Renderer":
@@ -136,30 +147,70 @@ class Renderer:
             self.quit.set()
 
     # -- feeding --------------------------------------------------------------
+    def _lips(self, audio: np.ndarray) -> list:
+        """How much each new frame's lips follow her voice: 1 while she is
+        heard, 0 in silence, where Ditto drawing from silence would press them
+        in, and a ramp between so the pauses between words keep her mouth."""
+        per = tl.RATE // tl.FPS
+        past = tl.CHUNKSIZE[0]
+        ahead = tl.CHUNK_FRAMES + tl.CHUNKSIZE[2]   # the chunk carries two frames of what follows
+        voiced = []
+        for k in range(ahead):
+            frame = audio[(past + k) * per:(past + k + 1) * per]
+            voiced.append(float(np.sqrt(np.mean(np.square(frame)))) > SILENCE_RMS)
+        weights = []
+        for k in range(tl.CHUNK_FRAMES):
+            if voiced[k]:
+                self._since_voice = 0
+                weights.append(1.0)
+                continue
+            self._since_voice += 1
+            release = max(0.0, 1.0 - self._since_voice / (LIPS_RELEASE_FRAMES + 1))
+            soon = next((j for j in range(1, LIPS_ATTACK_FRAMES + 1)
+                         if k + j < ahead and voiced[k + j]), None)
+            attack = 1.0 - soon / (LIPS_ATTACK_FRAMES + 1) if soon else 0.0
+            weights.append(max(release, attack))
+        return weights
+
     def _feed(self, start: float, publish: bool) -> None:
         first, _end = self.feeder.window(start)
         with self.lock:
             audio = self.timeline.read(first, tl.CHUNK_SAMPLES)
             generation = self.generation
-        for stamp in self.feeder.stamps(start):
+        for stamp, lips in zip(self.feeder.stamps(start), self._lips(audio)):
             self.due.append(_Due(stamp, generation, self.epoch, publish))
+            if lips < 1.0:
+                # Ditto names a frame by its place among those it draws.
+                self.stream.ctrl_info[self.frames_fed] = {"vad_alpha": lips}
+            self.frames_fed += 1
         self.stream.run_chunk(audio)
         self.feeder.fed(start)
 
     def _behind(self, now: float) -> bool:
-        """Whether a frame Ditto still owes should already be on screen."""
-        for due in self.due:
+        """Whether a frame Ditto could already have drawn should already be on screen.
+
+        Ditto hands a chunk's frames back only once the next chunk is fed, so
+        the last chunk's frames are not owed yet: counting them would skip
+        every chunk after a stall, and they would never come out."""
+        owed = list(self.due)   # one copy: Ditto's thread pops from the deque meanwhile
+        for due in owed[:max(len(owed) - tl.CHUNK_FRAMES, 0)]:
             if due.epoch == self.epoch and due.publish:
                 return now > due.stamp + 1 / tl.FPS
         return False
 
     def _rest(self) -> None:
-        """Feeding stops: frames still inside Ditto will not be shown."""
-        late = self.late.pop(self.epoch, 0)
+        """Feeding stops: frames still inside Ditto will never be shown, and
+        those already published are withdrawn."""
+        with self.lock:
+            # Refused by the writer itself, so a frame Ditto's thread hands
+            # back while the face rests can never be published after this.
+            self.generation = self.frames.withdraw_all()
+        epoch, self.epoch = self.epoch, self.epoch + 1
+        late = self.late.pop(epoch, 0)
         if late or self.skipped:
             _log(f"before this rest: {late} frames after their moment, {self.skipped} chunks skipped")
-        self.skipped = 0
-        self.epoch += 1
+        self.skipped = self._skipping = 0
+        self._since_voice = LIPS_RELEASE_FRAMES + 1   # whoever watches next finds her lips at rest
 
     def tick(self, now: float) -> float:
         """One turn of the feeding loop; returns how long to sleep."""
@@ -179,9 +230,15 @@ class Renderer:
             return min(step.wait, 0.05)
         if self._behind(now):
             # Ditto is behind: frames for this chunk would come too late to show.
+            self._skipping += 1
             self.skipped += 1
+            if self._skipping == LOGGED_SKIPS:
+                _log("Ditto fell behind: skipping chunks until it catches up")
             self.feeder.fed(step.feed)
             return 0.0
+        if self._skipping >= LOGGED_SKIPS:
+            _log(f"Ditto caught up after {self._skipping} chunks skipped")
+        self._skipping = 0
         self._feed(step.feed, publish=True)
         return 0.0
 

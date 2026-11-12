@@ -283,7 +283,7 @@ def _after_a_silence(dm):
     """What was said falls out of the conversation window, as it does when
     he comes back to her minutes later: the next turn starts a new
     conversation."""
-    dm.RECENT_WINDOW_SEC = 0.01
+    dm.CONVERSATION_GAP_SEC = 0.01
     time.sleep(0.05)
     assert not dm.has_recent_messages()
 

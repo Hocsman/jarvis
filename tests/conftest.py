@@ -227,6 +227,45 @@ def _isolate_face_frames(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _voice_detector_not_yet_failed(monkeypatch):
+    """Start each test with Whisper's voice detector not yet failed.
+
+    Its failure is the process's (``jarvis/listening/whisper_vad.py``), and
+    the suite refuses onnxruntime, so the first test that warms a listener
+    would otherwise mark it failed for every test after it. The suite
+    imports the module both as ``jarvis.x`` and as ``src.jarvis.x``.
+    """
+    for name in ("jarvis.listening.whisper_vad", "src.jarvis.listening.whisper_vad"):
+        module = sys.modules.get(name)
+        if module is not None:
+            monkeypatch.setattr(module, "_failure", None)
+
+
+@pytest.fixture(autouse=True)
+def _no_stream_counted_open(monkeypatch):
+    """Start each test with no stream counted open and the device list never
+    read afresh.
+
+    Both are the process's: the streams counted open live in
+    ``jarvis.utils.audio_lock``, and the first device list PortAudio read,
+    which an index setting is resolved against, in
+    ``jarvis.utils.audio_stream``. A stand-in stream that cannot say it is
+    closed (a string, a mock) stays counted for good, so one test's leftovers
+    would hold every later reading of the list back, and one test's reading
+    would decide what another's indices name. The suite imports modules both
+    as ``jarvis.x`` and as ``src.jarvis.x``; each copy loaded is reset.
+    """
+    for prefix in ("jarvis", "src.jarvis"):
+        lock_module = sys.modules.get(f"{prefix}.utils.audio_lock")
+        if lock_module is not None:
+            monkeypatch.setattr(lock_module, "_streams", [])
+            monkeypatch.setattr(lock_module, "_unguarded_opens", 0)
+        stream_module = sys.modules.get(f"{prefix}.utils.audio_stream")
+        if stream_module is not None:
+            monkeypatch.setattr(stream_module, "_first_list", None)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_jarvis_state(_bac_a_sable, request, monkeypatch):
     """Keep the suite's state changes off the live state file.
 
@@ -562,6 +601,19 @@ def public_dns(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_ollama_residency(monkeypatch):
+    """Keep the machine's Ollama residency out of what the tests expect.
+
+    The residency Yuba asks Ollama for is never shorter than the one
+    ``OLLAMA_KEEP_ALIVE`` sets for the server, read from Yuba's own
+    environment, so on a machine that sets it every warm-up and judge call
+    would ask for that instead of Yuba's own. A test that is about it sets
+    the variable itself.
+    """
+    monkeypatch.delenv("OLLAMA_KEEP_ALIVE", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_hugging_face_hub(_bac_a_sable, request, monkeypatch):
     """Keep every test off the Hugging Face Hub and out of the user's model cache.
 
@@ -658,7 +710,7 @@ def db():
 def dialogue_memory():
     """Provide a dialogue memory instance for unit tests."""
     from jarvis.memory.conversation import DialogueMemory
-    return DialogueMemory(inactivity_timeout=300, max_interactions=20)
+    return DialogueMemory(inactivity_timeout=300)
 
 
 @pytest.fixture

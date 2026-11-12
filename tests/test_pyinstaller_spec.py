@@ -60,6 +60,29 @@ class _Stage:
         self.kwargs = kwargs
 
 
+def _collect_data_files(package, include_py_files=False, subdir=None, excludes=None, includes=None):
+    """PyInstaller's ``collect_data_files`` for an installed package: every
+    file of it (or of its ``subdir``) that is not code, placed in the bundle
+    where the package looks for it. Nothing for a package not installed.
+
+    ``TestTheStandInCollectsAsPyInstallerDoes`` holds it to the real one on
+    every call the spec makes.
+    """
+    if excludes or includes:
+        raise NotImplementedError("the stand-in does not filter: extend it with the spec")
+    root = layout.installed_package_root(package)
+    if root is None:
+        return []
+    found = []
+    for path in sorted((root / subdir if subdir else root).rglob("*")):
+        if not path.is_file() or "__pycache__" in path.parts:
+            continue
+        if path.suffix in (".pyc", ".pyo") or (path.suffix == ".py" and not include_py_files):
+            continue
+        found.append((str(path), PurePosixPath(package, path.parent.relative_to(root).as_posix()).as_posix()))
+    return found
+
+
 def _module(name: str, **attrs) -> types.ModuleType:
     module = types.ModuleType(name)
     module.__dict__.update(attrs)
@@ -70,9 +93,17 @@ def load_spec(platform: str, scratch: Path) -> dict:
     """Run the spec as PyInstaller would from the project root, on ``platform``.
 
     The packages the spec probes for (piper, PyQt6) are replaced with empty
-    stand-ins rooted in ``scratch``, so the result does not depend on what is
-    installed and nothing is written outside ``scratch``.
+    stand-ins rooted in ``scratch``, so their part of the result does not
+    depend on what is installed, and nothing is written outside ``scratch``.
+    ``collect_data_files`` reads the installed packages, as PyInstaller's
+    does; the calls the spec made to it are kept under ``COLLECTED``.
     """
+    collected = []
+
+    def collect_data_files(package, **kwargs):
+        collected.append((package, kwargs))
+        return _collect_data_files(package, **kwargs)
+
     namespace = {
         "__file__": str(SPEC),
         "Analysis": _Analysis,
@@ -86,7 +117,7 @@ def load_spec(platform: str, scratch: Path) -> dict:
         "PyInstaller.utils": _module("PyInstaller.utils"),
         "PyInstaller.utils.hooks": _module(
             "PyInstaller.utils.hooks",
-            collect_data_files=lambda *a, **k: [],
+            collect_data_files=collect_data_files,
             collect_submodules=lambda *a, **k: [],
         ),
         "piper": _module("piper", __file__=str(scratch / "piper" / "__init__.py")),
@@ -104,6 +135,7 @@ def load_spec(platform: str, scratch: Path) -> dict:
         patch.setattr(shutil, "copy2", lambda src, dst, *a, **k: dst)
         patch.chdir(ROOT)
         exec(source, namespace)
+    namespace["COLLECTED"] = collected
     return namespace
 
 
@@ -195,6 +227,43 @@ class TestRuntimeDataFilesShip:
     def test_every_file_under_src_is_classified(self):
         """A file of an unknown kind is reported, so it cannot be skipped by accident."""
         assert layout.unclassified_files(SRC) == []
+
+
+class TestPackageDataShips:
+    """What a third-party package opens from its own folder at runtime
+    (``PACKAGE_DATA`` in scripts/check_bundle_layout.py), which no hook
+    collects: faster-whisper's voice detector model among them."""
+
+    @pytest.fixture(autouse=True)
+    def _installed(self):
+        for package in layout.PACKAGE_DATA:
+            if layout.installed_package_root(package) is None:
+                pytest.skip(f"{package} is not installed")
+
+    def test_every_file_ships_where_its_package_looks_for_it(self, datas):
+        shipped, _ = resolve(datas)
+        expected = [p.as_posix() for p in layout.package_data_files()]
+        assert expected
+        missing = [name for name in expected if name not in shipped]
+        assert not missing, f"jarvis_desktop.spec does not bundle: {missing}"
+
+
+class TestTheStandInCollectsAsPyInstallerDoes:
+    """The spec is run with ``collect_data_files`` stood in for; that is only
+    worth trusting if PyInstaller collects the same files to the same place."""
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_same_files_and_destinations_on_every_call_the_spec_makes(self, platform, tmp_path):
+        hooks = pytest.importorskip("PyInstaller.utils.hooks")
+        calls = load_spec(platform, tmp_path)["COLLECTED"]
+        assert calls
+        for package, kwargs in calls:
+            if layout.installed_package_root(package) is None:
+                continue
+            ours = {(Path(s).resolve(), d) for s, d in _collect_data_files(package, **kwargs)}
+            theirs = {(Path(s).resolve(), Path(d).as_posix())
+                      for s, d in hooks.collect_data_files(package, **kwargs)}
+            assert ours == theirs, f"collect_data_files({package!r}, **{kwargs!r})"
 
 
 class TestLicenceTextsShip:

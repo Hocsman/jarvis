@@ -95,7 +95,7 @@ def test_loading_the_listener_whisper_model_stays_off_the_hub(tripwire, network_
                 with patch("jarvis.listening.listener.WhisperModel", return_value=MagicMock()):
                     with patch("jarvis.listening.listener.sd") as mock_sd:
                         mock_sd.query_devices.return_value = [{"name": "Test Mic", "max_input_channels": 1}]
-                        mock_sd.InputStream.side_effect = Exception("Stop test here")
+                        mock_sd.InputStream.side_effect = Exception("Stop test here: microphone access denied")
 
                         from jarvis.listening.listener import VoiceListener
                         listener = VoiceListener(

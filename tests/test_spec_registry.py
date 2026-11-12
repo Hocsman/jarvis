@@ -23,17 +23,20 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 INSTRUCTION_FILES = ("CLAUDE.md", "AGENTS.md")
 
-# Directories that hold someone else's files or a second checkout of this one.
-_NOT_OURS = {"node_modules", "worktrees", "dist", "build", "__pycache__"}
+# Directories that hold someone else's files, generated output, or a second
+# checkout of this one.
+_NOT_OURS = {
+    "node_modules", "worktrees", "dist", "build", "__pycache__", "graphify-out",
+}
 
 # A registry row starts with the spec's repo-relative path in backticks.
 _ROW = re.compile(r"^\|\s*`(?P<path>[^`]+\.spec\.md)`\s*\|")
 
 
-def _specs_on_disk() -> set[str]:
-    """Every `*.spec.md` in the repository, as forward-slash relative paths."""
+def _specs_on_disk(root: Path = REPO_ROOT) -> set[str]:
+    """Every `*.spec.md` under `root`, as forward-slash relative paths."""
     found: set[str] = set()
-    for folder, subfolders, files in os.walk(REPO_ROOT):
+    for folder, subfolders, files in os.walk(root):
         # Hidden folders cover `.git`, `.mamba_env` and agent worktrees under
         # `.claude`; pruning them keeps the walk off the interpreter's tree.
         subfolders[:] = [
@@ -42,7 +45,7 @@ def _specs_on_disk() -> set[str]:
         ]
         for name in files:
             if name.endswith(".spec.md"):
-                relative = Path(folder, name).relative_to(REPO_ROOT)
+                relative = Path(folder, name).relative_to(root)
                 found.add(relative.as_posix())
     return found
 
@@ -67,6 +70,18 @@ def test_the_walk_finds_the_specs():
 
     assert on_disk, "no *.spec.md found: the repository walk is broken"
     assert all(not path.startswith(".") for path in on_disk)
+
+
+def test_a_generated_graph_is_not_a_spec(tmp_path):
+    """graphify's Obsidian export writes one note per node, named after it, so
+    the node for `tts.spec.md` becomes a `tts.spec.md` under `graphify-out`."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "tts.spec.md").write_text("", encoding="utf-8")
+    export = tmp_path / "graphify-out" / "obsidian"
+    export.mkdir(parents=True)
+    (export / "tts.spec.md").write_text("", encoding="utf-8")
+
+    assert _specs_on_disk(tmp_path) == {"src/tts.spec.md"}
 
 
 @pytest.mark.parametrize("instruction_file", INSTRUCTION_FILES)

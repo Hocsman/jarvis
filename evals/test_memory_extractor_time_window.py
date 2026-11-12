@@ -47,7 +47,6 @@ from __future__ import annotations
 import os
 import random
 import statistics
-import sys
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -58,7 +57,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from conftest import requires_judge_llm
-from helpers import MockConfig
+from helpers import MIN_CALLS_FOR_A_RATE, MockConfig, to_terminal
 
 # Tuesday 27 October 2026, 17:42 in Paris (UTC+1 since the 25th).
 REFERENCE = datetime(2026, 10, 27, 16, 42, tzinfo=timezone.utc)
@@ -72,9 +71,6 @@ _END_GRACE = timedelta(hours=2)
 
 # Where a lone `to` opens: earlier than anything the diary holds.
 _OPEN_START = "2000-01-01T00:00:00+00:00"
-
-# Below this many calls a rate says nothing (CLAUDE.md, sample sizes).
-_MIN_CALLS_FOR_A_RATE = 20
 
 # Long enough to load a local model that is not resident.
 _WARM_UP_TIMEOUT_SEC = 60.0
@@ -479,12 +475,12 @@ def _tally(calls: List[_Call], arms: List[str], rounds_done: int) -> List[str]:
             cells = []
             for kind in VERDICTS:
                 cell = f"{kind} {counts[kind]}"
-                if n >= _MIN_CALLS_FOR_A_RATE:
+                if n >= MIN_CALLS_FOR_A_RATE:
                     cell += f" ({100 * counts[kind] / n:.0f} %)"
                 cells.append(cell)
             answered = [c.secs for c in mine if c.answered]
             median = f"median {statistics.median(answered):.2f} s answered" if answered else "no answer"
-            note = "" if n >= _MIN_CALLS_FOR_A_RATE else f"   (under {_MIN_CALLS_FOR_A_RATE} calls: counts only)"
+            note = "" if n >= MIN_CALLS_FOR_A_RATE else f"   (under {MIN_CALLS_FOR_A_RATE} calls: counts only)"
             lines.append(f"      💬 {lang:<3} {n:>3} calls   " + "   ".join(cells) + f"   {median}{note}")
     for arm in arms:
         misses = defaultdict(list)
@@ -495,16 +491,6 @@ def _tally(calls: List[_Call], arms: List[str], rounds_done: int) -> List[str]:
         for case_id, seen in sorted(misses.items(), key=lambda kv: -len(kv[1])):
             lines.append(f"      ❌ {len(seen)}x {case_id}  ->  {seen[0]}")
     return lines
-
-
-def _to_terminal(capsys, lines: List[str]) -> None:
-    """Print past pytest's capture. The real stream may be a cp1252 pipe
-    (Git Bash on Windows), where an emoji raises once every call is made."""
-    from jarvis.utils.console import force_utf8_stream
-
-    with capsys.disabled():
-        force_utf8_stream(sys.stdout)
-        print("\n".join(lines), flush=True)
 
 
 @pytest.mark.eval
@@ -538,12 +524,12 @@ class TestMemoryExtractorArms:
                         calls.append(_Call(arm, case, verdict(params, case), secs,
                                            params is not None, _window(params)))
                 rounds_done += 1
-                _to_terminal(capsys, [f"⏱️ round {rounds_done}/{ARM_ROUNDS} done, {len(calls)} calls"])
+                to_terminal(capsys, [f"⏱️ round {rounds_done}/{ARM_ROUNDS} done, {len(calls)} calls"])
         finally:
             # Printed even when a round is cut short: the calls already made
             # may have been billed.
             if calls:
-                _to_terminal(capsys, [""] + _tally(calls, ARMS, rounds_done))
+                to_terminal(capsys, [""] + _tally(calls, ARMS, rounds_done))
 
         # A table from an arm that never answered measures nothing.
         silent = [arm for arm in ARMS if not any(c.answered for c in calls if c.arm == arm)]

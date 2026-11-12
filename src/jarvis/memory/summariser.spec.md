@@ -2,7 +2,7 @@
 
 ## Overview
 
-The diary summariser (`conversation.py::generate_conversation_summary`) condenses raw conversation chunks into a daily `conversation_summaries` row. That row feeds every downstream memory consumer — direct diary retrieval for enrichment, vector search, FTS, and knowledge-graph extraction. A corrupted summary therefore poisons every consumer, often silently: downstream code has no way to tell that a summary misrepresents what actually happened.
+The diary summariser (`conversation.py::generate_conversation_summary`) condenses raw conversation chunks into a daily `conversation_summaries` row. That row feeds every downstream memory consumer — direct diary retrieval for enrichment, vector search, FTS, knowledge-graph extraction, and the earlier part of a long conversation (`reply.spec.md`, Recent Dialogue Context). A corrupted summary therefore poisons every consumer, often silently: downstream code has no way to tell that a summary misrepresents what actually happened.
 
 The summariser prompt enforces a fixed set of hygiene rules. Each rule exists because a specific field incident produced corrupted diary entries that misled later sessions. Rules are cumulative — none supersedes another.
 
@@ -10,7 +10,7 @@ The summariser prompt is the only write-time defence. There is no post-process s
 
 ## Core Behaviour
 
-- Input: recent conversation chunks (last 10) plus, if present, the previous summary for the same day.
+- Input: up to ten waiting messages (`SUMMARY_WINDOW_MESSAGES`), oldest first, plus, if present, the previous summary for the same day. A flush with more waiting asks again for the next ten while its budget lasts, and only what a call has read is marked saved, so nothing waiting is skipped: what the budget leaves stays waiting for the next flush.
 - Output: a free-form summary (≤ 200 words) and 3–5 comma-separated topic keywords.
 - Storage: one row per `(date_utc, source_app)` in `conversation_summaries`, updated in place on each flush. The row keeps its id for the life of the day, because the FTS index, the search join and the embedding row are all keyed on it: a row that changed id would leave its old terms behind in the index, where nothing but bm25 can see them.
 - Embedding: the concatenation of summary + topics is embedded and stored for vector retrieval, in whichever store exists — sqlite-vss when its extension loaded, the Python vector store otherwise. Both sides are gated on `db.stores_embeddings`: writing follows the same rule the reader already uses, and a query vector with nothing to compare it against is not computed at all. Gating the write on sqlite-vss alone left the fallback store built, searched on every query and never written to, so the hybrid search's semantic sixty per cent weighed nothing while the round-trip was paid.
@@ -78,7 +78,7 @@ It is not a matter of style. Three readers consume these rows and none of them i
 - Empty rewrite → row is left untouched, `would_empty: true` surfaced.
 - Per-row write failure → row is reported with `error`, the sweep continues.
 
-**Cache invariant:** diary content is never cached across turns. The reply engine's hot cache holds the warm-profile block (graph-derived, not diary), the per-query router decision, and the per-query memory-extractor parameters. None are derived from diary text, so the rewrite sweep does not need a listener-style invalidation hook. The actual diary search hits SQLite live on every enrichment-bearing turn. Concurrency between the sweep and an in-flight reply is handled by SQLite WAL. There is one inherent limitation: the previous turn's already-spoken assistant reply lives in `DialogueMemory._messages`. If a follow-up lands on the recall-gate fast path, the user is answered from rolling dialogue rather than a fresh enrichment. The rewrite does not retroactively rewrite spoken history; the next turn that triggers fresh enrichment sees the cleaned diary.
+**Cache invariant:** diary content is never cached across turns. The reply engine's hot cache holds the warm-profile block (graph-derived, not diary), the per-query router decision, and the per-query memory-extractor parameters. None are derived from diary text, so the rewrite sweep does not need a listener-style invalidation hook. The actual diary search hits SQLite live on every enrichment-bearing turn, and so does the read of the day's summary for a conversation longer than its word-for-word part. Concurrency between the sweep and an in-flight reply is handled by SQLite WAL. There is one inherent limitation: the previous turn's already-spoken assistant reply lives in `DialogueMemory._messages`. If a follow-up lands on the recall-gate fast path, the user is answered from rolling dialogue rather than a fresh enrichment. The rewrite does not retroactively rewrite spoken history; the next turn that triggers fresh enrichment sees the cleaned diary.
 
 **Read paths:** none. The rewrite only touches the bulk sweep. Read-time diary retrieval is untouched.
 

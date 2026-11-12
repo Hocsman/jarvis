@@ -11,8 +11,9 @@ Strategies (ToolSelectionStrategy enum):
 from __future__ import annotations
 
 import re
+import time
 from enum import Enum
-from typing import Dict, List, Optional, TYPE_CHECKING
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from ..debug import debug_log
 from ..llm import LLMBackend
@@ -178,10 +179,17 @@ def _select_keyword(
     builtin_tools: Dict[str, "Tool"],
     mcp_tools: Dict[str, "ToolSpec"],
 ) -> List[str]:
-    """Score tools by keyword overlap; return those with score > 0."""
+    """Score tools by keyword overlap; return those with score > 0, then
+    the always-included tools.
+
+    A query that matches nothing (or leaves no token to score, as a
+    sentence in a script the tokeniser does not read does) gets the
+    always-included tools alone, never the whole catalogue: a chat model
+    handed every tool picks badly or not at all, and the reply engine
+    offers ``toolSearchTool`` beside them so the model can look for the
+    one it needs.
+    """
     query_tokens = set(_tokenise(query))
-    if not query_tokens:
-        return _all_tool_names(builtin_tools, mcp_tools)
 
     scored: List[tuple] = []
 
@@ -196,14 +204,11 @@ def _select_keyword(
         scored.append((name, score))
 
     matched = [name for name, score in scored if score > 0]
-
-    # The fallback is for a query nothing matched at all. It runs before
-    # the mandatory tools are added, so plain emptiness is the test:
-    # discounting a mandatory tool here would read a correct single-tool
-    # answer as a failure and hand the model the whole catalogue instead.
     if not matched:
-        debug_log("Keyword tool selection found no matches, falling back to all tools", "planning")
-        return _all_tool_names(builtin_tools, mcp_tools)
+        debug_log(
+            "Keyword tool selection found no matches: the always-included tools only",
+            "planning",
+        )
 
     matched = _ensure_always_included(matched, builtin_tools, mcp_tools)
 
@@ -324,16 +329,13 @@ def _router_summary(description: str) -> str:
     return (kept or text).strip()
 
 
-def _select_llm(
+def _router_prompts(
     query: str,
     builtin_tools: Dict[str, "Tool"],
     mcp_tools: Dict[str, "ToolSpec"],
-    llm_backend: LLMBackend,
-    llm_model: str,
-    llm_timeout_sec: float,
     context_hint: Optional[str] = None,
-) -> List[str]:
-    """Ask a lightweight LLM call which tools are relevant.
+) -> Tuple[str, str]:
+    """The router's system prompt and user prompt for ``query``.
 
     ``context_hint`` is an optional compact summary of what the main assistant
     can already see at reply time (current local time, user's resolved
@@ -344,11 +346,11 @@ def _select_llm(
     actual data and judges for itself. Gracefully degrades when the hint is
     missing or partial (e.g. location failed to resolve): the router simply
     has less context and falls back to tool-selection on content.
-    """
-    if not (llm_model or "").strip():
-        debug_log("LLM tool selection skipped: no model configured, falling back to keyword strategy", "planning")
-        return ToolSelection.fallback(_select_keyword(query, builtin_tools, mcp_tools))
 
+    The system prompt and the catalogue that opens the user prompt depend on
+    nothing but the catalogue, so every call, and the start-up warm-up
+    (:func:`warm_up_router`), opens with the same text.
+    """
     catalogue_lines: List[str] = []
     for name, tool in builtin_tools.items():
         if name in _ALWAYS_INCLUDED:
@@ -431,6 +433,27 @@ def _select_llm(
         f"User query: {query}\n\n"
         "Top tools (comma-separated, max 5, or 'none'):"
     )
+    return sys_prompt, user_prompt
+
+
+def _select_llm(
+    query: str,
+    builtin_tools: Dict[str, "Tool"],
+    mcp_tools: Dict[str, "ToolSpec"],
+    llm_backend: LLMBackend,
+    llm_model: str,
+    llm_timeout_sec: float,
+    context_hint: Optional[str] = None,
+) -> List[str]:
+    """Ask a lightweight LLM call which tools are relevant (the prompt is
+    :func:`_router_prompts`)."""
+    if not (llm_model or "").strip():
+        debug_log("LLM tool selection skipped: no model configured, falling back to keyword strategy", "planning")
+        return ToolSelection.fallback(_select_keyword(query, builtin_tools, mcp_tools))
+
+    sys_prompt, user_prompt = _router_prompts(
+        query, builtin_tools, mcp_tools, context_hint=context_hint,
+    )
 
     try:
         resp = llm_backend.direct(
@@ -472,12 +495,11 @@ def _select_llm(
     if len(selected) > _LLM_MAX_SELECTED:
         selected = selected[:_LLM_MAX_SELECTED]
 
-    # As in the keyword strategy, the check runs before the mandatory
-    # tools are added, so it asks whether the router named anything at
-    # all. A router that answers "remember" to "remember that I am
-    # vegetarian" has understood the query perfectly, and treating that
-    # as empty would bury the right tool in a 12-tool catalogue that a
-    # small model then fails to pick from.
+    # The check runs before the mandatory tools are added, so it asks
+    # whether the router named anything at all. A router that answers
+    # "remember" to "remember that I am vegetarian" has understood the
+    # query perfectly, and treating that as empty would throw its answer
+    # away for the keyword strategy's guess.
     if not selected:
         debug_log("LLM tool selection matched nothing, falling back to keyword strategy", "planning")
         return ToolSelection.fallback(_select_keyword(query, builtin_tools, mcp_tools))
@@ -508,6 +530,52 @@ def router_timeout_sec(cfg) -> float:
     so the two cannot drift.
     """
     return float(getattr(cfg, "tool_router_timeout_sec", _DEFAULT_ROUTER_TIMEOUT_SEC))
+
+
+def warm_up_router(
+    builtin_tools: Dict[str, "Tool"],
+    mcp_tools: Dict[str, "ToolSpec"],
+    *,
+    llm_backend: LLMBackend,
+    llm_model: str,
+    timeout_sec: float,
+    keep_alive: str,
+) -> bool:
+    """Warm the router's model on the router's own prompt.
+
+    The router's system prompt and the catalogue that opens its user prompt
+    are a few thousand tokens that every call repeats. Handed to the
+    backend's warm-up as the prompt of a query that is empty, they are what
+    a runtime that keeps a computed prompt (Ollama) reads ahead of the first
+    exchange: the model is loaded, has run once, and the first real call
+    reads only what follows the catalogue (the facts, the dialogue, the
+    sentence). A backend with nothing to keep opens its connection as its
+    warm-up always does. ``keep_alive`` is the residency the warm-up asks
+    for, as every start-up warm-up does.
+
+    Best-effort: False when there is no model or the warm-up failed, never
+    an exception.
+    """
+    if not (llm_model or "").strip():
+        return False
+    system_prompt, user_prompt = _router_prompts("", builtin_tools, mcp_tools)
+    started = time.monotonic()
+    try:
+        ok = bool(llm_backend.warm_up(
+            llm_model,
+            timeout_sec=timeout_sec,
+            keep_alive=keep_alive,
+            prompt=(system_prompt, user_prompt),
+        ))
+    except Exception as e:
+        debug_log(f"router warm-up failed (model={llm_model}): {e}", "planning")
+        return False
+    debug_log(
+        f"router warm-up {'ok' if ok else 'failed'} (model={llm_model}, "
+        f"{len(builtin_tools) + len(mcp_tools)} tools, {time.monotonic() - started:.1f}s)",
+        "planning",
+    )
+    return ok
 
 
 def select_tools(

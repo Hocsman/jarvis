@@ -57,7 +57,7 @@
   💬 Generating response...
 
 🤖 Jarvis
-Tomorrow looks great for a picnic! Sunny with highs around 22°C...
+Tomorrow looks great for a picnic! Sunny with highs around 22 degrees...
 ```
 Jarvis understood the entire conversation and gave a contextual answer — no need to repeat the question.
 
@@ -162,7 +162,7 @@ Jarvis starts listening automatically — just say "Jarvis" and talk!
 
 ## Features
 
-- **Conversational Awareness** - Understands ongoing discussions. Ask "Jarvis, what do you think?" and it knows what you're talking about. Works naturally in multi-person conversations.
+- **Conversational Awareness** - Understands ongoing discussions. Ask "Jarvis, what do you think?" and it knows what you're talking about. Works naturally in multi-person conversations, and keeps the thread of a long one: the latest exchanges word for word, what came before through the diary it writes as you talk (how much it reads word for word: `dialogue_context_max_chars`, under **⚙️ Settings → 🧠 Memory & Dialogue**).
 - **Text Chat** - Type to Jarvis alongside voice. Voice and text share one conversation, so a follow-up typed in the chat window continues a voice discussion. Text never speaks. Open it from the tray menu (`💬 Chat`) while Jarvis is listening. The window is a frameless phone-style panel (drag it by its top bar, resize it from the corner grip) and shows a local status banner while Jarvis starts, stops, or needs to be restarted. Each sent message has a rewind (⟲) button that rolls the shared conversation back to that message and asks Jarvis again; that rewinds the voice context too, since they are one.
 - **Unlimited Memory** - Never forgets. Searches across all your conversation history. Memory Viewer GUI included.
 - **Adaptive Tone** - Automatically surgical for code, pragmatic for business, encouraging for wellbeing — no manual mode switching
@@ -178,7 +178,7 @@ Jarvis starts listening automatically — just say "Jarvis" and talk!
 - **Destructive Actions Need a Click** - Reads and recoverable changes can be approved by answering out loud, in any language. Anything that may not come back is approved on a card showing the exact call, or not at all — a mis-heard word must never be able to delete a file
 - **A Record of What It Did** - One line per tool call: what ran, what it cost, what you allowed and what you refused. Deliberately no record of what it *saw* — no page contents, no file contents, no tool output
 - **Knowledge Graph Memory** - Self-organising memory of what it has looked up for you, which auto-splits by topic and surfaces relevant knowledge automatically
-- **Natural Voice** - Say "Jarvis" anywhere in your sentence, interrupt with "stop", follow up without repeating the wake word
+- **Natural Voice** - Say "Jarvis" anywhere in your sentence, interrupt with "stop" (while it thinks as well as while it speaks), follow up without repeating the wake word. It keeps listening while it thinks: a question asked meanwhile is answered next
 - **Fast Stop** - Use the tray action `⚡ Stop Now (Skip Diary)` to release local model resources quickly when you need your machine back immediately.
 - **Dictation Mode** - Free, offline alternative to WisprFlow — hold a hotkey, speak, release to paste text into any app
 - **MCP Integration** - Connect to thousands of external tools (Home Assistant, GitHub, Slack, etc.)
@@ -249,6 +249,7 @@ Install [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and sign i
 ```
 
 - Every sub-folder is a project, matched from what you say ("nikah score" finds `nikahscore`). Two close matches, and it asks which one.
+- Ask whether it can work on your projects and it says yes, then asks which one and what to do. A small chat model such as the default `gemma4:e2b` is not told it can, because it does not look up a tool the router left out: with one, a request reaches Claude Code only when the router offers the tool, and it may answer that it has no access to your code.
 - A task that changes code shows a card with the project and the exact task, and runs only on a click; Claude Code may edit files but not run commands. A question runs without asking, and Claude Code may then only read: editing, commands and web access are denied, whatever the project's own Claude Code settings allow. Write `- claudeCode` under `## Demande` in `outils.md` if you want to be asked every time.
 - One task at a time, stopped after `claude_code_timeout_sec` (30 minutes by default). Ask "how is Claude Code doing?" at any point.
 - Say "stop Claude Code" to stop a task early, without stopping Jarvis: it asks first, then tells you once the task has actually stopped. What Claude Code already changed stays changed. Put `- stopClaudeCode` under `## Libre` in `outils.md` to skip the question (if your file already lists it under `## Demande`, move that line rather than adding one).
@@ -312,7 +313,11 @@ Leave `embedding_provider` empty to use the same provider as chat. When no embed
 <summary><strong>Power and Startup</strong></summary>
 
 Jarvis favours fast first responses by default: it warms Whisper, the chat
-model, and the intent judge before announcing that it is listening. On Macs or
+model, the intent judge and the tool router (on the tool list it reads for
+every request, when the router has a model of its own) and waits for the
+voice to finish warming up before announcing that it is listening, so the
+first reply speaks at once, and asks Ollama to keep those models loaded for 30 minutes,
+or longer if `OLLAMA_KEEP_ALIVE` tells Ollama to. On Macs or
 laptops where heat and battery matter more than instant first-token latency,
 enable **⚙️ Settings → ✨ Features → Low Power Mode**.
 
@@ -323,8 +328,8 @@ enable **⚙️ Settings → ✨ Features → Low Power Mode**.
 ```
 
 Low Power Mode skips LLM startup warmup and shortens Ollama model residency for
-the intent judge from 30 minutes to 1 minute. Whisper still warms so voice input
-is ready. The first LLM-backed request after startup or idle may be slower.
+the intent judge to 1 minute. Whisper still warms so voice input
+is ready, and the voice is still waited for so the first reply is heard at once. The first LLM-backed request after startup or idle may be slower.
 
 **Latency journal.** To find out where the time goes in a spoken exchange,
 Jarvis keeps one line per voice turn with the duration of each stage (speech
@@ -357,6 +362,7 @@ The settings are under **⚙️ Settings → 🔧 Advanced**:
 #### Language Modes
 - **Multilingual** (default, 99 languages): `"whisper_model": "medium"`
 - **English Only** (slightly better English accuracy): `"whisper_model": "medium.en"`
+- **One language you name**: `"whisper_language": "fr"` (Settings, *Speech Recognition*, Language). Whisper then transcribes only that language, for voice and dictation: no more phrases invented out of silence in other languages, and a short word like "stop" is not spelled in another script. Leave it empty if you speak several languages to it. A code Whisper does not know, or another language than English with an English-only (`.en`) model, is ignored with a warning in the log.
 
 #### Model Sizes
 | Model | English | Multilingual | Download | VRAM | Speed |
@@ -378,12 +384,14 @@ pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
 CUDA is detected automatically — no configuration needed.
 
 #### Hallucination Filters
-Whisper sometimes produces confident but false transcriptions during silence or background noise (e.g. news-show intros, music). Two thresholds filter these out before they reach the intent judge:
+Whisper sometimes produces confident but false transcriptions during silence or background noise (e.g. news-show intros, music). Most never come out: with `"whisper_vad": true` (the default, *Use VAD Filter* under *Speech Recognition* in Settings), Whisper's voice detector cuts what holds no speech before it transcribes, for voice and dictation alike (not on the MLX backend, which has none). If the detector cannot load, the log says so at start-up and Whisper transcribes without it. Two thresholds filter what remains before it reaches the intent judge:
 
 - `"whisper_min_confidence": 0.3` — drops segments whose `avg_logprob`-derived confidence falls below this value. Raise if you see low-confidence noise leaking through; lower if real speech is being dropped.
 - `"whisper_no_speech_threshold": 0.5` — drops any segment whose `no_speech_prob` is at or above this value, regardless of `avg_logprob`. Catches the case where Whisper is confident about a hallucinated phrase but its own no-speech signal says the audio was silent. Applies to both the faster-whisper and MLX backends.
 
-Both thresholds are exposed in the Settings window under *Whisper*.
+Both thresholds are exposed in the Settings window under *Speech Recognition*.
+
+What gets past them, typically a subtitle credit or the closing line of a video ("Thank you.", "See you in the next video") in a language nobody in the room speaks, is left to the intent judge: when it says a phrase is not speech, the assistant does not answer it, even just after a reply when it is otherwise waiting for your follow-up, and does not add it to a question you are still asking. How much it catches depends on the judge model: the default small `gemma4:e2b` recognises most subtitle credits but usually not the closing lines of videos, which a larger judge model catches.
 
 </details>
 
@@ -392,7 +400,7 @@ Both thresholds are exposed in the Settings window under *Whisper*.
 
 **LLM Intent Judge** - Jarvis uses `gemma4:e2b` for intelligent voice intent classification (echo detection, query extraction, stop commands). This model is automatically installed alongside your chosen chat model during setup. The intent judge cannot be disabled but gracefully falls back to simpler text matching if Ollama is unavailable.
 
-**Tool Router** - When `"tool_selection_strategy": "llm"` (the default), Jarvis asks a small LLM to pick which tools are relevant for each query, shrinking the tool catalogue the chat model sees. By default this routing call reuses the intent-judge model: it's already warm and small enough not to stall the turn. Override with `"tool_router_model": "<name>"` to dedicate a different model to routing. The memory lookup, which reads each question for keywords and dates ("last Thursday"), rides the same model unless `"memory_extractor_model"` names its own (also under **⚙️ Settings → 🧠 Memory & Dialogue**). Small models misread dates, so a stronger model helps there; a name your provider serves (`vendor/model`, or a Claude model ID on Anthropic) sends the question to it. The routing call (and the memory lookup) stops waiting after `"tool_router_timeout_sec"` (15 s by default) of silence from the server, and routing then falls back to keyword matching for that turn, so a provider that goes quiet cannot hold the reply for minutes. Lower it if your router model normally answers in a second or two, but keep it above about three times the slower of the two calls, because the memory lookup shares it. Raise it if you pin a large local model for routing, or turn on low-power mode (which skips the warm-up, so the first call has to load the model). Other strategies: `"keyword"` (fast, no LLM), `"embedding"` (nomic-embed-text), `"all"` (no filtering).
+**Tool Router** - When `"tool_selection_strategy": "llm"` (the default), Jarvis asks a small LLM to pick which tools are relevant for each query, shrinking the tool catalogue the chat model sees. By default this routing call reuses the intent-judge model, which is small. On Ollama, though, the judge and the router ask for different context sizes, so a shared model is loaded again on every exchange and the router is not warmed at startup; name a dedicated small model with `"tool_router_model": "<name>"` to avoid both. The memory lookup, which reads each question for keywords and dates ("last Thursday"), rides the same model unless `"memory_extractor_model"` names its own (also under **⚙️ Settings → 🧠 Memory & Dialogue**). Small models misread dates, so a stronger model helps there; a name your provider serves (`vendor/model`, or a Claude model ID on Anthropic) sends the question to it. The routing call (and the memory lookup) stops waiting after `"tool_router_timeout_sec"` (15 s by default) of silence from the server, and routing then falls back to keyword matching for that turn (with a large chat model, a request that shares no word with any tool gets only the essential tools and a tool search; a small one such as `gemma4:e2b`, which does not use the tool search, gets the whole list for that turn), so a provider that goes quiet cannot hold the reply for minutes. Lower it if your router model normally answers in a second or two, but keep it above about three times the slower of the two calls, because the memory lookup shares it. Raise it if you pin a large local model for routing, or turn on low-power mode (which skips the warm-up, so the first call has to load the model). Other strategies: `"keyword"` (fast, no LLM; it matches whole English words of the tool descriptions, so a request worded otherwise, or in another language, gets only the essential tools and a tool search), `"embedding"` (nomic-embed-text), `"all"` (no filtering).
 
 **Task-list Planner** - Before the agentic loop, Jarvis runs a short planning pass that decomposes multi-step queries into an ordered list of sub-tasks. For small models (`gemma4:e2b` class), each planned step is directly resolved to a concrete tool call without relying on the chat model to re-plan turn-by-turn. This significantly improves multi-step reliability. Config options:
 
@@ -513,7 +521,7 @@ pip install --no-deps moshi==0.2.11
 { "tts_engine": "kyutai" }
 ```
 - Needs an NVIDIA GPU (CUDA) and about 4 GB of free VRAM. There is no CPU mode.
-- The model (~4 GB) downloads once from Hugging Face on first use, and the first start-up takes tens of seconds while it warms up.
+- The model (~4 GB) downloads once from Hugging Face on first use, and each start-up takes tens of seconds while it warms up: Jarvis says "Listening!" once it can speak (or after 60 s).
 - Sentences are played as they are synthesised and the next one is prepared while the current one plays: expect about a second before the first sentence is heard, then a short pause between sentences. Kokoro starts a little faster.
 - The default voice is a French female voice. To pick another, browse the [voice list](https://huggingface.co/kyutai/tts-voices) and set `tts_kyutai_voice` to a name from it (for example `cml-tts/fr/577_394_000070-0001_enhanced.wav`), or to the path of a `.safetensors` voice file. A local path to anything else (a `.wav` recording, say) is refused rather than sent to Hugging Face.
 - Known limitation: only English and French text is read correctly. Any other language is read with the wrong sounds, and the voice follows `tts_kyutai_voice` alone, not `response_language`.
@@ -719,11 +727,13 @@ Get API key at [composio.dev](https://composio.dev)
 <details>
 <summary><strong>Common issues</strong></summary>
 
-**First startup takes a bit** - Jarvis pre-warms the Whisper, chat, and intent-judge models before announcing "Listening!" so the first engagement feels instant. This adds a few seconds on cold start and is bounded at 60 s. If Ollama is slow, Jarvis will start listening anyway and load the models on demand. Enable **Low Power Mode** in Settings to skip LLM startup warmup.
+**First startup takes a bit** - Jarvis pre-warms the Whisper, chat, intent-judge and tool-router models, and waits for the voice to warm up, before announcing "Listening!" so the first engagement feels instant. This adds a few seconds on cold start, tens of seconds with Kyutai, and is bounded at 60 s. If Ollama is slow, Jarvis will start listening anyway and load the models on demand. Enable **Low Power Mode** in Settings to skip LLM startup warmup.
 
 **First startup downloads the speech model** - On the very first launch Jarvis downloads the Whisper model (up to ~3 GB depending on the chosen size) and shows progress lines (`⬇️ Downloading … X/Y MB · rate`) in the log. A slow connection keeps printing progress as long as data flows. An interrupted download resumes where it stopped on the next launch.
 
-**Jarvis doesn't hear me** - Check microphone permissions, speak clearly after "Jarvis"
+**Jarvis doesn't hear me** - Check microphone permissions, speak clearly after "Jarvis". If the log says `Microphone not connected` or `Microphone lost`, Jarvis cannot find the microphone chosen in Settings (unplugged, or not connected yet) and is waiting for it rather than recording from another one: plug it in and it starts listening within a few seconds (up to 15 once it has waited a minute), no restart needed.
+
+**A follow-up right after a reply goes unanswered** - If the console shows `🔇 Heard (echo)`, Jarvis took your words for its own voice coming back. This can happen when you answer quietly the instant it stops speaking, with mostly its own words, or with a short word said over its last word or just after it. Speak up a little, say a few more words, wait a moment after it finishes, or start with "Jarvis", which gets it answered unless its reply had just said its own name or a word it can mistake for it (common words such as "jours" or "chairs" among them). If it shows `🔇 Heard (not speech)`, it took your words for text the speech recogniser makes up out of silence: a short thanks or greeting right after a reply can read like that, more so when it repeats the reply's own words. Say a few more words of your own, or start with "Jarvis". If it shows `🔇 Heard (not to her)`, Jarvis took your words for words to someone else: a guest in the room, someone on a call, the people watching your stream. Say its name with the follow-up and it is answered.
 
 **Not sure what is running** - Open the tray menu and click **🩺 Runtime Status**. It shows whether Jarvis is listening, whether Low Power Mode is active, whether Ollama is needed/running, which models are configured, and how many MCP servers are enabled.
 
@@ -800,7 +810,7 @@ a small fallback chain before giving up rather than confabulating:
    2,000 queries/month. Get a key at
    [api.search.brave.com](https://api.search.brave.com/app/keys).
 2. **Wikipedia** — zero-config, on by default, uses the Wikipedia host
-   matching the language Whisper auto-detected on the utterance (so a
+   matching the language Whisper heard the utterance in (so a
    Turkish question gets a Turkish answer). Disable with
    `wikipedia_fallback_enabled: false`.
 3. **Honest failure** — if every provider fails, the reply tells you the

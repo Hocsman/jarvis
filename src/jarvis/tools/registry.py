@@ -590,10 +590,9 @@ def _ask(db, cfg, confirmation, *, name, args, risk, verdict, origin,
     """Raise a question and end the turn. Nothing runs.
 
     The gate never waits here. For voice, ``run_reply_engine`` runs on
-    the listener's own audio thread, so blocking would silence the
-    microphone that has to hear the answer — and blocking destroys the
-    answer rather than delaying it, because the audio queue overflows
-    into a swallowed exception.
+    the listener's reply thread, and the spoken answer is a later turn of
+    that same thread, so blocking would wait on itself while holding the
+    query lock every typed question needs too.
     """
     from .confirmation import PendingAction, channel_for_call
     from .policy import OUTCOME_ASKED, OUTCOME_EXPIRED, OUTCOME_REFUSED
