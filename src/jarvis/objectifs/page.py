@@ -59,9 +59,11 @@ _COMMENT_OPEN, _COMMENT_CLOSE = "<!--", "-->"
 # ours: a newline in it appends a field, a heading, or a whole goal.
 _NOM_PROPRE = re.compile(r"^[\w-]{1,64}$", re.UNICODE)
 
+
 def is_goal_name(nom: str) -> bool:
-    """Whether *nom* is a heading this file would write and read back."""
-    return bool(_NOM_PROPRE.match(nom or ""))
+    """Whether *nom* is a heading this file would write and read back,
+    the whole of it: `$` alone lets a trailing line break through."""
+    return bool(_NOM_PROPRE.fullmatch(nom or ""))
 
 
 # One line, and one line only. What the user says arrives through the

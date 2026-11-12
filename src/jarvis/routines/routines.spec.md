@@ -249,7 +249,9 @@ that nothing is written to the goal. A routine already running under
 that name and sentence is left as it is when it works for the goal the
 call names; when it works for another, or for none, nothing is changed
 and she says which: "it already does exactly that" would have him believe
-a goal travels with it, or that it no longer does.
+a goal travels with it, or that it no longer does. Which goal a routine
+works for is then his to change, on the `objectif:` line of its block: a
+routine stopped and asked for again restarts as its block is written.
 
 Two stores have to agree, a block and a row, and three rules follow.
 

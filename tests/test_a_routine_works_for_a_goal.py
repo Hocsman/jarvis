@@ -175,6 +175,17 @@ def test_a_goal_name_that_could_not_be_a_heading_is_never_written():
     assert not block.scope().memoire
 
 
+def test_nor_one_that_ends_on_a_line_break():
+    """A name with a line break after it reads as a name to a pattern
+    anchored on `$`, and written it would put an empty line in the block."""
+    written = render_block(nom="matin", phrase="résume les titres",
+                           quand="tous les jours à 07:00", outils=["webSearch"],
+                           objectif="velo-cargo\n")
+
+    assert "objectif" not in written
+    assert "\n\n" not in written
+
+
 # ── What a pass is handed ─────────────────────────────────────────────
 
 

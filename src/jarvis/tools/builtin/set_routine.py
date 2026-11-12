@@ -525,7 +525,11 @@ class SetRoutineTool(Tool):
     def _autre_objectif(self, nom, pour, demande) -> ToolExecutionResult:
         """The routine runs already, for another goal than the call names,
         or for none. Nothing is changed: which goal a routine works for is
-        a line of its block, and the yes he gave armed that block."""
+        a line of its block, and the yes he gave armed that block.
+
+        The way out she names is the one that works. Stopping it and
+        asking again would restart the block as written, goal included
+        (`_carte_dit_vrai`): the line is his to change, in his file."""
         actuel = (f"it works for their goal « {pour} »" if pour
                   else "it works for no goal of theirs")
         voulu = (f"for « {demande} »" if demande else "for no goal")
@@ -534,9 +538,10 @@ class SetRoutineTool(Tool):
             reply_text=(
                 f"Nothing was changed. « {nom} » is already running, and "
                 f"{actuel}, not {voulu}. Tell the user that, in their "
-                f"language. To change it they stop this routine and ask for "
-                f"it again, or edit the `objectif:` line of its block in "
-                f"routines.md themselves."
+                f"language. Which goal a routine works for is the "
+                f"`objectif:` line of its block in routines.md: to change "
+                f"it they edit that line themselves, or ask for a routine "
+                f"under another name."
             ),
         )
 
