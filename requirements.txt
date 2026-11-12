@@ -83,9 +83,10 @@ mlx-whisper>=0.4.0; sys_platform == "darwin" and platform_machine == "arm64"
 #     passes, install the same wheels in the project environment and run
 #       python -m pytest tests
 #     then start the desktop app (scripts/run_desktop_app.bat) and open the
-#     dashboard and the memory viewer, which the suite does not render. A
-#     passing check on a clean machine is not proof for this one: the cause is
-#     not diagnosed, so run it on the machine the release is built on too.
+#     dashboard and the memory viewer, which the suite renders only offscreen
+#     and without the GPU. A passing check on a clean machine is not proof for
+#     this one: the cause is not diagnosed, so run it on the machine the
+#     release is built on too.
 #   What to update when a set passes: the four Windows pins below (the runtime
 #     pair may become a range such as >=6.9.2,<6.10 when only a patch release
 #     moved), the release named in the paragraph above, and the Qt sentence in
