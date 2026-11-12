@@ -8,7 +8,7 @@ reply, exactly as it does when the daemon is a subprocess.
 
 These tests drive the real tray, the real window and bridge, and the real
 ``jarvis.daemon.submit_text_query``. Only what cannot exist headless is
-replaced: the web view (a stand-in widget), the thread that would run the
+replaced: the web view and its page (stand-ins), the thread that would run the
 daemon's main loop (inert), and the reply engine (scripted). What they
 read is what the page would have been shown.
 
@@ -160,15 +160,22 @@ def tray(qapp, monkeypatch):
     from desktop_app.face_widget import JarvisState, get_jarvis_state
 
     class _StandInPage:
+        def __init__(self, _index, _parent=None):
+            pass
+
         def setWebChannel(self, _channel):
             pass
 
     class _StandInView(QWidget):
-        """QWebEngineView cannot be constructed in a headless run."""
+        """QtWebEngine is not built in the suite's process (see
+        test_dashboard_own_page.py, which drives the real view)."""
 
         def __init__(self, parent=None):
             super().__init__(parent)
-            self._page = _StandInPage()
+            self._page = None
+
+        def setPage(self, page):
+            self._page = page
 
         def page(self):
             return self._page
@@ -177,6 +184,7 @@ def tray(qapp, monkeypatch):
             pass
 
     monkeypatch.setattr("desktop_app.dashboard_window.QWebEngineView", _StandInView)
+    monkeypatch.setattr("desktop_app.dashboard_window._DashboardPage", _StandInPage)
     monkeypatch.setattr(app_mod, "QThread", _InertThread)
     monkeypatch.setattr("desktop_app.chat_window._decision_writer", None)
     get_jarvis_state().set_state(JarvisState.IDLE)
@@ -186,7 +194,7 @@ def tray(qapp, monkeypatch):
     t.is_listening = False
     t.daemon_process = None
     t.daemon_thread = None
-    t._daemon_stop_expected = False
+    t._daemon_stopping = False
     t.chat_window = None
     t.dashboard_window = None
     t._chat_submit_fn = None
@@ -198,6 +206,7 @@ def tray(qapp, monkeypatch):
     t.tray_icon = MagicMock()
     t.toggle_action = MagicMock()
     t.quick_stop_action = MagicMock()
+    t.setup_wizard_action = MagicMock()
     t.status_action = MagicMock()
     t._confirm_signals = MagicMock()
     t.update_icon = lambda: None
@@ -518,3 +527,91 @@ class TestTheGearInTheDashboard:
         _drain(qapp, lambda: opened, timeout=1.0)
 
         assert opened == [True]
+
+
+# ── The dashboard follows the saved settings ──────────────────────────
+
+
+class TestTheDashboardFollowsTheSavedSettings:
+    """Saving the settings, or running the setup wizard, has the open
+    dashboard re-read them, so its weather stops or starts without a
+    restart (``desktop_app.spec.md``, "Dashboard")."""
+
+    @staticmethod
+    def _saved(monkeypatch, **settings):
+        """What ``load_settings`` reads from disk from now on."""
+        import jarvis.config
+        from types import SimpleNamespace
+
+        saved = SimpleNamespace(weather_city="Lyon", response_language="fr", **settings)
+        monkeypatch.setattr(jarvis.config, "load_settings", lambda *a, **k: saved)
+
+    def test_saving_the_settings_turns_the_dashboards_weather_off(self, qapp, tray, monkeypatch):
+        from PyQt6.QtWidgets import QDialog
+
+        import desktop_app.dashboard.bridge as bridge_module
+        import desktop_app.settings_window as settings_window
+
+        monkeypatch.setattr(bridge_module, "fetch_weather_summary", lambda city, language="en", **_: None)
+        self._saved(monkeypatch, location_enabled=True)
+        tray.show_dashboard()
+        assert _bridge(tray).property("weatherAvailable") is True
+
+        test = self
+
+        class _Settings:
+            def exec(self):
+                test._saved(monkeypatch, location_enabled=False)
+                return QDialog.DialogCode.Accepted
+
+        monkeypatch.setattr(settings_window, "SettingsWindow", _Settings)
+        tray.show_settings()
+
+        assert _bridge(tray).property("weatherAvailable") is False
+
+    def test_a_cancelled_settings_window_leaves_the_dashboard_as_it_was(self, qapp, tray, monkeypatch):
+        """Cancelling saves nothing, so there is nothing to follow; settings
+        changed on disk by hand wait for the next save."""
+        from PyQt6.QtWidgets import QDialog
+
+        import desktop_app.dashboard.bridge as bridge_module
+        import desktop_app.settings_window as settings_window
+
+        monkeypatch.setattr(bridge_module, "fetch_weather_summary", lambda city, language="en", **_: None)
+        self._saved(monkeypatch, location_enabled=True)
+        tray.show_dashboard()
+
+        test = self
+
+        class _Settings:
+            def exec(self):
+                test._saved(monkeypatch, location_enabled=False)
+                return QDialog.DialogCode.Rejected
+
+        monkeypatch.setattr(settings_window, "SettingsWindow", _Settings)
+        tray.show_settings()
+
+        assert _bridge(tray).property("weatherAvailable") is True
+
+    def test_running_the_setup_wizard_brings_the_dashboards_weather_on(self, qapp, tray, monkeypatch):
+        from PyQt6.QtWidgets import QWizard
+
+        import desktop_app.dashboard.bridge as bridge_module
+        import desktop_app.setup_wizard as setup_wizard
+
+        monkeypatch.setattr(bridge_module, "fetch_weather_summary", lambda city, language="en", **_: None)
+        self._saved(monkeypatch, location_enabled=False)
+        tray.show_dashboard()
+        assert _bridge(tray).property("weatherAvailable") is False
+
+        test = self
+
+        class _Wizard:
+            def exec(self):
+                test._saved(monkeypatch, location_enabled=True)
+                return QWizard.DialogCode.Rejected
+
+        monkeypatch.setattr(setup_wizard, "SetupWizard", _Wizard)
+        tray.show_setup_wizard()
+
+        assert _bridge(tray).property("weatherAvailable") is True

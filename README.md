@@ -753,7 +753,7 @@ Get API key at [composio.dev](https://composio.dev)
 
 **Mac gets warm while Jarvis is active** - Enable **⚙️ Settings → ✨ Features → Low Power Mode**. This keeps voice recognition ready while avoiding background LLM warmup and shortening Ollama's idle residency window.
 
-**Need to cool down immediately** - Use the tray action **⚡ Stop Now (Skip Diary)**. It stops the voice daemon without running the final diary LLM pass. Regular **Stop Listening** still saves the diary before shutdown.
+**Need to cool down immediately** - Use the tray action **⚡ Stop Now (Skip Diary)**. It stops the voice daemon without running the final diary LLM pass. Regular **Stop Listening** still saves the diary before shutdown. Pick one or the other: once a stop is under way the tray shows **⏳ Stopping…** and both are greyed out until it finishes.
 
 **Mac is still warm after quitting** - If Jarvis starts Ollama for you, quitting Jarvis also stops that owned Ollama runtime. If Ollama was already running before Jarvis opened, Jarvis leaves it running so it does not interrupt your other local AI tools.
 
@@ -842,6 +842,7 @@ provider can't run out the voice-assistant latency budget.
 - **No record of what you said in the timing log** - The latency journal has no free-text column either: durations, counts and model names only
 - **A cloud model only if you pick one** - With the default Ollama nothing leaves your machine. Choosing a hosted provider (an OpenAI-compatible endpoint such as OpenRouter, or Anthropic) sends your conversations there, after auto-redaction; small roles you pin to a local model stay local
 - **Claude Code, off by default** - Handing a project to Claude Code sends the task and the code it reads to Anthropic. Nothing reaches it until you name a projects folder (`claude_code_projects_dir`)
+- **No proxy hunt on your network** - The dashboard and the Memory Viewer show pages from your own machine, and the app's windows skip the system's automatic proxy detection, which would otherwise ask your network for a `wpad` proxy the first time the Memory Viewer opens. Behind a corporate proxy nothing changes, since these pages never go through one. The packaged macOS app opens the Memory Viewer in your browser, which follows its own settings
 - **Talking face, on your machine** - The portrait you animate is read locally and never sent anywhere, and its frames live only in memory. Turning the face on downloads its model files once from Hugging Face
 - **Permissions are yours to set** - `~/.local/share/jarvis/yuba/outils.md` lists your own tools by name, in three sections you move lines between. Written once, never rewritten. A tool that appears later falls back to the risk it declares, so a read runs and anything else asks
 
