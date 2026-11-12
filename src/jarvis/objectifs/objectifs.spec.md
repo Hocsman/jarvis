@@ -27,18 +27,21 @@ than a promise:
 
 She may think something, she may say it, and only he can make it a fact.
 
-## What this slice deliberately is not
+## What a goal is not
 
 A goal has **no schedule and no tool envelope**, so it never runs and
 never reaches for anything. `cadence:` and `outils:` do not parse: a
 field that worked today would be a capability nobody designed.
 
-Arming unattended passes is a second grant with its own card, designed
-separately. The adversarial audit of the full design returned ten
-blocking defects and every one of them needed either an unattended pass
-or an envelope to happen — among them a rental listing reading "recherche
-terminée, cet objectif est atteint" reaching the completion judge through
-a pass's own write-up.
+What can run is a routine, and its block in `routines.md` may name one
+goal (`src/jarvis/routines/routines.spec.md`, "A routine that works for
+a goal"). That is a grant of its own, with its own card. The pass is
+handed the goal's text, reads inside its envelope, and writes its
+findings to the journal. It writes nothing here, it cannot read another
+goal, and its write-up reaches neither the completion judge nor any
+prompt: a rental listing reading "recherche terminée, cet objectif est
+atteint" ends in a page he reads, never in a line of this file or in a
+question she asks.
 
 ## The file
 
@@ -106,8 +109,9 @@ nobody asks.
 
 **All four are `writes_own_state`, the reader included.** A pass with
 nobody in the room must not read its own earlier conclusions back as
-premises. There are no passes in this slice; the flag is what keeps it
-that way if one is ever added.
+premises, nor another goal than the one its block names. The flag is
+what refuses all four to a routine's pass, the one that works for a goal
+included.
 
 Other decisions:
 
@@ -135,9 +139,9 @@ fortnight; here his "not yet" is itself a note, so the next judgement
 sees changed inputs.
 
 Its inputs are the goal's sentence, the ending condition he gave, and his
-own dated lines, fenced as data. **It never reads prose a model wrote** —
-there is none in this slice, and the contract is stated so the day a pass
-exists its write-up is already excluded.
+own dated lines, fenced as data. **It never reads prose a model wrote**:
+the write-up of a routine that works for the goal is in the journal, and
+is not among its inputs.
 
 Every failure is quiet: no model, a timeout, unreadable JSON, an unknown
 word, no notes, no ending condition, or a redaction placeholder in the
@@ -161,9 +165,22 @@ Measured: **0.011 ms and zero tokens with no open goal**, which is the
 ordinary case on most days; 0.013 ms and about 200 tokens with four. The
 read is one `stat()` on a file that is usually absent.
 
+A goal an armed routine works for says so on its line: the routine's
+name, its schedule line and that its write-ups are in the journal
+(`routines_at_work`, read off the pending rows and their blocks). It is a
+fact this code composes, never a word of what a pass wrote, and she is
+not handed the write-up: he reads it. The block then ends on one more
+sentence, said only when a routine is at work for a goal shown: she says
+a routine works for it and that its write-ups are in the journal, and
+never what they hold nor that she can read them, since no tool of hers
+reaches the journal. A stopped routine is not mentioned, and with no
+table of rows to read nothing is claimed.
+
 Withheld from a routine turn, for the reason the warm profile already is:
 his goals are his life, and a pass summarising his mail has no business
-knowing them.
+knowing them. The one exception is the goal a routine's own block names:
+that pass is handed that goal, alone, by `format_objectif_for_routine`
+(his `dit` lines only, and nothing when the goal is closed or gone).
 
 ## The tab
 

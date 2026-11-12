@@ -2337,11 +2337,29 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
             try:
                 from ..objectifs.prompt import format_objectifs_block
 
-                _objectifs = format_objectifs_block(cfg)
+                # An attended turn is also told which goals an armed
+                # routine works for. A pass is not: what the other
+                # routines do is none of its business.
+                _objectifs = format_objectifs_block(
+                    cfg, db=db if scope is None else None)
                 if _objectifs:
                     guidance.append("\n" + _objectifs)
             except Exception as e:
                 debug_log(f"goals block skipped (non-fatal): {e}", "memory")
+
+        # The one goal a routine's block names (« objectif: nom ») travels
+        # with its pass: that goal's text and nothing else of his profile.
+        if scope is not None and getattr(scope, "objectif", ""):
+            try:
+                from ..objectifs.prompt import format_objectif_for_routine
+
+                _objectif = format_objectif_for_routine(cfg, scope.objectif)
+                if _objectif:
+                    guidance.append("\n" + _objectif)
+                    debug_log(f"routine {scope.nom}: handed the goal "
+                              f"{scope.objectif}", "memory")
+            except Exception as e:
+                debug_log(f"routine goal skipped (non-fatal): {e}", "memory")
 
         marks = [len("\n".join(guidance))]
 

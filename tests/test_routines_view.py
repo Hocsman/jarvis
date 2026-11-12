@@ -187,6 +187,26 @@ def test_a_routine_that_carries_the_profile_says_so(viewer):
     assert _list(client)[0]["memoire"] is True
 
 
+def test_a_routine_that_works_for_a_goal_says_which(viewer):
+    """That goal's text leaves the machine at every pass. Its name is
+    worth a word on the row, armed or stopped."""
+    db, client, cfg = viewer
+    from src.jarvis.routines.scope import routines_path
+
+    routines_path(cfg).write_text(
+        ROUTINES_FILE
+        + "\n## annonces\nobjectif: velo-cargo\noutils:\n- webSearch\n"
+        + "\n## veille\nobjectif: permis-bateau\noutils:\n- webSearch\n",
+        encoding="utf-8",
+    )
+    _add(db, nom="annonces")
+
+    by_name = {r["nom"]: r for r in _list(client)}
+    assert by_name["annonces"]["objectif"] == "velo-cargo"
+    assert by_name["veille"]["arretee"] and by_name["veille"]["objectif"] == "permis-bateau"
+    assert by_name["matin"]["objectif"] == ""
+
+
 def test_a_routine_that_keeps_producing_nothing_shows_its_count(viewer):
     """It is four fifths of the way to switching itself off, and the
     only place that is visible before it happens is here."""
