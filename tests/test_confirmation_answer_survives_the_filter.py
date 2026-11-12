@@ -160,6 +160,17 @@ def test_ambient_speech_without_her_name_is_still_dropped():
     assert _kept(listener, _segment("C'est trop dur, merci hein...", 0.28)) == []
 
 
+def test_a_word_holding_her_name_is_still_dropped():
+    """Her name is a word. "Charismatique" holds "charis", one of the
+    spellings Whisper gives it, and is ambient speech all the same: a poor
+    transcription of it is dropped like any other."""
+    listener = _listener(DialogueMemory())
+    listener.cfg.wake_word = "jarvis"
+    listener.cfg.wake_aliases = ["charis"]
+
+    assert _kept(listener, _segment("Elle est charismatique...", 0.28)) == []
+
+
 def test_keeping_it_decides_nothing():
     """The wake detector and the intent judge both still run. This only
     stops the word being deleted before either can see it."""

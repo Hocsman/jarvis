@@ -31,6 +31,7 @@ import psutil
 import threading
 import traceback
 import atexit
+import html
 import webbrowser
 import urllib.parse
 from dataclasses import dataclass
@@ -1223,6 +1224,14 @@ class LogViewerWindow(QMainWindow):
         webbrowser.open(url)
 
 
+# The memory viewer's server binds this address alone, and the window
+# probes, loads and guards it by this address: ``localhost`` would let
+# QtWebEngine try ``::1`` first, where the viewer never listens, so
+# another program bound to ``[::1]`` on the viewer's port would be shown
+# in its place.
+_VIEWER_HOST = "127.0.0.1"
+
+
 def _port_holds_viewer_server(port: int) -> bool:
     """True when whatever answers on `port` identifies as the memory viewer.
 
@@ -1240,7 +1249,7 @@ def _port_holds_viewer_server(port: int) -> bool:
     import json
 
     try:
-        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        conn = http.client.HTTPConnection(_VIEWER_HOST, port, timeout=2)
         try:
             conn.request("GET", "/api/health")
             resp = conn.getresponse()
@@ -1256,43 +1265,56 @@ def _port_holds_viewer_server(port: int) -> bool:
         return False
 
 
-# The embedded viewer navigates exactly one origin: the loopback server
-# that serves the page. Two schemes pass without a host check: ``about:``
-# for Qt's internal page states, and ``data:`` because ``setHtml`` is a
-# navigation to a self-contained ``data:text/html`` document (the error
-# page rides it).
-_VIEWER_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
-_VIEWER_LOCAL_SCHEMES = frozenset({"about", "data"})
-
-
-def _is_local_navigation(url) -> bool:
-    """Whether the embedded memory viewer may navigate to ``url``."""
-    if (url.scheme() or "").lower() in _VIEWER_LOCAL_SCHEMES:
+# The embedded viewer navigates only to its own server: ``http`` on
+# ``_VIEWER_HOST`` and the viewer's port, so to no other service on the
+# machine (Ollama on 11434, say), no other scheme on that address, and no
+# other loopback name. Two schemes pass without a host check: ``about:``
+# in any frame, for Qt's internal page states, and ``data:`` in the main
+# frame alone, because ``setHtml`` is a main-frame navigation to a
+# self-contained ``data:text/html`` document (the error page rides it)
+# and nothing the viewer shows frames one.
+def _is_local_navigation(url, port: int, is_main_frame: bool) -> bool:
+    """Whether the embedded memory viewer, served on ``port``, may navigate to ``url``."""
+    scheme = (url.scheme() or "").lower()
+    if scheme == "about":
         return True
-    return (url.host() or "").lower() in _VIEWER_LOCAL_HOSTS
+    if scheme == "data":
+        return is_main_frame
+    return scheme == "http" and url.host() == _VIEWER_HOST and url.port(80) == port
 
 
 if QWebEnginePage is not None:
 
     class _LocalOnlyPage(QWebEnginePage):
-        """WebEngine page that refuses every non-loopback navigation.
+        """WebEngine page that refuses every navigation, in any frame, to
+        anything but the viewer's own server (``http`` on ``_VIEWER_HOST``
+        and ``port``), Qt's ``about:`` states, and the main-frame ``data:``
+        document the error page rides (``_is_local_navigation``).
 
         The served page holds the launch token and references no remote
         asset; this makes navigation a property of the view too, so no
         link or injected redirect inside the embedded page can navigate
-        the machine to a remote host. Subresource requests (fetch, XHR,
-        images) do not pass through this guard; that the machine
-        contacts nobody rests on the served page referencing no remote
-        URL, which tests/test_memory_viewer_offline.py pins.
+        the machine to a remote host or to another service on it.
+        Subresource requests (fetch, XHR, images) do not pass through
+        this guard; that the machine contacts nobody rests on the served
+        page referencing no remote URL, which
+        tests/test_memory_viewer_offline.py pins.
         """
 
+        def __init__(self, parent, port: int):
+            super().__init__(parent)
+            self._port = port
+
         def acceptNavigationRequest(self, url, navigation_type, is_main_frame):
-            if _is_local_navigation(url):
+            if _is_local_navigation(url, self._port, is_main_frame):
                 return super().acceptNavigationRequest(url, navigation_type, is_main_frame)
-            debug_log(
-                f"viewer navigation refused: {url.scheme()}://{url.host()}",
-                "desktop",
-            )
+            # Scheme, host and port alone: no credentials, path (a data:
+            # document's payload), query or fragment.
+            parts = QUrl.UrlFormattingOption
+            address = url.adjusted(
+                parts.RemoveUserInfo | parts.RemovePath | parts.RemoveQuery | parts.RemoveFragment
+            ).toString()
+            debug_log(f"viewer navigation refused: {address}", "desktop")
             return False
 
 else:
@@ -1333,7 +1355,7 @@ class MemoryViewerWindow(QMainWindow):
             # Use embedded web view - URL will be set in showEvent when window is shown
             try:
                 self.web_view = QWebEngineView()
-                self.web_view.setPage(_LocalOnlyPage(self.web_view))
+                self.web_view.setPage(_LocalOnlyPage(self.web_view, self.MEMORY_VIEWER_PORT))
                 layout.addWidget(self.web_view)
                 web_view_created = True
             except Exception as e:
@@ -1393,7 +1415,7 @@ class MemoryViewerWindow(QMainWindow):
             # Check if server is already running on the port
             import socket
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            result = sock.connect_ex(('localhost', self.MEMORY_VIEWER_PORT))
+            result = sock.connect_ex((_VIEWER_HOST, self.MEMORY_VIEWER_PORT))
             sock.close()
 
             if result == 0:
@@ -1431,7 +1453,7 @@ class MemoryViewerWindow(QMainWindow):
 
                         # Disable Flask's reloader and debug mode
                         flask_app.run(
-                            host="127.0.0.1",
+                            host=_VIEWER_HOST,
                             port=self.MEMORY_VIEWER_PORT,
                             debug=False,
                             use_reloader=False,
@@ -1513,7 +1535,7 @@ class MemoryViewerWindow(QMainWindow):
 
                 # Check if server is listening
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                result = sock.connect_ex(('127.0.0.1', self.MEMORY_VIEWER_PORT))
+                result = sock.connect_ex((_VIEWER_HOST, self.MEMORY_VIEWER_PORT))
                 sock.close()
 
                 if result == 0:
@@ -1570,7 +1592,7 @@ class MemoryViewerWindow(QMainWindow):
             self.is_server_running = False
 
     def _show_error_page(self, message: str) -> None:
-        """Show an error page in the web view."""
+        """Show an error page in the web view, with ``message`` as text."""
         if self.web_view:
             error_html = f"""
             <html>
@@ -1586,7 +1608,7 @@ class MemoryViewerWindow(QMainWindow):
             <body><div class="error">
                 <div class="icon">⚠️</div>
                 <h1>Connection Failed</h1>
-                <p>{message}</p>
+                <p>{html.escape(message)}</p>
             </div></body>
             </html>
             """
@@ -1601,11 +1623,11 @@ class MemoryViewerWindow(QMainWindow):
             if self.start_server():
                 if self.web_view:
                     # Set URL and load (URL is set here, not in __init__, to avoid WebEngine crash)
-                    self.web_view.setUrl(QUrl(f"http://localhost:{self.MEMORY_VIEWER_PORT}"))
+                    self.web_view.setUrl(QUrl(f"http://{_VIEWER_HOST}:{self.MEMORY_VIEWER_PORT}"))
                 else:
                     # Open in system browser as fallback
                     import webbrowser
-                    webbrowser.open(f"http://localhost:{self.MEMORY_VIEWER_PORT}")
+                    webbrowser.open(f"http://{_VIEWER_HOST}:{self.MEMORY_VIEWER_PORT}")
             else:
                 # Server failed to start - show error message
                 debug_log("memory viewer server failed to start", "desktop")
@@ -1726,7 +1748,11 @@ class JarvisSystemTray:
         # bundled mode only the dashboard needs one (see _submit_dashboard_bundled).
         self.dashboard_window = None
         self._dashboard_submit_fn = None
-        self._daemon_stop_expected = False
+        # True for the whole of stop_daemon. The stop keeps the event loop
+        # turning while it waits for the diary, so clicks, the status timer
+        # and the thread's finished signal all arrive during it; while this
+        # is set none of them starts, stops or marks the daemon down.
+        self._daemon_stopping = False
 
         self._wire_chat_signals()
 
@@ -1836,11 +1862,24 @@ class JarvisSystemTray:
         # Stop memory viewer server
         if hasattr(self, 'memory_viewer'):
             self.memory_viewer.stop_server()
-        # Safety net: if daemon process exists but is_listening was False, still clean up
-        # (This shouldn't happen in normal operation, but handles edge cases)
+        # Safety net: a daemon process still here after the stop above, because
+        # that stop failed, was refused during another one, or was never asked
+        # for (is_listening already False), is ended now.
         if self.daemon_process:
             try:
-                self.daemon_process.terminate()
+                if self._daemon_stopping:
+                    # A termination signal runs this from inside a stop's
+                    # wait, where the stop above is refused. Ask the daemon
+                    # to exit as that stop does, by closing its stdin, so
+                    # she still writes her diary.
+                    debug_log("exit during a stop: asking the daemon to exit", "desktop")
+                    try:
+                        if self.daemon_process.stdin:
+                            self.daemon_process.stdin.close()
+                    except Exception:
+                        pass
+                else:
+                    self.daemon_process.terminate()
                 try:
                     # Use longer timeout to allow diary update to complete
                     self.daemon_process.wait(timeout=60)
@@ -2034,6 +2073,13 @@ class JarvisSystemTray:
         from desktop_app.setup_wizard import SetupWizard
         from PyQt6.QtWidgets import QWizard
 
+        # The wizard stops and restarts the daemon around itself; with a
+        # stop already in progress its restart would fight that stop. The
+        # tray entry is disabled meanwhile, this covers any other caller.
+        if self._daemon_stopping:
+            debug_log("setup wizard refused: a stop is in progress", "desktop")
+            return
+
         # Remember if daemon was running before wizard
         was_listening = self.is_listening
 
@@ -2066,6 +2112,21 @@ class JarvisSystemTray:
         result = dialog.exec()
         if result == QDialog.DialogCode.Accepted:
             self._reload_dashboard_settings()
+
+        # Saved while a stop is in progress (Settings stays reachable during
+        # it, from the tray and from the dashboard's gear): she is going
+        # down anyway and reads the new settings at her next start. A
+        # notification, not a dialog: a dialog opened here would hold the
+        # stop, which waits below it, until it was dismissed.
+        if result == QDialog.DialogCode.Accepted and self._daemon_stopping:
+            debug_log("settings saved during a stop: no restart offered", "desktop")
+            self.tray_icon.showMessage(
+                "⚙️ Settings Saved",
+                "Jarvis is stopping; they apply the next time she starts",
+                QSystemTrayIcon.MessageIcon.Information,
+                4000,
+            )
+            return
 
         # If settings were saved and daemon is running, offer to restart
         if result == QDialog.DialogCode.Accepted and self.is_listening:
@@ -2361,15 +2422,10 @@ class JarvisSystemTray:
     def show_chat(self) -> None:
         """Show the text chat window (created lazily on first open)."""
         if self.chat_window is None:
-            from desktop_app.chat_window import ChatWindow
-            self.chat_window = ChatWindow(
-                daemon_available=self.is_listening, **self._chat_hooks()
-            )
+            self._create_chat_window()
         else:
             self.chat_window.set_daemon_hooks(**self._chat_hooks())
-            self.chat_window.set_daemon_status(
-                "running" if self.is_listening else "stopped"
-            )
+            self.chat_window.set_daemon_status(self._chat_daemon_status())
         if self.chat_window.isMinimized():
             self.chat_window.showNormal()
         else:
@@ -2395,6 +2451,24 @@ class JarvisSystemTray:
         self.dashboard_window.show()
         self.dashboard_window.raise_()
         self.dashboard_window.activateWindow()
+
+    def _chat_daemon_status(self) -> str:
+        """The daemon's lifecycle as a chat window shows it. During a stop
+        she is still listening until the daemon exits, but takes no message."""
+        if self._daemon_stopping:
+            return "stopping"
+        return "running" if self.is_listening else "stopped"
+
+    def _create_chat_window(self) -> None:
+        """Create the chat window, showing the daemon's current lifecycle."""
+        from desktop_app.chat_window import ChatWindow
+
+        status = self._chat_daemon_status()
+        self.chat_window = ChatWindow(
+            daemon_available=status == "running", **self._chat_hooks()
+        )
+        if status == "stopping":
+            self.chat_window.set_daemon_status(status)
 
     def _set_chat_daemon_status(self, status: str) -> None:
         """Update an existing chat window with daemon lifecycle state."""
@@ -2693,6 +2767,29 @@ class JarvisSystemTray:
 
         self.tray_icon.setIcon(icon)
 
+    def _refresh_daemon_actions(self) -> None:
+        """Bring the tray's daemon entries and status line in line with the
+        daemon: listening, stopped, or a stop in progress.
+
+        During a stop the toggle says so and, like the quick stop and the
+        setup wizard, cannot be clicked: each would start or stop her
+        inside the stop.
+        """
+        stopping = self._daemon_stopping
+        if stopping:
+            self.toggle_action.setText("⏳ Stopping…")
+            self.status_action.setText("🟠 Status: Stopping…")
+        elif self.is_listening:
+            self.toggle_action.setText("⏸️ Stop Listening")
+            self.status_action.setText("🟢 Status: Listening")
+        else:
+            self.toggle_action.setText("▶️ Start Listening")
+            self.status_action.setText("⚪ Status: Stopped")
+        self.toggle_action.setEnabled(not stopping)
+        self.quick_stop_action.setEnabled(self.is_listening and not stopping)
+        self.setup_wizard_action.setEnabled(not stopping)
+        self.update_icon()
+
     def toggle_listening(self) -> None:
         """Toggle the Jarvis daemon on/off."""
         if self.is_listening:
@@ -2709,7 +2806,11 @@ class JarvisSystemTray:
 
     def start_daemon(self) -> None:
         """Start the Jarvis daemon."""
-        self._daemon_stop_expected = False
+        # A daemon started inside a stop is one that stop then kills
+        # (subprocess) or forgets while it runs (bundled).
+        if self._daemon_stopping:
+            debug_log("start refused: a stop is in progress", "desktop")
+            return
         self._set_chat_daemon_status("starting")
         try:
             if self.is_bundled:
@@ -2891,11 +2992,7 @@ class JarvisSystemTray:
                 self.log_signals.new_log.emit("🚀 Jarvis daemon started\n")
 
             self.is_listening = True
-            self.toggle_action.setText("⏸️ Stop Listening")
-            if hasattr(self, "quick_stop_action"):
-                self.quick_stop_action.setEnabled(True)
-            self.status_action.setText("🟢 Status: Listening")
-            self.update_icon()
+            self._refresh_daemon_actions()
             self._set_chat_daemon_status("running")
 
             # The log viewer is a debug surface, available on demand via
@@ -2929,19 +3026,19 @@ class JarvisSystemTray:
             )
 
     def _on_daemon_finished(self) -> None:
-        """Called when daemon thread finishes."""
+        """Called when the daemon thread ends without a stop asking it to.
+
+        During a stop the thread ending is what the stop waits for, and the
+        stop does the rest.
+        """
+        if self._daemon_stopping:
+            return
         if self.is_listening:
-            status = "stopped" if self._daemon_stop_expected else "crashed"
             self.is_listening = False
             self._clear_chat_hooks()
-            self.toggle_action.setText("▶️ Start Listening")
-            if hasattr(self, "quick_stop_action"):
-                self.quick_stop_action.setEnabled(False)
-            self.status_action.setText("⚪ Status: Stopped")
-            self.update_icon()
+            self._refresh_daemon_actions()
             self.daemon_thread = None
-            self._set_chat_daemon_status(status)
-            self._daemon_stop_expected = False
+            self._set_chat_daemon_status("crashed")
             # Reset face to asleep so it doesn't look ready while daemon is down
             get_jarvis_state().set_state(JarvisState.ASLEEP)
 
@@ -2981,10 +3078,7 @@ class JarvisSystemTray:
         the line to ``ChatWindow.process_ipc_line`` for parsing + signal emit.
         """
         if self.chat_window is None:
-            from desktop_app.chat_window import ChatWindow
-            self.chat_window = ChatWindow(
-                daemon_available=self.is_listening, **self._chat_hooks()
-            )
+            self._create_chat_window()
         self.chat_window.process_ipc_line(line)
         # The tray needs the same events: it is the only surface always
         # present, and for a destructive action it is the only route to a
@@ -3006,10 +3100,18 @@ class JarvisSystemTray:
     ) -> None:
         """Stop the Jarvis daemon.
 
+        One stop at a time: the wait below turns the event loop, so a click
+        can ask for another stop or a start while it runs, and both are
+        refused until it returns.
+
         Args:
             show_diary_dialog: If True (and bundled), shows a dialog with live diary update progress.
             skip_diary_update: If True, skips the final shutdown diary LLM pass.
         """
+        if self._daemon_stopping:
+            debug_log("stop refused: a stop is already in progress", "desktop")
+            return
+
         # Timeout must be longer than SHUTDOWN_DIARY_TIMEOUT_SEC (45s) in daemon.py,
         # the final diary pass's budget, to let it complete before force-killing
         shutdown_wait_timeout_sec = 60
@@ -3023,8 +3125,9 @@ class JarvisSystemTray:
             "desktop",
         )
 
+        self._daemon_stopping = True
         try:
-            self._daemon_stop_expected = True
+            self._refresh_daemon_actions()
             self._set_chat_daemon_status("stopping")
             if self.is_bundled and self.daemon_thread:
                 # When running in a QThread, use the stop flag for graceful shutdown
@@ -3251,14 +3354,10 @@ class JarvisSystemTray:
                 self.daemon_process = None
                 self._clear_chat_hooks()
 
-            self._daemon_stop_expected = False
             self.is_listening = False
-            self.toggle_action.setText("▶️ Start Listening")
-            if hasattr(self, "quick_stop_action"):
-                self.quick_stop_action.setEnabled(False)
-            self.status_action.setText("⚪ Status: Stopped")
-            self.update_icon()
             self._set_chat_daemon_status("stopped")
+            # Reset face to asleep so it doesn't look ready while daemon is down
+            get_jarvis_state().set_state(JarvisState.ASLEEP)
 
             self.tray_icon.showMessage(
                 "Jarvis Stopped",
@@ -3271,16 +3370,20 @@ class JarvisSystemTray:
             debug_log("daemon stopped from desktop app", "desktop")
 
         except Exception as e:
-            self._daemon_stop_expected = False
             debug_log(f"failed to stop daemon: {e}", "desktop")
             self.log_signals.new_log.emit(f"❌ Failed to stop: {str(e)}\n")
         finally:
+            self._daemon_stopping = False
+            self._refresh_daemon_actions()
             # Ensure dialog is closed
             if diary_dialog:
                 diary_dialog.close()
 
     def check_daemon_status(self) -> None:
         """Check if the daemon process/thread is still running."""
+        # A daemon that ends during a stop is the stop's to report.
+        if self._daemon_stopping:
+            return
         if self.is_bundled and self.daemon_thread:
             # Check if QThread is still running
             if self.daemon_thread.isFinished() and self.is_listening:
@@ -3302,11 +3405,7 @@ class JarvisSystemTray:
                 self._clear_chat_hooks()
                 if self.is_listening:
                     self.is_listening = False
-                    self.toggle_action.setText("▶️ Start Listening")
-                    if hasattr(self, "quick_stop_action"):
-                        self.quick_stop_action.setEnabled(False)
-                    self.status_action.setText("⚪ Status: Stopped")
-                    self.update_icon()
+                    self._refresh_daemon_actions()
                     self._set_chat_daemon_status("crashed")
 
                     self.tray_icon.showMessage(

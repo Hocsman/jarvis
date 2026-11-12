@@ -282,3 +282,147 @@ def test_tool_search_widening_reinjects_context_cleanly(
         "re-injected context block must sit before tool-call syntax guidance"
     )
 
+
+# ── Anthropic: what one reply leaves cached for the next ─────────────────
+#
+# Anthropic caches a prefix up to a breakpoint, and reads it back only when
+# everything before the breakpoint is byte-identical: the tools, then the
+# system prompt. The lasting head of the system prompt therefore goes out
+# as a block of its own, so the per-reply tail (plan, time) does not make
+# every reply write the whole prompt again.
+
+_REPLY_PROFILE_FACT = "Lives in Annecy, by the lake."
+_REPLY_PROFILE_EMAIL = "lucien.varenne@example.org"
+
+
+def _anthropic_replies(engine_mod, cfg, db, dialogue_memory, questions, plans, times,
+                       picks=("stop", "forget", "remember")):
+    """Run one reply per question through the real engine and the real
+    Anthropic backend behind the secret scrub that always wraps it
+    (``auto_redact_before_cloud``), on an in-memory transport; return the
+    request bodies."""
+    import json
+
+    import httpx2
+
+    from jarvis.llm import AnthropicBackend
+    from jarvis.llm.redacting import RedactingBackend
+
+    sent: list = []
+
+    def answer(request):
+        sent.append(json.loads(request.content))
+        return httpx2.Response(200, json={
+            "id": "msg_test", "type": "message", "role": "assistant",
+            "model": cfg.llm_chat_model, "stop_reason": "end_turn", "stop_sequence": None,
+            "content": [{"type": "text", "text": "Very well."}],
+            "usage": {"input_tokens": 3, "output_tokens": 2},
+        })
+
+    backend = RedactingBackend(AnthropicBackend(
+        api_key="sk-ant-test", http_client=httpx2.Client(transport=httpx2.MockTransport(answer))))
+    now = {}
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(engine_mod, "get_llm_backend", return_value=backend))
+        stack.enter_context(patch.object(
+            engine_mod, "select_tools", side_effect=lambda *a, **k: list(picks)))
+        stack.enter_context(patch.object(
+            engine_mod, "extract_search_params_for_memory", return_value={"keywords": []}))
+        stack.enter_context(patch.object(
+            engine_mod, "plan_query", side_effect=lambda *a, **k: list(now["plan"])))
+        stack.enter_context(patch.object(
+            engine_mod, "_live_time_location_string", side_effect=lambda _cfg: now["time"]))
+        for question, plan, time_line in zip(questions, plans, times):
+            now.update(plan=plan, time=time_line)
+            engine_mod.run_reply_engine(db=db, cfg=cfg, tts=None, text=question,
+                                        dialogue_memory=dialogue_memory)
+    return sent
+
+
+def _anthropic_cfg(mock_config):
+    from jarvis.memory.core import MemoryCore, SECTION_PROFILE
+
+    mock_config.llm_provider = "anthropic"
+    mock_config.llm_chat_model = "claude-haiku-5-5"
+    core = MemoryCore.for_config(mock_config)
+    core.remember(SECTION_PROFILE, _REPLY_PROFILE_FACT)
+    core.remember(SECTION_PROFILE, f"Writes from {_REPLY_PROFILE_EMAIL}.")
+    return mock_config
+
+
+@pytest.mark.unit
+def test_the_next_reply_reads_back_what_the_last_one_cached(mock_config, db, dialogue_memory):
+    """Two replies a minute apart, with different plans: the first system
+    block, which ends on a breakpoint, is the same in both, so the second
+    reads it from the cache. It holds the persona and his profile, scrubbed
+    as everything sent to the cloud is; the plan and the time are not in
+    it."""
+    import json
+
+    from jarvis.reply import engine as engine_mod
+
+    sent = _anthropic_replies(
+        engine_mod, _anthropic_cfg(mock_config), db, dialogue_memory,
+        questions=["What is the weather like?", "And tomorrow, should I take an umbrella?"],
+        plans=[["Call getWeather for Annecy.", "Reply to the user."], ["Reply to the user."]],
+        times=["Thursday 21:14, Annecy", "Thursday 21:15, Annecy"],
+    )
+
+    assert len(sent) == 2
+    first, second = sent
+    assert first["tools"] == second["tools"]
+    head = first["system"][0]
+    assert head == second["system"][0]
+    assert head["cache_control"] == {"type": "ephemeral"}
+    assert head["text"].startswith("Persona:")
+    assert _REPLY_PROFILE_FACT in head["text"]
+    assert "[REDACTED_EMAIL]" in head["text"]
+    assert _REPLY_PROFILE_EMAIL not in json.dumps(sent)
+    for request, time_line in zip(sent, ["Thursday 21:14", "Thursday 21:15"]):
+        assert "ACTION PLAN" not in request["system"][0]["text"]
+        assert time_line not in request["system"][0]["text"]
+        assert f"[Context: {time_line}" in request["system"][-1]["text"]
+    assert "ACTION PLAN" in first["system"][-1]["text"]
+
+
+@pytest.mark.unit
+def test_the_earlier_part_of_a_long_conversation_is_cached_on_its_own(
+    mock_config, db, monkeypatch
+):
+    """The diary's summary of the earlier part changes only when the diary
+    writes, every few minutes: between two writes it is read back too, from
+    a block of its own after the lasting head."""
+    import time
+    from datetime import datetime, timezone
+
+    from jarvis.memory.conversation import DialogueMemory
+    from jarvis.reply import engine as engine_mod
+
+    now = {"t": datetime(2026, 10, 31, 22, 0, tzinfo=timezone.utc).timestamp()}
+    monkeypatch.setattr(time, "time", lambda: now["t"])
+    db.upsert_conversation_summary(
+        "2026-10-31", "They planned a bike ride along the canal.", source_app="voice")
+    dm = DialogueMemory(inactivity_timeout=300.0, context_max_chars=1_000)
+    for i in range(30):
+        dm.add_message("user", f"question {i} " + "q" * 80)
+        now["t"] += 5
+        dm.add_message("assistant", f"answer {i} " + "a" * 80)
+        now["t"] += 55
+
+    first, second = _anthropic_replies(
+        engine_mod, _anthropic_cfg(mock_config), db, dm,
+        questions=["Which pastry shop was it?", "And when does it open?"],
+        plans=[["Reply to the user."],
+               ["Call webSearch for the opening hours.", "Reply to the user."]],
+        times=["Saturday 22:00, Annecy", "Saturday 22:01, Annecy"],
+    )
+
+    assert len(first["system"]) == 3
+    assert first["system"][:2] == second["system"][:2]
+    earlier = first["system"][1]
+    assert "They planned a bike ride along the canal." in earlier["text"]
+    assert earlier["cache_control"] == {"type": "ephemeral"}
+    assert "Persona:" not in earlier["text"]
+    assert "Saturday 22:00" not in earlier["text"]
+    assert "ACTION PLAN" in second["system"][2]["text"]
+

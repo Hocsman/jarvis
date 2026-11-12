@@ -8,7 +8,7 @@ The gate is a cheap pre-flight check, not a routing decision. It either tells th
 
 - File: `src/jarvis/memory/recall_gate.py`.
 - Caller: `run_reply_engine` in `src/jarvis/reply/engine.py`, between the planner's `needs_memory` decision and the diary/graph search.
-- Inputs: the redacted user query, the recent dialogue messages (already including tool-carryover rows from prior replies in the hot window).
+- Inputs: the redacted user query, the recent dialogue messages: the part of the current conversation the model reads word for word, with the tool-carryover rows from prior replies (the hot window, below).
 - Output: `True` to recall, `False` to skip.
 
 ## When the gate runs

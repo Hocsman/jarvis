@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from ..llm import get_auxiliary_backend
 from ..debug import debug_log
+from .prompts.system import SPOKEN_FORM
 
 
 def call_llm_direct(*, cfg, chat_model, system_prompt, user_content,
@@ -902,6 +903,8 @@ def digest_loop_for_max_turns(
     user_query: str,
     loop_messages: list[dict],
     cfg,
+    *,
+    spoken: bool = False,
 ) -> str | None:
     """Summarise what the agentic loop produced when it hit max turns.
 
@@ -917,10 +920,18 @@ def digest_loop_for_max_turns(
     The model is never asked to think. ``llm_thinking_enabled`` belongs to
     the chat model, and the digest usually runs on the intent judge's: a
     model with no thinking mode refuses a request that asks for one.
+
+    ``spoken`` is True when the reply will be read aloud (a turn from the
+    voice): the spoken-form rule then follows the digest's own instructions,
+    as it does in the chat model's prompt.
     """
     query = (user_query or "").strip()
     if not query:
         return None
+
+    system_prompt = _LOOP_DIGEST_SYSTEM_PROMPT
+    if spoken:
+        system_prompt = f"{_LOOP_DIGEST_SYSTEM_PROMPT}\n{SPOKEN_FORM}"
 
     activity = _format_loop_activity(loop_messages or [])
     if not activity:
@@ -946,7 +957,7 @@ def digest_loop_for_max_turns(
         raw = call_llm_direct(
             cfg=cfg,
             chat_model=chat_model,
-            system_prompt=_LOOP_DIGEST_SYSTEM_PROMPT,
+            system_prompt=system_prompt,
             user_content=user_content,
             timeout_sec=timeout_sec,
         )

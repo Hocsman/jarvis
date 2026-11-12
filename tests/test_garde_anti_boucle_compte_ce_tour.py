@@ -1,15 +1,15 @@
-"""The anti-loop guard counts this reply, not the conversation.
+"""The anti-loop guard reads this reply, not the conversation.
 
-A tool is refused after two results already came back for it. The count
-walked the last ten messages, and dialogue carryover replays earlier
-turns' tool results into that same list carrying the same `tool_name`.
-Ask about the weather in London twice and then ask about Tokyo, and the
-first call of the new turn is refused before it runs — the model is told
-to use results it does not have, and answers from nothing.
+A call identical to one already run in this reply is not run again. Dialogue
+carryover replays earlier replies' tool calls and results into the same
+message list, carrying the same `tool_name` and sometimes the same
+arguments. None of them is a loop inside this reply: ask about the weather
+in London twice and then about Tokyo, and the Tokyo call runs; ask about
+London again in a later reply, and it runs again, because the weather is
+read afresh each time it is asked for.
 
-The engine already knows where the current reply starts: `user_msg_index`
-is the split it uses for tool carry-over recording and for the end-of-loop
-digest. The guard becomes the third user of that same line.
+Distinct calls of one tool inside one reply are covered by
+`tests/test_distinct_calls_of_one_tool.py`.
 """
 
 from __future__ import annotations
@@ -97,25 +97,25 @@ def test_the_first_call_of_a_turn_survives_earlier_turns(
 @patch("src.jarvis.reply.engine.run_tool_with_retries")
 @patch("src.jarvis.reply.engine.extract_text_from_response")
 @patch("src.jarvis.reply.engine.chat_with_messages")
-def test_a_real_repeat_inside_one_reply_is_still_refused_and_said(
-    mock_chat, mock_extract, mock_run, _mem, _plan, _graph, _warm, _fmt, capsys,
+def test_the_same_question_in_a_later_reply_is_looked_up_again(
+    mock_chat, mock_extract, mock_run, _mem, _plan, _graph, _warm, _fmt,
 ):
-    """The guard stays alive, and stops being mute. Three calls in one
-    reply, different arguments each time so the exact-signature guard
-    does not catch them first."""
+    """The carryover holds a getWeather call for London with these exact
+    arguments. A new reply asking for London again is not a repeat of it:
+    the weather may have changed, and nothing in this reply has run yet."""
     mock_chat.side_effect = [
-        _appel("getWeather", {"location": "Tokyo"}, "a1"),
-        _appel("getWeather", {"location": "Osaka"}, "a2"),
-        _appel("getWeather", {"location": "Kyoto"}, "a3"),
-        {"message": {"content": "Voilà."}},
+        _appel("getWeather", {"location": "London"}, "c3"),
+        {"message": {"content": "Toujours 15°C."}},
     ]
-    mock_extract.side_effect = ["", "", "", "Voilà."]
+    mock_extract.side_effect = ["", "Toujours 15°C."]
     mock_run.return_value = ToolExecutionResult(
-        success=True, reply_text="22°C and clear.")
+        success=True, reply_text="London: 15°C and partly cloudy.")
 
     with patch("src.jarvis.reply.engine.select_tools", return_value=["getWeather"]):
         run_reply_engine(db=Mock(), cfg=_mock_cfg(), tts=None,
-                         text="le temps au Japon ?", dialogue_memory=DialogueMemory())
+                         text="et à Londres, maintenant ?",
+                         dialogue_memory=_memoire_avec_deux_tours())
 
-    assert len(mock_run.call_args_list) == 2
-    assert "⚠️" in capsys.readouterr().out
+    assert [c.kwargs.get("tool_args") for c in mock_run.call_args_list] == [
+        {"location": "London"},
+    ]

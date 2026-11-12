@@ -8,7 +8,7 @@ reply, exactly as it does when the daemon is a subprocess.
 
 These tests drive the real tray, the real window and bridge, and the real
 ``jarvis.daemon.submit_text_query``. Only what cannot exist headless is
-replaced: the web view (a stand-in widget), the thread that would run the
+replaced: the web view and its page (stand-ins), the thread that would run the
 daemon's main loop (inert), and the reply engine (scripted). What they
 read is what the page would have been shown.
 
@@ -130,7 +130,7 @@ def engine(monkeypatch, qapp):
     monkeypatch.setattr("jarvis.reply.engine.run_reply_engine", scripted)
     monkeypatch.setattr(
         daemon, "_global_dialogue_memory",
-        DialogueMemory(inactivity_timeout=300, max_interactions=20),
+        DialogueMemory(inactivity_timeout=300),
     )
     monkeypatch.setattr(daemon, "_global_cfg", object())
     monkeypatch.setattr(daemon, "_global_db", object())
@@ -160,15 +160,22 @@ def tray(qapp, monkeypatch):
     from desktop_app.face_widget import JarvisState, get_jarvis_state
 
     class _StandInPage:
+        def __init__(self, _index, _parent=None):
+            pass
+
         def setWebChannel(self, _channel):
             pass
 
     class _StandInView(QWidget):
-        """QWebEngineView cannot be constructed in a headless run."""
+        """QtWebEngine is not built in the suite's process (see
+        test_dashboard_own_page.py, which drives the real view)."""
 
         def __init__(self, parent=None):
             super().__init__(parent)
-            self._page = _StandInPage()
+            self._page = None
+
+        def setPage(self, page):
+            self._page = page
 
         def page(self):
             return self._page
@@ -177,6 +184,7 @@ def tray(qapp, monkeypatch):
             pass
 
     monkeypatch.setattr("desktop_app.dashboard_window.QWebEngineView", _StandInView)
+    monkeypatch.setattr("desktop_app.dashboard_window._DashboardPage", _StandInPage)
     monkeypatch.setattr(app_mod, "QThread", _InertThread)
     monkeypatch.setattr("desktop_app.chat_window._decision_writer", None)
     get_jarvis_state().set_state(JarvisState.IDLE)
@@ -186,7 +194,7 @@ def tray(qapp, monkeypatch):
     t.is_listening = False
     t.daemon_process = None
     t.daemon_thread = None
-    t._daemon_stop_expected = False
+    t._daemon_stopping = False
     t.chat_window = None
     t.dashboard_window = None
     t._chat_submit_fn = None
@@ -198,6 +206,7 @@ def tray(qapp, monkeypatch):
     t.tray_icon = MagicMock()
     t.toggle_action = MagicMock()
     t.quick_stop_action = MagicMock()
+    t.setup_wizard_action = MagicMock()
     t.status_action = MagicMock()
     t._confirm_signals = MagicMock()
     t.update_icon = lambda: None

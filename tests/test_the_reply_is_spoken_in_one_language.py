@@ -17,11 +17,13 @@ speakers.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+import threading
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from src.jarvis.listening.echo_detection import EchoDetector
+from src.jarvis.listening.room_floor import RoomFloor
 
 
 def _listener(detected="fr"):
@@ -34,13 +36,19 @@ def _listener(detected="fr"):
     obj.cfg = MagicMock()
     obj._tune_player = None
     obj.state_manager = MagicMock()
-    obj._recent_audio_energy = []
+    obj._room_floor = RoomFloor(frame_ms=20)
     obj._streamed_chars = 0
     obj._reply_queue = None
     obj.dialogue_memory = None
     obj.tts.is_speaking.return_value = False
     obj.activate_hot_window = MagicMock()
     obj._last_detected_language = detected
+    obj._speech_lock = threading.Lock()
+    obj._tune_lock = threading.Lock()
+    obj._stop_epoch = 0
+    obj._should_stop = False
+    obj._asked = None
+    obj.db = None
     return obj
 
 
@@ -53,21 +61,30 @@ def _languages(listener):
     return [c.kwargs.get("language") for c in listener.tts.speak.call_args_list]
 
 
-def _tour(listener, reply, size=9, between=None):
-    """Generate `reply` through the token callback, then finish."""
-    on_token = listener._speak_as_it_comes()
-    for i in range(0, len(reply), size):
-        on_token(reply[i:i + size])
-        if between is not None:
-            between(i)
-    listener._speak_reply(reply)
+def _tour(listener, reply, size=9, between=None, stream=True):
+    """Hand over a query, as the listener does, and let the engine generate
+    `reply` through the token callback before returning it."""
+    from src.jarvis.listening.listener import _Turn
+
+    turn = _Turn("question", listener._last_detected_language)
+
+    def engine(*_args, on_token=None, **_kwargs):
+        if stream and on_token is not None:
+            for i in range(0, len(reply), size):
+                on_token(reply[i:i + size])
+                if between is not None:
+                    between(i)
+        return reply
+
+    with patch("src.jarvis.reply.engine.run_reply_engine", side_effect=engine),             patch("src.jarvis.listening.listener.get_latency_journal"):
+        listener._dispatch_query(turn)
 
 
 @pytest.mark.unit
 def test_a_reply_that_never_streamed_carries_the_language_it_was_heard_in():
     listener = _listener(detected="fr")
 
-    listener._speak_reply("Il fait beau.")
+    _tour(listener, "Il fait beau.", stream=False)
 
     assert _languages(listener) == ["fr"]
 
@@ -114,7 +131,7 @@ def test_nothing_heard_means_no_language_is_claimed():
     back on what was configured."""
     listener = _listener(detected=None)
 
-    listener._speak_reply("Hello.")
+    _tour(listener, "Hello.", stream=False)
 
     assert _languages(listener) == [None]
 

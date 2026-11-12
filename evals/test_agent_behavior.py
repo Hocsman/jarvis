@@ -217,7 +217,7 @@ class TestContextUtilization:
              patch('jarvis.reply.engine.get_location_context_with_timezone', return_value=(f"Location: {user_location}", None)), \
              patch('jarvis.reply.engine.extract_search_params_for_memory', return_value={"keywords": []}):
 
-            run_reply_engine(db=eval_db, cfg=mock_config, tts=None, text=query, dialogue_memory=eval_dialogue_memory)
+            run_reply_engine(db=eval_db, cfg=mock_config, tts=None, origin="voix", text=query, dialogue_memory=eval_dialogue_memory)
 
         # Verify location was used
         assert capture.has_tool("webSearch"), "Should have called webSearch"
@@ -265,7 +265,7 @@ class TestToolUsage:
              patch('jarvis.reply.engine.chat_with_messages', side_effect=mock_chat), \
              patch('jarvis.reply.engine.extract_search_params_for_memory', return_value={"keywords": []}):
 
-            response = run_reply_engine(db=eval_db, cfg=mock_config, tts=None, text=query, dialogue_memory=eval_dialogue_memory)
+            response = run_reply_engine(db=eval_db, cfg=mock_config, tts=None, origin="voix", text=query, dialogue_memory=eval_dialogue_memory)
 
         print(f"\n📊 Tool Usage:")
         print(f"   Query: {query}")
@@ -308,7 +308,7 @@ class TestToolUsage:
              patch('jarvis.reply.engine.chat_with_messages', side_effect=mock_chat), \
              patch('jarvis.reply.engine.extract_search_params_for_memory', return_value={"keywords": []}):
 
-            response = run_reply_engine(db=eval_db, cfg=mock_config, tts=None, text=query, dialogue_memory=eval_dialogue_memory)
+            response = run_reply_engine(db=eval_db, cfg=mock_config, tts=None, origin="voix", text=query, dialogue_memory=eval_dialogue_memory)
 
         print(f"\n📊 Tool Chaining:")
         print(f"   Tools called: {[c['name'] for c in capture.calls]}")
@@ -375,7 +375,7 @@ class TestMultiStepReasoning:
              patch('jarvis.reply.engine.chat_with_messages', side_effect=mock_chat), \
              patch('jarvis.reply.engine.extract_search_params_for_memory', return_value={"keywords": ["health", "diet"]}):
 
-            response = run_reply_engine(db=eval_db, cfg=mock_config, tts=None, text=query, dialogue_memory=eval_dialogue_memory)
+            response = run_reply_engine(db=eval_db, cfg=mock_config, tts=None, origin="voix", text=query, dialogue_memory=eval_dialogue_memory)
 
         print(f"\n📊 Multi-Step Reasoning:")
         print(f"   Query: {query}")
@@ -530,7 +530,7 @@ class TestMemoryEnrichment:
              patch('jarvis.reply.engine.extract_search_params_for_memory', return_value={"keywords": ["dinner", "food", "preferences"]}), \
              patch('jarvis.memory.conversation.search_conversation_memory_by_keywords', return_value=mock_memory_results):
 
-            run_reply_engine(db=eval_db, cfg=mock_config, tts=None, text=query, dialogue_memory=eval_dialogue_memory)
+            run_reply_engine(db=eval_db, cfg=mock_config, tts=None, origin="voix", text=query, dialogue_memory=eval_dialogue_memory)
 
         # Check that enrichment context is in the system message
         system_messages = [m for m in captured_messages if m.get("role") == "system"]
@@ -589,7 +589,7 @@ class TestMemoryEnrichment:
              patch('jarvis.reply.engine.extract_search_params_for_memory', return_value={"keywords": ["interests", "hobbies", "preferences"]}), \
              patch('jarvis.memory.conversation.search_conversation_memory_by_keywords', return_value=mock_enrichment_context):
 
-            response = run_reply_engine(db=eval_db, cfg=mock_config, tts=None, text=query, dialogue_memory=eval_dialogue_memory)
+            response = run_reply_engine(db=eval_db, cfg=mock_config, tts=None, origin="voix", text=query, dialogue_memory=eval_dialogue_memory)
 
         tools_used = [c["name"] for c in capture.calls]
 
@@ -645,6 +645,7 @@ class TestLiveEndToEnd:
                                  "latitude": 51.5074, "longitude": -0.1278}):
             response = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text=query, dialogue_memory=eval_dialogue_memory
             )
 
@@ -699,6 +700,7 @@ class TestLiveEndToEnd:
 
             response = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text=query, dialogue_memory=eval_dialogue_memory
             )
 
@@ -799,6 +801,7 @@ class TestLiveEndToEnd:
 
             response = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text=query, dialogue_memory=eval_dialogue_memory
             )
 
@@ -926,6 +929,7 @@ class TestHelpfulness:
 
             response = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text=query, dialogue_memory=eval_dialogue_memory
             )
 
@@ -979,6 +983,7 @@ class TestHelpfulness:
 
             response = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text=query, dialogue_memory=eval_dialogue_memory
             )
 
@@ -1071,6 +1076,7 @@ class TestHelpfulness:
             capture.clear()
             run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text="how's the weather in Kazbegi today?",
                 dialogue_memory=eval_dialogue_memory
             )
@@ -1080,6 +1086,7 @@ class TestHelpfulness:
             capture.clear()
             response = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text=follow_up,
                 dialogue_memory=eval_dialogue_memory
             )
@@ -1195,6 +1202,7 @@ class TestHelpfulness:
                    return_value=("Location: Hackney, London, UK", "Europe/London")):
             response = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text=query, dialogue_memory=eval_dialogue_memory,
             )
 
@@ -1276,6 +1284,7 @@ class TestHelpfulness:
                    return_value=("Location: Hackney, London, UK", "Europe/London")):
             response = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text=query, dialogue_memory=eval_dialogue_memory,
             )
 
@@ -1391,6 +1400,7 @@ class TestHelpfulness:
                    return_value=("Location: Hackney, London, UK", "Europe/London")):
             response = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text=query, dialogue_memory=eval_dialogue_memory,
             )
 
@@ -1485,6 +1495,7 @@ class TestMalformedResponseAfterTools:
 
             response = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text=query, dialogue_memory=eval_dialogue_memory,
             )
 

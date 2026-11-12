@@ -25,7 +25,7 @@ from PyQt6.QtGui import QFont
 from jarvis.config import (
     get_default_config, load_config,
     default_config_path, _save_json, _load_json,
-    SUPPORTED_CHAT_MODELS, SUPPORTED_WHISPER_MODELS,
+    SUPPORTED_CHAT_MODELS, SUPPORTED_WHISPER_MODELS, WHISPER_LANGUAGES,
 )
 from jarvis.debug import debug_log
 from desktop_app.themes import apply_theme
@@ -414,6 +414,12 @@ def _build_field_metadata() -> List[FieldMeta]:
     f("whisper_no_speech_threshold", "No-Speech Threshold",
       "Reject segments where no_speech_prob is at or above this value (filters hallucinations during silence)",
       "whisper", "float", min_val=0.0, max_val=1.0, step=0.05)
+    f("whisper_language", "Language",
+      "The one language you speak to her. Whisper then transcribes only that one, "
+      "which stops the phrases it invents out of silence in other languages. "
+      "Detect: it guesses the language of each sentence",
+      "whisper", "choice",
+      choices=[("", "Detect")] + [(code, code) for code in WHISPER_LANGUAGES])
 
     # --- VAD ---
     f("vad_enabled", "Enable VAD",
@@ -454,8 +460,13 @@ def _build_field_metadata() -> List[FieldMeta]:
 
     # --- Memory & Dialogue ---
     f("dialogue_memory_timeout", "Memory & Diary Window",
-      "Duration for dialogue memory and forced diary updates",
+      "Pause that ends a conversation, and interval of the forced diary updates",
       "memory", "float", min_val=30, max_val=3600, step=30, suffix="s")
+    f("dialogue_context_max_chars", "Conversation Read Word for Word",
+      "Characters of the current conversation the model reads word for word; "
+      "what came before reaches it as the diary's summary (0 = what the model's "
+      "window holds: less for a model run on this machine)",
+      "memory", "int", min_val=0, max_val=64000, step=1000, suffix=" chars")
     f("memory_enrichment_max_results", "Enrichment Results",
       "Max memory results for context enrichment",
       "memory", "int", min_val=1, max_val=50)
@@ -653,11 +664,17 @@ def get_input_devices() -> List[tuple[str, str]]:
     of its audio systems; each name is listed once, since every entry would
     save the same value. Returns [("", "System Default")] if sounddevice is
     not available.
+
+    The list is read under ``portaudio_lock``: in the bundled app the
+    listener shares this process and may be reading it afresh.
     """
     devices: List[tuple[str, str]] = [("", "🔧 System Default")]
     try:
         import sounddevice as sd
-        for idx, dev in enumerate(sd.query_devices()):
+        from jarvis.utils.audio_lock import portaudio_lock
+        with portaudio_lock:
+            listed = sd.query_devices()
+        for idx, dev in enumerate(listed):
             try:
                 max_in = int(dev.get("max_input_channels", 0))
             except Exception:
@@ -675,8 +692,10 @@ def _input_device_name(index: str) -> Optional[str]:
     """The name of the microphone a stored index selects, or None."""
     try:
         import sounddevice as sd
+        from jarvis.utils.audio_lock import portaudio_lock
         from jarvis.utils.audio_stream import resolve_input_device
-        devices = sd.query_devices()
+        with portaudio_lock:
+            devices = sd.query_devices()
         return str(devices[resolve_input_device(index, lambda: devices)]["name"]).strip()
     except Exception:
         return None

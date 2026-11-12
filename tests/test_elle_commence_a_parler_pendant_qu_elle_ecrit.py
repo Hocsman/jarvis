@@ -16,11 +16,13 @@ walk straight back into.
 
 from __future__ import annotations
 
+import threading
 from unittest.mock import MagicMock
 
 import pytest
 
 from src.jarvis.listening.echo_detection import EchoDetector
+from src.jarvis.listening.room_floor import RoomFloor
 
 
 def _listener():
@@ -33,14 +35,26 @@ def _listener():
     obj.cfg = MagicMock()
     obj._tune_player = None
     obj.state_manager = MagicMock()
-    obj._recent_audio_energy = []
+    obj._room_floor = RoomFloor(frame_ms=20)
     obj._streamed_chars = 0
     obj._last_detected_language = None
     obj._reply_queue = None
     obj.dialogue_memory = None
     obj.tts.is_speaking.return_value = False
     obj.activate_hot_window = MagicMock()
+    obj._speech_lock = threading.Lock()
+    obj._tune_lock = threading.Lock()
+    obj._stop_epoch = 0
+    obj._should_stop = False
+    obj._asked = None
+    obj.db = None
     return obj
+
+
+def _tour_en_cours():
+    from src.jarvis.listening.listener import _Turn
+
+    return _Turn("question")
 
 
 REPONSE = ("Il fait beau à Bagneux aujourd'hui. "
@@ -50,7 +64,7 @@ REPONSE = ("Il fait beau à Bagneux aujourd'hui. "
 
 def _tour(listener, reponse: str, taille: int = 9):
     """Generate `reponse` through the token callback, then finish."""
-    sur_jeton = listener._speak_as_it_comes()
+    sur_jeton = listener._speak_as_it_comes(_tour_en_cours())
     for i in range(0, len(reponse), taille):
         sur_jeton(reponse[i:i + taille])
     listener._speak_reply(reponse)
@@ -63,7 +77,7 @@ def _dit(listener):
 def test_the_first_sentence_leaves_before_the_last_is_written():
     """The point of the whole exercise."""
     listener = _listener()
-    sur_jeton = listener._speak_as_it_comes()
+    sur_jeton = listener._speak_as_it_comes(_tour_en_cours())
 
     sur_jeton("Il fait beau à Bagneux aujourd'hui. La tempér")
 
@@ -132,4 +146,4 @@ def test_without_tts_there_is_no_token_callback():
     listener = _listener()
     listener.tts.enabled = False
 
-    assert listener._speak_as_it_comes() is None
+    assert listener._speak_as_it_comes(_tour_en_cours()) is None

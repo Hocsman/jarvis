@@ -90,8 +90,11 @@ def _line(**payload):
 
 class TestIpcRouting:
     """The daemon's wire events must reach the right bridge calls. Tested
-    against the Qt-free dispatcher (importing the window pulls in
-    QtWebEngine, which cannot be constructed headlessly)."""
+    against the Qt-free dispatcher: the window builds a QtWebEngine view,
+    which is not built in the suite's process (Chromium aborts a process
+    whose QApplication has no program name, which the suite's shared one
+    may lack, and the abort ends the whole run). A web view is built in a
+    process of its own, as ``test_memory_viewer_navigation.py`` does."""
 
     def test_token_then_complete_are_routed_in_order(self):
         from desktop_app.dashboard.bridge import dispatch_chat_ipc_line

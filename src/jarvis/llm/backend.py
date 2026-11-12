@@ -13,12 +13,12 @@ plus the same args and forwards to the matching backend method.
 
 from __future__ import annotations
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
 # Fields allowed per message ``role`` in the OpenAI Chat Completions schema.
 # Any field outside this set (e.g. engine-internal annotations like
-# ``tool_name``, ``tool_failed``, ``_is_context_injected``) MUST be
+# ``tool_name``, ``tool_failed``, ``_is_context_injected``, ``_cache_marks``) MUST be
 # stripped before the message reaches the wire, because strict servers
 # (llama.cpp, vLLM, etc.) reject unknown fields with 400 or 422.
 _ALLOWED_FIELDS_BY_ROLE: Dict[str, set[str]] = {
@@ -29,6 +29,36 @@ _ALLOWED_FIELDS_BY_ROLE: Dict[str, set[str]] = {
 }
 
 
+# Engine-internal annotation on a system message: the character offsets in
+# its ``content`` where a part that stays the same from one call to the
+# next ends (the reply engine's persona and profile, then the summary of
+# the conversation's earlier part). A backend with a prefix cache that
+# only reads back up to a breakpoint (Anthropic) breaks the cache there;
+# the others strip it like every other annotation.
+CACHE_MARKS = "_cache_marks"
+
+
+def cache_marks(message: Dict[str, Any]) -> List[int]:
+    """The usable marks of ``message``: whole offsets strictly inside its
+    text, in order, each once. Anything else is ignored rather than
+    trusted."""
+    content = message.get("content")
+    raw = message.get(CACHE_MARKS)
+    if not isinstance(content, str) or not isinstance(raw, (list, tuple)):
+        return []
+    return sorted({
+        mark for mark in raw
+        if isinstance(mark, int) and not isinstance(mark, bool) and 0 < mark < len(content)
+    })
+
+
+def cut_at_marks(text: str, marks: List[int]) -> List[str]:
+    """``text`` in the pieces ``marks`` (as :func:`cache_marks` returns
+    them) separate; joined, they are ``text``."""
+    bounds = [0, *marks, len(text)]
+    return [text[start:end] for start, end in zip(bounds, bounds[1:])]
+
+
 def strip_nonstandard_message_fields(
     messages: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
@@ -36,7 +66,7 @@ def strip_nonstandard_message_fields(
     Completions schema removed.
 
     The reply engine annotates some messages with internal fields it
-    uses for duplicate detection and carry-over logic (``tool_name``,
+    uses for the plan-step count and carry-over logic (``tool_name``,
     ``tool_failed`` on tool messages, ``_is_context_injected`` on
     system messages). These must be stripped before the payload is
     serialised because strict servers (e.g. llama.cpp, vLLM)
@@ -163,11 +193,18 @@ class LLMBackend(ABC):
         model: str,
         timeout_sec: float = 60.0,
         keep_alive: str = "30m",
+        prompt: Optional[Tuple[str, str]] = None,
     ) -> bool:
         """Page ``model`` into the runtime's resident memory ahead of the
         first real request. Default implementation is a no-op suitable for
         runtimes without per-call model unloading (OpenAI-compatible servers
         keep models warm at server load time). Backends that benefit from
         explicit warmup (e.g. Ollama, which unloads after ``keep_alive``)
-        override to perform the runtime-specific ping."""
+        override to perform the runtime-specific ping.
+
+        ``prompt`` is a ``(system, user)`` pair a later :meth:`direct` call
+        with its default options will open with. A runtime that keeps a
+        computed prompt between requests computes it here, so that call
+        reads only what follows; one that keeps nothing, or bills every
+        token, does not send it."""
         return True

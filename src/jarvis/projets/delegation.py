@@ -4,8 +4,9 @@
 Claude Code works on its own in the project's folder, for minutes, so the
 job runs on its own thread and its report is handed to a delivery the
 daemon wires in when it opens the keeper. The reply engine runs on the
-listener's thread while holding the query lock: a tool that waited for
-the job would leave Yuba deaf for its whole length.
+listener's reply thread while holding the query lock: a tool that waited
+for the job would hold every other reply, spoken or typed, for its whole
+length.
 
 See projets.spec.md beside this file.
 """
