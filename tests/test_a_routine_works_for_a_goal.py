@@ -417,6 +417,29 @@ def test_restarting_it_for_another_goal_than_its_block_names_arms_nothing(db, cf
     assert _armed(db) == []
 
 
+def test_a_routine_already_running_is_not_said_to_work_for_a_goal_it_does_not(db, cfg):
+    """He says the same routine again and names a goal this time. It runs
+    already, for no goal: "it already does exactly that" would have him
+    believe the goal travels with it."""
+    assert _set_routine(db, cfg, _ASKED).success
+
+    result = _set_routine(db, cfg, {**_ASKED, "objectif": "velo-cargo"})
+
+    assert not result.success
+    assert "velo-cargo" in result.reply_text
+    assert _blocks(cfg)["annonces"].objectif == ""
+    assert len(_armed(db)) == 1
+
+
+def test_a_routine_already_running_for_that_goal_is_unchanged(db, cfg):
+    assert _set_routine(db, cfg, {**_ASKED, "objectif": "velo-cargo"}).success
+
+    result = _set_routine(db, cfg, {**_ASKED, "objectif": "velo-cargo"})
+
+    assert result.success
+    assert len(_armed(db)) == 1
+
+
 # ── What she is told when he mentions the goal ────────────────────────
 
 

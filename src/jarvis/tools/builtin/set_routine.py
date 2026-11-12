@@ -276,7 +276,7 @@ class SetRoutineTool(Tool):
             elif arretes:
                 return self._arretes(arretes, blocs)
 
-        verdict = self._collision(nom, blocs, lignes, phrase, outils)
+        verdict = self._collision(nom, blocs, lignes, phrase, outils, objectif)
         if isinstance(verdict, ToolExecutionResult):
             return verdict
         rallumer = verdict == _RALLUMER
@@ -403,7 +403,7 @@ class SetRoutineTool(Tool):
 
     # ── The ways it does not happen ───────────────────────────────────
 
-    def _collision(self, nom, blocs, lignes, phrase, outils):
+    def _collision(self, nom, blocs, lignes, phrase, outils, objectif=""):
         """A name already spoken for, or the same routine said twice.
 
         Returns a refusal, a question, or which way forward this is.
@@ -425,6 +425,12 @@ class SetRoutineTool(Tool):
 
         if vivante is not None:
             if str(vivante.get("texte") or "") == phrase:
+                pour = bloc.objectif.strip() if bloc is not None else ""
+                if pour != objectif:
+                    # It runs, and not for the goal just named. Said as
+                    # unchanged, he would believe that goal travels with
+                    # it, or that it no longer does.
+                    return self._autre_objectif(nom, pour, objectif)
                 return self._inchangee(nom, vivante)
             return self._refuse(
                 f"« {nom} » est déjà pris par une autre routine ; donne-lui "
@@ -513,6 +519,24 @@ class SetRoutineTool(Tool):
                 f"Nothing was set up. « {propose} » is not one of the "
                 f"user's open goals, so a routine cannot work for it. "
                 f"{lesquels}"
+            ),
+        )
+
+    def _autre_objectif(self, nom, pour, demande) -> ToolExecutionResult:
+        """The routine runs already, for another goal than the call names,
+        or for none. Nothing is changed: which goal a routine works for is
+        a line of its block, and the yes he gave armed that block."""
+        actuel = (f"it works for their goal « {pour} »" if pour
+                  else "it works for no goal of theirs")
+        voulu = (f"for « {demande} »" if demande else "for no goal")
+        return ToolExecutionResult(
+            success=False, outcome=OUTCOME_QUESTION,
+            reply_text=(
+                f"Nothing was changed. « {nom} » is already running, and "
+                f"{actuel}, not {voulu}. Tell the user that, in their "
+                f"language. To change it they stop this routine and ask for "
+                f"it again, or edit the `objectif:` line of its block in "
+                f"routines.md themselves."
             ),
         )
 

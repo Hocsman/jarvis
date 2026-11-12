@@ -245,7 +245,11 @@ goals sets up nothing: she is told which goals are open, so his answer
 names a heading already in the file. The block is then written with its
 `objectif:` line, the dry run and the read-back both check it, and what
 she says back names the goal and says what travels with the routine and
-that nothing is written to the goal.
+that nothing is written to the goal. A routine already running under
+that name and sentence is left as it is when it works for the goal the
+call names; when it works for another, or for none, nothing is changed
+and she says which: "it already does exactly that" would have him believe
+a goal travels with it, or that it no longer does.
 
 Two stores have to agree, a block and a row, and three rules follow.
 
