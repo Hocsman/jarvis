@@ -528,6 +528,13 @@ class TestInputDevice:
         opened, _ = self._press(_make_engine(voice_device="4"))
         assert [kw["device"] for kw in opened] == [4]
 
+    @pytest.mark.parametrize("index", ["2", "9"])
+    def test_an_index_that_names_no_microphone_records_nothing(self, capsys, index):
+        # Device 2 is output-only and 9 names no device at all.
+        opened, beep = self._press(_make_engine(voice_device=index))
+        assert opened == [] and not beep.called
+        assert "microphone not found" in capsys.readouterr().out.lower()
+
     def test_no_device_records_from_the_system_input(self):
         opened, _ = self._press(_make_engine(voice_device=None))
         assert len(opened) == 1
@@ -547,8 +554,8 @@ class TestInputDevice:
         assert "microphone not found" in capsys.readouterr().out.lower()
 
     def test_a_missing_named_microphone_is_reported_before_whisper_has_loaded(self, capsys):
-        # The listener refuses the same microphone at start-up, before it
-        # loads Whisper, so this is the state dictation meets in the app.
+        # A press while Whisper is still loading is told about the missing
+        # microphone, not about Whisper.
         engine = _make_engine(
             voice_device="Disconnected Headset",
             whisper_model_ref=lambda: None,
@@ -576,9 +583,9 @@ class TestInputDevice:
         assert [kw["device"] for kw in opened] == [1]
 
     def test_a_named_microphone_that_fails_to_open_is_reported(self, capsys):
-        # PortAudio keeps the device list it read at start-up, so a
-        # microphone unplugged since then still matches its name and fails
-        # when its stream is opened.
+        # PortAudio keeps the device list it last read until it is read
+        # afresh, so a microphone unplugged since still matches its name
+        # and fails when its stream is opened.
         ended = threading.Event()
         engine = _make_engine(voice_device="MSI GV60", on_dictation_end=ended.set)
         unavailable = OSError("Error opening InputStream: Device unavailable [PaErrorCode -9985]")

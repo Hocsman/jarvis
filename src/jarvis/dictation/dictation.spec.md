@@ -83,7 +83,18 @@ After transcription, text passes through these stages in order:
 - **Clipboard-based paste** (`Ctrl+V` / `Cmd+V`) for text insertion — more
   reliable than character-by-character typing, handles Unicode.
 - **Shared Whisper model** via lazy reference (`lambda: voice_thread.model`)
-  and backend info — no double memory usage.
+  and backend info — no double memory usage. It transcribes in
+  `whisper_language` when one is named, as the listener does, and detects
+  the language otherwise. With `whisper_vad` on (the default), Whisper's
+  voice detector cuts what holds no speech before it decodes, as for the
+  listener, so a press with nothing said pastes nothing rather than a
+  phrase Whisper wrote into the silence. MLX Whisper has no detector. A
+  detector that fails never costs him what he dictated: the recording is
+  heard again without it. Its failure is the process's, shared with the
+  listener through `jarvis/listening/whisper_vad.py`: printed once,
+  whichever of them saw it, and the detector is not asked for again
+  until the listener next starts (`listening.spec.md`, "Text Whisper
+  Makes Out of Silence").
 - **Separate `sounddevice.InputStream`** for dictation audio — avoids
   modifying the complex listener code.
 - **Pause flag** on the main listener to prevent dictation speech being
@@ -116,22 +127,34 @@ After transcription, text passes through these stages in order:
   the daemon's configured device, and resolves it on every press with the
   shared resolver the wake-word listener also uses (`resolve_input_device` in
   `jarvis.utils.audio_stream`), so both record from the same microphone:
-  blank, `default` or `system` is the system default input, a number is a
-  device index, and any other text is the first input-capable device whose
-  name contains it, ignoring case.
-- PortAudio reads the device list once, when the app starts, and every press
-  resolves against that list. A microphone connected later is found once the
-  app is quit and reopened.
+  blank, `default` or `system` is the system default input, a number is an
+  index into the first device list the process read, which keeps naming the
+  input at that position by its exact name once the list has been read
+  afresh, and any other text is the first input-capable device whose name
+  contains it, ignoring case.
+- PortAudio keeps the device list it last read. A press resolves against it,
+  and when the microphone is not in it, reads it afresh with
+  `refresh_input_devices` and resolves again, so a microphone connected since
+  is found on that press. The list is read afresh only while no stream is
+  open in the process (the listener holds none while it waits for its
+  microphone); otherwise the press keeps the list it has, and a PortAudio
+  that will not initialise again counts as the microphone not found. An index
+  that names no input on the first list is not looked for afresh. The input
+  is resolved again in the hold of `portaudio_lock` that opens its stream,
+  since a position in the list is only valid for the list it was read from.
 - The device is resolved first, before the Whisper check and before anything
-  announces a recording. A name that matches no input (the microphone was not
-  connected when the app started, so the listener refused it too) records
-  nothing: no other input is opened, no start beep plays, and the console says
-  the selected microphone was not found. A failed device lookup is handled the
-  same way, without the console line.
-- A microphone unplugged while the app runs is still in that list, so its name
-  still matches: the start beep plays, its stream fails to open, the console
-  says the microphone could not be opened, and the recording ends with nothing
-  captured.
+  announces a recording. A name that matches no input, even in a list read
+  afresh, records nothing: no other input is opened, no start beep plays, and
+  the console says the selected microphone was not found. The engine then
+  calls its optional `on_microphone_missing` callback, which the daemon wires
+  to the listener: a listener waiting for the same microphone goes back to
+  reading the device list every 2.5 s (`listening.spec.md`). A failed device
+  lookup is handled the same way, without the console line and the callback.
+- A microphone unplugged while the app runs stays in the list until it is read
+  afresh (the listener does so once its own stream has died and closed), so
+  until then its name still matches: the start beep plays, its stream fails
+  to open, the console says the microphone could not be opened, and the
+  recording ends with nothing captured.
 - The stream opens at the selected input's native sample rate (requesting
   16 kHz fails on many devices, e.g. PortAudio error -50 on macOS), with
   `open_input_stream`'s format negotiation, and stores the rate in
@@ -151,8 +174,9 @@ After transcription, text passes through these stages in order:
 | macOS 26+ (Tahoe)         | `pynput` disabled — TSM main-thread assertion crash |
 | Linux / Wayland           | `pynput` requires X11 (limited Wayland support)    |
 | Audio rate mismatch       | Resample via linear interpolation to Whisper rate  |
-| Named microphone missing at startup | Records nothing, opens no other input, no start beep; console line |
-| Named microphone unplugged while running | Start beep, stream fails to open, console line, nothing recorded |
+| Named microphone not connected | Device list read afresh; still missing: records nothing, opens no other input, no start beep; console line |
+| Named microphone connected after start-up | Found on the next press |
+| Named microphone unplugged while running | Until the list is read afresh: start beep, stream fails to open, console line, nothing recorded |
 | Hotkey held after a refused press | Key repeat does not retry it; the next fresh press does |
 | LLM filler removal fails  | Falls back to raw transcription (5 s timeout)     |
 | Custom dictionary empty   | No-op, text passes through unchanged               |

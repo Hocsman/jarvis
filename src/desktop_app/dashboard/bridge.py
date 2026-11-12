@@ -1,7 +1,7 @@
 """Python<->JS bridge for the HUD dashboard.
 
 Exposed to the page over ``QWebChannel`` as ``window.jarvis``. The page
-calls slots (``submitQuery``) and listens to signals (``statsUpdated``,
+calls slots (``submitQuery``, ``openSettings``, ``ready``) and listens to signals (``statsUpdated``,
 ``stateChanged``, ``weatherUpdated``, ``replyReceived`` …). Complex
 payloads cross as JSON strings to keep the channel marshalling trivial.
 
@@ -12,7 +12,8 @@ The bridge owns two timers:
 
 Chat is wired by the host (the tray): it sets ``submit_fn`` to the
 daemon submission callable and calls ``deliver_reply`` / ``deliver_busy``
-when the daemon answers, which re-emit as signals to the page.
+when the daemon answers, which re-emit as signals to the page. It also
+hands over ``open_settings``, the settings window the page's gear opens.
 """
 
 from __future__ import annotations
@@ -131,12 +132,14 @@ class DashboardBridge(QObject):
     def __init__(
         self,
         submit_fn: Optional[Callable[[str], None]] = None,
+        open_settings: Optional[Callable[[], None]] = None,
         weather_city: Optional[str] = None,
         cfg: Optional[Any] = None,
         parent: Optional[QObject] = None,
     ) -> None:
         super().__init__(parent)
         self._submit_fn = submit_fn
+        self._open_settings = open_settings
         self._last_state: Optional[str] = None
         self._chat_pending: bool = False
 
@@ -258,6 +261,15 @@ class DashboardBridge(QObject):
         else:
             # Standalone preview without a daemon.
             self.replyReceived.emit("(aperçu — pas de daemon connecté)")
+
+    @pyqtSlot()
+    def openSettings(self) -> None:
+        """The page's gear was clicked. The settings window is modal, so it
+        opens once this call has returned, not inside it."""
+        if self._open_settings is None:
+            return
+        debug_log("dashboard gear: opening the settings window", "desktop")
+        QTimer.singleShot(0, self._open_settings)
 
     @pyqtSlot()
     def ready(self) -> None:

@@ -25,7 +25,7 @@ from PyQt6.QtGui import QFont
 from jarvis.config import (
     get_default_config, load_config,
     default_config_path, _save_json, _load_json,
-    SUPPORTED_CHAT_MODELS, SUPPORTED_WHISPER_MODELS,
+    SUPPORTED_CHAT_MODELS, SUPPORTED_WHISPER_MODELS, WHISPER_LANGUAGES,
 )
 from jarvis.debug import debug_log
 from desktop_app.themes import apply_theme
@@ -60,6 +60,8 @@ CATEGORIES = [
     ("tts", "🔊 Text-to-Speech"),
     ("piper", "🎵 Piper TTS"),
     ("kokoro", "🌸 Kokoro TTS"),
+    ("kyutai", "🎙️ Kyutai TTS"),
+    ("face", "👤 Visage"),
     ("chatterbox", "🎭 Chatterbox TTS"),
     ("voice_input", "🎤 Voice Input"),
     ("wake", "👂 Wake Word"),
@@ -147,13 +149,15 @@ def _select_choice(combo: QComboBox, key: str, value: Any) -> None:
 
 
 def _select_device(combo: QComboBox, key: str, value: Any) -> None:
-    """Select ``value`` in a device combo.
+    """Select ``value`` in a device combo, whose options carry device names.
 
-    A device set by name (any value that does not read as an index, as the
-    listener tells them apart) is added as its own option and selected, so a
-    Save writes the name back. An index the list lacks is not kept: after a
-    replug it can name another device, so the combo falls back to System
-    Default, as it does for the words the listener reads as the system default.
+    A stored index (any form the listener reads as one) selects the
+    microphone it names, so a Save writes that microphone's name instead. An
+    index that names no listed microphone is not kept: after a replug it can
+    name another device, so the combo falls back to System Default, as it does
+    for the words the listener reads as the system default. Any other value is
+    a name: the listed microphone of exactly that name, or else its own option,
+    so a Save writes the name back.
     """
     cur_str = str(value).strip() if value is not None else ""
     if cur_str.lower() in ("default", "system"):
@@ -161,13 +165,14 @@ def _select_device(combo: QComboBox, key: str, value: Any) -> None:
     idx = combo.findData(cur_str)
     if idx < 0 and cur_str:
         try:
-            index = int(cur_str)
+            int(cur_str)
         except ValueError:
             combo.addItem(f"🎤 {cur_str} (by name)", value)
             idx = combo.count() - 1
             debug_log(f"{key} keeps a device set by name", "settings")
         else:
-            idx = combo.findData(str(index))
+            name = _input_device_name(cur_str)
+            idx = combo.findData(name) if name is not None else -1
             if idx < 0:
                 debug_log(f"{key} names an index the list lacks, shown as System Default", "settings")
     if idx < 0:
@@ -271,6 +276,7 @@ def _build_field_metadata() -> List[FieldMeta]:
       "tts", "choice", choices=[
           ("piper", "Piper (Fast Neural)"),
           ("kokoro", "Kokoro (Ultra-Natural Neural)"),
+          ("kyutai", "Kyutai (Most Natural, NVIDIA GPU)"),
           ("chatterbox", "Chatterbox (Voice Cloning)"),
       ])
     f("tts_rate", "Speech Rate", "Words per minute (200 = normal)",
@@ -317,6 +323,32 @@ def _build_field_metadata() -> List[FieldMeta]:
       "kokoro", "str")
     f("tts_kokoro_speed", "Speed", "Speech speed scale (1.0 = normal)",
       "kokoro", "float", min_val=0.5, max_val=2.0, step=0.05)
+
+    # --- Kyutai TTS ---
+    f("tts_kyutai_voice", "Voice",
+      "Name of a voice in the kyutai/tts-voices repository (e.g. "
+      "cml-tts/fr/577_394_000070-0001_enhanced.wav) or the path of a "
+      ".safetensors voice file",
+      "kyutai", "str")
+
+    # --- Visage ---
+    #
+    # Turning the face on fetches about 2.2 GB of model files the first time,
+    # and the portrait is a picture of a face: both belong where he sees them.
+    f("face_enabled", "Visage parlant",
+      "Anime le portrait avec sa voix, dans la fenêtre du visage (👤 Show Face). "
+      "Demande la voix Kyutai, une carte NVIDIA et une installation depuis les "
+      "sources. Au premier lancement, environ 2,2 Go de modèles sont téléchargés "
+      "depuis Hugging Face ; ensuite tout tourne sur cette machine",
+      "face", "bool")
+    f("face_portrait_path", "Portrait",
+      "Chemin d'une image fixe d'un seul visage, vu de face. Elle reste sur cette "
+      "machine",
+      "face", "str")
+    f("face_framing", "Cadrage",
+      "Ce que la fenêtre montre du portrait animé",
+      "face", "choice",
+      choices=[("head", "Toute la tête"), ("face", "Visage rapproché")])
 
     # --- Chatterbox TTS ---
     f("tts_chatterbox_device", "Device",
@@ -382,6 +414,12 @@ def _build_field_metadata() -> List[FieldMeta]:
     f("whisper_no_speech_threshold", "No-Speech Threshold",
       "Reject segments where no_speech_prob is at or above this value (filters hallucinations during silence)",
       "whisper", "float", min_val=0.0, max_val=1.0, step=0.05)
+    f("whisper_language", "Language",
+      "The one language you speak to her. Whisper then transcribes only that one, "
+      "which stops the phrases it invents out of silence in other languages. "
+      "Detect: it guesses the language of each sentence",
+      "whisper", "choice",
+      choices=[("", "Detect")] + [(code, code) for code in WHISPER_LANGUAGES])
     f("whisper_vocabulary", "Names to Know",
       "Names Whisper should spell your way (places, people, products). "
       "Your weather city is included on its own. Keep it short: each name "
@@ -427,8 +465,13 @@ def _build_field_metadata() -> List[FieldMeta]:
 
     # --- Memory & Dialogue ---
     f("dialogue_memory_timeout", "Memory & Diary Window",
-      "Duration for dialogue memory and forced diary updates",
+      "Pause that ends a conversation, and interval of the forced diary updates",
       "memory", "float", min_val=30, max_val=3600, step=30, suffix="s")
+    f("dialogue_context_max_chars", "Conversation Read Word for Word",
+      "Characters of the current conversation the model reads word for word; "
+      "what came before reaches it as the diary's summary (0 = what the model's "
+      "window holds: less for a model run on this machine)",
+      "memory", "int", min_val=0, max_val=64000, step=1000, suffix=" chars")
     f("memory_enrichment_max_results", "Enrichment Results",
       "Max memory results for context enrichment",
       "memory", "int", min_val=1, max_val=50)
@@ -621,22 +664,46 @@ FIELD_METADATA = _build_field_metadata()
 def get_input_devices() -> List[tuple[str, str]]:
     """Return list of (value, display_name) for available audio input devices.
 
-    Returns [("", "System Default")] if sounddevice is not available.
+    The value is the device name, which a replug cannot move onto another
+    device the way it moves an index. Windows lists one microphone under each
+    of its audio systems; each name is listed once, since every entry would
+    save the same value. Returns [("", "System Default")] if sounddevice is
+    not available.
+
+    The list is read under ``portaudio_lock``: in the bundled app the
+    listener shares this process and may be reading it afresh.
     """
     devices: List[tuple[str, str]] = [("", "🔧 System Default")]
     try:
         import sounddevice as sd
-        for idx, dev in enumerate(sd.query_devices()):
+        from jarvis.utils.audio_lock import portaudio_lock
+        with portaudio_lock:
+            listed = sd.query_devices()
+        for idx, dev in enumerate(listed):
             try:
                 max_in = int(dev.get("max_input_channels", 0))
             except Exception:
                 max_in = 0
             if max_in > 0:
-                name = dev.get("name", f"Device {idx}")
-                devices.append((str(idx), f"🎤 {name}"))
+                name = str(dev.get("name") or f"Device {idx}").strip()
+                if all(value != name for value, _ in devices):
+                    devices.append((name, f"🎤 {name}"))
     except Exception as e:
         debug_log(f"could not enumerate audio devices: {e}", "settings")
     return devices
+
+
+def _input_device_name(index: str) -> Optional[str]:
+    """The name of the microphone a stored index selects, or None."""
+    try:
+        import sounddevice as sd
+        from jarvis.utils.audio_lock import portaudio_lock
+        from jarvis.utils.audio_stream import resolve_input_device
+        with portaudio_lock:
+            devices = sd.query_devices()
+        return str(devices[resolve_input_device(index, lambda: devices)]["name"]).strip()
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------

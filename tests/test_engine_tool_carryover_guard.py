@@ -542,7 +542,7 @@ def test_planner_direct_exec_stamps_tool_failed(
 @pytest.mark.unit
 def test_walker_logs_orphan_assistant_tool_call(caplog):
     """When an assistant tool_call has no matching role=tool result in
-    the recent window (e.g. truncation, scrub, eviction), the walker
+    the recent dialogue (e.g. truncation, scrub, eviction), the walker
     should fail-open and log a diagnostic — never crash, never silently
     widen the allow-list with the orphan name.
     """

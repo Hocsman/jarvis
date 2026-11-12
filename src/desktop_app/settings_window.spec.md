@@ -10,7 +10,7 @@ The Settings Window provides a graphical interface for editing `config.json` wit
 
 1. **Metadata-driven**: All fields are defined in a `FIELD_METADATA` registry. Adding a new config parameter to the settings UI requires only adding a `FieldMeta` entry — no widget code changes.
 2. **Minimal config files**: Only non-default values are written to `config.json`. Removing a field from the config reverts it to the default.
-3. **Preserves unknown keys and values**: Keys not managed by the UI (e.g. `mcps`, `_config_version`, future additions) are preserved when saving, and so is a value a `choice` field has no option for, and a microphone set by name (a `device` field still drops an index it cannot show, see "Hardware Device Selection").
+3. **Preserves unknown keys and values**: Keys not managed by the UI (e.g. `mcps`, `_config_version`, future additions) are preserved when saving, and so is a value a `choice` field has no option for, and a microphone set by name (a `device` field still drops an index that names no listed microphone, see "Hardware Device Selection").
 4. **Theme-consistent**: Uses the shared Jarvis theme from `themes.py`.
 
 ## Architecture
@@ -41,7 +41,7 @@ FieldMeta (dataclass)
 | `str` | QLineEdit | Placeholder if nullable |
 | `password` | QLineEdit (EchoMode.Password) | Masked input for API keys; same value extraction as `str` |
 | `choice` | QComboBox | Pre-defined options. A current value the field does not list (a model served by a remote provider, such as an `intent_judge_model` pin, or a hand-edited value) is added as its own option, shown as the raw value, and selected |
-| `device` | QComboBox | Dynamically populated from sounddevice. A device set by name is added as its own option and selected; an index the list lacks is not (see "Hardware Device Selection") |
+| `device` | QComboBox | Dynamically populated from sounddevice, one option per input device name, each saving that name. A name the list lacks is added as its own option and selected; an index selects the microphone it names (see "Hardware Device Selection") |
 | `list` | QListWidget + Add/Edit/Remove buttons | Stores as JSON array in config |
 | `map` | QListWidget + Add/Edit/Remove buttons | One `key -> value` row per entry; stores as a JSON object in config. A row that names no key or no value is refused when added, and dropped on save if it got in some other way. Only the first arrow separates, so a value may contain one; a key listed twice keeps its last value |
 
@@ -56,21 +56,27 @@ The settings window uses a sidebar navigation pattern: a fixed-width `QListWidge
 3. Text-to-Speech
 4. Piper TTS
 5. Kokoro TTS
-6. Chatterbox TTS
-7. Voice Input (includes microphone device selection)
-8. Wake Word
-9. Speech Recognition (Whisper)
-10. Voice Activity Detection
-11. Timing & Windows
-12. Memory & Dialogue
-13. Location
-14. Features (includes web search, Wikipedia fallback, low-power mode, startup tune, the startup update check, and dictation toggles)
-15. 🙋 Permissions
-16. ⏰ Rappels
-17. 🌅 Routines
-18. 🛠️ Projets
-19. MCP Servers
-20. Advanced
+6. Kyutai TTS
+7. 👤 Visage
+8. Chatterbox TTS
+9. Voice Input (includes microphone device selection)
+10. Wake Word
+11. Speech Recognition (Whisper)
+12. Voice Activity Detection
+13. Timing & Windows
+14. Memory & Dialogue
+15. Location
+16. Features (includes web search, Wikipedia fallback, low-power mode, startup tune, the startup update check, and dictation toggles)
+17. 🙋 Permissions
+18. ⏰ Rappels
+19. 🌅 Routines
+20. 🛠️ Projets
+21. MCP Servers
+22. Advanced
+
+### 👤 Visage
+
+The three settings of the talking face (`src/jarvis/output/face/face.spec.md`, "Configuration"): the switch, the portrait and the framing, which offers the two framings the renderer knows. They belong here and not only in `config.json` because the switch is what fetches about 2.2 GB of model files the first time listening starts with it on, and the portrait is a picture of a face: the user should see both. The switch's description says what it costs and what it needs (the Kyutai voice, an NVIDIA GPU, a source install), and the portrait's that the image stays on this machine. Like every setting, they apply when listening restarts. The face itself is shown in the face window (`desktop_app.spec.md`, "Face").
 
 ### 🙋 Permissions
 
@@ -147,6 +153,11 @@ The `whisper_model` dropdown lists every model in `SUPPORTED_WHISPER_MODELS`
 slider from, so a size picked in either one is listed by the other. An
 English-only id (`.en`) reads as its size name followed by "(English only)".
 
+`whisper_language` is a choice on the same page: "Detect", then every code
+in `WHISPER_LANGUAGES` (`jarvis/config.py`, Whisper's own list), so the
+window cannot write a code Whisper would refuse
+(`jarvis/listening/listening.spec.md`, Configuration).
+
 `whisper_vocabulary` is a list field, one name per row: the names Whisper is
 given as a hint alongside `weather_city` (`listening.spec.md`, "The names he
 uses").
@@ -183,11 +194,13 @@ works when the user asks (see "Update System" in `desktop_app.spec.md`).
 
 ## Hardware Device Selection
 
-The Voice Input tab includes a device dropdown populated at window open time via `sounddevice.query_devices()`. It lists every input-capable device by name. Choosing one stores the device index as a string; choosing System Default stores nothing. A stored index in any form the listener reads as that index (`"1"`, `1`, `"01"`) selects it.
+The Voice Input tab includes a device dropdown populated at window open time via `sounddevice.query_devices()`, called under `portaudio_lock` because the daemon can run in the same process and read the device list afresh (see "Serialised PortAudio Lifecycle" in `listening.spec.md`). It lists each input-capable device name once, without surrounding spaces: Windows lists one microphone under each of its audio systems, and every entry would save the same value. Choosing one stores that name; choosing System Default stores nothing. A name stays true across a replug, where an index can move onto another device.
 
-The config can also name a microphone (`"voice_device": "MSI GV60"`), which the listener matches against the input device names. A stored value that does not read as an index is such a name: it is added as its own option, shown as `🎤 <name> (by name)` whether or not a connected device matches it, and selected, so a Save writes it back as it was read. A name stays true across a replug. Choosing a listed option, or Reset, replaces it.
+The dropdown shows the device list as PortAudio last read it in the window's process. A microphone connected after that appears once the list is read afresh in that process (in the bundled app the listener does so while it waits for its microphone) or once the app restarts; until then its name can be set by hand as `voice_device` in the config, which the dropdown keeps as a name it does not list (below).
 
-A stored index the list does not contain (a device unplugged when the window opens, or an output-only one) is not kept: the dropdown falls back to System Default and a Save drops the key. An index can name a different device after a replug, so the window does not keep one it cannot show. A blank value, and `default` or `system` in any letter case, which the config and the listener read as the system default, also show as System Default.
+The listener and hold-to-dictate match a stored name against the input device names (`resolve_input_device`, see `listening.spec.md`), so the config can also name a microphone by part of its name (`"voice_device": "MSI GV60"`). A stored name that is exactly a listed one selects that option. Any other value that does not read as an index is added as its own option, shown as `🎤 <name> (by name)` whether or not a connected device matches it, and selected, so a Save writes it back as it was read. Choosing a listed option, or Reset, replaces it.
+
+A stored index, in any form the listener reads as that index (`"1"`, `1`, `"01"`), selects the microphone it names through the same resolver, so the input at that position in the first device list of the window's process, and a Save writes that microphone's name in its place. An index that names no listed microphone (a device unplugged when the window opens, or an output-only one) is not kept: the dropdown falls back to System Default and a Save drops the key. A blank value, and `default` or `system` in any letter case, which the config and the listener read as the system default, also show as System Default.
 
 ## Save Behaviour
 
@@ -205,7 +218,7 @@ A stored index the list does not contain (a device unplugged when the window ope
 
 ## Integration
 
-- Accessed via "⚙️ Settings" in the system tray menu.
+- Accessed via "⚙️ Settings" in the system tray menu, and via the gear in the dashboard's top bar (`desktop_app.spec.md`, "Dashboard").
 - Opens as a modal QDialog.
 - Imported from `show_settings` when the window is first opened. Importing the module loads none of sounddevice, numpy or pynput: the hotkey labels come from `jarvis/dictation/hotkeys.py`. sounddevice is imported when the window is built, to list the input devices for the Voice Input tab.
 

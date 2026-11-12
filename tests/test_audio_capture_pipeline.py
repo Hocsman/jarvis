@@ -1,6 +1,5 @@
 """Native-rate microphone frames reach VAD without silent rejection or loss."""
 
-from collections import deque
 import queue
 from types import SimpleNamespace
 
@@ -8,6 +7,7 @@ import numpy as np
 import pytest
 
 from jarvis.listening.listener import VoiceListener
+from jarvis.listening.room_floor import RoomFloor
 import jarvis.listening.listener as capture
 
 pytestmark = pytest.mark.unit
@@ -20,7 +20,9 @@ def listener(rate=48000):
     obj._stream_samplerate = rate
     obj._frame_samples = rate * 20 // 1000
     obj._pending_audio = None
-    obj._recent_audio_energy = deque(maxlen=20)
+    obj._room_floor = RoomFloor(frame_ms=20)
+    obj._frame_captured_at = 0.0
+    obj.tts = obj._tune_player = None
     obj._vad_error_logged = False
     obj._vad = None
     obj._should_stop = obj._dictation_active = False
@@ -219,14 +221,3 @@ def test_stream_open_lock_policy_includes_retries(monkeypatch, serialise):
     })
     assert capture._open_input_stream(16000, 20, {}, serialise=serialise)[0] == 'stream'
     assert not locked
-
-
-def test_missing_named_input_does_not_record_another_microphone(monkeypatch, capsys):
-    obj = listener()
-    obj.cfg.voice_device = 'Disconnected Headset'
-    monkeypatch.setattr(capture.sd, 'query_devices', lambda: [
-        {'name': 'Built-in Microphone', 'max_input_channels': 1},
-    ])
-    monkeypatch.setattr(capture.sd, 'InputStream', lambda **kwargs: pytest.fail('unexpected capture'))
-    obj.run()
-    assert 'Selected microphone not found' in capsys.readouterr().out

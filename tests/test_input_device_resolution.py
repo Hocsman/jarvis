@@ -2,9 +2,10 @@
 
 The listener and hold-to-dictate both read it through one resolver, so the
 rule below is the whole contract: blank, ``default`` or ``system`` is the
-system default input, anything ``int()`` reads is a PortAudio index, and any
-other text picks the first input-capable device whose name contains it,
-ignoring case.
+system default input, anything ``int()`` reads is the PortAudio index of an
+input-capable device, and any other text picks the first input-capable device
+whose name contains it, ignoring case. Anything else is refused rather than
+recorded from another input.
 """
 
 import pytest
@@ -25,7 +26,7 @@ DESK = [
 
 
 def _no_lookup():
-    pytest.fail('the device list is only needed to match a name')
+    pytest.fail('the device list is not needed for the system default')
 
 
 @pytest.mark.parametrize('value', [None, '', '   ', 'default', 'System', ' DEFAULT '])
@@ -33,9 +34,16 @@ def test_blank_or_default_means_the_system_input(value):
     assert resolve_input_device(value, _no_lookup) is None
 
 
-@pytest.mark.parametrize('value, index', [('3', 3), (' 4 ', 4), ('0', 0)])
+@pytest.mark.parametrize('value, index', [('3', 3), (' 4 ', 4), ('0', 0), ('+1', 1)])
 def test_a_number_is_a_device_index(value, index):
-    assert resolve_input_device(value, _no_lookup) == index
+    assert resolve_input_device(value, lambda: DESK) == index
+
+
+@pytest.mark.parametrize('value', ['2', '5', '-1'])
+def test_an_index_that_names_no_input_is_refused(value):
+    # Device 2 is output-only; 5 and -1 name no device at all.
+    with pytest.raises(InputDeviceNotFound):
+        resolve_input_device(value, lambda: DESK)
 
 
 @pytest.mark.parametrize('value', ['MSI GV60', 'msi gv60', '  Gv60 '])

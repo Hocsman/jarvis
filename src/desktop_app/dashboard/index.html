@@ -291,7 +291,7 @@
         <span>🌡️</span><span class="temp" id="wx-chip-temp">--°C</span>
         <span class="loc" id="wx-chip-loc">—</span>
       </div>
-      <div class="gear" title="Réglages">⚙️</div>
+      <div class="gear" id="settings-gear" role="button" title="Réglages">⚙️</div>
     </div>
   </header>
 
@@ -537,6 +537,9 @@
   }
   sendBtn.onclick = send;
   input.addEventListener("keydown", e => { if (e.key === "Enter") send(); });
+  document.getElementById("settings-gear").onclick = () => {
+    if (jarvis && jarvis.openSettings) jarvis.openSettings();
+  };
 
   function wireBridge(obj) {
     jarvis = obj;

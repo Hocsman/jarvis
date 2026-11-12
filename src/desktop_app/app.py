@@ -2372,7 +2372,9 @@ class JarvisSystemTray:
             return
         if self.dashboard_window is None:
             from desktop_app.dashboard_window import DashboardWindow
-            self.dashboard_window = DashboardWindow(submit_fn=self._dashboard_submit_fn)
+            self.dashboard_window = DashboardWindow(
+                submit_fn=self._dashboard_submit_fn, open_settings=self.show_settings
+            )
         else:
             self.dashboard_window.set_submit_fn(self._dashboard_submit_fn)
         self.dashboard_window.show()
@@ -2541,7 +2543,9 @@ class JarvisSystemTray:
             debug_log(f"failed to connect dictation history: {e}", "desktop")
 
     def show_face_window(self) -> None:
-        """Show the face window and bring it to front."""
+        """Show the face window and bring it to front, restored if minimised."""
+        if self.face_window.isMinimized():
+            self.face_window.showNormal()
         self.face_window.show()
         self.face_window.raise_()
         self.face_window.activateWindow()

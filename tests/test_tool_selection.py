@@ -189,8 +189,11 @@ class TestKeywordStrategy:
 
     @pytest.mark.unit
     def test_meal_query_selects_meal_tools(self):
-        result = select_tools("what did I eat yesterday", _builtin(), {}, strategy=ToolSelectionStrategy.KEYWORD)
-        assert "fetchMeals" in result or "logMeal" in result
+        """The overlap is on whole words: a query reaches a tool through a
+        word its name or description carries."""
+        result = select_tools("which meals did I have yesterday", _builtin(), {}, strategy=ToolSelectionStrategy.KEYWORD)
+        assert "fetchMeals" in result
+        assert "getWeather" not in result
 
     @pytest.mark.unit
     def test_search_query_selects_web_search(self):
@@ -239,9 +242,26 @@ class TestKeywordStrategy:
         assert len(orders) == 1, f"the catalogue order depends on the process: {orders}"
 
     @pytest.mark.unit
-    def test_vague_query_falls_back_to_all(self):
-        result = select_tools("hmm", _builtin(), {}, strategy=ToolSelectionStrategy.KEYWORD)
-        assert len(result) == len(_builtin())
+    def test_a_query_no_tool_shares_a_word_with_gets_only_the_always_included_tools(self):
+        """Nothing matched is not a reason to offer everything: a small chat
+        model handed the whole catalogue picks badly or not at all, and the
+        reply engine's toolSearchTool is how the model widens the list."""
+        builtin = _builtin()
+        builtin["remember"] = FakeTool("remember", "Save something to long-term memory.")
+        builtin["forget"] = FakeTool("forget", "Retire a stored fact.")
+
+        result = select_tools("hmm", builtin, _mcp(), strategy=ToolSelectionStrategy.KEYWORD)
+
+        assert result == [t for t in _ALWAYS_INCLUDED if t in builtin]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("query", ["Какая завтра погода?", "明日の天気は？", "?!"])
+    def test_a_query_with_no_word_the_tokeniser_reads_gets_only_the_always_included_tools(self, query):
+        """A sentence in a script the keyword index does not read leaves no
+        token to score, which is the same as nothing matching."""
+        result = select_tools(query, _builtin(), _mcp(), strategy=ToolSelectionStrategy.KEYWORD)
+
+        assert result == ["stop"]
 
     @pytest.mark.unit
     def test_mcp_tools_included(self):
@@ -506,6 +526,29 @@ class TestLLMStrategy:
         # The full catalogue must NOT be returned — that's the regression we're
         # fixing (small-model 41-tool overload).
         assert len(result) < len(builtin) + len(mcp)
+        assert result.degraded is True
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("answer", [None, "", "I think we should pick one"])
+    def test_a_router_that_gave_up_on_a_query_no_tool_shares_offers_only_the_always_included_tools(
+        self, answer
+    ):
+        """The router gave up and the keyword strategy found nothing either:
+        the whole catalogue is never what goes out (112 tools and 33k prompt
+        tokens on the first exchange after a start, when this was measured)."""
+        builtin = _builtin()
+        builtin["remember"] = FakeTool("remember", "Save something to long-term memory.")
+        backend = _llm_backend(return_value=answer)
+
+        result = select_tools(
+            "Какая завтра погода?",
+            builtin, _mcp(),
+            strategy=ToolSelectionStrategy.LLM,
+            llm_backend=backend,
+            llm_model="test",
+        )
+
+        assert list(result) == [t for t in _ALWAYS_INCLUDED if t in builtin]
         assert result.degraded is True
 
     @pytest.mark.unit
@@ -814,3 +857,25 @@ class TestUrlCue:
             llm_model="test",
         )
         assert "fetchWebPage" not in result
+
+
+# ---------------------------------------------------------------------------
+# A tool's name in a sentence
+# ---------------------------------------------------------------------------
+
+class TestAToolNameInASentence:
+    """A search for a tool's exact name finds it, but that is
+    ``toolSearchTool``'s doing (builtin/tool_search.spec.md, Name cue), not
+    ``select_tools``'s. The pre-loop router reads what the user said, and a
+    word of it that happens to be a tool's name is no request for the tool:
+    the sentence gets what the router makes of it."""
+
+    @pytest.mark.unit
+    def test_a_spoken_word_that_is_a_tool_name_does_not_offer_the_tool(self):
+        backend = _llm_backend(return_value="none")
+        result = select_tools(
+            "j'ai vu un screenshot marrant hier soir", _builtin(), {},
+            strategy=ToolSelectionStrategy.LLM,
+            llm_backend=backend, llm_model="test",
+        )
+        assert "screenshot" not in result

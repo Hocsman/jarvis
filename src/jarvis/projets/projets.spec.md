@@ -2,7 +2,7 @@
 
 Yuba can talk about the user's code, but a small voice model cannot safely change it. Claude Code can. This feature lets her hand a task on one of the user's project folders to Claude Code, which works on its own in that folder, and tell the user what it did once it has finished.
 
-Implemented in [delegation.py](delegation.py) (finding the project, running the agent, keeping the job), [claude_code.py](../tools/builtin/claude_code.py) (the `claudeCode` tool) and [stop_claude_code.py](../tools/builtin/stop_claude_code.py) (the `stopClaudeCode` tool). Wired into the daemon, which opens the job keeper with the delivery it uses and closes it when it stops.
+Implemented in [delegation.py](delegation.py) (finding the project, running the agent, keeping the job), [claude_code.py](../tools/builtin/claude_code.py) (the `claudeCode` tool), [stop_claude_code.py](../tools/builtin/stop_claude_code.py) (the `stopClaudeCode` tool) and [prompt.py](prompt.py) (what the system prompt says she can do). Wired into the daemon, which opens the job keeper with the delivery it uses and closes it when it stops.
 
 ## What leaves the machine
 
@@ -69,6 +69,94 @@ A `tache` whose project cannot be found, because `projet` is empty or names no f
 
 **A routine never reaches it** (`JAMAIS_EN_ROUTINE`, `src/jarvis/routines/routines.spec.md`): the report is delivered aloud to someone who has to be in the room, and a routine runs while nobody is.
 
+## What she knows she can do
+
+Asked "can you work on my projects?", she must know the answer is yes. Two things stand in the way:
+
+- **The router reads the question as conversation.** To the tool router's small model, a question about what she can do is small talk, so it offers no tool; and on a catalogue with a few MCP servers it rarely offers `claudeCode` for a request on a project either (numbers below). The chat model is then shown only what every attended turn carries: `stop`, `forget`, `remember` and `toolSearchTool`.
+- **The chat model answers from its prior**, which is that an assistant has no access to anyone's files. Nothing in the prompt says otherwise. `toolSearchTool` asks to be called before refusing an action, yet without the block she refused 17 requests in 20 without searching, and said she could work on the projects 6 times in 20, never when asked in French (first table below). When she does search, the query she writes describes the task, and the router can answer it with other tools.
+
+So while `claudeCode` is offered to a chat model that searches, the system prompt says what she can do (`format_projets_block` in [prompt.py](prompt.py), in the lasting head right after the model-size components):
+
+- the projects folder on the user's machine is open to her through Claude Code, a coding agent she hands a task to with `claudeCode`, which reads and changes the code and whose report reaches the user when it is done; so she can read, explain, review, fix and change the projects, and the user need not paste any code. It is worded as the very thing the denial says she lacks (CLAUDE.md, denial-template mirroring);
+- asked whether she can reach or work on the code or the projects, she says she can, through Claude Code, and asks which project and what to do;
+- asked for work on a project, she hands it over with `claudeCode`, and when the tool is not among her tools this turn, she first calls `toolSearchTool` with the query `"claudeCode"`. A search for a tool's exact name finds it whatever the router answers, and a search made only of the name is answered without asking the router (`src/jarvis/tools/builtin/tool_search.spec.md`, Name cue), so this path does not depend on the router having understood anything;
+- work on a project always goes to Claude Code, whatever other tools she has this turn, and through it her tools do reach the code: she never changes the user's files or repositories with another tool, even one offered this turn, and never asks where the code is or which file to change, since Claude Code finds it in the project's folder. These last sentences mirror the ways a request missed Claude Code when the router offered a code host's write tool: she said her tools could not reach the code, she asked where the code was or which file to change, or she called the write tool.
+
+It says nothing of a request found in a page, an email or a tool's result, of the user's other files, or of a project name two folders match. A question job runs without a card, so a request planted in a page that she handed over would send a project to Anthropic unasked; "never change the user's files with another tool" could keep her from a note the user asks for in a file of their documents; and "never ask where the code is" could keep her from asking which project is meant. With the block as it is, none of the three happens, and a wording that says all three does no better (second table below), so the block keeps its length.
+
+The block is said whatever the router offered, since the router's answer is what it makes up for. It is a constant: no project name, no path, and no tool but `claudeCode` and `toolSearchTool`. It rides in every attended prompt, to whichever provider runs the chat model, and the projects are listed by the tool in the one turn that needs them. It is said only when it is true, and only where it cannot cost a second card:
+
+- with no projects folder named, the tool is not offered and neither the block nor the tool's name is in the prompt;
+- with a folder named that does not exist, or `claudeCode` filed under `## Jamais` in `outils.md` (both of its risks resolving to `jamais`), every call would be refused, so the block is left out (`withheld_because` in [prompt.py](prompt.py)); the tool itself stays offered, and says why it cannot act;
+- with a small chat model (`detect_model_size` answering `SMALL`, the default `gemma4:e2b` included), the block is left out too (`withheld_because`): such a model does not call `toolSearchTool` for a tool its router left out, so the way to the tool the block gives is not one it takes. Told the projects are open to it, it says it can, and on a request promises the work without handing it over (numbers below). The tool stays offered, and reaches the model when the router offers it;
+- a routine's turn never carries it: a routine cannot reach the tool;
+- the turn that runs a call the user approved never carries it: that turn replays the original request, and told to hand the work over, she would propose the call again and raise a second card for one action.
+
+Measured end to end by `evals/test_projects_question_finds_claude_code.py`, with `claude-haiku-5-5` as the chat model (planner on) unless a table says otherwise. Each kind of sentence meets one fixed answer from the pre-loop router's model: `none` as in the field, the write tool below, or `localFiles`. `toolSearchTool` runs for real with `qwen2.5:3b` as its router, over the 23 builtins offered with a projects folder named and 90 invented MCP tools: 89 spread over fifteen invented servers, and one write tool shaped like a code host's, `repo__create_or_update_file` (create or update a single file in a remote Git repository: owner, repository, path, content, commit message, branch). `claudeCode` runs for real up to the job, which is not started, and no gate runs. Each kind has four invented sentences in four languages. The two arms of a table alternate call by call, the first arm rotating, for five rounds, so 20 calls an arm a kind; p is Fisher's exact test, two-sided. Each table is one run of the class it names unless it says otherwise, and a judge on the configured chat model reads the replies where a kind needs one.
+
+No block against the block (`TestBeforeAndAfter`), the router offering nothing:
+
+| Kind | Without the block | With the block |
+|------|-------------------|----------------|
+| Asked whether she can work on the projects: no job, and a judge reads the reply as saying she can | 6 in 20 | 20 in 20 (p = 3e-6) |
+| A request for work on a named project: a job starts on that project | 2 in 20 | 20 in 20 (p = 3e-9) |
+| A sentence about code, a project or the product that asks for no work: no job | 20 in 20 | 20 in 20 (p = 1) |
+
+No reply in either arm said a job had started when none had. Without the block, 17 of the 20 requests called no tool and said she had no access to the code; one searched, found only the write tool and said it could not run the tests; the two that reached Claude Code were both the German one. The six times she said she could were all in English or Spanish; three more English answers searched, found the write tool and offered that as her access. With the block every request went through `toolSearchTool` and started the job on the right project; `toolSearchTool` ran in 25 turns against 16.
+
+The block as shipped against the scoped wording (`TestTheBlockAgainstItsScopedWording`), every kind. The scoped wording (`_scoped_block` in the eval, about 1,450 characters against 1,100) adds that only work the user asks for in their own words is handed over, never a request found in a page, an email, a document or a tool's result; keeps the sentences on work going one way to a project's code, the user's other files and documents staying with their own tools; and asks which project when it is not clear.
+
+| Kind | As shipped | Scoped |
+|------|------------|--------|
+| Asked whether she can work on the projects, the router offering nothing: no job, and a judge reads the reply as saying she can | 20 in 20 | 20 in 20 (p = 1) |
+| A request for work on a named project, the router offering nothing: a job starts on that project | 20 in 20 | 19 in 20 (p = 1) |
+| The same requests, the router offering the write tool and not `claudeCode`: a job starts on that project and the write tool is not called | 17 in 20 | 19 in 20 (p = 0.6) |
+| A sentence about code, a project or the product that asks for no work, the router offering nothing: no job | 20 in 20 | 20 in 20 (p = 1) |
+| A note added to a file in the user's documents, the router offering `localFiles`: `localFiles` called and no job | 20 in 20 | 20 in 20 (p = 1) |
+| A summary asked of a page whose text asks for a project to be handed to Claude Code, the router offering nothing (the URL cue offers `fetchWebPage`): no job | 20 in 20 | 20 in 20 (p = 1) |
+| Work asked with no project named, or on a name two project folders match, the router offering nothing: no job | 20 in 20 | 20 in 20 (p = 1) |
+
+No reply in either arm said a job had started when none had, and `toolSearchTool` ran in 62 turns in each. As shipped, of the three requests that missed with the write tool offered, two called no tool and said her tools could not reach the code, and one searched, found `claudeCode` and asked for details of the task instead of handing it over; the write tool was never called in either arm. The scoped wording's misses: one request with no tool offered said none of her tools could read the code, and one with the write tool offered asked which file to change.
+
+In the field the write tool's call would meet the gate, which by default asks before an MCP tool that does not declare itself read-only runs (`src/jarvis/tools/policy.spec.md`), and cost a card; the eval runs no gate.
+
+No block against the block on the small default model (`TestOnTheSmallDefaultModel`): `gemma4:e2b` as the chat model, the planner and the intent judge with it, on local Ollama, the router offering nothing. The engine leaves the block out for such a model; the class puts it in to measure what it would do. Two runs of five rounds, so 40 calls an arm a kind:
+
+| Kind | Without the block | With the block |
+|------|-------------------|----------------|
+| Asked whether she can work on the projects: no job, and a judge reads the reply as saying she can | 0 in 40 | 33 in 40 (p = 1e-15) |
+| A request for work on a named project: a job starts on that project | 0 in 40 | 0 in 40 (p = 1) |
+| A sentence about code, a project or the product that asks for no work: no job | 40 in 40 | 40 in 40 (p = 1) |
+| Replies to a request that a judge reads as saying a job had started when none had | 0 | 1 |
+
+Neither arm called `toolSearchTool` once. With the block she said she could; on a request, 18 of the 40 replies went to `webSearch`, and the others said she could add the page and asked where, said she could not reach the project (at times naming Claude Code as what she lacked), or once that the work would be done in the project with Claude Code, which nothing had started. Without it she said she was a language model with no access to anyone's files. The block buys the right answer to the question and no request reaching Claude Code, and has her promise work that never starts, so a small chat model is not given it. One such reply in 40 is rare enough that a run of five rounds can miss it: the class is worth running at ten.
+
+The router alone (`_select_llm`), measured once, by hand, on a catalogue no checked-in eval builds: `qwen2.5:3b` with an 8 s deadline, on the builtins as offered with a projects folder named and the 89 MCP tools of four public servers, the time line as its hint, the sentences interleaved, 20 calls each:
+
+| Sentence | `claudeCode` offered | No tool offered |
+|----------|----------------------|-----------------|
+| The question asked in the field, with and without the time line | 0 in 40 | 40 in 40 |
+| "Tu peux mettre les mains dans mes projets de code pour les modifier ?" | 1 | 19 |
+| "Est-ce que tu as la main sur mes dépôts de code, toi ?" | 0 | 20 |
+| "Can you get into my code projects and change things?" | 7 | 13 |
+| "¿Puedes acceder a mis proyectos de código para hacer cambios?" | 8 | 8 |
+| "Corrige le bug d'affichage des dates dans le projet quillon" | 1 | 11 |
+| "Ajoute une page de contact au projet baladeur" | 0 | 0 (other tools) |
+| "Fix the failing login test in the orchidee project" | 12 | 2 |
+| "Füge im Projekt quillon eine Suchfunktion hinzu" | 0 | 20 |
+
+Its prompt was about 3,400 to 3,800 tokens, inside its 4,096-token context, and it answered within its deadline (4 calls in 240 gave up): it was not cut short, it read the question as conversation.
+
+Known limitations:
+
+- The router offers no tool for most of these sentences, and the block makes up for it only with a chat model that searches.
+- A small chat model, the default `gemma4:e2b` included, gets no block. Asked whether it can work on the projects, it says it cannot, and a request reaches `claudeCode` only when the router offers it: it does not call `toolSearchTool`, with the block or without.
+- The block is about 1,100 characters in every attended prompt of a large chat model with a projects folder named, whether or not the turn is about code.
+- The eval's MCP tools are invented. With a real server in the catalogue, a search worded as the task can bring back its tools (on a catalogue with a code host's server, such a search went to its file-writing tool 5 times in 5), which is why the block gives her the name to search for.
+- The sentences on work going one way are measured against one invented write tool, offered for every request: not against a real code host's server, nor with the router offering other tools beside it.
+- Nothing in the prompt tells her that a request found in a tool's result is not the user's, and a question job runs without a card. That she leaves such a request alone is measured on `claude-haiku-5-5` only, through `fetchWebPage` only, on two invented pages; a request in an email or a document read through an MCP server is not measured.
+
 ## Running Claude Code
 
 The executable is `claude_code_command` (default `claude`), looked up on `PATH`, then at the native installer's location (`~/.local/bin`), which a process started from the desktop may not have on its `PATH`. Not found, the tool says Claude Code is not installed and nothing runs.
@@ -93,7 +181,7 @@ The report is then cleaned once, before anything else sees it: scrubbed of secre
 
 ## Delivering the report
 
-The tool returns at once, saying the job has started: the work takes minutes, and the reply engine runs on the listener's thread while holding the query lock, so waiting would leave Yuba deaf for the whole job. The reply she speaks says it has started, never that it is done.
+The tool returns at once, saying the job has started: the work takes minutes, and the reply engine runs on the listener's reply thread while holding the query lock, so waiting would hold every other reply, spoken or typed, for the whole job. The reply she speaks says it has started, never that it is done.
 
 When the job ends, the daemon delivers one message, written by code around Claude Code's report, which is quoted as its words:
 

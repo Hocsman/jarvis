@@ -256,6 +256,89 @@ class TestKokoroFields:
         assert get_default_config()["tts_kokoro_lang_code"] == "f"
 
 
+class TestKyutaiFields:
+    """Kyutai has one setting, its voice, and the engine choice offers it."""
+
+    def _field(self, key):
+        for fm in FIELD_METADATA:
+            if fm.key == key:
+                return fm
+        return None
+
+    def test_kyutai_category_exposes_the_voice(self):
+        fm = self._field("tts_kyutai_voice")
+        assert fm is not None and fm.category == "kyutai" and fm.field_type == "str"
+        assert "kyutai" in {key for key, _ in CATEGORIES}
+
+    def test_the_engine_choice_offers_kyutai(self):
+        fm = self._field("tts_engine")
+        assert fm is not None
+        assert "kyutai" in [value for value, _ in fm.choices]
+
+    def test_the_voice_has_a_default_in_the_config(self):
+        assert get_default_config()["tts_kyutai_voice"]
+
+
+class TestTheFacePage:
+    """The talking face's three settings have a page of their own, next to
+    the Kyutai voice that feeds the face (``settings_window.spec.md``,
+    "👤 Visage")."""
+
+    @staticmethod
+    def _field(key):
+        return next((fm for fm in FIELD_METADATA if fm.key == key), None)
+
+    def test_the_page_follows_the_kyutai_voice(self):
+        keys = [key for key, _ in CATEGORIES]
+
+        assert keys.index("face") == keys.index("kyutai") + 1
+
+    @pytest.mark.parametrize("key, field_type", [
+        ("face_enabled", "bool"), ("face_portrait_path", "str"), ("face_framing", "choice"),
+    ])
+    def test_each_face_setting_is_on_the_page(self, key, field_type):
+        fm = self._field(key)
+
+        assert fm is not None and fm.category == "face" and fm.field_type == field_type
+
+    def test_the_framings_offered_are_the_ones_the_renderer_draws(self):
+        from jarvis.output.face.process import CROP
+
+        offered = [value for value, _ in self._field("face_framing").choices]
+
+        assert sorted(offered) == sorted(CROP)
+
+    def test_every_framing_offered_is_one_the_settings_keep(self, tmp_path, monkeypatch):
+        from jarvis.config import load_settings
+
+        offered = [value for value, _ in self._field("face_framing").choices]
+        assert get_default_config()["face_framing"] in offered
+        path = tmp_path / "config.json"
+        monkeypatch.setenv("JARVIS_CONFIG_PATH", str(path))
+        for value in offered:
+            path.write_text(json.dumps({"face_framing": value}), encoding="utf-8")
+            assert load_settings().face_framing == value
+
+    def test_turning_the_face_on_writes_the_switch_and_the_portrait(self, qapp):
+        from desktop_app import settings_window as sw
+        from jarvis.config import default_config_path
+
+        path = default_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
+        window = sw.SettingsWindow()
+        window._widgets["face_enabled"].setChecked(True)
+        window._widgets["face_portrait_path"].setText("portrait.png")
+
+        with patch.object(sw, "QMessageBox"):
+            window._on_save()
+
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        assert saved["face_enabled"] is True
+        assert saved["face_portrait_path"] == "portrait.png"
+        assert "face_framing" not in saved     # left at its default, so not written
+
+
 class TestMinimalConfigInvariant:
     """``_is_default_value`` decides whether a field is omitted from
     config.json. An emptied nullable provider field (reads back as None)
@@ -342,6 +425,28 @@ class TestInputDevices:
         assert devices[0][0] == ""
         assert "Built-in Mic" in devices[1][1]
         assert "External Mic" in devices[2][1]
+
+    def test_a_microphone_listed_once_per_audio_system_shows_once(self, monkeypatch):
+        """Windows lists one microphone under each of its audio systems, and
+        every entry would save the same name."""
+        mock_sd = MagicMock()
+        mock_sd.query_devices.return_value = [
+            {"name": "Microphone (MSI GV60 Streaming ", "max_input_channels": 2},
+            {"name": "Microphone (USB2.0 Device)", "max_input_channels": 2},
+            {"name": "Microphone (MSI GV60 Streaming Mic)", "max_input_channels": 2},
+            {"name": "Microphone (MSI GV60 Streaming Mic)", "max_input_channels": 2},
+            {"name": "Microphone (USB2.0 Device)", "max_input_channels": 1},
+        ]
+        monkeypatch.setitem(sys.modules, "sounddevice", mock_sd)
+
+        values = [value for value, _ in get_input_devices()]
+
+        assert values == [
+            "",
+            "Microphone (MSI GV60 Streaming",
+            "Microphone (USB2.0 Device)",
+            "Microphone (MSI GV60 Streaming Mic)",
+        ]
 
     def test_handles_sounddevice_import_error(self):
         """Gracefully handles missing sounddevice."""
@@ -647,14 +752,50 @@ class TestASaveKeepsWhatTheWindowDoesNotList:
         assert "voice_device" not in self._save(window, settings_file)
 
     @pytest.mark.parametrize("index", ["1", 1, "01", "+1"])
-    def test_a_listed_index_is_selected_and_kept(self, settings_file, microphones, index):
-        """Any form the listener reads as that index selects it."""
-        shown = dict(get_input_devices())[str(int(index))]
+    def test_a_saved_index_shows_its_microphone_and_saves_its_name(
+        self, settings_file, microphones, index,
+    ):
+        """Any form the listener reads as that index selects the microphone
+        it names, and a Save writes that microphone's name, which a replug
+        cannot move onto another device."""
+        name = AUDIO_DEVICES[int(index)]["name"]
         window = self._open(settings_file, {"voice_device": index})
         combo = window._widgets["voice_device"]
 
-        assert combo.currentText() == shown
-        assert int(self._save(window, settings_file)["voice_device"]) == int(index)
+        assert combo.currentText() == dict(get_input_devices())[name]
+        assert self._save(window, settings_file)["voice_device"] == name
+
+    def test_choosing_a_microphone_saves_its_name(self, settings_file, microphones):
+        name = AUDIO_DEVICES[2]["name"]
+        window = self._open(settings_file, {})
+        combo = window._widgets["voice_device"]
+        combo.setCurrentIndex(combo.findText(f"🎤 {name}"))
+
+        assert self._save(window, settings_file)["voice_device"] == name
+
+    def test_a_saved_name_selects_its_listed_microphone(self, settings_file, microphones):
+        name = AUDIO_DEVICES[1]["name"]
+        window = self._open(settings_file, {"voice_device": name})
+        combo = window._widgets["voice_device"]
+
+        assert combo.currentText() == f"🎤 {name}"
+        assert combo.count() == len(get_input_devices()), "no extra (by name) row"
+        assert self._save(window, settings_file)["voice_device"] == name
+
+    def test_a_truncated_name_survives_a_save_and_a_reopen(self, settings_file, microphones):
+        """Windows' MME lists a long name cut at 31 characters, trailing
+        space included."""
+        microphones.query_devices.return_value = AUDIO_DEVICES + [
+            {"name": "Microphone (MSI GV60 Streaming ", "max_input_channels": 2},
+        ]
+        window = self._open(settings_file, {})
+        combo = window._widgets["voice_device"]
+        combo.setCurrentIndex(combo.count() - 1)
+        saved = self._save(window, settings_file)
+
+        reopened = self._open(settings_file, saved)._widgets["voice_device"]
+        assert reopened.currentIndex() == reopened.count() - 1
+        assert reopened.count() == len(get_input_devices())
 
     @pytest.mark.parametrize("default", ["default", "System", "  "])
     def test_a_word_for_the_system_default_shows_as_system_default(
@@ -669,7 +810,7 @@ class TestASaveKeepsWhatTheWindowDoesNotList:
         assert combo.count() == len(get_input_devices())
         assert "voice_device" not in self._save(window, settings_file)
 
-    @pytest.mark.parametrize("choice", ["2", ""])
+    @pytest.mark.parametrize("choice", [AUDIO_DEVICES[2]["name"], ""])
     def test_choosing_a_listed_option_replaces_the_name(
         self, settings_file, microphones, choice,
     ):

@@ -2,11 +2,15 @@
 
 The listener gives Whisper his names as a hint (listening.spec.md, "The
 names he uses"). Over noise Whisper writes the hint back: measured with
-large-v3-turbo, 162 noise clips in 219 came out "Bagneux" and cleared
-both confidence filters. The listener reads a transcript that is mostly
-the hint again without it. This runs that path on the real model over
-noise and silence and holds it to the promise: the hint may change how
-a word is spelled, never whether anything was said.
+large-v3-turbo and a town for a hint, 162 noise clips in 219 came out as
+the town and cleared both confidence filters. The listener reads a
+transcript that is mostly the hint again without it. This runs that path
+on the real model over noise and silence and holds it to the promise:
+the hint may change how a word is spelled, never whether anything was
+said. It runs with Whisper's voice detector and without it: the detector
+cuts most noise before Whisper writes anything, and without it (the
+setting off, or a detector that failed) the second reading is all that
+stands between noise and his city. The city is an invented name.
 
 Needs a faster-whisper model already on this machine; nothing is
 downloaded. ``JARVIS_EVAL_WHISPER_MODEL`` names the one to use, else
@@ -25,7 +29,7 @@ import numpy as np
 import pytest
 
 SR = 16000
-CITY = "Bagneux"
+CITY = "Varnelle"
 
 
 def _load_model():
@@ -45,17 +49,24 @@ def _load_model():
 
 
 @pytest.fixture(scope="module")
-def listener():
+def whisper():
     model = _load_model()
     if model is None:
         pytest.skip("no faster-whisper model cached on this machine")
+    return model
+
+
+@pytest.fixture(params=[True, False], ids=["voice detector on", "voice detector off"])
+def listener(whisper, request):
     from jarvis.listening.listener import VoiceListener
 
+    model = whisper
     heard = VoiceListener.__new__(VoiceListener)
     heard.cfg = SimpleNamespace(
         weather_city=CITY, whisper_vocabulary=[], wake_word="yuba",
         wake_aliases=["youba", "juba"], whisper_min_confidence=0.3,
-        whisper_no_speech_threshold=0.5, voice_debug=False,
+        whisper_no_speech_threshold=0.5, whisper_language=None,
+        whisper_vad=request.param, voice_debug=False,
     )
     heard.model = model
     heard._whisper_backend = "faster-whisper"
@@ -125,8 +136,12 @@ def test_noise_does_not_come_out_as_his_city(listener, kind, level):
     rng = np.random.default_rng(CLIPS.index((kind, level)))
     audio = _at(_noise(kind, rng), level)
 
-    assert not _names_the_city(listener._transcribe(audio))
+    text, _language, _pieces = listener._transcribe(audio)
+
+    assert not _names_the_city(text)
 
 
 def test_silence_does_not_come_out_as_his_city(listener):
-    assert not _names_the_city(listener._transcribe(np.zeros(2 * SR, dtype=np.float32)))
+    text, _language, _pieces = listener._transcribe(np.zeros(2 * SR, dtype=np.float32))
+
+    assert not _names_the_city(text)

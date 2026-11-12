@@ -130,7 +130,7 @@ def engine(monkeypatch, qapp):
     monkeypatch.setattr("jarvis.reply.engine.run_reply_engine", scripted)
     monkeypatch.setattr(
         daemon, "_global_dialogue_memory",
-        DialogueMemory(inactivity_timeout=300, max_interactions=20),
+        DialogueMemory(inactivity_timeout=300),
     )
     monkeypatch.setattr(daemon, "_global_cfg", object())
     monkeypatch.setattr(daemon, "_global_db", object())
@@ -490,3 +490,31 @@ class TestFrozenMacOSBuild:
         tray.create_menu()
 
         assert (getattr(tray, "dashboard_action", None) in tray.menu.actions()) is offered
+
+
+# ── The gear opens the settings ───────────────────────────────────────
+
+
+class TestTheGearInTheDashboard:
+    """The page's gear opens the tray's own settings window
+    (``desktop_app.spec.md``, "Dashboard")."""
+
+    def test_the_gear_opens_the_settings_window(self, qapp, tray, monkeypatch):
+        from PyQt6.QtWidgets import QDialog
+
+        import desktop_app.settings_window as settings_window
+
+        opened = []
+
+        class _Settings:
+            def exec(self):
+                opened.append(True)
+                return QDialog.DialogCode.Rejected
+
+        monkeypatch.setattr(settings_window, "SettingsWindow", _Settings)
+        tray.show_dashboard()
+
+        _bridge(tray).openSettings()
+        _drain(qapp, lambda: opened, timeout=1.0)
+
+        assert opened == [True]

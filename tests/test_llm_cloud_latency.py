@@ -16,6 +16,7 @@ These pin the mechanisms that keep a remote cloud endpoint responsive:
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -94,6 +95,21 @@ class TestWarmUp:
         sent = mock_post.call_args.kwargs["json"]
         assert sent["model"] == "m"
         assert sent["max_tokens"] == 1  # minimal: don't pay for generation
+
+    @patch("requests.Session.post")
+    def test_a_prompt_given_to_the_warm_up_is_not_sent(self, mock_post):
+        """The request stays the one-token one: a server behind this backend
+        may bill every token and keeps no computed prompt for us."""
+        mock_post.return_value = _resp(
+            {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+        )
+        be = OpenAICompatibleBackend("http://x/v1")
+
+        assert be.warm_up("m", timeout_sec=5, prompt=("a long system prompt", "a catalogue")) is True
+
+        sent = json.dumps(mock_post.call_args.kwargs["json"])
+        assert "a long system prompt" not in sent
+        assert "a catalogue" not in sent
 
     @patch("requests.Session.post")
     def test_warm_up_returns_false_on_error(self, mock_post):

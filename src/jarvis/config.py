@@ -52,6 +52,20 @@ def get_supported_model_ids() -> set[str]:
 # first. An id ending in ``.en`` is English-only; the others cover ~99
 # languages. File sizes from HuggingFace (Systran/faster-whisper-*), VRAM from
 # OpenAI.
+# The languages Whisper transcribes, by the code `whisper_language` takes. Kept
+# equal to the installed faster-whisper's own list by a test.
+WHISPER_LANGUAGES = (
+    'af', 'am', 'ar', 'as', 'az', 'ba', 'be', 'bg', 'bn', 'bo', 'br', 'bs',
+    'ca', 'cs', 'cy', 'da', 'de', 'el', 'en', 'es', 'et', 'eu', 'fa', 'fi',
+    'fo', 'fr', 'gl', 'gu', 'ha', 'haw', 'he', 'hi', 'hr', 'ht', 'hu', 'hy',
+    'id', 'is', 'it', 'ja', 'jw', 'ka', 'kk', 'km', 'kn', 'ko', 'la', 'lb',
+    'ln', 'lo', 'lt', 'lv', 'mg', 'mi', 'mk', 'ml', 'mn', 'mr', 'ms', 'mt',
+    'my', 'ne', 'nl', 'nn', 'no', 'oc', 'pa', 'pl', 'ps', 'pt', 'ro', 'ru',
+    'sa', 'sd', 'si', 'sk', 'sl', 'sn', 'so', 'sq', 'sr', 'su', 'sv', 'sw',
+    'ta', 'te', 'tg', 'th', 'tk', 'tl', 'tr', 'tt', 'uk', 'ur', 'uz', 'vi',
+    'yi', 'yo', 'zh', 'yue'
+)
+
 SUPPORTED_WHISPER_MODELS: Dict[str, Dict[str, str]] = {
     "tiny": {"name": "Tiny", "size": "~75MB", "vram": "~1GB VRAM",
              "description": "Fastest, lower accuracy"},
@@ -205,7 +219,7 @@ class Settings:
 
     # Text-to-Speech
     tts_enabled: bool
-    tts_engine: str  # "piper" (default), "kokoro", or "chatterbox"
+    tts_engine: str  # "piper" (default), "kokoro", "chatterbox", or "kyutai"
     tts_voice: str | None
     tts_rate: int | None  # Words per minute (WPM), 200=normal
     tts_chatterbox_device: str  # "cuda", "auto", or "cpu" for Chatterbox
@@ -226,6 +240,14 @@ class Settings:
     tts_kokoro_voice: str  # Voice id, e.g. "ff_siwis" (French)
     tts_kokoro_lang_code: str  # Kokoro language code, e.g. "f" (French)
     tts_kokoro_speed: float  # Speech speed multiplier (1.0 = normal)
+
+    # Kyutai TTS (most natural local voice; needs an NVIDIA GPU)
+    tts_kyutai_voice: str  # Name in the kyutai/tts-voices repository, or path of a .safetensors voice file
+
+    # Talking face: a portrait whose lips follow Kyutai's voice (output/face/face.spec.md)
+    face_enabled: bool
+    face_portrait_path: str  # A still image of one face seen from the front
+    face_framing: str  # "head" (the whole head) or "face" (closer)
 
     # Voice Input & Audio
     voice_device: str | None
@@ -250,6 +272,7 @@ class Settings:
     whisper_vad: bool
     whisper_min_confidence: float
     whisper_no_speech_threshold: float
+    whisper_language: Optional[str]
     whisper_min_audio_duration: float
     whisper_min_word_length: int
     whisper_vocabulary: list[str]  # His names, given to Whisper as a hint with weather_city
@@ -324,8 +347,11 @@ class Settings:
     transcript_buffer_duration_sec: float
 
     # Memory & Dialogue
-    # Drives both the short-term memory window and forced diary update interval
+    # The pause that ends a conversation, and the forced diary update interval
     dialogue_memory_timeout: float
+    # Characters of the current conversation the model reads word for word;
+    # 0 = what the chat model's window holds (see dialogue_context_budget)
+    dialogue_context_max_chars: int
     memory_enrichment_max_results: int
     memory_enrichment_source: str  # "all", "diary", or "graph"
     # The model that reads a question for the memory lookup's keywords and
@@ -423,8 +449,10 @@ class Settings:
     stop_commands: list
     stop_command_fuzzy_ratio: float
 
-    # City shown on the dashboard weather card (Open-Meteo geocoded).
-    # Empty auto-detects from local GeoIP when location is enabled.
+    # The user's home city (Open-Meteo geocoded): shown on the dashboard
+    # weather card, and getWeather's last resort before asking, including
+    # when a place the user named is not found. Empty auto-detects from local
+    # GeoIP when location is enabled.
     weather_city: str
 
     # Desktop UI choices (orb particle layer, etc.)
@@ -576,6 +604,27 @@ def load_config() -> Dict[str, Any]:
 # settings every couple of seconds, and a line repeated at that rate is a
 # line the user learns to scroll past.
 _announced_pins: set = set()
+_announced_languages: set = set()
+
+
+def _whisper_language(value: Any) -> Optional[str]:
+    """The code Whisper is told to transcribe in, or None to let it detect.
+
+    "fr-FR" and "fr_FR" read as "fr", and "auto" as nothing named. A value
+    Whisper does not know is announced once and read as None: passed on, it
+    would fail every transcription and leave her deaf.
+    """
+    raw = str(value or "").strip().lower()
+    code = raw.replace("_", "-").split("-")[0]
+    if code in ("", "auto"):
+        return None
+    if code in WHISPER_LANGUAGES:
+        return code
+    if raw not in _announced_languages:
+        _announced_languages.add(raw)
+        print(f"⚠️ Whisper language ignored: '{raw}' is not one Whisper knows", flush=True)
+        print("   ↪️ it detects the language of each sentence instead", flush=True)
+    return None
 
 
 def is_local_endpoint(base_url: str) -> bool:
@@ -821,7 +870,7 @@ def get_default_config() -> Dict[str, Any]:
 
         # Text-to-Speech
         "tts_enabled": True,
-        "tts_engine": "piper",  # "piper" (default), "kokoro", or "chatterbox"
+        "tts_engine": "piper",  # "piper" (default), "kokoro", "chatterbox", or "kyutai"
         "tts_voice": None,
         "tts_rate": 200,  # Words per minute (WPM), 200=normal
         "tts_chatterbox_device": "cuda",  # "cuda" (recommended), "auto", or "cpu"
@@ -842,6 +891,14 @@ def get_default_config() -> Dict[str, Any]:
         "tts_kokoro_voice": "ff_siwis",  # French voice
         "tts_kokoro_lang_code": "f",  # French
         "tts_kokoro_speed": 1.0,  # Speech speed multiplier
+
+        # Kyutai TTS
+        "tts_kyutai_voice": "cml-tts/fr/577_394_000070-0001_enhanced.wav",  # French female voice
+
+        # Talking face
+        "face_enabled": False,
+        "face_portrait_path": "",
+        "face_framing": "head",
 
         # Voice Input & Audio
         "voice_device": None,
@@ -866,6 +923,7 @@ def get_default_config() -> Dict[str, Any]:
         "whisper_vad": True,
         "whisper_min_confidence": 0.3,  # Filter low-confidence segments (hallucinations)
         "whisper_no_speech_threshold": 0.5,  # Hard cutoff: reject segments where no_speech_prob >= this
+        "whisper_language": "",  # Code of the one language Whisper transcribes in; empty: it detects
         "whisper_min_audio_duration": 0.15,
         "whisper_min_word_length": 1,
         "whisper_vocabulary": [],  # Names Whisper should spell his way; weather_city is added on its own
@@ -972,9 +1030,13 @@ def get_default_config() -> Dict[str, Any]:
         "transcript_buffer_duration_sec": 120.0,
 
         # Memory & Dialogue
-        # dialogue_memory_timeout drives the short-term memory window AND the forced
-        # diary update interval. After a diary update, enrichment retrieves older context.
+        # dialogue_memory_timeout is the pause that ends a conversation AND the
+        # forced diary update interval, so a long conversation is summarised as
+        # it goes. Its latest messages reach the model word for word, within
+        # dialogue_context_max_chars (0 = by the chat model's size); the diary's
+        # summary carries what was said before them.
         "dialogue_memory_timeout": 300.0,
+        "dialogue_context_max_chars": 0,
         "memory_enrichment_max_results": 3,
         "memory_enrichment_source": "all",  # "all", "diary", or "graph"
         # Empty = reuse the tool router's chain (tool_router_model →
@@ -1166,7 +1228,7 @@ def load_settings() -> Settings:
     active_profiles = _ensure_list(merged.get("active_profiles"))
     tts_enabled = bool(merged.get("tts_enabled", True))
     tts_engine = str(merged.get("tts_engine", "piper")).lower()
-    if tts_engine not in ("piper", "chatterbox", "kokoro"):
+    if tts_engine not in ("piper", "chatterbox", "kokoro", "kyutai"):
         tts_engine = "piper"  # Default to piper if invalid value
     tts_voice_val = merged.get("tts_voice")
     tts_voice = None if tts_voice_val in (None, "", "null") else str(tts_voice_val)
@@ -1219,6 +1281,15 @@ def load_settings() -> Settings:
         tts_kokoro_speed = float(merged.get("tts_kokoro_speed", 1.0))
     except Exception:
         tts_kokoro_speed = 1.0
+    tts_kyutai_voice = (
+        str(merged.get("tts_kyutai_voice") or "").strip()
+        or "cml-tts/fr/577_394_000070-0001_enhanced.wav"
+    )
+    face_enabled = _as_bool(merged.get("face_enabled", False))
+    face_portrait_path = str(merged.get("face_portrait_path") or "").strip()
+    face_framing = str(merged.get("face_framing") or "head").strip().lower()
+    if face_framing not in ("head", "face"):
+        face_framing = "head"
 
     voice_device_val = merged.get("voice_device")
     voice_device = None if voice_device_val in (None, "", "default", "system") else str(voice_device_val)
@@ -1311,8 +1382,12 @@ def load_settings() -> Settings:
     # Transcript Buffer - ambient speech context for intent judge (separate from dialogue)
     transcript_buffer_duration_sec = float(merged.get("transcript_buffer_duration_sec", 120.0))
 
-    # Dialogue memory window and forced diary update share this duration
+    # The pause that ends a conversation and the forced diary update share this duration
     dialogue_memory_timeout = float(merged.get("dialogue_memory_timeout", 300.0))
+    try:
+        dialogue_context_max_chars = max(0, int(merged.get("dialogue_context_max_chars", 0) or 0))
+    except (TypeError, ValueError):
+        dialogue_context_max_chars = 0
     memory_enrichment_max_results = int(merged.get("memory_enrichment_max_results", 3))
     memory_enrichment_source = str(merged.get("memory_enrichment_source", "all")).lower()
     if memory_enrichment_source not in ("all", "diary", "graph"):
@@ -1403,6 +1478,17 @@ def load_settings() -> Settings:
 
     whisper_min_confidence = float(merged.get("whisper_min_confidence", 0.4))
     whisper_no_speech_threshold = float(merged.get("whisper_no_speech_threshold", 0.5))
+    whisper_language = _whisper_language(merged.get("whisper_language"))
+    if whisper_language not in (None, "en") and whisper_model.endswith(".en"):
+        # An English-only model transcribes English whatever it is told, and
+        # would report the named language for English text.
+        if ("en-only", whisper_language) not in _announced_languages:
+            _announced_languages.add(("en-only", whisper_language))
+            print(f"⚠️ Whisper language ignored: '{whisper_language}' with the "
+                  f"English-only model {whisper_model}", flush=True)
+            print("   ↪️ it transcribes English; pick a multilingual model to use another language",
+                  flush=True)
+        whisper_language = None
     whisper_min_audio_duration = float(merged.get("whisper_min_audio_duration", 0.3))
     whisper_min_word_length = int(merged.get("whisper_min_word_length", 2))
     raw_vocabulary = merged.get("whisper_vocabulary", [])
@@ -1472,6 +1558,10 @@ def load_settings() -> Settings:
         tts_kokoro_voice=tts_kokoro_voice,
         tts_kokoro_lang_code=tts_kokoro_lang_code,
         tts_kokoro_speed=tts_kokoro_speed,
+        tts_kyutai_voice=tts_kyutai_voice,
+        face_enabled=face_enabled,
+        face_portrait_path=face_portrait_path,
+        face_framing=face_framing,
 
         # Voice Input & Audio
         voice_device=voice_device,
@@ -1496,6 +1586,7 @@ def load_settings() -> Settings:
         whisper_vad=whisper_vad,
         whisper_min_confidence=whisper_min_confidence,
         whisper_no_speech_threshold=whisper_no_speech_threshold,
+        whisper_language=whisper_language,
         whisper_min_audio_duration=whisper_min_audio_duration,
         whisper_min_word_length=whisper_min_word_length,
         whisper_vocabulary=whisper_vocabulary,
@@ -1555,6 +1646,7 @@ def load_settings() -> Settings:
 
         # Memory & Dialogue
         dialogue_memory_timeout=dialogue_memory_timeout,
+        dialogue_context_max_chars=dialogue_context_max_chars,
         memory_enrichment_max_results=memory_enrichment_max_results,
         memory_enrichment_source=memory_enrichment_source,
         memory_extractor_model=memory_extractor_model,

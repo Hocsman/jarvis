@@ -480,7 +480,7 @@ def test_the_audio_stream_starting_marks_the_first_sound(db):
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("engine", ["ChatterboxTTS", "PiperTTS", "KokoroTTS"])
+@pytest.mark.parametrize("engine", ["ChatterboxTTS", "PiperTTS", "KokoroTTS", "KyutaiTTS"])
 def test_publishing_the_speaking_state_is_not_the_first_sound(db, engine):
     """`SPEAKING` is published when a chunk begins to be synthesised, before
     anything is audible; marking there would understate the wait."""
@@ -505,6 +505,7 @@ def test_publishing_the_speaking_state_is_not_the_first_sound(db, engine):
         ("ChatterboxTTS", "pygame.mixer.music.play()", False),   # no audio lock in that engine
         ("PiperTTS", "self._audio_stream.start()", True),
         ("KokoroTTS", "self._audio_stream.start()", True),
+        ("KyutaiTTS", "self._audio_stream.start()", True),
     ],
 )
 def test_each_speech_engine_marks_the_sound_once_playback_has_started(

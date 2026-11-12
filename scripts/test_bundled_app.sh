@@ -3,8 +3,9 @@
 #
 # macOS builds dist/Jarvis.app, Linux builds the onedir folder dist/Jarvis/.
 # scripts/check_bundle_layout.py derives the data files the app reads at
-# runtime from the source tree and names any that the build is missing,
-# before the app is launched.
+# runtime from the source tree and from the installed packages it names
+# (PACKAGE_DATA), and names any that the build is missing, before the app is
+# launched.
 
 set -e
 
@@ -43,7 +44,8 @@ echo "🔍 Checking the build layout..."
 if ! python scripts/check_bundle_layout.py --dist dist; then
     echo ""
     echo "❌ Build is incomplete: the files listed above are missing from $BUNDLE."
-    echo "   Add them to the datas list in jarvis_desktop.spec."
+    echo "   Add them to the datas list in jarvis_desktop.spec. A package reported as not"
+    echo "   installed means the check ran with another Python than the build."
     exit 1
 fi
 echo ""

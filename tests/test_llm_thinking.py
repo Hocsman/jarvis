@@ -6,9 +6,8 @@ the ``think`` parameter sent to Ollama across all call sites.
 
 Asking for thinking sends ``think: true``. Not asking for it sends
 ``think: false``, except on a request that carries tools, where the flag is
-omitted entirely: Ollama reads an explicit false as an instruction about the
-model's reasoning mode, and on a model that has no such mode it suppresses
-native tool calls outright.
+omitted entirely: ``gemma4:e2b`` has a thinking mode, and an explicit false
+that switches it off also stops its native tool calls.
 """
 
 import json
@@ -24,11 +23,10 @@ from jarvis.config import get_default_config
 class TestThinkingAndTools:
     """A request carrying tools must not tell the model not to think.
 
-    Ollama reads ``think: false`` as an instruction about the model's
-    reasoning mode; on a model that has no such mode it stops emitting
-    native tool calls altogether, so an assistant offered a tool never
-    calls it. Tool-free calls keep the flag, which measurably steadies
-    small-model extraction.
+    Switching ``gemma4:e2b``'s thinking mode off with ``think: false``
+    also stops its native tool calls, so an assistant offered a tool
+    never calls it. Tool-free calls keep the flag, which measurably
+    steadies small-model extraction.
     """
 
     def _payload(self, mock_post):

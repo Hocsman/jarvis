@@ -2,14 +2,17 @@
 
 ``scripts/check_bundle_layout.py`` is what ``test_bundled_app.bat`` and
 ``test_bundled_app.sh`` run on a fresh build. It derives the data files
-the app reads at runtime from the source tree (nothing is listed by
-hand), looks for each of them at the place the bundle's layout gives it,
-and names every one that is absent. These tests build small fake projects and fake
-builds, so they pin the mechanism and not today's file list.
+the app reads at runtime from the source tree (no file of ours is listed
+by hand), adds the data files of the third-party packages it names, read
+from the installed package, looks for each of them at the place the
+bundle's layout gives it, and names every one that is absent. These tests
+build small fake projects, a fake installed package and fake builds, so
+they pin the mechanism and not today's file list.
 """
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 from pathlib import Path, PurePosixPath
 
@@ -44,6 +47,7 @@ def _project(tmp_path: Path) -> Path:
     _touch(src / "pkg" / "module.py")
     _touch(src / "pkg" / "pkg.spec.md")
     _touch(src / "pkg" / "CLAUDE.md")
+    _touch(src / "pkg" / "vendored" / "LICENSE", "licence of vendored source")
     _touch(src / "pkg" / "__pycache__" / "module.cpython-311.pyc")
     _touch(src / "pkg" / "assets" / "icon.ico")
     _touch(src / "pkg" / ".DS_Store")
@@ -61,11 +65,31 @@ RUNTIME = {
     "pkg/assets/logo.png",
 }
 
+# A third-party package installed beside the project that opens a model
+# file from its own folder, as faster-whisper opens its voice detector's.
+THIRD_PARTY = "ships_its_own_model"
+PACKAGE_FILES = {f"{THIRD_PARTY}/assets/detector.onnx"}
+
+
+@pytest.fixture(autouse=True)
+def _third_party_package(tmp_path, monkeypatch):
+    site = tmp_path / "site-packages"
+    package = site / THIRD_PARTY
+    _touch(package / "__init__.py")
+    _touch(package / "model.py")
+    _touch(package / "assets" / "__init__.py")
+    _touch(package / "assets" / "detector.onnx", "onnx")
+    _touch(package / "assets" / "__pycache__" / "__init__.cpython-311.pyc")
+    _touch(package / "docs" / "notes.txt", "not read at runtime")
+    monkeypatch.syspath_prepend(str(site))
+    importlib.invalidate_caches()
+    monkeypatch.setattr(checker, "PACKAGE_DATA", {THIRD_PARTY: ("assets",)})
+
 
 def _fake_build(root: Path, platform: str, *, data_dir: str | None = None) -> Path:
     """Lay out a build the way PyInstaller does for ``platform``."""
     dist = root / "dist"
-    wanted = sorted(RUNTIME) + list(checker.LICENCE_FILES)
+    wanted = sorted(RUNTIME) + list(checker.LICENCE_FILES) + sorted(PACKAGE_FILES)
     if platform == "darwin":
         bundle = dist / "Jarvis.app" / "Contents"
         _touch(bundle / "MacOS" / "Jarvis")
@@ -98,6 +122,7 @@ class TestRuntimeDataFiles:
             "pkg/module.py",
             "pkg/pkg.spec.md",
             "pkg/CLAUDE.md",
+            "pkg/vendored/LICENSE",
             "pkg/assets/icon.ico",
             "pkg/.DS_Store",
         ):
@@ -168,6 +193,53 @@ class TestCheckBundle:
         _touch(root / "src" / "pkg" / "page" / "model.weights")
         problems = checker.check_bundle(dist, root, platform)
         assert any("model.weights" in p for p in problems)
+
+    @pytest.mark.parametrize("missing", sorted(PACKAGE_FILES))
+    def test_a_missing_package_data_file_is_named(self, tmp_path, platform, missing):
+        root = _project(tmp_path)
+        dist = _fake_build(root, platform)
+        for candidate in dist.rglob("*"):
+            if candidate.is_file() and candidate.as_posix().endswith("/" + missing):
+                candidate.unlink()
+        problems = checker.check_bundle(dist, root, platform)
+        assert len(problems) == 1
+        assert missing in problems[0]
+
+    def test_a_package_that_is_not_installed_is_a_problem(self, tmp_path, platform, monkeypatch):
+        """Its data files cannot be listed, and a check that listed none would pass."""
+        root = _project(tmp_path)
+        dist = _fake_build(root, platform)
+        monkeypatch.setattr(checker, "PACKAGE_DATA", {"not_installed_anywhere": ("assets",)})
+        problems = checker.check_bundle(dist, root, platform)
+        assert any("not_installed_anywhere" in p for p in problems)
+
+
+class TestPackageData:
+    def test_its_data_files_land_in_its_own_folder(self):
+        assert {p.as_posix() for p in checker.package_data_files()} == PACKAGE_FILES
+
+    def test_its_code_its_caches_and_its_other_folders_are_not_data(self):
+        found = {p.as_posix() for p in checker.package_data_files()}
+        assert not any(name.endswith((".py", ".pyc")) or "__pycache__" in name for name in found)
+        assert f"{THIRD_PARTY}/docs/notes.txt" not in found
+
+    def test_the_package_is_found_without_being_imported(self):
+        import sys
+
+        checker.package_data_files()
+
+        assert THIRD_PARTY not in sys.modules
+
+    def test_faster_whisper_s_voice_detector_folder_is_listed(self):
+        """The folder is the one faster-whisper resolves its detector's
+        model against, so the list follows the library, not a guess."""
+        utils = pytest.importorskip("faster_whisper.utils")
+        real = _load_checker()
+        root = real.installed_package_root("faster_whisper")
+
+        folder = Path(utils.get_assets_path()).resolve().relative_to(root.resolve()).as_posix()
+
+        assert folder in real.PACKAGE_DATA["faster_whisper"]
 
 
 class TestWhereTheFrozenAppLooks:

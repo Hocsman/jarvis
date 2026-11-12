@@ -1,3 +1,4 @@
+import gc
 import ipaddress
 import os
 import shutil
@@ -200,6 +201,68 @@ def _isolate_dictation_history(_bac_a_sable, request, monkeypatch):
         monkeypatch.setattr(module, "_default_history_path", lambda: target)
         patched += 1
     assert patched, "neither dictation history module could be imported"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_face_frames(request, monkeypatch):
+    """Keep the suite's frames off the talking face of a running Jarvis.
+
+    The renderer and the face window share one shared memory segment per user;
+    a test that publishes a frame would show it in the face window the developer
+    has open. Each test gets its own segment name.
+    """
+    import importlib
+
+    name = f"jarvis_face_test_{os.getpid()}_{abs(hash(request.node.nodeid)):x}"[:30]
+    patched = 0
+    for path in ("jarvis.output.face.frames", "src.jarvis.output.face.frames"):
+        try:
+            module = importlib.import_module(path)
+        except ImportError:
+            continue
+        monkeypatch.setattr(module, "segment_name", lambda: name)
+        monkeypatch.setattr(module, "_reader", None)
+        patched += 1
+    assert patched, "neither face frames module could be imported"
+
+
+@pytest.fixture(autouse=True)
+def _voice_detector_not_yet_failed(monkeypatch):
+    """Start each test with Whisper's voice detector not yet failed.
+
+    Its failure is the process's (``jarvis/listening/whisper_vad.py``), and
+    the suite refuses onnxruntime, so the first test that warms a listener
+    would otherwise mark it failed for every test after it. The suite
+    imports the module both as ``jarvis.x`` and as ``src.jarvis.x``.
+    """
+    for name in ("jarvis.listening.whisper_vad", "src.jarvis.listening.whisper_vad"):
+        module = sys.modules.get(name)
+        if module is not None:
+            monkeypatch.setattr(module, "_failure", None)
+
+
+@pytest.fixture(autouse=True)
+def _no_stream_counted_open(monkeypatch):
+    """Start each test with no stream counted open and the device list never
+    read afresh.
+
+    Both are the process's: the streams counted open live in
+    ``jarvis.utils.audio_lock``, and the first device list PortAudio read,
+    which an index setting is resolved against, in
+    ``jarvis.utils.audio_stream``. A stand-in stream that cannot say it is
+    closed (a string, a mock) stays counted for good, so one test's leftovers
+    would hold every later reading of the list back, and one test's reading
+    would decide what another's indices name. The suite imports modules both
+    as ``jarvis.x`` and as ``src.jarvis.x``; each copy loaded is reset.
+    """
+    for prefix in ("jarvis", "src.jarvis"):
+        lock_module = sys.modules.get(f"{prefix}.utils.audio_lock")
+        if lock_module is not None:
+            monkeypatch.setattr(lock_module, "_streams", [])
+            monkeypatch.setattr(lock_module, "_unguarded_opens", 0)
+        stream_module = sys.modules.get(f"{prefix}.utils.audio_stream")
+        if stream_module is not None:
+            monkeypatch.setattr(stream_module, "_first_list", None)
 
 
 @pytest.fixture(autouse=True)
@@ -538,6 +601,19 @@ def public_dns(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_ollama_residency(monkeypatch):
+    """Keep the machine's Ollama residency out of what the tests expect.
+
+    The residency Yuba asks Ollama for is never shorter than the one
+    ``OLLAMA_KEEP_ALIVE`` sets for the server, read from Yuba's own
+    environment, so on a machine that sets it every warm-up and judge call
+    would ask for that instead of Yuba's own. A test that is about it sets
+    the variable itself.
+    """
+    monkeypatch.delenv("OLLAMA_KEEP_ALIVE", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_hugging_face_hub(_bac_a_sable, request, monkeypatch):
     """Keep every test off the Hugging Face Hub and out of the user's model cache.
 
@@ -634,7 +710,7 @@ def db():
 def dialogue_memory():
     """Provide a dialogue memory instance for unit tests."""
     from jarvis.memory.conversation import DialogueMemory
-    return DialogueMemory(inactivity_timeout=300, max_interactions=20)
+    return DialogueMemory(inactivity_timeout=300)
 
 
 @pytest.fixture
@@ -650,6 +726,18 @@ def qapp():
     if app is None:
         app = QApplication([])
     yield app
+    # A window the test left shown that only a reference cycle holds (a chat
+    # window and its orb) has a paint pending. Collect it now, while Qt is
+    # between events: a collection that fires while Qt paints it frees the
+    # window under the child being painted, and the process dies in native
+    # code. When the collector fires depends on every allocation in the run,
+    # so nothing else keeps it out of the paint.
+    # test_qapp_tears_down_what_only_a_cycle_holds.py holds the collection to
+    # that. Only a shown window is painted, and a full collection costs a
+    # large share of a second late in the run, so a teardown with none shown
+    # skips it.
+    if any(widget.isVisible() for widget in app.topLevelWidgets()):
+        gc.collect()
     app.processEvents()
     for widget in list(app.topLevelWidgets()):
         try:

@@ -2,7 +2,7 @@
 
 ## Why
 
-Everything she says aloud leaves through one of three engines in
+Everything she says aloud leaves through one of four engines in
 `tts.py`. The listener, the echo detector, the hot window and the
 reminder scheduler all lean on what those engines promise, and most of
 those promises are not visible in a signature: that a completion
@@ -21,12 +21,13 @@ voice).
 
 Synthesis is local. The text she speaks never leaves the machine. The
 only network traffic in this module is fetching a model the first time
-it is needed (a Piper voice, the Kokoro weights), and that request
-carries a file name, never speech.
+it is needed (a Piper voice, the Kokoro weights, the Kyutai model and
+the file of its voice), and that request carries a file name, never
+speech.
 
 ## Engines and selection
 
-`create_tts_engine(engine=...)` returns one of three engines. The name
+`create_tts_engine(engine=...)` returns one of four engines. The name
 is compared case-insensitively.
 
 | `tts_engine` | Class | What it is |
@@ -34,9 +35,10 @@ is compared case-insensitively.
 | `piper` (default) | `PiperTTS` | Light local neural voice, one `.onnx` model per voice, fetched on first use |
 | `kokoro` | `KokoroTTS` | Kokoro-82M, more natural, real time on CPU, multilingual through espeak-ng |
 | `chatterbox` | `ChatterboxTTS` | Heavy PyTorch voice with emotion control and cloning, runs from source only |
+| `kyutai` | `KyutaiTTS` | Kyutai TTS 1.6B (English and French), the most natural of the four, faster than real time on a recent NVIDIA GPU, runs from source only |
 
 Any other name yields Piper. The config layer lowercases `tts_engine` and
-falls back to `piper` for a value that is not one of the three, so the
+falls back to `piper` for a value that is not one of the four, so the
 factory only ever sees a valid name from the daemon.
 
 The daemon builds the engine from the settings in one function,
@@ -51,17 +53,19 @@ nothing: `speak` queues nothing, `start` starts nothing. Callers test
 
 ### The shared surface
 
-The three engines are interchangeable to the listener. Each exposes:
+The four engines are interchangeable to the listener. Each exposes:
 
 | Member | Meaning |
 |--------|---------|
 | `enabled` | Whether the engine speaks at all |
 | `start()` | Create the worker thread. Idempotent |
-| `stop()` | Interrupt, end the worker, wait up to two seconds for it |
-| `speak(text, completion_callback=None, duration_callback=None, language=None)` | Queue one item (see below). `language` is the language the user was heard in. Piper chooses its voice from it; Kokoro and Chatterbox accept it and ignore it |
+| `stop()` | Interrupt, end the worker (and Kyutai's player), wait up to two seconds for each thread. The engine counts as started until they are gone, so an item arriving meanwhile waits in the queue for the next worker |
+| `speak(text, completion_callback=None, duration_callback=None, language=None)` | Queue one item (see below). `language` is the language the user was heard in. Piper chooses its voice from it; Kokoro, Chatterbox and Kyutai accept it and ignore it |
 | `interrupt()` | Stop talking (see Interrupting) |
 | `is_speaking()` | Whether an item is being synthesised or played |
 | `get_last_spoken_text()` | The processed text of the item most recently started |
+| `voice_delay()` | How much later than usual her voice will be heard: the talking face's delay while a face is ready and watched (Kyutai, see "The face"), otherwise 0 |
+| `wait_until_ready(timeout)` | Waits up to `timeout` seconds for the load (and warm-up) `start` began. `True` once the engine can speak without paying it, `False` once it settled without a voice (it could not load, or the engine is off), `None` when it is still loading at the deadline, or when `start` has not been called and nothing is loading (then it returns at once). Piper and Chatterbox load inside `start`, so they never wait. The listener calls it before it announces "Listening!" (`listening.spec.md`, "Startup & Model Warmup") |
 
 `speak` starts the worker if nobody has. Calling `start` on Piper loads
 the voice on the calling thread (downloading it if absent) so the wait
@@ -76,16 +80,27 @@ leaves the pipeline loaded and the error surfaces at speak time. A
 before the load finishes waits on the same lock. On Windows
 Kokoro first imports its package on the calling thread, because loading
 PyTorch, SciPy and OpenBLAS DLLs concurrently deadlocks the Windows
-loader. Chatterbox loads its model on `start`.
+loader. Chatterbox loads its model on `start`. Kyutai warms its model on
+a background thread named `kyutai-init`, ending with one throwaway
+synthesis whose audio is discarded: the first synthesis pays the model's
+one-off costs (kernel and module loading, allocator warm-up), which take
+tens of seconds, so they are paid at startup rather than on the first
+reply. On Windows `start` first
+sets the compile switch (see "Kyutai") and imports the package on the
+calling thread, for the loader reason given for Kokoro.
 
 ## The queue
 
 One worker thread per engine takes items from a FIFO queue and speaks
 them one at a time. An item is `(text, completion_callback,
-duration_callback)`, and for Piper a fourth field, the language. The
-language belongs to the item, not to the engine: sentences of two
-replies in two languages can wait in the queue together, each spoken in
-its own voice.
+duration_callback)`, then the engine's own fields: for Piper the
+language, and last in every engine the count of interruptions at the
+moment the item was queued (see "Interrupting"). The language belongs to
+the item, not to the engine: sentences of two replies in two languages
+can wait in the queue together, each spoken in its own voice. Kyutai has a
+second thread, the player, that plays what the worker has synthesised, in
+the same order (see "Kyutai"); for it "the worker speaks the item" reads
+"the worker synthesises it and the player plays it".
 
 **Text is processed when it is queued.** `_preprocess_for_speech`
 replaces links with a spoken description of the domain and strips
@@ -93,21 +108,31 @@ markdown (bold, italics, code, headings, quotes, bullets, and numbered
 markers only when two or more adjacent lines form a real list). The
 processed text is what the worker speaks and what
 `get_last_spoken_text()` returns. Words inside the markup are kept.
+Symbols are not rewritten here. The words for "°" or "km/h" belong to the
+language of the reply, and the language this layer is given is the one the
+user was heard in, an assumption about the reply (see "Which language
+wins"). The reply the engine writes for a turn from the voice already has
+its units, signs and dates in words, because the prompt asks for them
+(`src/jarvis/reply/prompts/prompts.spec.md`, Spoken Form). Text spoken
+without that prompt, a reminder or a Claude Code report, keeps whatever
+symbols it carries.
 
 **Empty text is dropped, unless it carries a callback.** Whitespace
 with no completion callback queues nothing. Empty text *with* a
 completion callback is the end-of-reply marker: it speaks nothing, and
-when the worker reaches it, after everything queued before it, it fires
-its callback. A streamed reply whose last sentence ended on punctuation
-leaves no tail for the callback to ride on, so it travels as a marker of
-its own (`streaming.spec.md`, "One reply is still one turn").
+when the engine reaches it, after everything queued before it has been
+said, it fires its callback (for Kyutai, the player reaches it, so the
+marker waits for the audio of the items before it to finish playing). A
+streamed reply whose last sentence ended on punctuation leaves no tail
+for the callback to ride on, so it travels as a marker of its own
+(`streaming.spec.md`, "One reply is still one turn").
 
 **Callbacks belong to their item.** They are queued with the text and
-installed by the worker as it dequeues that item. They are never
-engine-wide settings written by `speak`, because a reply spoken sentence
-by sentence would then fire the last chunk's callback after the first
-chunk finished and open the hot window mid-reply. An early chunk carries
-no callback at all.
+installed by the worker as it dequeues that item (Kyutai carries them
+with the item to its player). They are never engine-wide settings written
+by `speak`, because a reply spoken sentence by sentence would then fire
+the last chunk's callback after the first chunk finished and open the hot
+window mid-reply. An early chunk carries no callback at all.
 
 ## Speaking state and completion
 
@@ -116,7 +141,11 @@ that item is finished, interrupted or abandoned. It describes the item
 in hand. It is false while the worker is idle, in the instant between
 two items, and for items still waiting in the queue. The end of a reply
 is therefore signalled by the completion callback, never inferred from
-`is_speaking()` going false.
+`is_speaking()` going false. Kyutai takes the next item up while the
+current one is still playing, so for it the item in hand is the earliest
+one not yet played: `is_speaking()` stays true from the first item taken up
+until the last one has been played, interrupted or abandoned, with no
+instant between two items.
 
 **The completion callback fires if and only if the item's audio played
 to its end.** It does not fire when the engine could not initialise,
@@ -128,18 +157,24 @@ recording that she said it. The end-of-reply marker is the one item that
 fires without playing anything; it has no audio to play.
 
 **The duration callback** receives the exact length of the item's audio
-in seconds, computed from the synthesised samples, after synthesis and
-before playback starts. It does not fire when nothing was synthesised.
+in seconds, computed from the synthesised samples, once synthesis has
+ended. Piper, Kokoro and Chatterbox play after synthesising, so it arrives
+before playback starts. Kyutai plays while it synthesises, so it arrives
+during playback, or before it when the item was prepared while the previous
+one played. It does not fire when nothing was synthesised.
 
 **Speaking state.** When an item starts, the engine publishes SPEAKING
 through the shared state (`state.spec.md`). Publishing never raises, so
-the engine calls it bare and speech never depends on it. Nothing in this
-module clears the state when speech ends; whoever owns the transitions
-does.
+the engine calls it bare and speech never depends on it. An item that a
+stop word has already cancelled when the worker takes it up publishes
+nothing: the listener answers a stop with IDLE, and a SPEAKING after it
+would stay on the orb until the next wake word. Nothing in this module
+clears the state when speech ends; whoever owns the transitions does.
 
-**First sound.** Once an item's audio stream is running (Piper and
-Kokoro: after the output stream starts; Chatterbox: after playback
-begins), the engine calls `_sound_started()`, which marks the latency
+**First sound.** Once an item's audio stream is running (Piper, Kokoro
+and Kyutai: after the output stream starts; Chatterbox: after playback
+begins; a Kyutai item drawn on the talking face: when it is heard, see
+"Kyutai"), the engine calls `_sound_started()`, which marks the latency
 journal (`jarvis/latency.spec.md`). That is not where SPEAKING is
 published: SPEAKING goes out when an item starts being synthesised, before
 anything is audible, so marking there would understate the wait by the
@@ -155,7 +190,10 @@ talking, completely. The contract is the one `streaming.spec.md` states
 - the item playing stops within a fraction of a second (the output
   stream is aborted, and the playback loops poll every 50 ms, 100 ms for
   Chatterbox);
-- items queued before the call are discarded without being synthesised;
+- items queued before the call are discarded, so that none of them is
+  heard: Piper, Kokoro and Chatterbox never synthesise them, and Kyutai,
+  which prepares items while one plays, drops those it has already
+  prepared (see below);
 - an item still being synthesised is abandoned;
 - no completion callback fires for any of them, and the end-of-reply
   marker does not fire its callback either: an interrupted reply is
@@ -165,31 +203,79 @@ talking, completely. The contract is the one `streaming.spec.md` states
   follows a stop is not swallowed.
 
 `interrupt()` is safe from any thread, safe when nothing is speaking,
-and safe to call repeatedly. `stop()` calls it. Chatterbox can only
-interrupt playback: the generation of one item is a single model call
-that cannot be cut short.
+and safe to call repeatedly. `stop()` calls it. Chatterbox cannot cut a
+generation short: the item is a single model call, so what it made for an
+item interrupted meanwhile is thrown away when the call returns, never
+played.
+
+**How the contract is kept.** An engine counts its interruptions.
+`interrupt()` adds one, and `speak` stamps every item with the count
+current when it was queued. The worker drops an item whose stamp is no
+longer current before doing anything else with it: no synthesis, no
+callback, and for the end-of-reply marker no firing. The item in hand
+compares the count at every step (before synthesis, between the pieces
+the model returns, after synthesis, in the audio callback and in the
+playback wait) and counts as unspoken once it has changed. Stamping at
+the moment of queueing is what makes an interrupt that lands between the
+worker taking an item up and starting it impossible to lose, and it is
+what lets the reply that follows a stop be spoken, since its items carry
+the new count.
+
+The listener does its part upstream. A stop can land while the reply is
+still being written, with only some of it queued: the engine drops what it
+holds, and the listener queues nothing more of that reply, no later
+sentence, no tail and no marker (`listening/listening.spec.md`, "The
+Microphone Is Always Read").
+
+An interrupted reply never reaches its completion callback, so nothing the
+engine does takes the published state out of SPEAKING: the listener, which
+heard the stop, publishes IDLE right after calling `interrupt()`
+(`state.spec.md`).
+
+Kyutai applies the count in both its threads. The worker drops a stale item
+before preparing it and compares the count at every frame the model
+produces, so an item still being synthesised is abandoned within one frame
+of audio rather than run to its end. The player drops a prepared item whose
+count is stale without opening a stream, fires nothing for it, and stops
+the stream of the item it is playing; so the items prepared while the
+interrupted one played are never heard. It drops an end-of-reply marker
+whose count is stale in the same way, and that is where a stop word usually
+finds the marker: the worker has handed it over while the last sentence
+still plays. With a face attached, `interrupt()` also cuts the face at that
+instant (`face/face.spec.md`, "Interrupting"), so her lips stop with her
+voice.
 
 ## What she owes the echo detector
 
 The engines do not own the echo reference. The listener records what was
 said with `track_tts_start`, accumulating the sentences of one reply
 (`streaming.spec.md`, "The constraint that shapes everything"). The
-engine owes the listener four things:
+engine owes the listener five things:
 
 1. `is_speaking()`, which gates stop-word and echo handling while she
-   talks;
+   talks, and keeps what the microphone hears meanwhile out of the room's
+   quiet level, the floor of the voice proof (`listening.spec.md`, "The
+   floor is the room, never her nor him"): it must stay true until her
+   voice has played;
 2. `get_last_spoken_text()`, which is the current chunk only. It is not
    the echo reference, and must not be used as one;
 3. the duration callback, which replaces the detector's estimate with the
    real length when the listener passed one. A streamed reply attaches it to
-   its tail only, so earlier chunks are timed by estimate;
-4. the completion callback, which is what opens the hot window.
+   its tail only, so earlier chunks are timed by estimate. Kyutai produces
+   the tail's length as soon as the tail is synthesised, which can be while
+   earlier chunks are still heard: the rate the detector derives from it (the
+   words of the whole reply over the tail's length) is then applied to those
+   chunks too, which moves its window ahead of the speech, and an utterance
+   of four words or fewer is judged by that window alone;
+4. the completion callback, which is what opens the hot window;
+5. `voice_delay()`, which the listener adds to the start of her speech it
+   records, because a watched face holds her voice back by its delay.
 
 Where no exact duration is known the detector estimates from `tts_rate`
-(words per minute). Piper, Kokoro and Chatterbox ignore `tts_rate`
-themselves: Piper's pace is `length_scale`, Kokoro's is `speed`, and
-`tts_rate` and `tts_voice` are accepted by the factory for interface
-compatibility only.
+(words per minute). Piper, Kokoro, Chatterbox and Kyutai ignore `tts_rate`
+themselves: Piper's pace is `length_scale`, Kokoro's is `speed`, Kyutai has
+no pace setting, and `tts_rate` and `tts_voice` are accepted by the factory
+for interface compatibility only (Kyutai is handed neither).
 
 ## The thinking tune
 
@@ -197,20 +283,28 @@ compatibility only.
 reply is being prepared and is owned by the listener, which starts it
 when a query is dispatched (never while she is already speaking) and
 stops it when the finished reply is handed over for speaking, or when
-there is nothing to say. It opens its output stream through the same
-`sounddevice` API and under the same process-wide `portaudio_lock` as the
-engines, so stopping it releases the device in milliseconds and the voice
-can open it straight away.
+there is nothing to say. While `is_playing()` is true, what the
+microphone hears is not the room's quiet level (`listening.spec.md`,
+"The floor is the room, never her nor him"). It opens its output stream
+through the same `sounddevice` API and under the same process-wide
+`portaudio_lock` as the engines, so stopping it releases the device in
+milliseconds and the voice can open it straight away.
 
 ## Audio output
 
-Each item is synthesised whole, then played. Piper and Kokoro play it
-through a `sounddevice.OutputStream` (mono; Piper in `int16` at the
-voice's own sample rate, Kokoro in `float32` at 24 kHz) in blocks of
-1024 frames so an abort lands quickly. Chatterbox writes a temporary WAV
+Piper, Kokoro and Chatterbox synthesise each item whole, then play it;
+Kyutai plays an item as it is synthesised (see "Kyutai"). Piper, Kokoro and
+Kyutai play through a `sounddevice.OutputStream` (mono; Piper in `int16` at the
+voice's own sample rate, Kokoro and Kyutai in `float32` at 24 kHz) in
+blocks of 1024 frames so an abort lands quickly. Chatterbox writes a temporary WAV
 and plays it through the pygame mixer. Opening, starting, aborting and
 closing a stream all happen under `portaudio_lock`
-(`listening.spec.md`, "Serialised PortAudio Lifecycle").
+(`listening.spec.md`, "Serialised PortAudio Lifecycle"). Each output stream,
+the thinking tune's included, is opened through `open_output_stream`
+(`jarvis.utils.audio_stream`), which constructs it and tracks it in one hold
+of the lock, and counted open until it is closed, so the device list is
+never read afresh while she speaks or the tune plays: reading it terminates
+PortAudio, which would close the stream under her voice.
 
 ## Piper voices
 
@@ -349,13 +443,140 @@ coexist with the newer CUDA torch builds Kokoro uses on recent GPUs — so
 running the engine means installing it by hand; if its dependencies or
 model are missing it warns and every item is skipped.
 
+## Kyutai
+
+`KyutaiTTS` runs Kyutai TTS 1.6B (`kyutai/tts-1.6b-en_fr`) through the
+`moshi` package. It speaks English and French and reads the language from
+the text itself. Its voice comes from `tts_kyutai_voice` and nothing else:
+`response_language` does not reach it.
+
+**Voice.** The value is either a name in the `kyutai/tts-voices`
+repository (a recording with a precomputed embedding, for example
+`cml-tts/fr/577_394_000070-0001_enhanced.wav`), fetched on first use, or
+the path of a `.safetensors` embedding file, used as it is. A name is
+slash-separated segments of letters, digits, dots, hyphens and
+underscores; anything else (a drive letter or an absolute path, a
+backslash, `~`, `..`, a URL scheme) is refused before the network is
+touched, because the repository would be asked for it and a local path
+would travel in that request with the user's name and folders in it. A
+refused value, and a `.safetensors` path that does not exist, fail
+initialisation before the model is loaded: a voice the user named is never
+replaced by another. The default is a French female voice.
+
+**Hardware.** The engine needs an NVIDIA GPU (CUDA). Without one,
+initialisation fails and the reason is kept in `_init_error`; each item
+prints it and speaks nothing. The reason says which of three things is
+wrong: PyTorch cannot be loaded (with its own error), this PyTorch was
+built without CUDA support, or no NVIDIA GPU was found. There is no CPU
+mode: a model of this size synthesises far slower than real time there.
+
+**Compilation.** `torch.compile` needs Triton, which has no Windows build.
+When Triton is not installed the engine sets `NO_TORCH_COMPILE=1`,
+unless the user already set it, before `moshi` is first imported, because
+the package reads the variable at import. The CUDA graphs stay on: with
+them the model runs faster than real time, without them several times
+slower, so the engine never sets `NO_CUDA_GRAPH`.
+
+**Graph capture.** `moshi` captures its CUDA graphs in torch's default
+"global" mode, in which a CUDA call made by any other thread during a
+capture (an allocation, a synchronisation) invalidates it and aborts the
+process. Whisper keeps the GPU busy in the listener's thread while she
+speaks, and every synthesis captures afresh, so the engine has `moshi`
+capture per thread instead (`capture_error_mode="thread_local"`), where
+only the capturing thread is checked. The engine replaces the `cuda` that
+`moshi.utils.compile` takes from torch, and does so before the model's
+first synthesis (the warm-up). A capture mode `moshi` passes by keyword is
+kept, and a `moshi.utils.compile` with no `cuda` to replace is left as it
+is: the engine still works, without the protection.
+
+**Synthesis.** One item is one model call: the text is prepared as a
+single-speaker script and conditioned on the voice, with the sampling
+temperature and guidance coefficient the model was released with (fixed,
+not settings). Each synthesis builds the model's generation state afresh,
+CUDA graphs included, so every sentence pays a set-up cost on top of the
+audio itself. Frames are decoded to audio as the model produces them: the
+first audible frame arrives a second or less after the item is taken up,
+whatever its length, and the model then produces audio two to three times
+faster than it is played. The exact duration is known once the last frame
+is decoded.
+
+**Playback.** The audio is played as it is produced, not once all of it
+exists, and the next item is prepared while the current one plays. A second
+thread, the player, started with the first item, takes the synthesised
+items in the order the worker took them up. For each it waits until about a
+quarter of a second of audio has been produced (or synthesis has ended, for
+an item shorter than that), then opens an output stream whose callback
+takes what the synthesis has produced so far, waits for the stream to end,
+and fires the item's completion callback if the audio played to its end.
+The worker never waits for the player: as soon as one item's synthesis
+ends it takes up the next, so the silence between two sentences is the
+opening of a stream, a few tenths of a second. If synthesis falls behind
+playback the stream plays silence
+until audio arrives, and the underruns are counted in the debug log. An
+item whose synthesis fails after playback began stops where its audio
+ends and fires no completion callback. `get_last_spoken_text()` names the
+item whose playback began last.
+
+**The face.** Kyutai is the engine a talking face follows
+(`face/face.spec.md`). The daemon hands it the face's renderer when it builds
+it (`create_tts_engine(face=...)`; the other engines take none). An item is
+drawn on the face when, at the moment its first quarter second of audio is in
+hand, someone is watching the face (a face that failed is not watched) and no
+item played without the face is still to be heard: the face would otherwise
+be told a moment her voice cannot keep. Any other item plays as above, at
+once, and the face costs her nothing. A viewer who arrives in the middle of a
+reply sees her lips from the first sentence that becomes ready once what she
+said without them has been heard.
+
+- An item drawn on the face is scheduled to be heard at the later of two
+  moments: the renderer's delay from then, and the end of the previous item
+  drawn on the face, with whatever its voice waited, plus a gap. The gap is
+  at least 0.2 s, and at least what the player takes to close one stream,
+  open the next and have it heard (0.15 s plus the sound card's latency); a
+  stream that starts late anyway widens it by as much, up to 0.3 s more, for
+  the rest of the session. A sentence that is ready early enough keeps that
+  spacing from the one before; one that is ready later waits for the face's
+  delay, as the first of a reply does.
+- Its audio is handed to the renderer as it is synthesised, each piece
+  stamped with the moment it will be heard.
+- The player plays it at that moment. Its stream starts with silence when it
+  opens early, timed from when the sound card says the first sample will
+  leave the speakers, or from the stream's own latency when the card says
+  nothing. The first sound is marked when she is heard, not when the stream
+  opens. A stream that starts late moves the rest of the item, and the items
+  scheduled after it, by as much.
+- When synthesis falls behind playback the voice waits for its audio as it
+  does without a face, and the pieces handed over after the wait are stamped
+  later by as much. A stretch that reaches the face less than its delay
+  before it is heard comes too late to be drawn: there her lips rest as in the
+  portrait (`face/face.spec.md`, "Her lips at rest") until synthesis is ahead
+  again. The debug log counts how far the voice ran
+  behind its moment.
+- A stop resets the schedule: the next reply waits for the face's delay
+  only, not for what the stop cut.
+- `voice_delay()` is the renderer's delay while it is watched, and 0
+  otherwise, so a renderer that failed never holds her voice back.
+
+**Failure.** Initialisation is attempted once and its outcome is kept for
+the life of the engine. A `moshi` package (or one of its dependencies) that
+cannot be imported, a missing GPU or CUDA build, a model that fails to
+load, a voice that cannot be used: each fails initialisation with its
+reason, and nothing is said. A synthesis that
+raises, or produces no audio, fires no completion callback.
+
+**Installation.** `moshi` is not in `requirements.txt`: it declares a
+`torch` range older than the CUDA builds used here, so the README installs
+it by hand without its dependencies.
+
 ## Language
 
 Piper is the only engine whose voice follows a language. Which language,
 and which wins when the configured one and the one heard disagree, is
-decided under "Piper voices". Kokoro and Chatterbox accept the language
-`speak` is given and ignore it: Kokoro's voice and language are set by
-hand, and Chatterbox speaks English.
+decided under "Piper voices". Kokoro, Chatterbox and Kyutai accept the
+language `speak` is given and ignore it: Kokoro's voice and language are
+set by hand, Chatterbox speaks English, and Kyutai speaks the English or
+French it finds in the text, so a reply in another language is read with
+the wrong sounds.
 
 The voices only read what the model writes, and the voice is chosen from
 the language the engine expects, not from the text. The reply engine
@@ -367,14 +588,14 @@ model follows is up to the model. A model that obeys the English line
 writes English, and the voice mapped to the language the user spoke (or to
 `response_language`) then reads English text with that voice's accent.
 The voice map therefore helps only when the model writes in the mapped
-language.
+language. The line is not added for Kokoro or Kyutai.
 
 ## Configuration
 
 | Key | Applies to | Meaning |
 |-----|------------|---------|
 | `tts_enabled` | all | Whether she speaks |
-| `tts_engine` | all | `piper`, `kokoro` or `chatterbox` |
+| `tts_engine` | all | `piper`, `kokoro`, `chatterbox` or `kyutai` |
 | `tts_voice`, `tts_rate` | all | Interface compatibility; `tts_rate` also feeds the echo detector's timing estimate |
 | `response_language` | Piper | The language of every reply when set, and so the voice's; chooses the default voice when no model path is pinned |
 | `tts_piper_voices` | Piper | Language to voice (path or bare name), chosen per reply. A language of the built-in table may be keyed in any of its spellings; any other language is keyed by its ISO 639-1 code. A language it does not name speaks with the default voice |
@@ -384,6 +605,7 @@ language.
 | `tts_piper_noise_scale`, `tts_piper_noise_w` | Piper | Expressiveness and rhythm |
 | `tts_piper_sentence_silence` | Piper | Carried on the engine; synthesis does not apply it |
 | `tts_kokoro_voice`, `tts_kokoro_lang_code`, `tts_kokoro_speed` | Kokoro | Voice, language code, pace |
+| `tts_kyutai_voice` | Kyutai | A name in the `kyutai/tts-voices` repository, or the path of a `.safetensors` embedding file |
 | `tts_chatterbox_device`, `_audio_prompt`, `_exaggeration`, `_cfg_weight` | Chatterbox | Device, cloning sample, emotion, quality |
 
 ## Testing
@@ -396,16 +618,41 @@ language.
   for a callback with no text.
 - The completion callback does not fire when the engine could not start
   or the item was interrupted.
-- An interrupt during one item leaves the items queued behind it
-  unspoken, and fires neither their callbacks nor the end-of-reply
-  marker's.
+- An interrupt discards the items queued before it, whether the stop
+  lands during synthesis or during playback: none of them is heard, and
+  they fire neither their callbacks nor the end-of-reply marker's. The
+  item in hand is not heard (or, playing, is cut), and the items queued
+  after the interrupt are spoken to the end with their callbacks, so are
+  the ones after a second stop. Held for each engine. Piper, Kokoro and
+  Chatterbox also never synthesise the discarded items; Kyutai may already
+  have prepared some.
+- An interrupt landing just as the worker takes an item up is not lost,
+  and an interrupt with nothing to stop swallows nothing queued after it.
+- An item that a stop word cancelled as the worker took it up publishes no
+  SPEAKING, and the listener answers a stop word, heard by the text check
+  or by the intent judge, with IDLE.
+- Chatterbox does not play audio generated for an item interrupted during
+  generation.
 - A missing voice that cannot be fetched falls back to a cached fallback
   voice, never to another voice when pinned, and reports the reason when
   there is nothing to fall back to.
 - Each listed language gets a voice trained for it, in any spelling, and
   an unlisted one gets the fallback.
-- Each engine marks the first sound once its audio stream is running, and
-  not when SPEAKING is published.
+- Each engine marks the first sound once its audio stream is running (a
+  Kyutai item drawn on the talking face: when it is heard), and not when
+  SPEAKING is published.
+- Kyutai and a talking face (`tests/test_kyutai_face.py`): with no face, a
+  face not ready or nobody watching, she speaks at once and nothing is handed
+  over; otherwise her audio reaches the face stamped with when it is heard,
+  an item shorter than the first stretch included, the voice waits for that
+  moment, the first sound is marked then, the sentences of a reply keep their
+  spacing, pieces handed over after the voice waited are stamped later by as
+  much, the gap covers the sound card's latency and learns from a late start,
+  nothing is drawn while an item played without the face is ahead, a
+  face nobody watches any more is not drawn from the next item, the item after
+  a synthesis that failed midway follows what was said, a stop cuts the face
+  and resets the schedule, `voice_delay()` follows the face, and the factory
+  hands the face to Kyutai only.
 - Kokoro's initialisation ends with one throwaway synthesis (audio
   discarded, nothing queued or played), and a warm-up failure leaves the
   pipeline loaded rather than failing init.
@@ -436,3 +683,61 @@ language.
   `tts_piper_voices` is spoken in its voice when the daemon builds the
   engine, and `response_language` travels the same road.
 - Markdown and links are stripped before speech.
+- `kyutai` resolves to `KyutaiTTS` in any case, from the `tts_kyutai_voice`
+  setting, and the config layer keeps it as a valid `tts_engine`.
+- A Kyutai engine without a GPU, or without the `moshi` package, speaks
+  nothing, fires no completion callback, reports the reason, and does not
+  retry on the next item. A PyTorch that cannot be loaded, one built
+  without CUDA and a machine without a GPU give three different reasons.
+- Kyutai's `start` begins loading in a background thread named
+  `kyutai-init` before anything is said and a second `start` leaves the
+  first worker in place; a sentence arriving during the load waits for it
+  and the model loads once; a stop that lands during the load abandons the
+  item before it is synthesised.
+- With Triton absent the compile switch is set before `moshi` is first
+  imported, a value the user set is left alone, and the CUDA graphs are
+  never switched off.
+- `moshi` captures its CUDA graphs per thread, the capture made while the
+  model warms up and the one made for each sentence alike, and `moshi`'s own
+  capture code asks torch for it; a capture mode `moshi` passes by keyword is
+  kept, a second engine keeps the wrapper the first one installed, and a
+  `moshi.utils.compile` with no `cuda` to replace still loads. That Kyutai
+  can speak while Whisper transcribes on the same GPU is checked by hand
+  with a reproduction, as it needs the GPU.
+- Kyutai's initialisation ends with one throwaway synthesis (audio
+  discarded, nothing queued or played).
+- Each engine's `wait_until_ready`: Kyutai and Kokoro answer `None` while
+  their background load or warm-up runs and `True` once the warm-up
+  synthesis is done; an engine that could not load answers `False`, a
+  disabled one `False`, and one nobody started `None` without spending the
+  wait. Piper and Chatterbox answer at once from what `start` loaded.
+- A voice name is resolved through the model's voice repository, a
+  `.safetensors` path is used as it is, and a path that does not exist
+  fails initialisation before the model is loaded. A value that is not a
+  repository name (a local path, a URL, a path going up) never reaches the
+  network.
+- Kyutai's audio is played at the codec's rate, the duration callback
+  gets its exact length once synthesis has ended, and the completion
+  callback fires only after the audio played to its end.
+- Kyutai starts playing before synthesis has ended, once a short stretch of
+  audio is ready, and an item shorter than that plays when its synthesis
+  ends.
+- Kyutai prepares the next item while the current one plays: its synthesis
+  begins before the current one has finished playing, the items are heard in
+  the order they were queued, the completion callbacks fire in that order
+  each after its own audio, and the end-of-reply marker fires after the last
+  of them has played.
+- A Kyutai stream that runs out of audio plays silence until more arrives
+  instead of ending, an item whose synthesis fails midway fires no
+  completion callback, and an item that produced no audio opens no stream.
+- `is_speaking()` stays true across the hand-over from one Kyutai item to the
+  next, and is false once the last has been played or dropped.
+- A Kyutai interrupt drops the items queued before it without their
+  callbacks, speaks the ones queued after, abandons a synthesis in flight at
+  its next frame, stops the stream being played, never plays an item that
+  was prepared but not yet playing, and drops an end-of-reply marker that
+  is waiting behind the sentence being played.
+- Stopping the Kyutai engine ends both its threads, including while a
+  sentence plays with another prepared, and the engine speaks again
+  afterwards, even when an item arrived while it was stopping.
+- Kyutai marks the first sound once its output stream is running.

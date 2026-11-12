@@ -21,7 +21,8 @@ src/desktop_app/
 ├── splash_screen.py     # Animated startup splash
 ├── setup_wizard.py      # First-run setup wizard
 ├── settings_window.py   # Auto-generated settings UI from config metadata
-├── face_widget.py       # Animated face that follows the assistant's state
+├── face_widget.py       # The face window: the drawn face, or her talking face (see Face below)
+├── talking_face.py      # Her talking face's frames, read from jarvis and painted
 ├── orb/                 # State-driven orb window and widget (see Orb below)
 ├── themes.py            # Qt stylesheets and color palette
 ├── diary_dialog.py      # End-of-session diary update dialog
@@ -96,7 +97,7 @@ The central controller that manages:
 |--------|---------|
 | **LogViewerWindow** | Real-time log output from the daemon, with "Report Issue" button |
 | **MemoryViewerWindow** | Web-based memory browser (Flask server) |
-| **FaceWindow** | Animated face that follows the assistant's state (idle, listening, thinking, speaking, dictating) |
+| **FaceWindow** | Her talking face while a renderer draws one, and otherwise an animated face that follows the assistant's state (idle, listening, thinking, speaking, dictating); see Face below |
 | **SettingsWindow** | Auto-generated config editor with tabbed categories |
 | **SetupWizard** | First-run configuration (Ollama, models, profile) |
 | **DictationHistoryWindow** | Scrollable list of past dictations with copy/delete/clear actions |
@@ -109,6 +110,8 @@ The central controller that manages:
 `DashboardWindow` (`dashboard_window.py`) hosts the HUD page `dashboard/index.html` in a `QWebEngineView`. `DashboardBridge` (`dashboard/bridge.py`) is registered on a `QWebChannel` as `window.jarvis` and carries everything the page shows: system stats, the voice state (orb accent and status line), the weather when location is enabled, and the chat. The window is created lazily and is what the app opens at startup; the tray's `🖥️ Dashboard` action raises it.
 
 **Where it can be shown.** A web view needs QtWebEngine, and QtWebEngine crashes the app the moment a view is shown inside a frozen macOS bundle. The memory viewer falls back to the system browser there; the dashboard cannot, because its channel to the bridge exists only inside this process. `_dashboard_available()` is therefore false without WebEngine and in a frozen macOS build. In that case the tray has no `🖥️ Dashboard` action, `show_dashboard()` does nothing, and the app starts with the floating orb instead.
+
+**Settings.** The gear in the page's top bar opens the settings window, the same one as the tray's `⚙️ Settings`, with the same offer to restart once it is saved. The page calls the bridge's `openSettings`, and once that call has returned the bridge calls the tray's `show_settings`, which it was handed when the window was built: the settings window runs modally, so it does not open inside the page's call. A bridge built without it does nothing.
 
 **Chat.** The page's `submitQuery` reaches the daemon through a submit hook that the tray wires when a daemon starts, clears when it stops or dies, and pushes to the window on every lifecycle change (`_set_chat_daemon_status`), so a dashboard opened before the daemon starts and one opened after it behave the same. With no hook wired the bridge answers with a local preview line and nothing is sent. The route depends on where the daemon runs:
 
@@ -127,13 +130,28 @@ The orb listens to nothing. It has no audio input, takes no audio source as an a
 
 Two hosts embed it. `OrbWindow` is the floating instance: frameless, translucent, always on top and draggable; built at startup with a provider that reads the shared `JarvisState` (see Assistant State below), shown at launch only when the dashboard is unavailable (see Dashboard; the dashboard draws its own canvas orb from the same state), and otherwise toggled from the tray action `🟠 Toggle Orb` or the hotkey `Ctrl+Shift+J` (`Cmd+Shift+J` on macOS: a global pynput hotkey, disabled on macOS 26+ where pynput crashes the process, and a window-scoped Qt shortcut that works while the orb has focus). Hiding the window pauses the widget; showing it resumes it. `ChatWindow` embeds its own instance in the introductory panel that only an empty conversation shows, drives it through `set_state` (THINKING while a query is in flight, IDLE otherwise), pauses it the moment a message lands or the window hides, and resumes it when the window shows with an empty transcript (see `chat_window.spec.md`).
 
+### Face
+
+`FaceWindow` (`face_widget.py`) opens from the tray action `👤 Show Face`, which also restores it when it is minimised, and only from there: with the talking face enabled or not, it never opens by itself. It shows one of two faces, never both.
+
+- **Her talking face**, while a renderer draws one (`src/jarvis/output/face/face.spec.md`): the frame `read_face_frame()` returns, imported from `jarvis`, scaled to fit the window with its proportions kept and centred on black. The window shows a frame for as long as it is less than three seconds old, and goes back to the drawn face once it has none that recent. A live renderer's newest frame is never older than its delay, the hold after a cut included (`face.spec.md`, "Interrupting"), except while Ditto catches up after the GPU was taken elsewhere for a moment (`face.spec.md`, "Failure"): her last frame stays through that, so she freezes for a moment rather than giving way to another face. An older frame, or none, is what a renderer that is not running, has failed, has stopped or has hung looks like from here. A frame it drew before it last rested is never shown: the renderer withdraws its frames when it rests (`face.spec.md`, "Watching and resting").
+- **The drawn face** otherwise: the low-poly face that follows the assistant's state (see Assistant State).
+
+A read that fails counts as no frame: it runs in a Qt slot, where an exception would end the whole app, so the window stays up, shows the drawn face and logs the failure once.
+
+**Reading is watching.** While the window is on screen, which means shown and not minimised, it reads a frame sixty times a second, so each frame shows within a refresh of its moment. Hidden or minimised, it reads nothing. A window left open on a locked screen or on another desktop is still on screen. Each read is the heartbeat that tells the renderer someone is watching (`face.spec.md`, "Watching and resting"), so within two seconds of the window leaving the screen the GPU rests and her voice is no longer held back for the face.
+
+**Nothing is kept.** The window holds the frame on screen in memory and writes nothing anywhere: no frame, no recording.
+
+`talking_face.py` holds the view that reads and paints the frames. It imports from `jarvis` the reader `face.spec.md` puts there for a front end, and nothing of the renderer. It imports it on the first read, so importing the desktop app's modules, as the settings window does, loads no numpy (`tests/test_dictation_hotkeys_stay_light.py`).
+
 ### Assistant State
 
 The orb, the dashboard and the face show what the assistant is doing by reading the shared `JarvisState` through `get_jarvis_state()`, both defined in `src/jarvis/state.py` and imported from `jarvis` (`src/jarvis/state.spec.md` owns the contract: the values, who publishes each, and the file that carries it between processes). The desktop app reads it by polling and never subscribes, because the daemon publishes from its own threads, and from another process in a development checkout.
 
 - The floating orb's `StateController` polls a provider each frame.
 - The dashboard bridge polls at 5 Hz and maps the value to the HUD orb's accent and label.
-- The face polls each frame.
+- The drawn face polls each frame.
 
 The desktop app publishes one value itself: `ASLEEP`, when the daemon stops and while the setup wizard is open, so nothing looks ready while nothing is listening. It defines no state of its own.
 
@@ -203,7 +221,7 @@ The desktop app runs the Jarvis daemon in a **QThread** (bundled mode) or **subp
 The desktop app registers callbacks with the daemon for:
 
 - **Diary updates**: Shows DiaryUpdateDialog when session ends
-- **Clean shutdown**: Ensures graceful exit with diary save
+- **Clean shutdown**: Ensures graceful exit with diary save, even once the console is gone (see Shutdown and the Console)
 - **Fast shutdown**: Calls `request_stop(skip_diary_update=True)` in bundled mode, or sends `SHUTDOWN_SKIP_DIARY` over daemon stdin in subprocess mode. This skips only the final forced diary update; dictation, voice, TTS, MCP runtime, and database cleanup still run.
 
 #### Bundled Mode (QThread)
@@ -226,6 +244,14 @@ In subprocess mode, the daemon runs as a separate process. IPC is achieved via s
 - Chat IPC lines are marshalled onto the Qt main thread via `ChatIpcSignals`, then `_on_chat_ipc_line()` forwards them to `ChatWindow.process_ipc_line()` and, when it is open, to `DashboardWindow.process_ipc_line()`
 - When the daemon starts, stops, or a subprocess exits unexpectedly, the tray updates any open ChatWindow lifecycle banner and clears or refreshes its stdin hooks (submit, cancel, control), the dashboard's submit hook and the confirmation decision writer together, so no window writes to a dead pipe.
 - Same UI experience as bundled mode
+
+### Shutdown and the Console
+
+The daemon's shutdown (`_shut_down` in `jarvis/daemon.py`) is a sequence of steps, in this order: dictation, the reminder scheduler, the routine dispatcher, the routine in flight, the Claude Code job, the voice listener, the chat worker, the final diary pass (left out by a fast stop), speech, the face, the MCP sessions, the database, and the profile cache's listener on core writes. Each step is written to the debug log before it runs (`shutdown: <step>`). A step that raises is logged, reported on the console (`⚠️ Shutdown: <step> failed`) and costs that step only: the next one still runs, and the shutdown always ends with `👋 Daemon stopped`. A second Ctrl+C, which the daemon's signal handlers raise as `KeyboardInterrupt`, is the same: it cuts short the step it lands in (`⚠️ Shutdown: <step> interrupted`) and the steps after it still run.
+
+The console can be gone before the shutdown is over. In subprocess mode it is the pipe the desktop app reads, and the pipe closes when the app's process ends, whether or not the app waited for the daemon. The daemon's entry point (`python -m jarvis.main`) wraps stdout and stderr so that writing to the console never raises. A console that is gone (the pipe or the file beneath it reports an error, or there is no console at all) is given up for the rest of the run, and the shutdown goes on unchanged, diary included. A console that is still there and refuses one line is kept: a line it cannot encode goes out with what it cannot carry replaced, and any other refusal costs that one write, so the chat and diary events that follow still reach the desktop app.
+
+**The log file.** When `JARVIS_DEBUG_FILE` names a file, that entry point mirrors everything the daemon prints into it, each line once and whole, written before the console so that it is there whatever the console does; the moment a console went is noted in the file (`🔌 <stdout> gone (…)`), after the line in progress. Lines from several threads never splice: each thread's text reaches the file a whole line at a time, under one lock both streams share. The daemon's debug lines reach the file through that mirror. A process whose console is not mirrored (the desktop app itself, and the daemon run in its thread in bundled mode) appends its debug lines to the file itself. The talking face's renderer is started without `JARVIS_DEBUG_FILE`: what it prints reaches the file once, through the daemon, which relays it as plain text with colour codes dropped (`jarvis/output/face/face.spec.md`).
 
 ## Theme System
 
@@ -328,7 +354,9 @@ PyInstaller follows imports and nothing else, so every file the app opens throug
 
 The entry script is the one module that does not resolve against its package folder: PyInstaller places it at the root of the data tree, so its `Path(__file__).parent` is that root (`_internal` in a onedir build) and not `desktop_app/`. `app.py` is the entry script, and its tray-icon lookup (`get_icon_path`) builds `desktop_assets/<icon>` from that parent. In a frozen build it therefore looks for the icons next to the root, while they ship under `desktop_app/desktop_assets`, and the tray shows its drawn fallback icon. A lookup that resolves against the package folder (`sys._MEIPASS/desktop_app` when frozen) finds them where they ship.
 
-The rule is enforced from the tree, not from a list kept by hand. `tests/test_pyinstaller_spec.py` runs the spec once per platform with PyInstaller's names stubbed, expands `datas` the way PyInstaller does, and fails when a runtime data file under `src/` is not bundled or lands somewhere else than the mirror of its place in the tree. That is the placement package modules look for; the check does not cover what the entry script opens itself. A file whose kind is unknown fails it too, until its suffix is classified in `scripts/check_bundle_layout.py`: guessing is how a file goes missing.
+A third-party package can open a data file from its own folder too, which import analysis does not bring and, for the packages listed here, no PyInstaller hook collects. `PACKAGE_DATA` in `scripts/check_bundle_layout.py` names each such package and the folders of it the app reads; today that is faster-whisper's `assets`, which holds its voice detector's model (Silero, used while `whisper_vad` is on), and the spec collects it with `collect_data_files('faster_whisper', subdir='assets')`. Without those files every transcription that asks for the detector fails; the listener and dictation then transcribe without it and say so (`jarvis/listening/listening.spec.md`), but the build is meant to carry them, and the bundle check fails one that does not. The check reads the installed package to know its files, so it runs with the Python that built the bundle and reports a package it cannot find.
+
+The rule is enforced from the tree, not from a list kept by hand. `tests/test_pyinstaller_spec.py` runs the spec once per platform with PyInstaller's names stubbed, expands `datas` the way PyInstaller does, and fails when a runtime data file under `src/` is not bundled or lands somewhere else than the mirror of its place in the tree. That is the placement package modules look for; the check does not cover what the entry script opens itself. A file whose kind is unknown fails it too, until its suffix is classified in `scripts/check_bundle_layout.py`: guessing is how a file goes missing. The same test fails when a file of `PACKAGE_DATA` is not bundled where its package looks for it; there `collect_data_files` is stood in for by one held to PyInstaller's own on the installed package.
 
 ### Licence texts
 
@@ -338,7 +366,7 @@ The rule is enforced from the tree, not from a list kept by hand. `tests/test_py
 
 ### Checking a build
 
-`scripts/test_bundled_app.bat` and `scripts/test_bundled_app.sh` build, run `scripts/check_bundle_layout.py` on the result, and only then launch the app. The check looks for the executable the platform's build produces and for every runtime data file and licence text at the place the bundle's layout gives it (`_internal` on Windows and Linux, `Contents/Resources` or `Contents/Frameworks` on macOS), and names each one that is missing. The Windows batch file asks for plain ASCII output.
+`scripts/test_bundled_app.bat` and `scripts/test_bundled_app.sh` build, run `scripts/check_bundle_layout.py` on the result, and only then launch the app. The check looks for the executable the platform's build produces and for every runtime data file, licence text and file of `PACKAGE_DATA` at the place the bundle's layout gives it (`_internal` on Windows and Linux, `Contents/Resources` or `Contents/Frameworks` on macOS), and names each one that is missing. It reads the `PACKAGE_DATA` packages as installed, so it runs with the Python that built the bundle, and names a package it cannot find there. The Windows batch file asks for plain ASCII output.
 
 ## Memory Viewer
 

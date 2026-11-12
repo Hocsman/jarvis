@@ -1,7 +1,10 @@
 """Weather tool implementation using Open-Meteo API (free, no API key required)."""
 
+import re
+import unicodedata
+
 import requests
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 from ...debug import debug_log
 from ...llm import get_auxiliary_backend
 from ...memory.graph import fold_for_search
@@ -111,6 +114,152 @@ def _extract_place_from_user_text(text: str, cfg) -> Optional[str]:
     return place
 
 
+_GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
+
+# The Unicode name of a Latin letter built on plain ones: "LATIN SMALL LETTER
+# O WITH STROKE", "LATIN SMALL LETTER DOTLESS I", "LATIN SMALL LIGATURE OE".
+_LATIN_BUILT_ON = re.compile(
+    r"^LATIN (?:SMALL|CAPITAL) (?:LETTER|LIGATURE) (?:DOTLESS )?([A-Z]{1,2})(?: WITH .+)?$"
+)
+
+
+def _base_letters(c: str) -> str:
+    """The plain letters a Latin letter is built on, for those NFKD keeps whole.
+
+    ``ø`` gives "o", ``ı`` "i", ``ł`` "l", ``œ`` "oe": a keyboard or a
+    transcript without them still names the same place. They are read from
+    the character's Unicode name, so no table of letters is kept, and
+    letters of their own such as ``ð`` or ``þ`` (ETH, THORN) stay as they are.
+    """
+    if c.isascii():
+        return c
+    match = _LATIN_BUILT_ON.match(unicodedata.name(c, ""))
+    return match.group(1).lower() if match else c
+
+
+def _name_words(name: str) -> list:
+    """A place name as the words that identify it.
+
+    Case and accents are folded away, letters with a stroke or without a dot
+    become the letter they are built on, and every punctuation mark becomes
+    a space: "Saint-Denis" and "saint denis", "São Paulo" and "Sao Paulo",
+    "Tromsø" and "Tromso" give the same words. Punctuation is recognised by
+    its Unicode category, which holds in every script without a list of
+    characters.
+    """
+    folded = fold_for_search(name or "")
+    spaced = "".join(
+        " " if unicodedata.category(c).startswith("P") else _base_letters(c)
+        for c in folded
+    )
+    return spaced.split()
+
+
+def _name_match(asked: str, found: str) -> Optional[str]:
+    """How the geocoder's name relates to the name asked for.
+
+    ``"exact"`` when they are the same words, ``"leading"`` when one is the
+    other's leading whole words ("New York City" and "New York", "Paris 13e"
+    and "Paris 13e Arrondissement"), ``None`` otherwise. A piece of a word
+    never counts: Open-Meteo's fuzzy search answers "Bagnus" with
+    "Bagnusch", which is another place.
+    """
+    asked_words, found_words = _name_words(asked), _name_words(found)
+    if not asked_words or not found_words:
+        return None
+    if asked_words == found_words:
+        return "exact"
+    shorter = min(len(asked_words), len(found_words))
+    if asked_words[:shorter] == found_words[:shorter]:
+        return "leading"
+    return None
+
+
+def _geocode_first(name: str, language: str) -> Optional[Dict[str, Any]]:
+    """Open-Meteo's first result for ``name`` searched in ``language``.
+
+    Only the first result is ever asked for. Further down the list sit
+    places that merely share a name: searched in French, "London" gives
+    Londres (UK) first and London, Ontario second.
+    """
+    resp = requests.get(
+        _GEOCODE_URL,
+        params={"name": name, "count": 1, "language": language, "format": "json"},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    results = resp.json().get("results") or []
+    return results[0] if results else None
+
+
+def _find_place(
+    name: str, language: Optional[str],
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """The place ``name`` designates, and the nearest one the geocoder offered.
+
+    Open-Meteo matches names in the language it is asked for rather than
+    only translating its answer: "Londres" searched in English is a town in
+    Argentina, searched in French it is London. So the search runs in the
+    utterance's language first, then in English. The first result whose name
+    is exactly the asked name wins; failing that, the first that shares its
+    leading words; failing that, none. The first result seen is returned
+    alongside, so a refusal can say which place was passed over.
+    """
+    languages = [language, "en"] if language and language != "en" else ["en"]
+    nearest = None
+    leading = None
+    for lang in languages:
+        found = _geocode_first(name, lang)
+        if not found:
+            continue
+        nearest = nearest or found
+        match = _name_match(name, found.get("name", ""))
+        debug_log(
+            f"    🔎 '{name}' searched in '{lang}' → '{found.get('name', '')}': "
+            f"{match or 'not the same name'}",
+            "tools",
+        )
+        if match == "exact":
+            return found, nearest
+        if match == "leading" and leading is None:
+            leading = found
+    return leading, nearest
+
+
+def _place_parts(town: str, region: str, country: str) -> list:
+    """Town, region and country, each once.
+
+    A part carrying the same name as one before it is dropped: Tbilisi's
+    region is Tbilisi, Monaco's region and country are both Monaco.
+    """
+    parts = []
+    for part in (town, region, country):
+        part = (part or "").strip()
+        if part and all(_name_words(part) != _name_words(kept) for kept in parts):
+            parts.append(part)
+    return parts
+
+
+def _place_display(place: Dict[str, Any]) -> str:
+    """Town, region and country, so a wrong place is heard at once."""
+    return ", ".join(_place_parts(
+        place.get("name") or "", place.get("admin1") or "", place.get("country") or "",
+    ))
+
+
+def _utterance_language(context) -> Optional[str]:
+    """The language Whisper heard the request in, or ``None`` off the voice path."""
+    language = getattr(context, "language", None)
+    if not isinstance(language, str) or not language.strip():
+        return None
+    return language.strip().lower()
+
+
+def _home_city(context) -> str:
+    """The home city the user declared in config, or ``""``."""
+    return str(getattr(getattr(context, "cfg", None), "weather_city", "") or "").strip()
+
+
 # WMO Weather interpretation codes
 # https://open-meteo.com/en/docs
 WMO_CODES = {
@@ -204,20 +353,11 @@ class WeatherTool(Tool):
             if lat is None or lon is None:
                 return None
 
-            # Build display name from available fields (handle None values)
-            city = location_info.get("city") or ""
-            region = location_info.get("region") or ""
-            country = location_info.get("country") or ""
-
-            # Prefer city, but fall back to region if city is a district
-            display_parts = []
-            if city:
-                display_parts.append(city)
-            if region and region != city:
-                display_parts.append(region)
-            if country:
-                display_parts.append(country)
-
+            display_parts = _place_parts(
+                location_info.get("city") or "",
+                location_info.get("region") or "",
+                location_info.get("country") or "",
+            )
             display_name = ", ".join(display_parts) if display_parts else "your location"
 
             return {"lat": lat, "lon": lon, "display_name": display_name}
@@ -242,10 +382,9 @@ class WeatherTool(Tool):
             lon: Optional[float] = None
             location_display: str = ""
 
-            # Track whether we inferred the place name from the user's text
-            # rather than receiving it from the caller — used only for the
-            # debug log, doesn't change behaviour downstream.
-            place_from_fallback = False
+            # Where the name to geocode came from, for the debug log: the
+            # caller's argument, the user's utterance, or the home city.
+            place_source = "argument"
 
             if not location_str:
                 # No location provided - try auto-detected coordinates first.
@@ -274,7 +413,7 @@ class WeatherTool(Tool):
                             "tools",
                         )
                         location_str = extracted
-                        place_from_fallback = True
+                        place_source = "user text"
                     else:
                         # Still nothing: fall back to the home city the user
                         # declared in config. Geo-IP needs a local GeoLite2
@@ -282,9 +421,7 @@ class WeatherTool(Tool):
                         # tool result is precisely what tempts the model into
                         # inventing a plausible forecast — so a city the user
                         # has already told us about beats asking again.
-                        home_city = str(
-                            getattr(getattr(context, "cfg", None), "weather_city", "") or ""
-                        ).strip()
+                        home_city = _home_city(context)
                         if home_city:
                             debug_log(
                                 f"    📍 auto-detect unavailable; using configured "
@@ -292,7 +429,7 @@ class WeatherTool(Tool):
                                 "tools",
                             )
                             location_str = home_city
-                            place_from_fallback = True
+                            place_source = "weather_city"
                         else:
                             # Auto-detect genuinely failed, the user didn't name
                             # a place, and no home city is configured. Asking is
@@ -305,47 +442,78 @@ class WeatherTool(Tool):
                                 ),
                             )
 
+            # Set when the named place was not found and the home city stands
+            # in for it: the result opens with it so the reply says so.
+            not_found_note = ""
+
             if location_str:
-                # User specified a location (or we pulled one from their text) — geocode it.
                 debug_log(
-                    f"    🌤️ geocoding location: '{location_str}'"
-                    + (" (from user text fallback)" if place_from_fallback else ""),
+                    f"    🌤️ geocoding location: '{location_str}' (from {place_source})",
                     "tools",
                 )
+                # Place names come back in the language they were found in:
+                # the user's when the search in it matched, English
+                # otherwise. The rest of the result stays English for the LLM.
+                language = _utterance_language(context)
+                place, nearest = _find_place(location_str, language)
 
-                geocode_url = "https://geocoding-api.open-meteo.com/v1/search"
-                # Intentionally English — tool results are processed by the LLM,
-                # not shown to the user.  All models handle English data well.
-                geocode_params = {
-                    "name": location_str,
-                    "count": 1,
-                    "language": "en",
-                    "format": "json"
-                }
-
-                geo_response = requests.get(geocode_url, params=geocode_params, timeout=10)
-                geo_response.raise_for_status()
-                geo_data = geo_response.json()
-
-                if not geo_data.get("results"):
-                    return ToolExecutionResult(
-                        success=False,
-                        reply_text=f"Could not find location '{location_str}'. Try a different city name or spelling."
+                if place is None:
+                    nearest_name = (
+                        f" (the geocoder's nearest name is {_place_display(nearest)})"
+                        if nearest else ""
                     )
+                    home_city = _home_city(context)
+                    # The name that failed may be the home city itself, from
+                    # the config or said by the user: it is not tried twice.
+                    failed_home = bool(home_city) and (
+                        _name_words(home_city) == _name_words(location_str)
+                    )
+                    home_place = None
+                    if home_city and not failed_home:
+                        home_place, _ = _find_place(home_city, language)
 
-                place = geo_data["results"][0]
+                    if home_place is None:
+                        if failed_home:
+                            debug_log(f"    ⚠️ configured home city '{home_city}' not found", "tools")
+                            refusal = (
+                                f"The user's configured home city '{location_str}' was "
+                                f"not found under that name{nearest_name}. Tell the user, "
+                                f"and ask which city to check."
+                            )
+                        elif home_city:
+                            debug_log(
+                                f"    ⚠️ '{location_str}' not found, nor home city '{home_city}'",
+                                "tools",
+                            )
+                            refusal = (
+                                f"Could not find a place named '{location_str}'{nearest_name}, "
+                                f"nor the user's configured home city '{home_city}'. "
+                                f"Ask the user which city they meant."
+                            )
+                        else:
+                            debug_log(f"    ⚠️ '{location_str}' not found, no home city set", "tools")
+                            refusal = (
+                                f"Could not find a place named '{location_str}'{nearest_name}. "
+                                f"Ask the user which city they meant."
+                            )
+                        context.user_print(f"⚠️ No place named '{location_str}'.")
+                        return ToolExecutionResult(success=False, reply_text=refusal)
+
+                    debug_log(
+                        f"    ⚠️ '{location_str}' not found; using home city '{home_city}'",
+                        "tools",
+                    )
+                    context.user_print(f"⚠️ No place named '{location_str}'; using {home_city}.")
+                    not_found_note = (
+                        f"No place named '{location_str}' was found{nearest_name}, so this "
+                        f"is the weather for the user's home city instead. Tell the user "
+                        f"'{location_str}' was not found."
+                    )
+                    place = home_place
+
                 lat = place["latitude"]
                 lon = place["longitude"]
-                place_name = place.get("name", location_str)
-                country = place.get("country", "")
-                admin1 = place.get("admin1", "")  # State/region
-
-                # Build display name
-                location_display = place_name
-                if admin1 and admin1 != place_name:
-                    location_display += f", {admin1}"
-                if country:
-                    location_display += f", {country}"
+                location_display = _place_display(place)
 
                 debug_log(f"    📍 resolved to {location_display} ({lat}, {lon})", "tools")
 
@@ -390,8 +558,18 @@ class WeatherTool(Tool):
             weather_desc = WMO_CODES.get(weather_code, "Unknown conditions")
 
             # Build response text — current conditions
-            lines = [
-                f"Current weather in {location_display}:",
+            lines = [not_found_note, ""] if not_found_note else []
+            lines.append(f"Current weather in {location_display}:")
+            # Town and region, said aloud, are what let the user hear a wrong
+            # place: left to itself the reply names the town alone.
+            display_parts = location_display.split(", ")
+            if len(display_parts) >= 2:
+                spoken_place = ", ".join(display_parts[:2])
+                lines.append(
+                    f'Say the place as "{spoken_place}" in the reply, so the '
+                    f"user can tell at once if it is the wrong place."
+                )
+            lines += [
                 f"",
                 f"Conditions: {weather_desc}",
             ]
