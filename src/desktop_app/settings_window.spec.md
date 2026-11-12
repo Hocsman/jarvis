@@ -27,7 +27,7 @@ FieldMeta (dataclass)
   ├── step               # Increment step
   ├── suffix             # Unit label (e.g. "s", "ms", "WPM")
   ├── nullable           # Whether None is valid (shows placeholder)
-  └── example            # For "map": a sample row shown when adding one
+  └── example            # For "list" and "map": a sample row shown when adding one
 ```
 
 ## Widget Mapping
@@ -160,7 +160,9 @@ window cannot write a code Whisper would refuse
 
 `whisper_vocabulary` is a list field, one name per row: the names Whisper is
 given as a hint alongside `weather_city` (`listening.spec.md`, "The names he
-uses").
+uses"). Every list and map field carries its own `example`, which the dialog
+that adds a row shows: a name for this one, a `wrong -> right` rule for the
+dictation dictionary.
 
 ### Features
 

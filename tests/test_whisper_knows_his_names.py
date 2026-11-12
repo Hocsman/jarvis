@@ -4,14 +4,14 @@ Whisper pulls a proper noun it has rarely seen towards a word it knows.
 A town's name came back a letter short, the weather request went to that
 spelling, and the answer was the weather of a village in another country.
 Measured on synthetic speech with the same model and filters as the
-listener, the name came out right 271 times in 672 without a hint and
-502 with one.
+listener, the name came out right in 145 sentences of 288 without a hint
+and in 267 with one.
 
 The hint has a price, and the tests below hold the listener to paying
-none of it: over noise Whisper repeats the hint back. Background noise
-that comes out "Thank you." without the hint comes out as the town with
-it, which clears both confidence filters and, in a hot window, would be
-taken as a question.
+none of it: over noise, and over voices across the room that speak to
+nobody, Whisper repeats the hint back. What comes out "Thank you."
+without the hint comes out as the town with it, which clears both
+confidence filters and, in a hot window, would be taken as a question.
 So the hint may change how a word is spelled, never whether anything was
 said.
 
@@ -31,7 +31,7 @@ import numpy as np
 import pytest
 
 from jarvis.listening.listener import VoiceListener
-from jarvis.listening.vocabulary import whisper_hint
+from jarvis.listening.vocabulary import HINT_BYTES, announce_his_names, whisper_hint
 
 
 CITY = "Varnelle"
@@ -182,6 +182,78 @@ def test_settings_that_are_not_names_are_ignored():
     assert whisper_hint(cfg) == "Ostrevane"
 
 
+def test_how_close_to_her_name_is_too_close_is_his_setting():
+    """`wake_fuzzy_ratio` decides what wakes her, so it decides what the
+    hint leaves out."""
+    from jarvis.listening.wake_detection import is_wake_word_detected
+
+    name, loose, strict = "Kuba", 0.6, 0.9
+    hers = _cfg()
+    assert is_wake_word_detected(name.lower(), hers.wake_word, hers.wake_aliases, loose)
+    assert not is_wake_word_detected(name.lower(), hers.wake_word, hers.wake_aliases, strict)
+
+    assert whisper_hint(_cfg(weather_city="", whisper_vocabulary=[name], wake_fuzzy_ratio=loose)) is None
+    assert whisper_hint(_cfg(weather_city="", whisper_vocabulary=[name], wake_fuzzy_ratio=strict)) == name
+
+
+def test_the_hint_is_never_longer_than_whisper_keeps():
+    """Whisper keeps the start of a long hint and drops the rest without
+    a word, so the hint is cut here, at a whole name, his town first."""
+    names = [f"Pont Sarrel {n:02d}" for n in range(60)]
+
+    hint = whisper_hint(_cfg(whisper_vocabulary=names))
+
+    kept = hint.split(", ")
+    assert len(hint.encode("utf-8")) <= HINT_BYTES
+    assert kept == [CITY, *names[:len(kept) - 1]]
+    assert 1 < len(kept) < len(names)
+
+
+def test_a_name_takes_the_room_of_its_bytes():
+    """Whisper's tokens are made of bytes, and a letter of some scripts
+    is three of them."""
+    names = [f"ヴァルネル{n}" for n in range(40)]
+
+    hint = whisper_hint(_cfg(weather_city="", whisper_vocabulary=names))
+
+    assert len(hint.encode("utf-8")) <= HINT_BYTES
+    assert hint.split(", ") == names[:len(hint.split(", "))]
+
+
+def test_a_name_too_long_for_the_hint_leaves_room_for_the_next():
+    endless = "Ostrevane " * 40
+
+    assert whisper_hint(_cfg(whisper_vocabulary=[endless, "Pont Sarrel"])) == f"{CITY}, Pont Sarrel"
+
+
+def test_he_is_told_which_names_whisper_is_not_given(capsys):
+    names = [f"Pont Sarrel {n:02d}" for n in range(60)]
+
+    announce_his_names(_cfg(whisper_vocabulary=["Youbah", *names]))
+
+    said = capsys.readouterr().out
+    given = len(whisper_hint(_cfg(whisper_vocabulary=names)).split(", "))
+    assert str(given) in said
+    assert "Youbah" in said
+    assert names[given - 1] in said
+    assert names[0] not in said
+
+
+def test_nothing_is_said_of_names_he_does_not_have(capsys):
+    announce_his_names(_cfg(weather_city="", whisper_vocabulary=[]))
+
+    assert capsys.readouterr().out == ""
+
+
+def test_loading_whisper_says_which_names_it_is_not_given(capsys):
+    loaded = SimpleNamespace(model=SimpleNamespace(device="cuda"))
+    listener = _listener(_cfg(whisper_vocabulary=["Youbah"]), loaded)
+
+    listener._apply_whisper_load_success("large-v3-turbo", "cuda", "int8", "cuda", "int8", 0)
+
+    assert "Youbah" in capsys.readouterr().out
+
+
 # ── What he said ──────────────────────────────────────────────────────
 
 
@@ -297,6 +369,18 @@ def test_a_list_repeated_back_with_a_stray_word_is_still_the_list():
     listener = _listener(_cfg(whisper_vocabulary=names), model)
 
     assert _text(listener) == ""
+
+
+def test_what_noise_made_of_the_hint_is_not_written_down():
+    """A reading thrown away was never said: his town does not go to the
+    debug log as something heard."""
+    listener = _listener(_cfg(), _Whisper(speech=None))
+
+    with patch("jarvis.listening.listener.debug_log") as log:
+        assert _text(listener) == ""
+
+    assert log.call_args_list
+    assert not any(CITY.casefold() in str(call.args[0]).casefold() for call in log.call_args_list)
 
 
 def test_on_a_mac_noise_stays_noise():
@@ -461,6 +545,14 @@ def test_the_names_he_lists_in_his_settings_reach_the_hint(tmp_path, monkeypatch
     })
 
     assert whisper_hint(cfg) == f"{CITY}, Ostrevane, Pont Sarrel"
+
+
+def test_what_is_not_text_in_the_list_is_not_a_name(tmp_path, monkeypatch):
+    cfg = _settings_from(tmp_path, monkeypatch, {
+        "whisper_vocabulary": [None, 3, True, "Ostrevane"],
+    })
+
+    assert cfg.whisper_vocabulary == ["Ostrevane"]
 
 
 def test_a_vocabulary_that_is_not_a_list_is_read_as_none(tmp_path, monkeypatch):

@@ -50,7 +50,7 @@ class FieldMeta:
     step: Optional[float] = None
     suffix: Optional[str] = None
     nullable: bool = False  # Whether None/"" is a valid value (shows "Default" option)
-    example: Optional[str] = None  # "map" fields: a sample row shown when adding one
+    example: Optional[str] = None  # "list" and "map" fields: a sample row shown when adding one
 
 
 # Categories and their display order
@@ -424,7 +424,7 @@ def _build_field_metadata() -> List[FieldMeta]:
       "Names Whisper should spell your way (places, people, products). "
       "Your weather city is included on its own. Keep it short: each name "
       "also attracts words that sound like it",
-      "whisper", "list")
+      "whisper", "list", example="Ostrevane")
 
     # --- VAD ---
     f("vad_enabled", "Enable VAD",
@@ -549,7 +549,7 @@ def _build_field_metadata() -> List[FieldMeta]:
       "features", "bool")
     f("dictation_custom_dictionary", "Custom Dictionary",
       "Correction rules for dictation. Use 'wrong -> right' format (e.g. 'Jarvice -> Jarvis')",
-      "features", "list")
+      "features", "list", example="wrong -> right")
 
     # --- Permissions ---
     #
@@ -991,7 +991,7 @@ class SettingsWindow(QDialog):
         def _on_add():
             text, ok = QInputDialog.getText(
                 self, f"Add {fm.label}",
-                f"Enter value (e.g. '{fm.example or 'wrong -> right'}'):",
+                f"Enter value (e.g. '{fm.example}'):",
             )
             if ok and text.strip() and _valid(text.strip()):
                 list_w.addItem(text.strip())

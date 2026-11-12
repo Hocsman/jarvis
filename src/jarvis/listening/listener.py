@@ -29,7 +29,7 @@ from .wake_detection import (is_wake_word_detected, extract_query_after_wake,
                              is_stop_command, names_her)
 from .transcript_buffer import TranscriptBuffer, TranscriptSegment
 from .whisper_turbo import is_faster_whisper_turbo_supported
-from .vocabulary import is_the_hint_repeated, whisper_hint
+from .vocabulary import announce_his_names, is_the_hint_repeated, whisper_hint
 from .whisper_vad import (
     detector_failed as voice_detector_failed, prepare_voice_detector,
     transcribe as transcribe_faster_whisper,
@@ -2959,6 +2959,7 @@ class VoiceListener(threading.Thread):
 
         suffix = f" ({context})" if context else ""
         print(f"     🎤 Whisper '{model_name}' loaded on {resolved_device}{suffix}", flush=True)
+        announce_his_names(self.cfg)
         return resolved_device
 
     # How long "Listening!" may wait for the warm-ups, counted from when they
@@ -3317,6 +3318,7 @@ class VoiceListener(threading.Thread):
 
             self._mlx_model_repo = _get_mlx_model_repo(model_name)
             print(f"     🎤 Loading MLX Whisper '{model_name}' (Apple Silicon GPU)...", flush=True)
+            announce_his_names(self.cfg)
 
             max_retries = 4
             for attempt in range(max_retries + 1):
@@ -4100,7 +4102,11 @@ class VoiceListener(threading.Thread):
         hint = whisper_hint(self.cfg)
         text, detected, pieces = self._transcribe_once(audio, hint)
         if is_the_hint_repeated(text, hint):
-            debug_log(f"transcript is the hint repeated, reading again without it: '{text[:60]}'", "voice")
+            # What it wrote is his names and nobody said them: only the
+            # size of it goes to the log.
+            debug_log(
+                f"transcript is the hint repeated ({len(text.split())} words), "
+                f"reading again without it", "voice")
             text, detected, pieces = self._transcribe_once(audio, None)
         return text, detected, pieces
 

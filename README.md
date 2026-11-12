@@ -403,7 +403,9 @@ Whisper tends to turn a rare name into a word it knows (a town called "Varnelle"
 }
 ```
 
-Keep the list short: each name also attracts words that sound like it. The wake word and its aliases are never used as hints, so this cannot make the assistant easier to wake by mistake. The hint applies to the assistant's listening, not to dictation, which has its own custom dictionary.
+The names never leave your machine: they go to the Whisper model that runs on it, and nowhere else.
+
+Keep the list short: each name also attracts words that sound like it, so a place whose name is close to your town's can come out as your town. The hint holds about 200 characters; a name that no longer fits is left out, and the log says which when Whisper loads. The wake word, its aliases and names that sound like them are never used as hints, so this cannot make the assistant easier to wake by mistake. The hint applies to the assistant's listening, not to dictation, which has its own custom dictionary.
 
 </details>
 

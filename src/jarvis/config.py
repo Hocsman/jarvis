@@ -1493,7 +1493,8 @@ def load_settings() -> Settings:
     whisper_min_word_length = int(merged.get("whisper_min_word_length", 2))
     raw_vocabulary = merged.get("whisper_vocabulary", [])
     whisper_vocabulary = [
-        str(name).strip() for name in raw_vocabulary if str(name).strip()
+        name.strip() for name in raw_vocabulary
+        if isinstance(name, str) and name.strip()
     ] if isinstance(raw_vocabulary, list) else []
     llm_chat_timeout_sec = float(merged.get("llm_chat_timeout_sec", 180.0))
     llm_tools_timeout_sec = float(merged.get("llm_tools_timeout_sec", 300.0))

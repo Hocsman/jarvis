@@ -1004,3 +1004,17 @@ class TestWhisperVocabularyField:
         assert fm is not None
         assert fm.category == "whisper"
         assert fm.field_type == "list"
+
+    def test_the_row_offered_as_an_example_is_a_name(self):
+        fm = next(fm for fm in FIELD_METADATA if fm.key == "whisper_vocabulary")
+        dictionary = next(fm for fm in FIELD_METADATA if fm.key == "dictation_custom_dictionary")
+
+        assert fm.example
+        assert "->" not in fm.example
+        assert "->" in dictionary.example
+
+    def test_every_field_of_rows_says_what_a_row_looks_like(self):
+        rows = [fm for fm in FIELD_METADATA if fm.field_type in ("list", "map")]
+
+        assert rows
+        assert all(fm.example for fm in rows)
