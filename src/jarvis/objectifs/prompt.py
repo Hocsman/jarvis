@@ -79,7 +79,18 @@ def format_objectifs_block(cfg, db=None) -> str:
           "next step is obvious, offer it. Never take that step without "
           "their agreement, and never decide that a goal is finished. Call "
           "listGoals for the full history of one."
+        + (_SES_COMPTES_RENDUS if any(au_travail.get(o.nom) for o in encore) else "")
     )
+
+
+# Said only when a routine is at work for one of the goals shown. Without
+# it she offers to read the write-ups out, and no tool of hers reaches the
+# journal: it is prose a model made of pages it fetched, kept for him.
+_SES_COMPTES_RENDUS = (
+    " When a routine works for one, say so, and that its write-ups are in "
+    "the journal for the user to read: you have not read them and cannot, "
+    "so never say what they hold and never offer to read them."
+)
 
 
 def format_objectif_for_routine(cfg, nom: str) -> str:

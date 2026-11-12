@@ -435,6 +435,24 @@ def test_she_is_told_a_routine_works_for_the_goal(db, cfg):
     assert "journal" in line
 
 
+def test_she_is_told_she_has_not_read_its_write_ups(db, cfg):
+    """No tool of hers reaches the journal, and what is in it is prose a
+    model made of pages it fetched: she says where it is, and no more."""
+    _write_routines(cfg, ROUTINES)
+    _arm(db, due_minutes=600)
+
+    told = format_objectifs_block(cfg, db=db)
+
+    assert "you have not read them" in told
+
+
+def test_with_no_routine_at_work_the_block_says_nothing_of_write_ups(db, cfg):
+    """An ordinary turn pays nothing for a feature nobody is using."""
+    _write_routines(cfg, ROUTINES)
+
+    assert "write-ups" not in format_objectifs_block(cfg, db=db)
+
+
 def test_and_only_for_that_goal(db, cfg):
     _write_routines(cfg, ROUTINES)
     _arm(db, due_minutes=600)
