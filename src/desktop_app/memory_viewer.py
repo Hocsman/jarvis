@@ -659,6 +659,8 @@ def routines_get() -> Response:
                 "origin": r["origin"],
                 "outils": list(scope.outils) if scope else [],
                 "memoire": bool(scope.memoire) if scope else False,
+                # The goal whose text travels with every pass, by name.
+                "objectif": scope.objectif if scope else "",
                 "suspendue": scope is None,
                 "arretee": False,
                 # Named in the block, gone from the machine. Without this
@@ -690,6 +692,7 @@ def routines_get() -> Response:
                 "id": None, "nom": nom, "texte": bloc.phrase,
                 "due_local": "", "tz": "", "origin": None,
                 "outils": list(scope.outils), "memoire": bool(scope.memoire),
+                "objectif": scope.objectif,
                 "suspendue": False, "arretee": True,
                 "introuvables": missing_from_catalogue(scope),
                 "horaire_divergent": False, "steriles": 0,
@@ -4008,6 +4011,9 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
                 }
                 if (r.memoire) {
                     flags.push(flag('mémoire', "Ton profil et tes règles partent avec elle"));
+                }
+                if (r.objectif) {
+                    flags.push(flag('objectif : ' + r.objectif, "Elle travaille pour cet objectif : sa phrase, ce qui le terminera et ce que tu en as dit partent avec elle à chaque passage. Elle n'y écrit rien."));
                 }
                 if (r.steriles) {
                     flags.push(flag(r.steriles + ' sans résultat', "Passages de suite sans rien produire. Au bout de 5, elle s'arrête.", true));

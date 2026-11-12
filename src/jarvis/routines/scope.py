@@ -35,7 +35,8 @@ from ..tools.naming import is_plain_name
 ROUTINES_FILENAME = "routines.md"
 
 _HEADING_RE = re.compile(r"^\s*##\s+(?P<name>\S+)\s*$")
-_FIELD_RE = re.compile(r"^\s*(?P<key>phrase|quand|mémoire|memoire)\s*:\s*(?P<value>.*)$")
+_FIELD_RE = re.compile(
+    r"^\s*(?P<key>phrase|quand|mémoire|memoire|objectif)\s*:\s*(?P<value>.*)$")
 _TOOLS_RE = re.compile(r"^\s*outils\s*:\s*$")
 _ITEM_RE = re.compile(r"^\s*-\s+(?P<name>\S+)\s*$")
 _COMMENT_OPEN, _COMMENT_CLOSE = "<!--", "-->"
@@ -82,6 +83,9 @@ class RoutineScope:
     nom: str
     outils: List[str]
     memoire: bool = False
+    # The one goal of his this routine works for, by name, or none. Its
+    # text travels with every pass, and nothing else of his profile does.
+    objectif: str = ""
 
     def allows(self, tool_name: str) -> bool:
         """Exact names only.
@@ -104,6 +108,7 @@ class RoutineBlock:
     phrase: str = ""
     quand: str = ""
     memoire: str = ""
+    objectif: str = ""
     outils: List[str] = field(default_factory=list)
 
     def scope(self) -> RoutineScope:
@@ -111,6 +116,7 @@ class RoutineBlock:
             nom=self.nom,
             outils=list(self.outils),
             memoire=self.memoire.strip().lower() == _MEMOIRE_OUI,
+            objectif=self.objectif.strip(),
         )
 
 
@@ -154,6 +160,8 @@ def parse_routines(text: str) -> Dict[str, RoutineBlock]:
                 current.phrase = value
             elif key == "quand":
                 current.quand = value
+            elif key == "objectif":
+                current.objectif = value
             else:
                 current.memoire = value
             continue
@@ -415,6 +423,12 @@ _HEADER = (
     "  règles ne partent pas avec elle. Écris « mémoire: oui » dans un\n"
     "  bloc si cette routine-là en a besoin. Tout autre texte vaut non.\n"
     "\n"
+    "  « objectif: nom » lui confie un de tes objectifs, et celui-là\n"
+    "  seulement : à chaque passage elle reçoit sa phrase, ce qui le\n"
+    "  terminera et ce que tu en as dit. Elle n'y écrit jamais rien, son\n"
+    "  compte rendu va au journal. Objectif clos ou introuvable : elle\n"
+    "  est suspendue.\n"
+    "\n"
     "  Pas de joker ici, contrairement à outils.md : là-bas tu es présent\n"
     "  pour voir le résultat, ici non, et un serveur qui gagne un outil\n"
     "  pendant la nuit le gagnerait aussi dans le périmètre.\n"
@@ -424,7 +438,8 @@ _HEADER = (
 
 def render_block(*, nom: str, phrase: str, quand: str, outils: List[str],
                  ecartes: Optional[List[Tuple[str, str]]] = None,
-                 impossibles: Optional[List[Tuple[str, str]]] = None) -> str:
+                 impossibles: Optional[List[Tuple[str, str]]] = None,
+                 objectif: str = "") -> str:
     """Write one block, including what was left out and why.
 
     The rejected tools are named as a comment, so the user can put one
@@ -443,7 +458,15 @@ def render_block(*, nom: str, phrase: str, quand: str, outils: List[str],
     # caller can route round it.
     outils = [n for n in (outils or []) if is_plain_name(str(n))]
 
-    lines = [f"## {nom}", f"phrase: {phrase}", f"quand: {quand}", "outils:"]
+    lines = [f"## {nom}", f"phrase: {phrase}", f"quand: {quand}"]
+    # The goal's name comes from a model. Only one that could be a heading
+    # of objectifs.md is written: a newline in it would add a field, or a
+    # block, to a file whose every line is a grant.
+    from ..objectifs.page import is_goal_name
+
+    if is_goal_name(objectif):
+        lines.append(f"objectif: {objectif}")
+    lines.append("outils:")
     lines.extend(f"- {name}" for name in outils)
     if not outils:
         lines.append("<!-- vide : cette routine ne peut rien atteindre -->")
