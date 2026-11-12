@@ -393,7 +393,7 @@ class TestAsItShips:
     def test_each_sentence_gets_what_it_asks(self, cfg, kind_name, case):
         kind = KINDS[kind_name]
         turn = _turn(cfg, case, kind.unattended)
-        print(f"\n  🗣️ {case.sentence}\n  🔧 {turn.calls}\n  🤖 {turn.reply[:300]!r}")
+        print(f"\n  🗣️ {case.sentence}\n  🔧 {turn.calls}\n  🤖 {turn.reply[:700]!r}")
 
         assert kind.passes(cfg, case, turn), (
             f"{kind_name}: calls {turn.calls}, reply {turn.reply[:400]!r}"

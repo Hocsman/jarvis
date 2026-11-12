@@ -178,6 +178,11 @@ a heading of `objectifs.md` names no goal, and suspends it the same way.
 was stopped, and saying it looks after a goal would be a promise about
 every morning. With no table to read it claims nothing.
 
+`evals/test_a_routine_works_for_a_goal.py` measures the three texts a
+model reads because of this: the goal handed to the pass, the `objectif`
+argument of `setRoutine` (set when asked, and never unasked), and what an
+attended turn is told. `docs/llm_contexts.md` holds the measurement.
+
 The goal's name is a model's reading of what he said, so only a name
 that could be a heading of `objectifs.md` is ever written on the line
 (`is_goal_name`, inside `render_block`): a newline in it would add a
