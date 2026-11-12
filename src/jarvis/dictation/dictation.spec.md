@@ -85,7 +85,10 @@ After transcription, text passes through these stages in order:
 - **Shared Whisper model** via lazy reference (`lambda: voice_thread.model`)
   and backend info — no double memory usage. It transcribes in
   `whisper_language` when one is named, as the listener does, and detects
-  the language otherwise. With `whisper_vad` on (the default), Whisper's
+  the language otherwise. It is given no hint of his names
+  (`whisper_vocabulary` and `weather_city` steer the listener alone,
+  `listening.spec.md`, "The names he uses"): a word dictation gets wrong
+  goes in its dictionary. With `whisper_vad` on (the default), Whisper's
   voice detector cuts what holds no speech before it decodes, as for the
   listener, so a press with nothing said pastes nothing rather than a
   phrase Whisper wrote into the silence. MLX Whisper has no detector. A
