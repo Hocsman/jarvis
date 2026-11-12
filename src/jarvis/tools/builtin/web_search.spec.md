@@ -141,7 +141,8 @@ answer, the tool walks a fallback chain before giving up:
    dependency, so it is never auto-enabled.
 2. **Wikipedia** (zero-config, on by default). Runs when
    `wikipedia_fallback_enabled` is True. Uses the host matching the
-   ISO-639-1 language Whisper auto-detected for the current utterance
+   language Whisper reports for the current utterance (the one named in
+   `whisper_language`, or the one it detected)
    (`context.language`) — falls back to English when the code is missing
    or syntactically invalid. Two additional guards catch Whisper
    language-misdetection on short/noisy utterances:
@@ -195,8 +196,8 @@ These are ephemeral stdout prints (`context.user_print`). They are not persisted
 
 ### Per-utterance language
 
-`ToolContext.language` carries the ISO-639-1 code Whisper detected at
-the listener site. Here the Wikipedia fallback reads it to pick the
+`ToolContext.language` carries the code Whisper reports at the listener
+site: the one named in `whisper_language`, or the one it detected. Here the Wikipedia fallback reads it to pick the
 right subdomain; `getWeather` reads it to search place names in the
 user's language ([weather.spec.md](weather.spec.md)). `None` on non-voice entrypoints (evals, unit tests,
 text input) — tools must treat `None` as "no signal" and choose a safe

@@ -23,7 +23,7 @@ from src.jarvis import daemon
 
 def _install_memory():
     from src.jarvis.memory.conversation import DialogueMemory
-    daemon._global_dialogue_memory = DialogueMemory(inactivity_timeout=300, max_interactions=20)
+    daemon._global_dialogue_memory = DialogueMemory(inactivity_timeout=300)
     daemon._global_cfg = object()
     daemon._global_db = object()
     daemon._global_stop_requested = False

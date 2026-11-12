@@ -9,8 +9,10 @@ on-disk diary writes — should apply before any byte crosses the wire.
 ``RedactingBackend`` wraps any :class:`LLMBackend` and scrubs the text
 arguments on the egress methods (``direct``, ``streaming``, ``chat``,
 ``embed``) via :func:`jarvis.utils.redact.scrub_secrets` before
-delegating to the inner backend. ``list_models`` and ``warm_up`` carry
-no user content and pass straight through.
+delegating to the inner backend. ``list_models`` carries no user
+content and passes straight through; the prompt a ``warm_up`` may carry
+is the opening of a later ``direct`` call and is scrubbed as that call
+is.
 
 Design choice — decorator, not a constructor flag on the concrete
 backend: this keeps the upstream ``OpenAICompatibleBackend`` untouched
@@ -28,9 +30,11 @@ masked.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Optional
+from itertools import accumulate
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from .backend import LLMBackend
+from .backend import CACHE_MARKS, LLMBackend, cache_marks, cut_at_marks
+from ..debug import debug_log
 from ..utils.redact import scrub_secrets
 
 
@@ -45,12 +49,26 @@ def _scrub(text: Any) -> Any:
 def _scrub_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Return a shallow copy of ``messages`` with every string
     ``content`` field scrubbed. Tool-call metadata and non-string
-    content (e.g. multimodal blocks) are left untouched."""
+    content (e.g. multimodal blocks) are left untouched.
+
+    Scrubbing shortens or lengthens the text, so the cache marks of a
+    message (``CACHE_MARKS``) are recomputed: each marked piece is
+    scrubbed on its own and the marks moved to the new piece ends. When
+    that does not give exactly the whole text scrubbed at once (a secret
+    cut by a mark), the whole text is what goes and the marks are dropped:
+    the cache may miss, the scrub never does."""
     out: List[Dict[str, Any]] = []
     for m in messages or []:
         if isinstance(m, dict) and isinstance(m.get("content"), str):
             scrubbed = dict(m)
             scrubbed["content"] = scrub_secrets(m["content"])
+            if CACHE_MARKS in m:
+                pieces = [scrub_secrets(p) for p in cut_at_marks(m["content"], cache_marks(m))]
+                if "".join(pieces) == scrubbed["content"]:
+                    scrubbed[CACHE_MARKS] = list(accumulate(len(p) for p in pieces[:-1]))
+                else:
+                    del scrubbed[CACHE_MARKS]
+                    debug_log("redaction: a secret straddles a cache mark, marks dropped", "llm")
             out.append(scrubbed)
         else:
             out.append(m)
@@ -148,5 +166,12 @@ class RedactingBackend(LLMBackend):
         model: str,
         timeout_sec: float = 60.0,
         keep_alive: str = "30m",
+        prompt: Optional[Tuple[str, str]] = None,
     ) -> bool:
-        return self._inner.warm_up(model, timeout_sec=timeout_sec, keep_alive=keep_alive)
+        # Scrubbed as ``direct`` scrubs it: the prompt is the opening of a
+        # later ``direct`` call, and the two have to be the same text.
+        if prompt is not None:
+            prompt = (_scrub(prompt[0]), _scrub(prompt[1]))
+        return self._inner.warm_up(
+            model, timeout_sec=timeout_sec, keep_alive=keep_alive, prompt=prompt,
+        )

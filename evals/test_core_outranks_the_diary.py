@@ -148,6 +148,7 @@ class TestCoreOutranksTheDiary:
         ):
             response = run_reply_engine(
                 db=eval_db, cfg=mock_config, tts=None,
+                origin="voix",
                 text=case.text,
                 dialogue_memory=eval_dialogue_memory,
             )

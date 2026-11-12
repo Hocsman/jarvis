@@ -119,7 +119,7 @@ def test_a_diary_flush_files_and_merges_on_the_chat_model(graph_db, monkeypatch)
     _, db, store = graph_db
     cinema = _seed_cinema(store)
 
-    memory = DialogueMemory(inactivity_timeout=300, max_interactions=20)
+    memory = DialogueMemory(inactivity_timeout=300)
     memory.add_message("user", "Who directed Possessor?")
     memory.record_tool_turn([
         {"role": "tool", "tool_name": "webSearch", "content": "Brandon Cronenberg"},

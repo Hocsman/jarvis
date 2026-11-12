@@ -174,6 +174,56 @@ def assert_not_max_turns_digest(response: Optional[str], context: str = "") -> N
 
 
 # =============================================================================
+# Comparing arms: rates, significance, printing past pytest's capture
+# =============================================================================
+#
+# The evals that compare prompt variants interleave the arms call by call
+# (CLAUDE.md, Comparing prompt variants) and print a table per arm. These
+# are the pieces they share.
+
+# Below this many calls an arm's rate says nothing (CLAUDE.md, sample sizes).
+MIN_CALLS_FOR_A_RATE = 20
+
+
+def rate(got: int, n: int) -> str:
+    """``got/n``, with a percentage only once ``n`` is large enough to
+    carry one."""
+    if n >= MIN_CALLS_FOR_A_RATE:
+        return f"{got}/{n} ({100 * got / n:.0f} %)"
+    return f"{got}/{n}   (under {MIN_CALLS_FOR_A_RATE} calls: counts only)"
+
+
+def fisher_two_sided(a: int, b: int, c: int, d: int) -> float:
+    """Fisher's exact test on [[a, b], [c, d]], two-sided: the probability,
+    under the margins observed, of every table as likely as this one or
+    less. Arm one's hits and misses are ``a, b``, arm two's ``c, d``."""
+    from math import comb
+
+    row, col, n = a + b, a + c, a + b + c + d
+    if n == 0:
+        return 1.0
+
+    def p(x: int) -> float:
+        return comb(col, x) * comb(n - col, row - x) / comb(n, row)
+
+    observed = p(a)
+    low, high = max(0, row + col - n), min(row, col)
+    return min(1.0, sum(p(x) for x in range(low, high + 1) if p(x) <= observed * (1 + 1e-9)))
+
+
+def to_terminal(capsys, lines: List[str]) -> None:
+    """Print past pytest's capture. The real stream may be a cp1252 pipe
+    (Git Bash on Windows), where an emoji raises once every call is made."""
+    import sys
+
+    from jarvis.utils.console import force_utf8_stream
+
+    with capsys.disabled():
+        force_utf8_stream(sys.stdout)
+        print("\n".join(lines), flush=True)
+
+
+# =============================================================================
 # Warm-memory seeding
 # =============================================================================
 #
@@ -331,11 +381,11 @@ class MockConfig:
     # It did fall through, and the cost was invisible: `intent_judge_model`
     # defaulted to `gemma4:e2b`, `resolve_tool_router_model` resolved to
     # it, and OpenRouter answered "gemma4:e2b is not a valid model ID" on
-    # every routing call. `select_tools` fails open, so every eval run
-    # against a remote provider was silently exercising the fall-open
-    # path — "20 selected" is the whole catalogue, not a routing
-    # decision — while appearing to pass. A suite that measures routing
-    # has to actually route.
+    # every routing call. `select_tools` falls back to the keyword
+    # strategy when the router cannot answer, so every eval run against a
+    # remote provider was silently exercising the fallback, not a routing
+    # decision, while appearing to pass. A suite that measures routing has
+    # to actually route.
     intent_judge_model: str = SMALL_MODEL
     tool_router_model: str = SMALL_MODEL
     reminder_model: str = SMALL_MODEL

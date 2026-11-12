@@ -15,6 +15,10 @@ would send the user's own ``profil.md`` and ``regles.md`` to whichever
 provider the settings name. The model is the thing under test; the user's
 life is not part of it.
 
+Nor does an eval move the orb of a running Jarvis: the assistant's state
+reaches the desktop app through a file in the system temp directory, and
+the harness gives each eval its own.
+
 These are not evals: they call no model, and they run wherever the evals
 do, which is exactly where the guards have to hold.
 """
@@ -305,6 +309,7 @@ def test_a_real_model_turn_touches_nothing_of_the_users_own(
              patch("jarvis.reply.engine.extract_search_params_for_memory", return_value={"keywords": []}):
             reply = run_reply_engine(
                 db=db, cfg=cfg, tts=None,
+                origin="voix",
                 text="quelle est la météo ?", dialogue_memory=eval_dialogue_memory,
             )
     finally:
@@ -355,4 +360,30 @@ def test_the_eval_report_never_enters_the_repository():
     source = ignored.stdout.split(":", 1)[0]
     assert (DEPOT / source).resolve() == (DEPOT / ".gitignore").resolve(), (
         f"{EVAL_REPORT_DEFAULT.name} is ignored by {source!r}, not by the repository's .gitignore"
+    )
+
+
+# ── The running assistant's state, left alone ────────────────────────
+#
+# The assistant's state (idle, listening, speaking, ...) reaches the
+# desktop app through a file in the system temp directory, which the orb of
+# a running Jarvis polls. An eval that drives the listener publishes to it,
+# so the harness gives each eval its own file.
+
+
+@pytest.mark.unit
+def test_a_state_an_eval_publishes_never_reaches_the_running_apps_file(tmp_path, monkeypatch):
+    """Measured against a temp directory of the test's own, so the file it
+    watches is never the developer's. The state holder starts afresh, as
+    it does in a new process."""
+    import tempfile
+    import jarvis.state as state
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(state, "_jarvis_state_instance", None)
+
+    state.get_jarvis_state().set_state(state.JarvisState.LISTENING)
+
+    assert not (tmp_path / "jarvis_state").exists(), (
+        "an eval published to the file the orb of a running Jarvis reads"
     )

@@ -48,7 +48,7 @@ def _install_dialogue_memory(cfg=None, db=None):
     The contract tests pass mock cfg/db so ``submit_text_query`` can hand
     them to the (patched) reply engine without touching the filesystem.
     """
-    dm = DialogueMemory(inactivity_timeout=300, max_interactions=20)
+    dm = DialogueMemory(inactivity_timeout=300)
     daemon._global_dialogue_memory = dm
     daemon._global_cfg = cfg
     daemon._global_db = db
@@ -482,11 +482,11 @@ class TestGetHotWindowMessages:
         assert messages[1]["content"] == "It is sunny."
 
     def test_empty_when_hot_window_has_aged_out(self):
-        """Turns older than the recent window are not replayed."""
+        """Turns of a conversation that has ended are not replayed."""
         import time as _time
         dm = _install_dialogue_memory()
-        # A 1-second recent window makes anything added now age out after sleep.
-        dm.RECENT_WINDOW_SEC = 1
+        # A 1-second pause ends the conversation, so it is over after the sleep.
+        dm.CONVERSATION_GAP_SEC = 1
         dm.add_message("user", "old turn")
         _time.sleep(1.2)
 

@@ -185,7 +185,7 @@ def test_pipeline_timings_by_context():
     with TimingRecorder() as rec:
         for query in PIPELINE_QUERIES:
             db = Database(":memory:", sqlite_vss_path=None)
-            dlg = DialogueMemory(inactivity_timeout=300, max_interactions=20)
+            dlg = DialogueMemory(inactivity_timeout=300)
             try:
                 for _ in range(PERF_RUNS):
                     run_reply_engine(db, cfg, None, query, dlg)

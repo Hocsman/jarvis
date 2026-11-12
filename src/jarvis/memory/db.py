@@ -1125,6 +1125,22 @@ class Database:
             ).fetchone()
             return row
 
+    def get_conversation_summaries_between(
+        self, first_date_utc: str, last_date_utc: str,
+    ) -> list[sqlite3.Row]:
+        """Every source's summaries dated from ``first_date_utc`` to
+        ``last_date_utc`` (``YYYY-MM-DD``, both included), oldest first."""
+        with self._lock:
+            cur = self.conn.cursor()
+            return cur.execute(
+                """
+                SELECT * FROM conversation_summaries
+                WHERE date_utc >= ? AND date_utc <= ?
+                ORDER BY date_utc ASC, source_app ASC
+                """,
+                (first_date_utc, last_date_utc),
+            ).fetchall()
+
     def get_recent_conversation_summaries(self, days: int = 7) -> list[sqlite3.Row]:
         """Get conversation summaries from the last N days."""
         from datetime import datetime, timedelta, timezone

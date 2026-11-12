@@ -4,8 +4,10 @@
 PyInstaller bundles Python code on its own and nothing else: a data file the
 app opens through ``Path(__file__)`` is absent from the build unless the spec
 lists it, and the app then fails quietly (an empty window, a missing icon).
-This script derives the runtime data files from the source tree, looks for each
-one at the place the bundle's layout gives it (the place a package's modules
+This script derives the runtime data files from the source tree, adds the data
+files of the third-party packages in ``PACKAGE_DATA`` (read from the installed
+package, so it runs with the Python that built the bundle), looks for each one
+at the place the bundle's layout gives it (the place a package's modules
 resolve it, which is not the place the entry script does), and names every
 one that is absent.
 
@@ -18,6 +20,7 @@ Exit status is 0 when the build is complete and 1 otherwise.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import sys
 from pathlib import Path, PurePosixPath
 from typing import Iterable, List, Optional
@@ -46,6 +49,13 @@ RUNTIME_SUFFIXES = frozenset({
 NOT_DATA_SUFFIXES = frozenset({".py", ".pyc", ".pyo", ".ico"})
 NOT_DATA_NAMES = frozenset({"CLAUDE.md", "LICENSE"})
 NOT_DATA_ENDINGS = (".spec.md",)
+
+# Third-party packages that open data files from their own folder at runtime,
+# which import analysis does not bring and no PyInstaller hook collects: the
+# package, and the folders of it that hold those files. faster-whisper reads
+# its voice detector's model (Silero, used when ``whisper_vad`` is on) from
+# ``assets``; without it every transcription that asks for the detector fails.
+PACKAGE_DATA = {"faster_whisper": ("assets",)}
 
 
 def _skipped(relative: PurePosixPath) -> bool:
@@ -87,6 +97,31 @@ def unclassified_files(src_root: Path) -> List[PurePosixPath]:
     return [rel for rel in _walk(src_root) if _is_runtime(rel) is None]
 
 
+def installed_package_root(package: str) -> Optional[Path]:
+    """The folder ``package`` is installed in, found without importing it."""
+    spec = importlib.util.find_spec(package)
+    if spec is None or not spec.submodule_search_locations:
+        return None
+    return Path(list(spec.submodule_search_locations)[0])
+
+
+def package_data_files() -> List[PurePosixPath]:
+    """The data files of ``PACKAGE_DATA`` as installed, as paths inside the
+    bundle's data tree, where the package looks for them (its own folder)."""
+    files: List[PurePosixPath] = []
+    for package, folders in PACKAGE_DATA.items():
+        root = installed_package_root(package)
+        if root is None:
+            continue
+        for folder in folders:
+            for path in sorted((root / folder).rglob("*")):
+                relative = PurePosixPath(path.relative_to(root).as_posix())
+                if (path.is_file() and not _skipped(relative)
+                        and relative.suffix.lower() not in NOT_DATA_SUFFIXES):
+                    files.append(PurePosixPath(package) / relative)
+    return files
+
+
 def executable_path(dist_dir: Path, platform: str) -> Path:
     """Where the build puts the program a user launches."""
     if platform == "darwin":
@@ -106,6 +141,7 @@ def expected_bundle_files(project_root: Path) -> List[PurePosixPath]:
     """Every file the build must carry, as a path inside its data tree."""
     files = list(runtime_data_files(project_root / "src"))
     files.extend(PurePosixPath(name) for name in LICENCE_FILES)
+    files.extend(package_data_files())
     return files
 
 
@@ -121,6 +157,13 @@ def check_bundle(dist_dir: Path, project_root: Path, platform: Optional[str] = N
         problems.append(
             f"cannot tell whether src/{rel} ships: classify its suffix in scripts/check_bundle_layout.py"
         )
+
+    for package in PACKAGE_DATA:
+        if installed_package_root(package) is None:
+            problems.append(
+                f"{package} is not installed here, so its data files cannot be checked: "
+                f"run this check with the Python that built the bundle"
+            )
 
     exe = executable_path(dist_dir, platform)
     if not exe.is_file():

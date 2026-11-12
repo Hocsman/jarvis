@@ -26,16 +26,16 @@ class TestHotCachePrimitives:
         dm.hot_cache_put("k", {"v": 1})
         assert dm.hot_cache_get("k") == {"v": 1}
 
-    def test_entries_persist_past_recent_window_age(self):
-        """Cache entries are conversation-scoped, not bounded by
-        RECENT_WINDOW_SEC. A long active conversation must keep the
-        cache hot even when the original write is older than the window.
+    def test_entries_persist_however_old(self):
+        """Cache entries are conversation-scoped, not bounded by age.
+        A long active conversation must keep the cache hot even when the
+        original write is older than the pause that ends a conversation.
         """
         dm = DialogueMemory(inactivity_timeout=300.0)
         dm.hot_cache_put("k", "v")
         with dm._lock:
             ts, value = dm._hot_cache["k"]
-            dm._hot_cache["k"] = (ts - (dm.RECENT_WINDOW_SEC + 10), value)
+            dm._hot_cache["k"] = (ts - (dm.CONVERSATION_GAP_SEC + 10), value)
         # Age alone must NOT cause the value to disappear; only explicit
         # invalidation should drop it.
         assert dm.hot_cache_get("k") == "v"

@@ -258,7 +258,7 @@ class TestDiaryEnrichmentInjectionFraming:
     """The reply engine must frame diary enrichment as reference-only, not as instructions."""
 
     def test_engine_injects_diary_under_reference_only_label(self):
-        """The literal injection string used by _build_initial_system_message must signal reference-only use."""
+        """The literal injection string used by _initial_system_message must signal reference-only use."""
         # Read the engine source and verify the label string is present.
         # We intentionally assert on the source-level string rather than end-to-end
         # because the full reply engine invocation pulls in the network stack.

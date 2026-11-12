@@ -23,7 +23,7 @@ which backend is active.
 """
 
 from __future__ import annotations
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import json
 import requests
@@ -270,7 +270,8 @@ class OpenAICompatibleBackend(LLMBackend):
         """Reassemble a streamed chat completion into the buffered shape.
 
         Content deltas are forwarded to ``on_token`` as they arrive and also
-        accumulated; tool-call deltas are keyed by ``index`` and their
+        accumulated; a reasoning model's ``reasoning_content`` deltas are
+        accumulated only; tool-call deltas are keyed by ``index`` and their
         ``arguments`` fragments concatenated (a single call's JSON arrives
         split across chunks). The result is returned in the server's
         non-streaming ``{"choices": [{"message": ...}]}`` shape so the same
@@ -281,6 +282,9 @@ class OpenAICompatibleBackend(LLMBackend):
         so the fully accumulated message is still returned.
         """
         content: List[str] = []
+        # A reasoning model's thinking, which the buffered answer carries as
+        # the message's ``reasoning_content``. It is kept, never forwarded.
+        reasoning: List[str] = []
         # index -> partial tool call (arguments accumulated as a string)
         tool_calls: Dict[int, Dict[str, Any]] = {}
 
@@ -312,6 +316,10 @@ class OpenAICompatibleBackend(LLMBackend):
                 except Exception as e:
                     debug_log(f"OpenAICompatibleBackend: on_token raised — {e}", "llm")
 
+            thought = delta.get("reasoning_content")
+            if isinstance(thought, str) and thought:
+                reasoning.append(thought)
+
             for tc in delta.get("tool_calls") or []:
                 if not isinstance(tc, dict):
                     continue
@@ -332,6 +340,8 @@ class OpenAICompatibleBackend(LLMBackend):
                         slot["function"]["arguments"] += args
 
         message: Dict[str, Any] = {"role": "assistant", "content": "".join(content)}
+        if reasoning:
+            message["reasoning_content"] = "".join(reasoning)
         if tool_calls:
             message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
         return {"choices": [{"message": message}]}
@@ -421,10 +431,19 @@ class OpenAICompatibleBackend(LLMBackend):
                 stream=streaming,
             ) as resp:
                 resp.raise_for_status()
-                data = (
-                    self._consume_chat_stream(resp, on_token)
-                    if streaming else resp.json()
-                )
+                if streaming:
+                    try:
+                        data = self._consume_chat_stream(resp, on_token)
+                    except requests.exceptions.ConnectionError:
+                        # The server answered, then went quiet past the read
+                        # timeout (requests reports that as a ConnectionError)
+                        # or dropped the stream. It was reachable: this is the
+                        # buffered path's read timeout, not a refusal.
+                        print("  ⏱️ LLM stream stalled", flush=True)
+                        debug_log("OpenAICompatibleBackend.chat: stream stalled or cut", "llm")
+                        return None
+                else:
+                    data = resp.json()
             if isinstance(data, dict):
                 return _normalise_response(data)
         except requests.exceptions.Timeout:
@@ -521,6 +540,7 @@ class OpenAICompatibleBackend(LLMBackend):
         model: str,
         timeout_sec: float = 60.0,
         keep_alive: str = "30m",
+        prompt: Optional[Tuple[str, str]] = None,
     ) -> bool:
         """Establish the persistent session's connection and warm the
         provider ahead of the first real query.
@@ -532,6 +552,11 @@ class OpenAICompatibleBackend(LLMBackend):
         one minimal (1-token) request at startup absorbs that cost up front
         so the user's first query lands on a warm path. The session is
         reused (the backend is cached), so the warm connection persists.
+
+        ``prompt`` is not sent: the request stays the one-token one,
+        because whether the server keeps a computed prompt between requests
+        is not something the OpenAI shape says, and a cloud endpoint would
+        bill every token of it.
         """
         if not model:
             return False

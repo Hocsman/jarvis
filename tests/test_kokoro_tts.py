@@ -30,8 +30,60 @@ class TestKokoroInterface:
     def test_has_same_interface_as_other_engines(self):
         tts = KokoroTTS(enabled=False)
         for name in ("start", "stop", "speak", "interrupt", "is_speaking",
-                     "get_last_spoken_text", "voice_delay"):
+                     "get_last_spoken_text", "voice_delay", "wait_until_ready"):
             assert callable(getattr(tts, name)), f"missing {name}"
+
+    def test_the_voice_is_ready_once_its_warm_up_is_over_and_not_before(self, monkeypatch):
+        """The listener waits on this before it says it is listening: ready
+        means the warm-up synthesis is done, not merely that loading began."""
+        import threading
+
+        gate = threading.Event()
+        warmed = []
+
+        class GatedPipeline:
+            def __init__(self, lang_code=None):
+                gate.wait(10)
+
+            def __call__(self, text, voice=None, speed=None):
+                warmed.append(text)
+                yield None, None, [0.0] * 2400
+
+        fake_kokoro = types.ModuleType("kokoro")
+        fake_kokoro.KPipeline = GatedPipeline
+        monkeypatch.setitem(sys.modules, "kokoro", fake_kokoro)
+        monkeypatch.setattr(sys, "platform", "linux")
+        tts = KokoroTTS(enabled=True)
+        tts.start()
+        try:
+            assert tts.wait_until_ready(0.05) is None
+
+            gate.set()
+            assert tts.wait_until_ready(5) is True
+            assert warmed == [tts._WARMUP_TEXT]
+        finally:
+            gate.set()
+            tts.stop()
+
+    def test_a_voice_that_cannot_load_is_settled_and_not_ready(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "kokoro", None)  # import fails
+        monkeypatch.setattr(sys, "platform", "linux")
+        tts = KokoroTTS(enabled=True)
+        tts.start()
+        try:
+            assert tts.wait_until_ready(5) is False
+        finally:
+            tts.stop()
+
+    def test_an_engine_nobody_started_has_nothing_to_wait_for(self):
+        import time
+
+        began = time.monotonic()
+        assert KokoroTTS(enabled=True).wait_until_ready(5) is None
+        assert time.monotonic() - began < 1.0
+
+    def test_a_disabled_voice_is_never_ready(self):
+        assert KokoroTTS(enabled=False).wait_until_ready(5) is False
 
     def test_disabled_is_a_no_op(self):
         # Disabled must never load the pipeline or touch audio hardware.
