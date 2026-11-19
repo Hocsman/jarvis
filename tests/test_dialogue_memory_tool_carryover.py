@@ -265,6 +265,28 @@ class TestToolCarryover:
             "closing fence marker must survive truncation"
         )
 
+    def test_truncation_closes_the_fence_of_any_tool(self):
+        """A screen's text runs past the cap far more often than a web
+        extract does, and its fence is the tool's own."""
+        from src.jarvis.tools.builtin.screenshot import (
+            SCREEN_FENCE_BEGIN,
+            SCREEN_FENCE_END,
+        )
+
+        dm = DialogueMemory()
+        dm.add_message("user", "q")
+        payload = (
+            "Screen:\n" + SCREEN_FENCE_BEGIN + "\n" + ("x" * 5000) + "\n"
+            + SCREEN_FENCE_END
+        )
+        dm.record_tool_turn([
+            {"role": "tool", "tool_call_id": "c1", "content": payload},
+        ])
+        out = dm.get_recent_turns_with_tools(per_entry_chars=500)
+        tool_msg = next(m for m in out if m.get("role") == "tool")
+        assert SCREEN_FENCE_BEGIN in tool_msg["content"]
+        assert tool_msg["content"].endswith(SCREEN_FENCE_END)
+
     def test_get_pending_chunks_excludes_tool_rows(self):
         """Tool messages must not pollute the diary summariser input."""
         dm = DialogueMemory()

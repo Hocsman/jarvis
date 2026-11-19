@@ -47,6 +47,20 @@ def _embed_text(text: str, cfg, *, timeout_sec: float = 15.0) -> Optional[list[f
 _UNTRUSTED_FENCE_BEGIN = "<<<BEGIN UNTRUSTED WEB EXTRACT>>>"
 _UNTRUSTED_FENCE_END = "<<<END UNTRUSTED WEB EXTRACT>>>"
 
+# The opening marker of any tool's fence (a web extract, the text of the
+# screen). Each closes with the same words after `END`.
+_OPEN_FENCE_RE = re.compile(r"<<<BEGIN (UNTRUSTED [^<>\n]+)>>>")
+
+
+def _close_cut_fences(cut: str) -> str:
+    """`cut` with the closing marker put back on every fence a truncation
+    left open, so what was fenced as data stays fenced downstream."""
+    for kind in dict.fromkeys(_OPEN_FENCE_RE.findall(cut)):
+        closing = f"<<<END {kind}>>>"
+        if closing not in cut:
+            cut = f"{cut}\n{closing}"
+    return cut
+
 
 # ── Deflection rewrite (LLM-driven historical cleanup) ────────────────────
 #
@@ -1269,15 +1283,7 @@ class DialogueMemory:
                     c = mm.get("content")
                     if isinstance(c, str) and len(c) > per_entry_chars:
                         cut = c[:per_entry_chars].rstrip() + "…"
-                        # If truncation sliced away the closing marker of an
-                        # UNTRUSTED WEB EXTRACT fence, re-append it so the
-                        # injection-defence fence stays intact downstream.
-                        if (
-                            _UNTRUSTED_FENCE_BEGIN in cut
-                            and _UNTRUSTED_FENCE_END not in cut
-                        ):
-                            cut = cut + "\n" + _UNTRUSTED_FENCE_END
-                        mm["content"] = cut
+                        mm["content"] = _close_cut_fences(cut)
                     truncated.append(mm)
                 timeline.append((ts, "group", truncated))
             timeline.sort(key=lambda t: t[0])
