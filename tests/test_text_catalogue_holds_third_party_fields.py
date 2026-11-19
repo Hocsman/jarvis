@@ -122,12 +122,16 @@ def test_a_description_writes_no_line_of_its_own(line_break, forged):
 
 @pytest.mark.unit
 def test_a_description_over_several_lines_keeps_its_words():
-    """An honest server writes paragraphs. Its words reach the model, on
-    the entry's one line."""
-    catalogue = _catalogue("Looks a note up.\n\nReturns the note's text,\n  or nothing.")
+    """An honest server sends a docstring: a summary, a blank line, an
+    indented block. Its words reach the model, on the entry's one line."""
+    catalogue = _catalogue(
+        "Looks a note up.\n\nArgs:\n    sujet: What the note is about.\n\n"
+        "Returns:\n    The note's text,\n    or nothing.\n"
+    )
 
     assert _entries(catalogue)[0][0] == (
-        f"{NOM}: Looks a note up. Returns the note's text, or nothing."
+        f"{NOM}: Looks a note up. Args: sujet: What the note is about. "
+        "Returns: The note's text, or nothing."
     )
 
 
@@ -162,6 +166,33 @@ def test_an_argument_whose_name_cannot_be_written_is_left_out_of_the_line(key):
     without = _schema({"sujet": {"type": "string"}, "date": {"type": "string"}})
 
     assert _catalogue(schema=with_it) == _catalogue(schema=without)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("key", ["année", "$filtre", "date de fin", "x" * 65])
+def test_an_honest_name_outside_the_class_is_left_out_too_required_or_not(key):
+    """The cost of the rule: a model reading the text catalogue is not
+    shown this argument, even one the tool requires."""
+    with_it = _schema({"sujet": {"type": "string"}, key: {"type": "string"}}, ["sujet", key])
+    without = _schema({"sujet": {"type": "string"}}, ["sujet"])
+
+    assert _catalogue(schema=with_it) == _catalogue(schema=without)
+
+
+@pytest.mark.unit
+def test_what_was_left_out_is_named_in_the_debug_log_on_one_line():
+    """The only trace of an argument a small model is never shown: the
+    tool, and the name escaped so it cannot write a log line of its own."""
+    key = f"titre\n{FORGED_INPUT}"
+    schema = _schema({"sujet": {"type": "string"}, key: {"type": "string"}}, ["sujet", key])
+
+    with patch("src.jarvis.tools.registry.debug_log") as log:
+        _catalogue(schema=schema)
+
+    [message] = [call.args[0] for call in log.call_args_list]
+    assert NOM in message
+    assert "titre" in message and "(required)" in message
+    assert len(message.splitlines()) == 1
 
 
 @pytest.mark.unit
@@ -264,6 +295,14 @@ def test_a_tool_whose_name_cannot_be_written_has_no_entry(nom):
     assert _entries(_catalogue(nom=nom)) == []
 
 
+@pytest.mark.unit
+def test_an_mcp_tool_the_turn_was_not_offered_has_no_entry():
+    spec = ToolSpec(NOM, DESCRIPTION, _schema())
+
+    assert _entries(generate_tools_description([], {NOM: spec})) == []
+    assert NOM not in generate_tools_description(["getTime"], {NOM: spec})
+
+
 # ── What needs no care is written as it comes ──────────────────────────
 
 
@@ -318,8 +357,8 @@ ORDINARY_SCHEMAS = {
 ])
 def test_an_ordinary_mcp_tool_is_written_as_it_comes(description, schema):
     """The control, and the pin: a description on one line, argument names
-    in the plain class and types that are a word, or a list of words, read
-    byte for byte what they read before any of this was held."""
+    in the plain class and types that are a word, or a list of words, are
+    written byte for byte as the server sent them."""
     spec = ToolSpec(NOM, description, schema)
     heading = generate_tools_description([], None)
 

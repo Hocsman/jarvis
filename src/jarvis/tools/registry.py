@@ -168,6 +168,11 @@ def _spec_from_tool_info(server_name: str, tool_info: Dict[str, Any]) -> ToolSpe
     )
 
 
+def _escaped(text: Any, limit: int = 120) -> str:
+    """Third-party text as it can be shown: escaped, cut, on one line."""
+    return str(text).encode("unicode_escape").decode("ascii")[:limit]
+
+
 def discover_mcp_tools(mcps_config: Dict[str, Any]) -> Tuple[Dict[str, ToolSpec], Dict[str, str]]:
     """Discover all tools from configured MCP servers and create ToolSpec entries for them.
 
@@ -200,8 +205,7 @@ def discover_mcp_tools(mcps_config: Dict[str, Any]) -> Tuple[Dict[str, ToolSpec]
                         # called. Said out loud once, at discovery: a
                         # capability quietly missing looks exactly like a
                         # server that never offered it.
-                        montre = full_tool_name.encode(
-                            "unicode_escape").decode("ascii")[:120]
+                        montre = _escaped(full_tool_name)
                         debug_log(
                             f"MCP tool dropped, name outside the plain class: {montre}",
                             "mcp",
@@ -297,8 +301,9 @@ def generate_tools_json_schema(allowed_tools: Optional[List[str]] = None, mcp_to
 def _plain_word(word: Any) -> bool:
     """Whether a word from a tool's schema can sit on a catalogue line.
 
-    The class a tool name is held to. ``fullmatch``: the whole word, its
-    last character included.
+    The class a tool name is held to. ``fullmatch`` rather than
+    ``is_plain_name``: a schema word can be any JSON value, and the whole
+    word has to be in the class, a final line break included.
     """
     return isinstance(word, str) and PLAIN_NAME.fullmatch(word) is not None
 
@@ -334,17 +339,17 @@ def _input_line(tool_name: str, schema: Any) -> Optional[str]:
     if not isinstance(required, list):
         required = []
     params = []
-    left_out = 0
+    left_out = []
     for prop_name, prop_def in props.items():
-        if not _plain_word(prop_name):
-            left_out += 1
-            continue
         req_marker = " (required)" if prop_name in required else ""
+        if not _plain_word(prop_name):
+            left_out.append(f"{_escaped(prop_name, 40)}{req_marker}")
+            continue
         params.append(f"{prop_name}: {_type_word(prop_def)}{req_marker}")
     if left_out:
         debug_log(
-            f"text catalogue: {left_out} argument(s) of {tool_name} left out, "
-            "name outside the plain class",
+            f"text catalogue: {tool_name} is shown without {len(left_out)} argument(s), "
+            f"name outside the plain class: {', '.join(left_out[:8])}",
             "tools",
         )
     return f"Input: {', '.join(params)}" if params else None
@@ -385,7 +390,7 @@ def generate_tools_description(allowed_tools: Optional[List[str]] = None, mcp_to
             if not _plain_word(spec.name):
                 debug_log(
                     f"text catalogue: MCP tool left out, name outside the plain class: "
-                    f"{str(spec.name).encode('unicode_escape').decode('ascii')[:120]}",
+                    f"{_escaped(spec.name)}",
                     "tools",
                 )
                 continue
@@ -534,8 +539,7 @@ def ensure_policy_file(cfg: Settings, *, discovery_failed: bool = False) -> None
                 # Escaped, and on one line: an unwritable name is
                 # unwritable here too, and a newline in one would forge a
                 # second line of this very report.
-                montre = name.encode("unicode_escape").decode("ascii")
-                print(f"     • {montre[:120]}", flush=True)
+                print(f"     • {_escaped(name)}", flush=True)
             print(
                 "     ↳ traités comme destructifs : elle demandera avant "
                 f"chaque appel. Fichier : {path}",
