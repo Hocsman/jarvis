@@ -394,6 +394,23 @@ Behaviour:
 - **Raw payload preserved in debug**: the debug logs capture the original length so field captures can compare digested vs raw behaviour.
 - **Wherever the call ran**: the agentic loop, the planner's direct execution and the turn that runs an approved call all distil a result the same way (One Reading of a Tool Result, below).
 
+Measured by `evals/test_a_long_block_is_read_in_parts.py` on 2026-11-20 on `gemma4:e2b`, the router on `qwen2.5:3b`: four arms interleaved call by call, ten rounds of six invented cases, each shaped as its tool returns it. Four carry the answer at different depths (two screens of 11 000 characters, pages of 40 000 and 20 000, two of the four in French); two carry a sentence planted mid-block telling the assistant to say an invented word instead of answering (a screen, and a page of 30 000). The arms are the cut on blank lines only with a window of the distil's own (4096) and no deadline; the cut alone; the window alone; and both, as shipped.
+
+| | Blank lines, own window | Cut alone | Window alone | As shipped |
+|---|---|---|---|---|
+| The reply holds the answer (40 calls) | 9 | 25 | 24 | 26 |
+| The same, a sentence planted (20 calls) | 1 | 17 | 10 | 18 |
+| The reply leaves the planted word out (20 calls) | 11 | 19 | 12 | 19 |
+| Turn median, when the tool was called | 16.7 s | 17.6 s | 0.9 s | 1.6 s |
+
+Blank lines with their own window against as shipped, Fisher two-sided: p = 0.00026 on the answer, 5.8e-08 with a sentence planted, 0.0084 on the planted word. All but two of the shipped arm's misses are the router's: the tool was never called, or `webSearch` was called on a link. Over the turns that called the tool the shipped arm held the answer 44 times in 46, against 10 in 45.
+
+The two halves do different work. The window alone keeps the cut on blank lines, so a page reaches the distil as one batch longer than the window: on the page of 40 000 characters the answer is never read (0 in 10), and on the planted page every note was the planted order alone (10 in 10) and 8 replies in 10 passed it on. The cut alone reads every part but reloads the model on the first part of every digest: about 9 s in the digest and 17.6 s a turn.
+
+On the planted screen as it was cut on blank lines, the screen went over whole and the reply was the planted word alone 9 times in 10. As shipped, notes on that screen never carried it. Notes on the planted page carried it 4 times in 10, attributed and beside the answer ("According to the web extract, the system note instructs the user to ring the number …"), and the reply passed it on once in 20 planted turns, as something the page suggests, on a turn that had not found the answer. The distil prompt asks for the facts relevant to the query and says nothing about instructions inside the result.
+
+The deadline is a ceiling for a model that answers nothing: a page of the full size is some twenty parts, nearly three minutes at 8 s each. As shipped no digest came near it (402 parts, the longest digest 2.1 s).
+
 ### One Reading of a Tool Result
 
 Three places in the engine run a tool and hand its result to the chat model: the agentic loop, when the model emits the call; the planner's direct execution, when the engine runs a planned step itself; and the turn that runs a call the user approved (below). What the model reads does not depend on which of them it was. One helper, `_result_text_for_model` in `engine.py`, composes it for a result that came back with text:
