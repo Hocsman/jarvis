@@ -1077,6 +1077,63 @@ def _maybe_digest_tool_result(
     return raw_tool_result
 
 
+def _with_failure_note(text: str, tool_name: str) -> str:
+    """A failed tool's result, followed by the note that it failed.
+
+    A failed tool is where models fabricate: the question was factual, the
+    honest answer is unsatisfying, and a plausible number is cheap to
+    produce, and the user cannot tell it from a real reading. The system
+    prompt forbids this, but that instruction sits thousands of tokens
+    back; repeating it here, in the last thing the model reads before
+    answering, is what actually holds (reply.spec.md, Failed Tools Must
+    Not Be Papered Over).
+    """
+    return (
+        f"{text}\n\n"
+        f"[{tool_name} FAILED — no data was returned. Tell the user you "
+        f"could not retrieve it and ask for what is missing. Do NOT state "
+        f"any figure, measurement, or fact this tool would have provided: "
+        f"inventing one is worse than admitting the failure.]"
+    )
+
+
+def _failed(result) -> bool:
+    """Whether a result is a failure, which is what `tool_failed` records.
+
+    « Elle n'a pas le droit » is not « ça n'a pas marché »: a refusal
+    comes back with `success=False` too, and the carry-over guard reads
+    `tool_failed` to widen the next turn's tools with this one. A tool he
+    forbade must not come back through that door.
+    """
+    return not result.success and not result.refused
+
+
+def _result_text_for_model(cfg, *, query: str, tool_name: str, result) -> str:
+    """What the chat model reads of a result that came back with text.
+
+    One definition for every place a tool runs (the agentic loop, the
+    planner's direct execution, the turn that runs an approved call), so
+    what the model reads does not depend on how the call came to run.
+
+    A refusal is written by code and already addressed to the model, so
+    it goes through untouched: no distil to paraphrase it, and no failure
+    note telling the model to ask for what is missing. Nothing is
+    missing, he said no. Anything else is distilled when the chat model
+    needs long results distilled, and a failure then carries the note.
+    """
+    if result.refused:
+        return result.reply_text or ""
+    text = _maybe_digest_tool_result(
+        cfg=cfg,
+        query=query,
+        tool_name=tool_name,
+        raw_tool_result=result.reply_text,
+    )
+    if _failed(result):
+        text = _with_failure_note(text, tool_name)
+    return text
+
+
 def _live_time_location_string(cfg) -> str:
     """Return a one-liner describing current local time and location, or ""."""
     try:
@@ -2476,45 +2533,6 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
     user_msg_index = len(messages)
     messages.append({"role": "user", "content": redacted})
 
-    # The user said yes. Run the call they were shown, here, rather than
-    # waiting for the model to propose it again — it might propose
-    # something else, or nothing, and the grant was for this call. The
-    # model's only remaining job this turn is to say what happened, so it
-    # gets the result and no tools.
-    if _settled.approval is not None:
-        _granted = _settled.action
-        _stage("tool", _granted.tool)
-        _granted_result = run_tool_with_retries(
-            db=db, cfg=cfg, tool_name=_granted.tool, tool_args=_granted.args,
-            system_prompt="", original_prompt="", redacted_text=redacted,
-            max_retries=1, language=language, origin=origin,
-            confirmation=_confirmation, scope=scope,
-        )
-        _confirmation = _spend(_confirmation)
-        _granted_text = (
-            _granted_result.reply_text
-            or f"Error: {_granted_result.error_message or '(no result)'}"
-        )
-        try:
-            print(f"    🙋 Approved → {_granted.tool}", flush=True)
-        except Exception:
-            pass
-        messages.append({
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [{
-                "id": f"call_grant_{uuid.uuid4().hex[:8]}",
-                "type": "function",
-                "function": {"name": _granted.tool, "arguments": _granted.args},
-            }],
-        })
-        messages.append({
-            "role": "user",
-            "content": f"[Tool result: {_granted.tool}]\n{_granted_text}",
-            "tool_name": _granted.tool,
-            "tool_failed": not _granted_result.success,
-        })
-
     # Idempotent flag — once carryover capture runs (success, error, or stop),
     # don't run it again. Lets us call _maybe_record_tool_carryover from any
     # exit path safely.
@@ -2535,6 +2553,66 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 dialogue_memory.record_tool_turn(tool_msgs)
         except Exception as exc:  # noqa: BLE001
             debug_log(f"tool-carryover record failed: {exc}", "reply")
+
+    # The user said yes. Run the call they were shown, here, rather than
+    # waiting for the model to propose it again — it might propose
+    # something else, or nothing, and the grant was for this call. The
+    # model's only remaining job this turn is to say what happened, so the
+    # routed tools and the plan are gone and it gets the result, read as
+    # any other tool result is.
+    if _settled.approval is not None:
+        _granted = _settled.action
+        _stage("tool", _granted.tool)
+        _granted_result = run_tool_with_retries(
+            db=db, cfg=cfg, tool_name=_granted.tool, tool_args=_granted.args,
+            system_prompt="", original_prompt="", redacted_text=redacted,
+            max_retries=1, language=language, origin=origin,
+            confirmation=_confirmation, scope=scope,
+        )
+        if _granted_result.pending_id:
+            # The gate asked instead of running. The turn ends on the
+            # question the code wrote, as on the two other paths.
+            return _end_turn_with_question(
+                _granted_result, dialogue_memory, redacted, tts=tts, cfg=cfg,
+                record_carryover=_maybe_record_tool_carryover,
+                messages=messages,
+            )
+        _confirmation = _spend(_confirmation)
+        if _granted_result.reply_text:
+            # Distilled against the request that raised the call. After a
+            # spoken yes this turn's own text is the answer ("oui"), and
+            # nothing in a result is relevant to that.
+            _granted_text = _result_text_for_model(
+                cfg, query=_granted.query_redacted or redacted,
+                tool_name=_granted.tool, result=_granted_result,
+            )
+        else:
+            # An exception, an MCP error: the tool left no text of its
+            # own. This turn has no tool to try again with, so what is
+            # left is to say it failed, and the note says so.
+            _granted_text = _with_failure_note(
+                f"Error: {_granted_result.error_message or '(no result)'}",
+                _granted.tool,
+            )
+        try:
+            print(f"    🙋 Approved → {_granted.tool}", flush=True)
+        except Exception:
+            pass
+        messages.append({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": f"call_grant_{uuid.uuid4().hex[:8]}",
+                "type": "function",
+                "function": {"name": _granted.tool, "arguments": _granted.args},
+            }],
+        })
+        messages.append({
+            "role": "user",
+            "content": f"[Tool result: {_granted.tool}]\n{_granted_text}",
+            "tool_name": _granted.tool,
+            "tool_failed": _failed(_granted_result),
+        })
 
     def _extract_structured_tool_call(resp: dict):
         try:
@@ -2877,11 +2955,9 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                                 )
                             _confirmation = _spend(_confirmation)
                             if _plan_result.reply_text:
-                                _plan_text = _maybe_digest_tool_result(
-                                    cfg=cfg,
-                                    query=redacted,
-                                    tool_name=_name,
-                                    raw_tool_result=_plan_result.reply_text,
+                                _plan_text = _result_text_for_model(
+                                    cfg, query=redacted, tool_name=_name,
+                                    result=_plan_result,
                                 )
                             else:
                                 _plan_err = (
@@ -2912,7 +2988,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                                     f"{_plan_text}{_plan_hint}"
                                 ),
                                 "tool_name": _name,
-                                "tool_failed": not _plan_result.success,
+                                "tool_failed": _failed(_plan_result),
                             })
                             calls_run_this_reply.add(_cand_sig)
                             invoked_tools_history.append(
@@ -3285,45 +3361,14 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                             "planning",
                         )
                         print("    🔍 No new tools found", flush=True)
-                # Tool-result digest for small models. Long tool payloads
-                # (webSearch UNTRUSTED WEB EXTRACT blocks in particular)
-                # push ~2B models into "describe the structure back" or
-                # prior-confabulation failure modes. The helper encapsulates
-                # the gating, distil round-trip, NONE fallback, and logging.
-                if result.refused:
-                    # « Elle n'a pas le droit » is not « ça n'a pas
-                    # marché ». The refusal text is written by code and
-                    # already addressed to the model, so it goes through
-                    # untouched: no distil to paraphrase it, no banner
-                    # telling the model to ask for what is missing —
-                    # nothing is missing, he said no — and no
-                    # `tool_failed`, which the carry-over guard reads to
-                    # re-widen next turn's allow-list with the tool he
-                    # forbade.
-                    effective_result = result.reply_text or ""
-                else:
-                    effective_result = _maybe_digest_tool_result(
-                        cfg=cfg,
-                        query=redacted,
-                        tool_name=tool_name,
-                        raw_tool_result=result.reply_text,
-                    )
-                if not result.success and not result.refused:
-                    # A failed tool is where models fabricate: the question was
-                    # factual, the honest answer is unsatisfying, and a
-                    # plausible number is cheap to produce — and the user cannot
-                    # tell it from a real reading. The system prompt forbids this,
-                    # but that instruction sits thousands of tokens back; repeating
-                    # it here, in the last thing the model reads before answering,
-                    # is what actually holds (measured: inventions dropped from
-                    # 2/6 to 0/6 once this was added).
-                    effective_result = (
-                        f"{effective_result}\n\n"
-                        f"[{tool_name} FAILED — no data was returned. Tell the user you "
-                        f"could not retrieve it and ask for what is missing. Do NOT state "
-                        f"any figure, measurement, or fact this tool would have provided: "
-                        f"inventing one is worse than admitting the failure.]"
-                    )
+                # Long tool payloads (webSearch UNTRUSTED WEB EXTRACT blocks
+                # in particular) push ~2B models into "describe the
+                # structure back" or prior-confabulation failure modes, so
+                # a small model reads them distilled; a failure carries
+                # its note and a refusal is left as written.
+                effective_result = _result_text_for_model(
+                    cfg, query=redacted, tool_name=tool_name, result=result,
+                )
 
                 if use_text_tools:
                     # Plan-aware remainder nudge. When a pre-loop plan exists,
@@ -3364,7 +3409,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                         "role": "user",
                         "content": f"[Tool result: {tool_name}]\n{effective_result}{remainder_hint}",
                         "tool_name": tool_name,  # read by the plan-step count and carry-over
-                        "tool_failed": not result.success and not result.refused,
+                        "tool_failed": _failed(result),
                     })
                 else:
                     messages.append({
@@ -3372,7 +3417,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                         "tool_call_id": tool_call_id,
                         "tool_name": tool_name,  # read by the plan-step count and carry-over
                         "content": effective_result,
-                        "tool_failed": not result.success and not result.refused,
+                        "tool_failed": _failed(result),
                     })
                 debug_log(f"    ✅ tool result appended ({len(effective_result)} chars)", "planning")
 
