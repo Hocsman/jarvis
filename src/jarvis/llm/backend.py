@@ -39,10 +39,11 @@ CACHE_MARKS = "_cache_marks"
 
 
 # The context window a ``chat()`` call asks for where the provider has one
-# to ask for (Ollama's ``num_ctx``). A single-shot call that runs on the
-# chat model between two of its turns asks for the same one: Ollama loads a
-# model again for another context size, which costs that call the reload
-# and the next chat call a second one.
+# to ask for (Ollama's ``num_ctx``). Ollama loads a model again for another
+# context size, so a single-shot call that runs on the chat model between
+# two of its turns and asks for another one costs that call the reload and
+# the next chat call a second one. The tool-result digest and the planner
+# ask for this one.
 CHAT_NUM_CTX = 8192
 
 

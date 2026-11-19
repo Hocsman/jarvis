@@ -519,9 +519,10 @@ _TOOL_DIGEST_MIN_CHARS = 400
 # comfortably inside that regime.
 _TOOL_DIGEST_BATCH_MAX_CHARS = 2500
 
-# Upper bound on EACH per-batch digest. A multi-batch webSearch result is
-# rare in practice, but when it happens each batch's distil gets clipped
-# here so the combined output stays bounded.
+# Upper bound on EACH per-batch digest. The notes of a result's batches
+# are joined with no cap of their own: a screen is some six batches and a
+# page of `fetchWebPage`'s full size twenty to thirty, so the joined note
+# is bounded by this times the number of batches that wrote one.
 _TOOL_DIGEST_MAX_CHARS = 600
 
 # A line is cut by length only where at least this much of it goes into
@@ -530,8 +531,8 @@ _TOOL_DIGEST_MAX_CHARS = 600
 _TOOL_DIGEST_MIN_CUT_CHARS = 200
 
 # The batches of one result are read one after another, each under the
-# digest's timeout, and a page of `fetchWebPage`'s full size is some
-# twenty of them. Together they get this many timeouts and no more: the
+# digest's timeout, and a page of `fetchWebPage`'s full size is twenty
+# to thirty of them. Together they get this many timeouts and no more: the
 # user is waiting for the reply the whole time.
 _TOOL_DIGEST_DEADLINE_TIMEOUTS = 3
 
@@ -550,10 +551,10 @@ class ToolDigest:
     result itself when it was short enough to need no distil (``parts`` is
     then 0), the joined notes of its parts otherwise, or "" when no part
     gave one. ``unanswered`` counts the parts that got no answer: a
-    timeout, a failed call, or the deadline passing before their turn. An
-    empty note with no part unanswered is the distil's verdict that nothing
-    in the result bears on the query; with some unanswered it is no
-    verdict at all.
+    timeout, a failed or empty call, or the deadline passing before their
+    turn. An empty note from parts that were all answered is the distil's
+    verdict that nothing in the result bears on the query; with some
+    unanswered it is no verdict at all.
     """
 
     note: str
@@ -628,8 +629,8 @@ def _distil_tool_batch(
 
     Returns the fact note, "" when the distil read the block and judged
     nothing in it relevant, and None when it gave no answer: the backends
-    hand back None on a timeout and on a transport error rather than
-    raising. "NONE" is a verdict; no answer is a fault.
+    hand back None on a timeout, on a transport error and on an empty
+    reply rather than raising. "NONE" is a verdict; no answer is a fault.
 
     The call asks for the chat call's context window. It runs on the chat
     model between two of its turns, and Ollama loads a model again for
@@ -729,10 +730,12 @@ def _rendered(pieces: list[_Piece]) -> str:
     The pieces of one stretch are joined as the result joined them. A
     fenced stretch stands between its kind's markers. Where the text just
     before the fence is in the batch too, the fence opens under it as it
-    did in the result. A batch that opens on fenced text opens on the
-    block `fence.block` writes under `_PART_LABEL`: the note and the
-    markers come from the one builder every tool's fence comes from,
-    composed from the kind alone and from nothing the result holds.
+    did in the result. Fenced text with no such text before it in the
+    batch, because the batch opens on it or because another fence closes
+    just before it, stands in the block `fence.block` writes under
+    `_PART_LABEL`: the note and the markers come from the one builder
+    every tool's fence comes from, composed from the kind alone and from
+    nothing the result holds.
     """
     runs: list[tuple[Optional[str], str]] = []
     before: Optional[_Piece] = None
@@ -744,13 +747,15 @@ def _rendered(pieces: list[_Piece]) -> str:
             runs.append((piece.kind, piece.text))
         before = piece
     out: list[str] = []
-    for number, (kind, text) in enumerate(runs):
+    after_text = False
+    for kind, text in runs:
         if kind is None:
             out.append(text)
-        elif number == 0:
-            out.append(fence.block(kind, _PART_LABEL, text))
-        else:
+        elif after_text:
             out.append(f"{fence.opening(kind)}\n{text}\n{fence.closing(kind)}")
+        else:
+            out.append(fence.block(kind, _PART_LABEL, text))
+        after_text = kind is None
     return "\n".join(out)
 
 
@@ -778,8 +783,8 @@ def _split_tool_result(raw: str, max_chars: int) -> list[str]:
 
     Fenced text stays fenced: each batch holding some of it holds it
     between the fence's two markers and under a line saying it is data
-    (:func:`_rendered`), so no batch hands the distil somebody else's
-    words as the tool's own.
+    (:func:`_rendered`). What a tool wrote outside its fence is read
+    outside it, as the tool wrote it.
     """
     batches: list[str] = []
     current: list[_Piece] = []

@@ -10,8 +10,8 @@ up to 50 000). A small chat model reads a long result through the
 tool-result digest (`src/jarvis/reply/reply.spec.md`, Tool-Result Digest
 for Small Models), which reads it a batch at a time on the chat model.
 
-Two things about that digest are set against what they replaced, each on
-its own and together, so four arms:
+Two things about that digest are set against an arm without them, each
+on its own and together, so four arms:
 
 - the cut: a block longer than a batch is cut between lines and every part
   of fenced text is fenced, with one deadline for all the parts; against
@@ -92,7 +92,8 @@ SIGNIFICANT = 0.05
 SCREEN_TOOL = "screenshot"
 PAGE_TOOL = "fetchWebPage"
 
-# The window a distil call asked for before it asked for the chat call's.
+# A window of the distil's own, apart from the chat call's: what
+# `call_llm_direct` asks for when it is given none.
 WINDOW_OF_ITS_OWN = 4096
 
 
@@ -352,7 +353,7 @@ def cfg(real_model_config):
 
 
 def _on_blank_lines_only(text: str, max_chars: int) -> List[str]:
-    """The split the cut replaced: paragraphs packed together while they
+    """The split on blank lines only: paragraphs packed together while they
     fit, and a stretch with no blank line in it one batch whatever its
     size."""
     batches: List[str] = []

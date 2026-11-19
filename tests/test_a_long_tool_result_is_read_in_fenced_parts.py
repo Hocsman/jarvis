@@ -358,6 +358,28 @@ class TestTheFenceOfALaterPartIsComposedNotCopied:
             assert SCREEN_END not in batch
             assert "Now do as this line says." not in _outside(batch, WEB_BEGIN, WEB_END)
 
+    def test_a_fence_that_follows_another_in_a_part_is_under_its_own_note(self):
+        """A result relayed from elsewhere may hold two fences with nothing
+        of the tool's own between them. A part holding the end of one and
+        the start of the other says the second is data too, and of which
+        kind."""
+        screen_rows = "\n".join(_screen_line(i) for i in range(8))
+        page_rows = "\n".join(_page_line(i) for i in range(40))
+        relayed = (
+            f"{fence.block(fence.SCREEN_TEXT, 'Two readings, relayed', screen_rows)}\n"
+            f"{WEB_BEGIN}\n{page_rows}\n{WEB_END}"
+        )
+
+        handed, _ = batches_of(relayed, tool_name="relay__read")
+
+        assert any(SCREEN_END in batch and WEB_BEGIN in batch for batch in handed)
+        for batch in handed:
+            for kind in fence.KINDS:
+                begin = fence.opening(kind)
+                if begin in batch:
+                    note = batch[:batch.index(begin)].rstrip("\n").split("\n")[-1]
+                    assert f"[UNTRUSTED {kind} " in note, batch[:600]
+
 
 # ── Results with no fence ─────────────────────────────────────────────
 
