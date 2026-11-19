@@ -27,7 +27,7 @@ FieldMeta (dataclass)
   ├── step               # Increment step
   ├── suffix             # Unit label (e.g. "s", "ms", "WPM")
   ├── nullable           # Whether None is valid (shows placeholder)
-  └── example            # For "map": a sample row shown when adding one
+  └── example            # For "list" and "map": a sample row shown when adding one
 ```
 
 ## Widget Mapping
@@ -158,6 +158,12 @@ in `WHISPER_LANGUAGES` (`jarvis/config.py`, Whisper's own list), so the
 window cannot write a code Whisper would refuse
 (`jarvis/listening/listening.spec.md`, Configuration).
 
+`whisper_vocabulary` is a list field, one name per row: the names Whisper is
+given as a hint alongside `weather_city` (`listening.spec.md`, "The names he
+uses"). Every list and map field carries its own `example`, which the dialog
+that adds a row shows: a name for this one, a `wrong -> right` rule for the
+dictation dictionary.
+
 ### Features
 
 The Features category exposes user-facing runtime toggles that do not need a
@@ -204,6 +210,7 @@ A stored index, in any form the listener reads as that index (`"1"`, `1`, `"01"`
 - A `choice` value the field does not list, and a microphone set by name, are written back exactly as they were read: saving another setting never moves one to the first option or to the default. Choosing a listed option, or Reset, still replaces it.
 - Existing keys not managed by the UI are preserved (e.g. `mcps`, `active_profiles`, `wake_aliases`, `allowlist_bundles`, `stop_commands`).
 - After save, a dialog confirms success and reminds the user to restart.
+- Once the window closes after a save, the dashboard reads the settings again, whether or not the daemon runs, so its weather follows location without a restart (`desktop_app.spec.md`, "Weather").
 - If the daemon is running when save completes, the tray app offers to restart it.
 
 ## Reset to Defaults

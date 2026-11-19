@@ -393,6 +393,20 @@ Both thresholds are exposed in the Settings window under *Speech Recognition*.
 
 What gets past them, typically a subtitle credit or the closing line of a video ("Thank you.", "See you in the next video") in a language nobody in the room speaks, is left to the intent judge: when it says a phrase is not speech, the assistant does not answer it, even just after a reply when it is otherwise waiting for your follow-up, and does not add it to a question you are still asking. How much it catches depends on the judge model: the default small `gemma4:e2b` recognises most subtitle credits but usually not the closing lines of videos, which a larger judge model catches.
 
+#### Names It Should Know
+Whisper tends to turn a rare name into a word it knows (a town called "Varnelle" can come back "Varnel"). Your `weather_city` is passed to Whisper as a hint on every transcription, and you can add other names (places, people, products) to `"whisper_vocabulary"` (*Names to Know* under *Speech Recognition* in Settings):
+
+```json
+{
+  "weather_city": "Varnelle",
+  "whisper_vocabulary": ["Ostrevane", "Pont Sarrel"]
+}
+```
+
+The names never leave your machine: they go to the Whisper model that runs on it, and nowhere else.
+
+Keep the list short: each name also attracts words that sound like it, so a place whose name is close to your town's can come out as your town. The hint holds about 200 characters; a name that no longer fits is left out, and the log says which when Whisper loads. The wake word, its aliases and names that sound like them are never used as hints, so this cannot make the assistant easier to wake by mistake. The hint applies to the assistant's listening, not to dictation, which has its own custom dictionary.
+
 </details>
 
 <details>
@@ -741,7 +755,7 @@ Get API key at [composio.dev](https://composio.dev)
 
 **Mac gets warm while Jarvis is active** - Enable **⚙️ Settings → ✨ Features → Low Power Mode**. This keeps voice recognition ready while avoiding background LLM warmup and shortening Ollama's idle residency window.
 
-**Need to cool down immediately** - Use the tray action **⚡ Stop Now (Skip Diary)**. It stops the voice daemon without running the final diary LLM pass. Regular **Stop Listening** still saves the diary before shutdown.
+**Need to cool down immediately** - Use the tray action **⚡ Stop Now (Skip Diary)**. It stops the voice daemon without running the final diary LLM pass. Regular **Stop Listening** still saves the diary before shutdown. Pick one or the other: once a stop is under way the tray shows **⏳ Stopping…** and both are greyed out until it finishes.
 
 **Mac is still warm after quitting** - If Jarvis starts Ollama for you, quitting Jarvis also stops that owned Ollama runtime. If Ollama was already running before Jarvis opened, Jarvis leaves it running so it does not interrupt your other local AI tools.
 
@@ -830,6 +844,7 @@ provider can't run out the voice-assistant latency budget.
 - **No record of what you said in the timing log** - The latency journal has no free-text column either: durations, counts and model names only
 - **A cloud model only if you pick one** - With the default Ollama nothing leaves your machine. Choosing a hosted provider (an OpenAI-compatible endpoint such as OpenRouter, or Anthropic) sends your conversations there, after auto-redaction; small roles you pin to a local model stay local
 - **Claude Code, off by default** - Handing a project to Claude Code sends the task and the code it reads to Anthropic. Nothing reaches it until you name a projects folder (`claude_code_projects_dir`)
+- **No proxy hunt on your network** - The dashboard and the Memory Viewer show pages from your own machine, and the app's windows skip the system's automatic proxy detection, which would otherwise ask your network for a `wpad` proxy the first time the Memory Viewer opens. Behind a corporate proxy nothing changes, since these pages never go through one. The packaged macOS app opens the Memory Viewer in your browser, which follows its own settings
 - **Talking face, on your machine** - The portrait you animate is read locally and never sent anywhere, and its frames live only in memory. Turning the face on downloads its model files once from Hugging Face
 - **Permissions are yours to set** - `~/.local/share/jarvis/yuba/outils.md` lists your own tools by name, in three sections you move lines between. Written once, never rewritten. A tool that appears later falls back to the risk it declares, so a read runs and anything else asks
 

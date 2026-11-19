@@ -659,6 +659,7 @@ The listener feeds the latency journal (`src/jarvis/latency.py`, see `latency.sp
 | `voice_max_collect_seconds` | 180.0 | Longest a question is collected, however often it is completed. |
 | `whisper_min_confidence` | 0.3 | Minimum `avg_logprob`-derived confidence score for a transcribed segment. Segments below this are discarded before the intent judge sees them. |
 | `whisper_no_speech_threshold` | 0.5 | Hard cutoff on Whisper's `no_speech_prob` field. Any segment at or above this value is discarded **regardless of `avg_logprob`** — Whisper can be confident about a hallucinated phrase even when no real speech is present (e.g. the "MBC 뉴스" hallucination on background noise). This filter runs before the `avg_logprob` check so it catches high-confidence hallucinations that would otherwise survive. Applies to both the faster-whisper and MLX backends. |
+| `whisper_vocabulary` | `[]` | Names Whisper is given as a hint, after `weather_city`. See "The names he uses". |
 
 **Repetition guard.** Past the confidence filters, a transcript is
 discarded when it loops: one word over half the tokens, the same word
@@ -871,6 +872,108 @@ decides nothing: the detector and the intent judge both still apply.
 Everything else stays dropped. In one afternoon's logs, 38 segments went
 to this filter and 36 were a television and a conversation in the room —
 lifting the bar for all of them would send every one to the intent judge.
+
+## The names he uses
+
+Whisper pulls a proper noun it has rarely seen towards a word it knows:
+the name of his town has come back in three spellings that are not its
+own, and one of them sent a weather request to a village in another
+country.
+
+Every transcription is given his names as a hint: `weather_city`, then
+the entries of `whisper_vocabulary`, each once, joined with commas
+(`whisper_hint` in `jarvis/listening/vocabulary.py`). faster-whisper
+receives it as `hotwords`, MLX as `initial_prompt`. Both place the text
+where Whisper keeps what it heard before, which steers spelling and
+leaves language detection alone, since detection reads the audio first;
+with a `whisper_language` named, the hint is given the same way.
+The names are configured, not a language list. With none configured,
+Whisper is called exactly as without the feature, with no argument for a
+hint. Dictation transcribes without the hint: a word it gets wrong goes
+in its own dictionary (`jarvis/dictation/dictation.spec.md`).
+
+On faster-whisper the hint goes through `jarvis/listening/whisper_vad.py`
+with the call's other arguments: a call made again without a voice
+detector that failed still carries it, and a model that takes only the
+language (`TypeError`) is called without it ("Text Whisper Makes Out of
+Silence").
+
+**Her name is never in it.** A name the wake-word matcher recognises,
+against `wake_word` and `wake_aliases` and as close as `wake_fuzzy_ratio`
+allows, is left out: the hint makes Whisper write its words more
+readily, and writing hers more readily is a false wake.
+
+**The hint is never longer than Whisper reads.** Whisper keeps 223
+tokens of a hint and drops the rest without a word. A token is at least
+one byte, so the hint holds at most `HINT_BYTES` (200) bytes of UTF-8,
+separators included: a name there is no room left for is left out whole,
+the names before it stay, and a shorter one after it can still fit.
+`weather_city` comes first, so it is the last to go.
+
+**He is told what was left out.** When Whisper loads, the console says
+how many names it is given, names each one left out for sounding like
+the wake word, and names the first three the list had no room for with
+the count of the rest (`announce_his_names`). With no name configured it
+says nothing.
+
+**The hint may change how a word is spelled, never whether anything was
+said.** Over noise Whisper writes the hint back, and its scores cannot
+tell that from speech: measured, noise that comes out "Thank you."
+without the hint comes out as his town with it, clearing both confidence
+filters, and in a hot window it would be taken as a question. A
+transcript at least three quarters of whose words are the hint's own
+(`is_the_hint_repeated`) is therefore read again without the hint, and
+that second reading is the one used whole: its text, the language it
+reports and its segments, which the listener reads afterwards ("Her
+sentences at the edges of what he said"). The second pass runs only
+then, and the first reading's text goes to no log: it is his names, and
+nobody said them. With `whisper_vad` on, noise that holds no voice is
+emptied by the voice detector whatever the hint; what the detector lets
+through is voices across the room that speak to nobody, and the second
+reading is what holds for them, as it does for all noise with the
+setting off, after the detector has failed, and on MLX, which has none.
+The threshold sits between the two shapes measured: a fourteen-name list
+read back over noise was 88 to 94% hint words, often with a stray word
+of its own tacked on; a sentence that merely names one of them is half
+or less. The price is a reply that is nothing but his names, such as his
+town on its own: it is transcribed as it would be without the hint.
+
+**Keep the list short.** Each name also attracts words that sound like
+it, and no reading of the text can tell which was said: the reading
+without the hint comes as close to his town when he said it as when he
+named the other place. A long list adds nothing for any one name: with
+fourteen names, his town came out right no more often than with it
+alone.
+
+Measured on 1,738 synthetic clips (seven French voices, Piper's and
+Windows', two of them a Piper voice shifted in pitch; each clean, under
+pink noise, under other voices and through a far microphone; then noise
+and voices across the room) with large-v3-turbo, through this path with his town for
+a hint and without it, the voice detector on and the language named, the
+two arms alternating clip by clip:
+
+- **His town in a sentence** came out right in 267 clips of 288 against
+  145, the far microphone gaining most (62 of 72 against 8).
+- **His town on its own** came out right in 62 clips of 120 with the
+  hint, 46 once the readings that were only the hint had been read
+  again, and 26 without the hint.
+- **A sentence naming a place that sounds close** came out as his town
+  in 165 clips of 620, never without the hint: between 1 clip in 72 and
+  57 in 68 by the place, the one a letter away from his the most. A
+  common word that sounds like it did in 4 clips of 100.
+- **Sentences with no name in them** gave his town in none of 306,
+  either way.
+- **Pink noise and clicks** gave no text, either way. **Voices across
+  the room and music** came out as his town, alone, in 17 clips of 165
+  with the hint; the second reading left none.
+
+With the voice detector off and no language named, his town came out
+right in 502 sentences of 672 against 271, and noise and silence came
+out as his town in 162 clips of 219 before the second reading and in
+none after it.
+`evals/test_noise_never_becomes_his_city.py` holds the real model to the
+noise half, over noise, silence and voices across the room, with the
+voice detector and without it.
 
 ## Salvaging his speech out of a merged echo chunk
 
