@@ -160,7 +160,7 @@ here only as a pin.
 journal row is written by LLM #9 from a conversation, and a conversation
 can quote a page fetched from the web, so a row can show anything. The
 rows reach the model in the bare fence of `utils/fence.py` (`bare`): a
-`<<<` line, the rows each under its date, a `>>>` line, under a line
+`<<<` line, the rows each prefixed with its date, a `>>>` line, under a line
 saying they are data and not instructions. Before that, every run of
 three or more angle brackets in a row, plain or full-width, becomes a
 single guillemet, so a row showing a `>>>` line stays wholly between the
@@ -170,8 +170,11 @@ the model byte for byte.
 
 The rewritten text is what the model read, so it is what a citation is
 looked for in (the `grounded` guard below): a citation copied across a
-rewritten run is found. What marks a row as read stays the digest of the
-row as the journal holds it.
+rewritten run is found. The quote written on the page is that citation,
+so for a row holding such a run it shows one guillemet where the journal
+holds the brackets, and is character for character the row everywhere
+else. What marks a row as read stays the digest of the row as the journal
+holds it.
 
 Seven guards run afterwards, in Python, each counted:
 

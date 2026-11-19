@@ -244,7 +244,8 @@ angle brackets in it, plain or full-width, becomes a single guillemet
 before it is fenced, so a sentence showing a `>>>` line stays wholly
 between the two lines and nothing after it reads as the prompt's own
 text. Two brackets in a row are left as they read, and a sentence with no
-such run reaches the model byte for byte.
+such run reaches the model as it reads, trimmed of the whitespace round
+it.
 
 It is read where the reminder sentence is read, by the same rule and
 through the same call: `setRoutine` is a tool of the reply loop too, so

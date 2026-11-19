@@ -76,15 +76,16 @@ those kinds, the ones that travel in a tool result are listed apart
 (`IN_TOOL_RESULTS`: this one and `screenshot`'s).
 
 The same module composes the one fence that carries no name
-(`bare(text)`): a `<<<` line, the text with its bracket runs rewritten as
-below, a `>>>` line. It is for a prompt whose one fenced text is its whole
-subject, named by the sentence above it: the journal reader, the goal
-judge, the reminder and routine extractors and the approval judge
+(`bare(text)`): a `<<<` line, the text with every run of three or more
+angle brackets rewritten as a single guillemet (`without_markers`), a
+`>>>` line. It is for a prompt whose one fenced text is its whole subject,
+named by the sentence above it: the journal reader, the goal judge, the
+reminder and routine extractors and the approval judge
 (`docs/llm_contexts.md` #15 to #19). The pair is spelled nowhere else, and
 it is not in `IN_TOOL_RESULTS`: none of those texts travels in a tool
 result.
 
-The fenced text is truncated to `max_chars = 1500` before wrapping — the
+The fetched text is truncated to `max_chars = 1500` before wrapping — the
 smaller the surface, the less injection room, and the fresher content
 evicts less of the conversation from context.
 
