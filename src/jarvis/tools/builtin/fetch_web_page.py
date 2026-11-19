@@ -8,6 +8,7 @@ from urllib.parse import urljoin
 from ...debug import debug_log
 from ..base import Tool, ToolContext
 from ..types import ToolExecutionResult
+from ...utils import fence
 
 # One guard, one hop cap and one byte ceiling, not two of each: `webSearch`
 # holds them and this tool imports them, since a copy would be the one
@@ -21,6 +22,62 @@ from .web_search import _MAX_FETCH_BYTES, _MAX_REDIRECTS, _is_public_url
 # when it passes is cut there, as the byte ceiling cuts it.
 _FETCH_WALL_CLOCK_SEC = 30.0
 _REQUEST_TIMEOUT_SEC = 15.0
+
+# How much of a page's text reaches the model: what the parser extracted,
+# and the source itself when there is no parser to extract with.
+_MAX_PAGE_CHARS = 50_000
+_MAX_RAW_CHARS = 10_000
+
+# How many of a page's links are listed when links are asked for.
+_MAX_LINKS = 20
+
+
+def _on_one_line(text: str) -> str:
+    """`text` with every run of whitespace, line breaks included, as one
+    space."""
+    return " ".join(text.split())
+
+
+def _fenced(asked: str, read_from: str, label: str, said: str, max_chars: int) -> str:
+    """What a page said, as the result the model reads: the address that
+    was asked for, then the page's words between the web extract's markers
+    and under a line saying they are data.
+
+    A page is somebody else's text and can say anything, "ignore your
+    instructions" included, and the address this tool is handed often
+    comes out of a model that has just been reading the web. So the block
+    is `fence.block`'s: the brackets a marker is made of are rewritten (a
+    marker shown by the page would close the fence early), and the cut to
+    `max_chars` falls on the page's words, before the closing marker is
+    written.
+
+    The whole result is one paragraph. The tool-result digest splits a
+    long result on blank lines, and a batch holding the page's words
+    without the markers round them would read as the tool's own, so the
+    blank lines a page holds are dropped here, before the cut, and none
+    is written; a page with no text leaves a line saying so rather than
+    an empty one.
+
+    Two addresses, on either side of the fence. The one before it is the
+    one the model asked for, already in its own call. Once a redirect is
+    followed, the address the page was read from is the server's to
+    choose, and an address can spell a sentence without a space, so that
+    one opens the fenced text. Both are percent-encoded, which leaves them
+    no angle bracket, no space and no line break.
+    """
+    if read_from != asked:
+        said = f"Read from: {requests.utils.requote_uri(read_from)}\n{said}"
+    one_paragraph = "\n".join(line for line in said.splitlines() if line.strip())
+    return (
+        f"**URL:** {requests.utils.requote_uri(asked)}\n"
+        + fence.block(
+            fence.WEB_EXTRACT,
+            f"**{label}**",
+            one_paragraph,
+            holder="page",
+            max_chars=max_chars,
+        )
+    )
 
 
 class FetchWebPageTool(Tool):
@@ -153,7 +210,8 @@ class FetchWebPageTool(Tool):
                     reply_text="That page redirected too many times; nothing was read.",
                 )
             # The address the page was read from, which a redirect may have
-            # moved: the reply names it and relative links join against it.
+            # moved: the reply names it, inside the fence, and relative
+            # links join against it.
             final_url = current
 
             # ``with`` releases the connection back to the pool deterministically
@@ -192,7 +250,7 @@ class FetchWebPageTool(Tool):
                 title = ""
                 title_tag = soup.find('title')
                 if title_tag:
-                    title = title_tag.get_text().strip()
+                    title = _on_one_line(title_tag.get_text())
                 text_content = soup.get_text()
                 lines = []
                 for line in text_content.split('\n'):
@@ -206,45 +264,64 @@ class FetchWebPageTool(Tool):
                         unique_lines.append(line)
                         seen_lines.add(line)
                 content = '\n'.join(unique_lines[:500])
-                links_section = ""
+                links = []
                 if include_links:
-                    links = []
                     for link in soup.find_all('a', href=True):
-                        href = link.get('href', '').strip()
-                        link_text = link.get_text().strip()
+                        href = _on_one_line(link.get('href', ''))
+                        link_text = _on_one_line(link.get_text())
                         if href and link_text and len(link_text) > 3:
                             if href.startswith('/'):
                                 href = urljoin(final_url, href)
                             elif not href.startswith(('http://', 'https://', 'mailto:', 'tel:')):
                                 continue
                             links.append(f"• {link_text}: {href}")
-                    if links:
-                        links_section = f"\n\n**Links found on page:**\n" + '\n'.join(links[:20])
-                reply_parts = []
+                # Everything the page chose goes inside the fence: its
+                # title and its links with its text.
+                said = []
                 if title:
-                    reply_parts.append(f"**Title:** {title}")
-                reply_parts.append(f"**URL:** {final_url}")
-                reply_parts.append(f"**Content:**\n{content}")
-                if links_section:
-                    reply_parts.append(links_section)
-                reply_text = '\n\n'.join(reply_parts)
-                max_chars = 50_000
-                if len(reply_text) > max_chars:
-                    reply_text = f"[Truncated to {max_chars} chars]\n\n" + reply_text[:max_chars]
+                    said.append(f"Title: {title}")
+                said.append(content)
+                if links:
+                    said.append("Links found on page:")
+                    said.extend(links[:_MAX_LINKS])
+                reply_text = _fenced(
+                    url, final_url, "Content of the page", '\n'.join(said), _MAX_PAGE_CHARS)
                 debug_log(f"fetchWebPage: extracted {len(content)} chars of content", "web")
                 context.user_print("✅ Page content fetched.")
                 return ToolExecutionResult(success=True, reply_text=reply_text)
             except ImportError:
-                text = response_text[:10000]
-                reply_text = f"**URL:** {final_url}\n**Raw Content:**\n{text}"
+                reply_text = _fenced(
+                    url, final_url, "Raw Content of the page", response_text, _MAX_RAW_CHARS)
                 debug_log("fetchWebPage: BeautifulSoup not available, returning raw text", "web")
                 context.user_print("✅ Page content fetched (raw).")
                 return ToolExecutionResult(success=True, reply_text=reply_text)
+        # A failure's text reaches the model with no fence round it, and an
+        # exception's message can quote the server: the reason phrase of a
+        # status line is free text, and so is an address. The model gets
+        # the status code or the kind of failure, in words written here;
+        # the message itself goes to the log.
+        except requests.exceptions.HTTPError as e:
+            debug_log(f"fetchWebPage: request failed: {e}", "web")
+            context.user_print("⚠️ Failed to fetch page.")
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            answered = (f"the server answered with HTTP status {status}"
+                        if isinstance(status, int) else "the server answered with an error")
+            return ToolExecutionResult(
+                success=False,
+                reply_text=f"Failed to fetch page: {answered}. Nothing was read.",
+            )
         except requests.exceptions.RequestException as e:
             debug_log(f"fetchWebPage: request failed: {e}", "web")
             context.user_print("⚠️ Failed to fetch page.")
-            return ToolExecutionResult(success=False, reply_text=f"Failed to fetch page: {e}")
+            return ToolExecutionResult(
+                success=False,
+                reply_text=(f"Failed to fetch page: the request did not go through "
+                            f"({type(e).__name__}). Nothing was read."),
+            )
         except Exception as e:  # pragma: no cover (safety net)
             debug_log(f"fetchWebPage: error: {e}", "web")
             context.user_print("⚠️ Error fetching page.")
-            return ToolExecutionResult(success=False, reply_text=f"Error fetching page: {e}")
+            return ToolExecutionResult(
+                success=False,
+                reply_text=f"Error fetching page ({type(e).__name__}). Nothing was read.",
+            )

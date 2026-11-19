@@ -66,7 +66,7 @@ The file is re-read when its mtime changes, not at restart. A control surface wi
 
 ## Where the gate sits
 
-At the top of `run_tool_with_retries`, which is the only place a tool runs: the planner's direct execution and the agentic loop both arrive through it. One insertion covers both, which is why the gate lives there and not at either call site.
+At the top of `run_tool_with_retries`, which is the only place a tool runs: the planner's direct execution, the agentic loop and the turn that runs an approved call all arrive through it. One insertion covers them, which is why the gate lives there and not at any call site.
 
 Deterministic on purpose. Asking a model "is this dangerous?" would cover tools nobody annotated, but a gate whose answer varies between two identical calls is not a gate.
 
