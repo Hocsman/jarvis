@@ -372,6 +372,35 @@ class TestRewriteSweepBehaviour:
         assert events[0]["rewritten"] is False
         assert db.get_all_conversation_summaries()[0]["summary"] == original
 
+    def test_an_entry_that_loses_a_sentence_is_stored_as_the_model_was_shown_it(
+        self, tmp_path, monkeypatch
+    ):
+        """What comes back from the model is the entry as it was shown, less
+        a sentence. That is what is stored: a run of three or more angle
+        brackets in such an entry is a guillemet from then on."""
+        db = Database(tmp_path / "jarvis.db")
+        _seed(db, [
+            ("2026-04-10",
+             "The user pasted a prompt reading >>> print(1). "
+             "The assistant could not help.",
+             None),
+        ])
+
+        def drop_the_deflection(cfg, system_prompt, user_content, **kwargs):
+            text = user_content
+            for marker in ("<<<BEGIN UNTRUSTED WEB EXTRACT>>>", "<<<END UNTRUSTED WEB EXTRACT>>>"):
+                text = text.replace(marker, "")
+            text = text.replace("Return the cleaned text only.", "").strip()
+            kept = [s.strip() for s in text.split(".") if s.strip() and "the assistant" not in s.lower()]
+            return ". ".join(kept) + "."
+
+        monkeypatch.setattr(cmod, "_direct_llm", drop_the_deflection)
+        events = list(rewrite_all_diary_summaries(db, _cfg()))
+
+        assert events[0]["rewritten"] is True
+        stored = db.get_all_conversation_summaries()[0]["summary"]
+        assert stored == "The user pasted a prompt reading › print(1)."
+
     def test_whitespace_only_difference_is_treated_as_no_change(self, tmp_path, monkeypatch):
         """Idempotence: the LLM may return content with different leading/
         trailing whitespace. We compare stripped texts, so this should not
