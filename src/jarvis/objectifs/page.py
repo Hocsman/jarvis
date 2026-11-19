@@ -17,10 +17,12 @@ the tool envelope uses. Two files that parse alike are two files the user
 learns once.
 
 What is absent is load-bearing. There is no `cadence:` and no `outils:`,
-so a goal has no unattended pass and no envelope: it is something she
-remembers and brings up, never something that acts. Arming one is a
-separate grant with its own card, and it does not exist yet — a field
-that parsed today would be a capability nobody designed.
+so a goal has no schedule and no envelope of its own: it is something
+she remembers and brings up, never something that acts. What runs is a
+routine whose block names the goal (routines.spec.md, "A routine that
+works for a goal"), a separate grant with its own card, kept in the
+routine's file. A `cadence:` or `outils:` field parsed here would be a
+second way to arm one, which nobody designed.
 
 See objectifs.spec.md for the full contract.
 """
@@ -58,6 +60,13 @@ _COMMENT_OPEN, _COMMENT_CLOSE = "<!--", "-->"
 # reaches here from a model reading a Whisper transcription, so it is not
 # ours: a newline in it appends a field, a heading, or a whole goal.
 _NOM_PROPRE = re.compile(r"^[\w-]{1,64}$", re.UNICODE)
+
+
+def is_goal_name(nom: str) -> bool:
+    """Whether *nom* is a heading this file would write and read back,
+    the whole of it: `$` alone lets a trailing line break through."""
+    return bool(_NOM_PROPRE.fullmatch(nom or ""))
+
 
 # One line, and one line only. What the user says arrives through the
 # same two lossy layers, and a line break in it forges file structure.
@@ -444,6 +453,22 @@ def close_objectif(cfg, nom: str, valeur: str) -> bool:
 def ouverts(cfg) -> List[Objectif]:
     """The goals still going, in the order the file lists them."""
     return [o for o in load_objectifs(cfg).values() if o.est_ouvert]
+
+
+def open_goal(cfg, nom: str) -> Optional[Objectif]:
+    """The open goal of exactly this name, or None.
+
+    None for a goal that is closed or not in the file, and None for a
+    name `is_goal_name` refuses. A heading he typed by hand can hold
+    characters no line of `routines.md` carries, and a goal that cannot
+    be written there cannot be worked for: the writer, the runner and the
+    prompt all ask here, so they cannot disagree on what a goal's name is.
+    """
+    nom = (nom or "").strip()
+    if not is_goal_name(nom):
+        return None
+    objectif = load_objectifs(cfg).get(nom)
+    return objectif if objectif is not None and objectif.est_ouvert else None
 
 
 def resolve(cfg, nom: str) -> Optional[Objectif]:

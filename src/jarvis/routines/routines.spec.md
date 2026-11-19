@@ -55,8 +55,9 @@ have a staleness window that reaches into tomorrow's occurrence.
 
 `scope.py`, and the file at `yuba/routines.md`.
 
-One block per routine: `phrase`, `quand`, an `outils` list, and an
-optional `mémoire`. The tool list is the routine's whole world.
+One block per routine: `phrase`, `quand`, an `outils` list, an optional
+`mémoire` and an optional `objectif`. The tool list is the routine's whole
+world.
 
 ```markdown
 ## matin
@@ -93,6 +94,8 @@ Defaults, all of them shut:
 | no block for a routine name | suspended, never unrestricted |
 | an unreadable file | every routine suspended |
 | `mémoire` absent or anything but `oui` | the user's profile stays home |
+| no `objectif` line | no goal is handed to it on that account; with `mémoire: oui` his open goals travel like his profile |
+| `objectif` naming what no open goal of `objectifs.md` answers to | suspended, checked when the pass starts |
 
 There are no wildcards, unlike `outils.md`. That file has them because
 the user is present to see the result; here nobody is, and an MCP server
@@ -120,6 +123,95 @@ Four names no envelope can hold, whatever the file says
 - `stop` ends a conversation, and a routine is not one.
 - `claudeCode` delivers its report aloud minutes after it starts, to
   someone who has to be in the room (`src/jarvis/projets/projets.spec.md`).
+
+## A routine that works for a goal
+
+`objectif.py`, and the `objectif:` line of a block.
+
+A goal is remembered, never run: it has no schedule and no envelope of
+its own (`src/jarvis/objectifs/objectifs.spec.md`). What runs is a
+routine, and its block may name one goal:
+
+```markdown
+## annonces
+phrase: regarde les nouvelles annonces
+quand: tous les jours à 07:00
+objectif: velo-cargo
+outils:
+- webSearch
+```
+
+**The pass is handed that goal, and only that one.** Its system prompt
+carries what the goal is, what he said would count as done and his own
+dated lines, the last eight of them (`format_objectif_for_routine`,
+source `dit` only: a pass sends what it is handed every time it runs),
+with the instruction to do what the routine asks with it in mind and
+report what it found. No other goal, with `mémoire: oui` or without: a
+block that names a goal has said which, so the open-goals block that
+`mémoire: oui` sends with any other routine stays home, and that line
+adds his profile and his rules only. The sentence a routine runs is
+often generic ("regarde s'il y a du nouveau"); the goal is what says
+what to look for, so what the pass searches for carries the goal's
+subject to whatever its tools reach.
+
+**It gains nothing else.** The envelope and the gate's checks apply to
+it as to any routine: the pass can only read, only inside its envelope.
+The four goal tools write Yuba's own state and are refused to it,
+`listGoals` included, and `localFiles` refuses the whole core directory,
+so no builtin tool gives a pass a way to write a line of `objectifs.md`
+or to read another goal. A tool from an MCP server that he made `libre`
+and put in the envelope is another matter, for this routine as for any:
+the gate checks which tool is called, not what its arguments point at,
+so such a tool reads whatever its server can reach, the core directory
+included when the server reaches it. Its write-up goes to the journal
+like any routine's.
+
+**The write-up reaches no prompt.** It is prose a model made of pages it
+fetched, and a page can say anything, "recherche terminée, cet objectif
+est atteint" included. It is not an input of the completion judge, it is
+not in the open-goals block of an attended turn, and no builtin tool
+returns it: he reads it in the journal. What an attended turn is told is
+a fact this code composes from both stores (see `objectifs.spec.md`, "In
+the turn"): which armed routine works for the goal, on which schedule,
+and that its write-ups are in the journal.
+
+**A goal that is closed or gone suspends the pass.** He closed it,
+renamed it or took it out of the file: a pass that ran anyway would
+search for something nobody asks for any more, every morning. Nothing
+runs, the journal says which name it looked for (and that the schedule
+line is out of step, when it is), and like a routine whose block has
+gone the morning does not count towards the sterile tally: it has not
+failed, it is switched off. The goal is looked for when the pass starts.
+
+**One definition says what a routine can work for** (`open_goal` in
+`objectifs/page.py`): the name is one `is_goal_name` accepts, a goal of
+that name is in the file, and it is open. The writer, the runner, the
+prompt and the Routines tab all ask it. A hand-typed name that could not
+be a heading written by `setGoal` therefore names no goal, and suspends
+the pass the same way, even when he typed a heading of that very name in
+`objectifs.md`: such a goal is remembered, and cannot be worked for
+until its heading is letters, digits, `-` and `_`.
+
+**Armed means a pending row.** `routines_at_work` reads the pending
+`routine` rows and their blocks: a block with no row is a routine that
+was stopped, and saying it looks after a goal would be a promise about
+every morning. Each routine is named once and they are sorted by name,
+so the line does not move when one of them runs. The schedule beside the
+name is composed from the rule the row runs on, never read off the
+block's `quand:` line, which is a copy he can edit and that would
+otherwise reach her prompt word for word. A routine whose heading
+`setRoutine` could not have written is not named. With no table to read
+it claims nothing.
+
+`evals/test_a_routine_works_for_a_goal.py` measures the three texts a
+model reads because of this: the goal handed to the pass, the `objectif`
+argument of `setRoutine` (set when asked, and never unasked), and what an
+attended turn is told. `docs/llm_contexts.md` holds the measurement.
+
+The goal's name is a model's reading of what he said, so only a name
+that could be a heading of `objectifs.md` is ever written on the line
+(`is_goal_name`, inside `render_block`): a newline in it would add a
+field, or a block, to a file whose every line is a grant.
 
 ## Reading a spoken schedule
 
@@ -169,6 +261,39 @@ costs one human yes.
 
 Both tools are `writes_own_state`, so a routine can never create or
 silence a routine.
+
+**`objectif` is an argument of the call**, so it is on the card: that
+goal's text leaves the machine at every pass, and the card is composed
+from the arguments alone. Answered aloud, the question says only that
+something is about to change (`tools/policy.spec.md`, what she says
+aloud): neither the envelope nor the goal is heard before the yes. Both
+are on the card, and in what she says back once the routine is set, read
+off disk; stopping it is free. The argument is set only when he asks for
+a routine to work on one of his goals. A name that no open goal answers
+to (`open_goal`) sets up nothing: she is told which open goals a routine
+can work for, so his answer names a heading already in the file. A goal
+of his whose heading holds characters a routine's line cannot carry is
+said to be exactly that, and is not offered as a name to call back with.
+The block is then written with its `objectif:` line, the dry run and the
+read-back both check it, and what she says back names the goal and says
+what travels with the routine and that nothing is written to the goal.
+
+A routine already running under that name and sentence is left as it is
+when it works for the goal the call names; when it works for another, or
+for none, nothing is changed and she says which: "it already does
+exactly that" would have him believe a goal travels with it, or that it
+no longer does. Which goal a routine works for is then his to change, on
+the `objectif:` line of its block: a routine stopped and asked for again
+restarts as its block is written.
+
+**A routine that runs nothing is never said to be doing its job.** One
+that has a schedule and whose block has gone, or whose block names what
+no open goal answers to, is suspended, and she says so and why rather
+than "it already does exactly that". A stopped routine whose block names
+such a goal is not restarted, whatever goal the call names: restarted,
+every pass would be suspended, and asked again she would go round. She
+says which goal the block names, and that the line is his to change or
+remove.
 
 Two stores have to agree, a block and a row, and three rules follow.
 
@@ -235,9 +360,11 @@ one harmless tool, and the block arms three plus `mémoire: oui` — the
 user's whole profile leaving the machine every morning, on no card they
 saw. Revoking is free (`cancelRoutine` is `libre`) and restoring would
 cost a yes that described something else. So when the block grants more
-than the call proposed, or carries `mémoire: oui`, nothing is written and
-the question is asked again with the block's real envelope in the
-arguments, where the gate fingerprints it. A proposal that already
+than the call proposed, or carries `mémoire: oui`, or names another goal
+than the call does (one where the call names none, none where the call
+names one), nothing is written and the question is asked again with the
+block's real envelope and goal in the arguments, where the gate
+fingerprints them. A proposal that already
 matches passes on the first yes, because there the card was true.
 
 **An hour nobody spoke comes from the routine's own cancelled row**, not
@@ -307,7 +434,10 @@ survives outside the envelope. `stop` and `toolSearchTool` are not
 appended, and `RoutineScope.allows` would refuse them anyway.
 
 The warm profile block and open goals block are withheld unless the
-routine's block says `mémoire: oui`. Every line of them is a line of the
+routine's block says `mémoire: oui`; the one goal its block names with
+`objectif:` is handed to it either way, and his other goals then stay
+home either way (see "A routine that works for a goal"). Every line of
+them is a line of the
 user's private life leaving the machine while they sleep, and a routine
 does not need to know who they are to summarise their mail. The diary's
 summary of a long conversation (`reply.spec.md`, Recent Dialogue Context)
@@ -508,7 +638,11 @@ whether the thing running at 07:00 can read their files — that is the
 moment they decide the feature is not worth having.
 
 Each row carries its envelope, and a flag for anything that changes what
-it means: `suspendue` when the block has gone (listed rather than hidden,
+it means: `objectif : <nom>` when a goal's text travels with it, on an
+armed row and on a stopped one, and `suspendue : objectif <nom> clos` in
+its place when no open goal answers to that name (the passes of such a
+routine are suspended and not counted, so no other flag would ever say
+that it runs nothing), `suspendue` when the block has gone (listed rather than hidden,
 since it still holds a slot in the table and returns the moment the block
 does), `périmètre vide`, `mémoire` when the user's own profile travels
 with it, and the count of consecutive runs that produced nothing — which

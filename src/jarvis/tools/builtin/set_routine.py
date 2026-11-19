@@ -34,6 +34,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from ...debug import debug_log
+from ...objectifs.page import is_goal_name, open_goal, ouverts
 from ...reminders.extract import ExtractionFailed, reminder_channel_available
 from ...routines.eligibility import candidate_tools, refuse_reason, split_rejected
 from ...routines.extract import extract_routine_rule
@@ -152,6 +153,16 @@ class SetRoutineTool(Tool):
                         "unsure."
                     ),
                 },
+                "objectif": {
+                    "type": "string",
+                    "description": (
+                        "ONLY when the user asks for this routine to work "
+                        "on one of the goals they asked you to keep track "
+                        "of: that goal's name, exactly as it is listed. "
+                        "The goal's text then travels with the routine "
+                        "every time it runs. Omit otherwise."
+                    ),
+                },
             },
         }
 
@@ -190,6 +201,14 @@ class SetRoutineTool(Tool):
 
         # A newline breaks `_FIELD_RE`, and the block with it.
         phrase = " ".join(str(lecture.quoi).split())
+
+        objectif = str(args.get("objectif") or "").strip()
+        if objectif:
+            # The name is a model's reading of what he said. A routine set
+            # up for a goal that is not his, or that he closed, would be
+            # suspended from its first morning, so it asks instead.
+            if open_goal(cfg, objectif) is None:
+                return self._quel_objectif(objectif, ouverts(cfg))
 
         candidats = candidate_tools(cfg)
         if not candidats:
@@ -255,14 +274,21 @@ class SetRoutineTool(Tool):
             elif arretes:
                 return self._arretes(arretes, blocs)
 
-        verdict = self._collision(nom, blocs, lignes, phrase, outils)
+        verdict = self._collision(cfg, nom, blocs, lignes, phrase, outils, objectif)
         if isinstance(verdict, ToolExecutionResult):
             return verdict
         rallumer = verdict == _RALLUMER
 
         if rallumer:
             bloc_repris = blocs[nom]
-            carte = self._carte_dit_vrai(cfg, nom, bloc_repris, outils)
+            pour = bloc_repris.scope().objectif
+            if pour and open_goal(cfg, pour) is None:
+                # Restarted, every pass would be suspended. And asked
+                # again she would go round: name the block's goal, no,
+                # that one is closed, name another, no, the block says
+                # the first.
+                return self._objectif_clos(nom, pour)
+            carte = self._carte_dit_vrai(cfg, nom, bloc_repris, outils, objectif)
             if carte is not None:
                 return carte
             # The block wins: it is the user's corrected version, and the
@@ -279,6 +305,7 @@ class SetRoutineTool(Tool):
             bloc = render_block(
                 nom=nom, phrase=phrase, quand=quand_fichier(lecture.regle),
                 outils=outils, ecartes=ajoutables, impossibles=impossibles,
+                objectif=objectif,
             )
 
             # The dry run. Zero bytes written, nothing to unwind: this is
@@ -286,7 +313,8 @@ class SetRoutineTool(Tool):
             # up, which would otherwise swallow the block and be found by
             # a morning that never came.
             essai = parse_routines(texte + separateur + bloc).get(nom)
-            if essai is None or essai.outils != outils or essai.phrase != phrase:
+            if (essai is None or essai.outils != outils or essai.phrase != phrase
+                    or essai.objectif != objectif):
                 return self._refuse(
                     "je n'ai pas su composer un bloc que je sais relire"
                 )
@@ -337,12 +365,13 @@ class SetRoutineTool(Tool):
         except Exception as e:
             debug_log(f"routines cache not invalidated: {e}", "tools")
 
-        return self._read_back(context, cfg, rid, nom, phrase, outils, lecture)
+        return self._read_back(context, cfg, rid, nom, phrase, outils, lecture,
+                               objectif)
 
     # ── Saying it back from disk ──────────────────────────────────────
 
     def _read_back(self, context, cfg, rid, nom, phrase, outils,
-                   lecture) -> ToolExecutionResult:
+                   lecture, objectif) -> ToolExecutionResult:
         """Both stores, re-read and re-parsed, before she claims anything."""
         try:
             relu = parse_routines(
@@ -357,6 +386,7 @@ class SetRoutineTool(Tool):
 
         if (relu is None or ligne is None or quand is None or regle is None
                 or relu.outils != outils or relu.phrase != phrase
+                or relu.objectif.strip() != objectif
                 or ligne.get("id") != rid):
             _withdraw(context.db, rid)
             return self._refuse_moitie(nom, relu)
@@ -372,12 +402,13 @@ class SetRoutineTool(Tool):
         return ToolExecutionResult(
             success=True,
             reply_text=_confirmation(nom, regle, quand, relu.outils,
-                                     lecture.heure_supposee),
+                                     lecture.heure_supposee,
+                                     relu.objectif.strip()),
         )
 
     # ── The ways it does not happen ───────────────────────────────────
 
-    def _collision(self, nom, blocs, lignes, phrase, outils):
+    def _collision(self, cfg, nom, blocs, lignes, phrase, outils, objectif):
         """A name already spoken for, or the same routine said twice.
 
         Returns a refusal, a question, or which way forward this is.
@@ -399,6 +430,18 @@ class SetRoutineTool(Tool):
 
         if vivante is not None:
             if str(vivante.get("texte") or "") == phrase:
+                if bloc is None:
+                    # A schedule and no block: every pass is suspended,
+                    # and there is no line of it for him to edit.
+                    return self._sans_bloc(nom)
+                pour = bloc.scope().objectif
+                if pour and open_goal(cfg, pour) is None:
+                    return self._suspendue_par_son_objectif(nom, pour)
+                if pour != objectif:
+                    # It runs, and not for the goal just named. Said as
+                    # unchanged, he would believe that goal travels with
+                    # it, or that it no longer does.
+                    return self._autre_objectif(nom, pour, objectif)
                 return self._inchangee(nom, vivante)
             return self._refuse(
                 f"« {nom} » est déjà pris par une autre routine ; donne-lui "
@@ -406,7 +449,8 @@ class SetRoutineTool(Tool):
             )
         return _CREER
 
-    def _carte_dit_vrai(self, cfg, nom, bloc, outils) -> Optional[ToolExecutionResult]:
+    def _carte_dit_vrai(self, cfg, nom, bloc, outils,
+                        objectif) -> Optional[ToolExecutionResult]:
         """Whether the yes already given describes what re-arming grants.
 
         The whole security posture of this tool is one sentence: a
@@ -427,15 +471,28 @@ class SetRoutineTool(Tool):
         So when the block grants more than the call proposed, nothing is
         written and the question is asked again with the block's real
         envelope in the arguments, where the gate will fingerprint it.
+
+        The goal a block names is part of what it grants: that goal's
+        text leaves the machine at every pass. The card must have shown
+        that very goal, and none when the block names none, or she would
+        say back a goal the routine does not work for.
         """
         scope = bloc.scope()
-        if set(scope.outils) == set(outils) and not scope.memoire:
+        if (set(scope.outils) == set(outils) and not scope.memoire
+                and scope.objectif == objectif):
             return None
 
         profil = (
             " Elle emporte aussi ton profil et tes règles (« mémoire: oui »)."
             if scope.memoire else ""
         )
+        if scope.objectif:
+            pour = (f" It works for their goal « {scope.objectif} », whose "
+                    f"text it is given every time it runs.")
+            rappel = f" and objectif set to exactly `{scope.objectif}`"
+        else:
+            pour = " It works for no goal of theirs."
+            rappel = " and no objectif"
         return ToolExecutionResult(
             success=False, outcome=OUTCOME_QUESTION,
             reply_text=(
@@ -443,10 +500,122 @@ class SetRoutineTool(Tool):
                 f"already exists in routines.md and restarting it would arm "
                 f"what its own block says, not what was just proposed: "
                 f"{', '.join(f'`{n}`' for n in scope.outils) or 'aucun outil'}."
-                f"{profil} Tell the user exactly that, in their language, "
-                f"listing those tool names unchanged, and ask whether to "
-                f"restart it as written. If they agree, call setRoutine "
-                f"again with outils set to exactly that list."
+                f"{profil}{pour} Tell the user exactly that, in their "
+                f"language, listing those tool names unchanged, and ask "
+                f"whether to restart it as written. If they agree, call "
+                f"setRoutine again with outils set to exactly that "
+                f"list{rappel}."
+            ),
+        )
+
+    def _quel_objectif(self, propose: str, encore) -> ToolExecutionResult:
+        """No routine can work for the goal named: which one, then?
+
+        *encore* is his open goals. The names offered are headings already
+        in his file that a routine's line can carry, so his answer resolves
+        without another reading of what he said. A heading he typed by hand
+        with other characters is one of his goals and is said to be, and is
+        not offered as a name to call back with.
+        """
+        possibles = [o.nom for o in encore if is_goal_name(o.nom)]
+        if any(o.nom == propose for o in encore):
+            pourquoi = (
+                f"« {propose} » is one of the user's open goals, but its "
+                f"heading in objectifs.md holds characters a routine's line "
+                f"cannot carry, so a routine cannot work for it. Tell them "
+                f"that: renamed with letters, digits, `-` and `_` only, it "
+                f"could.")
+        else:
+            pourquoi = (
+                f"« {propose} » is not one of the user's open goals, so a "
+                f"routine cannot work for it.")
+        if possibles:
+            lesquels = ("The open goals a routine can work for are: "
+                        + ", ".join(f"`{n}`" for n in possibles)
+                        + ". Ask which one this routine should work for, "
+                          "then call setRoutine again with objectif set to "
+                          "exactly that name.")
+        elif encore:
+            lesquels = "Offer to set the routine up without a goal."
+        else:
+            lesquels = ("They have no open goal. Say so, and offer to set "
+                        "the routine up without one.")
+        return ToolExecutionResult(
+            success=False, outcome=OUTCOME_QUESTION,
+            reply_text=f"Nothing was set up. {pourquoi} {lesquels}",
+        )
+
+    def _objectif_clos(self, nom, pour) -> ToolExecutionResult:
+        """The stopped routine he asks for again works for a goal that no
+        open goal answers to. Nothing is armed: every pass of it would be
+        suspended. Said whatever goal the call names, so the question does
+        not go round."""
+        return ToolExecutionResult(
+            success=False, outcome=OUTCOME_QUESTION,
+            reply_text=(
+                f"Nothing was set up. The stopped routine « {nom} » works "
+                f"for the goal « {pour} » (the `objectif:` line of its "
+                f"block in routines.md), and no open goal carries that "
+                f"name: it is closed or no longer in objectifs.md. "
+                f"Restarted, it would stay suspended. Tell the user that, "
+                f"in their language. That line is theirs to change or "
+                f"remove in routines.md, or they can ask for a routine "
+                f"under another name."
+            ),
+        )
+
+    def _suspendue_par_son_objectif(self, nom, pour) -> ToolExecutionResult:
+        """The routine is armed and works for a goal that no open goal
+        answers to: it runs nothing. Saying it "already does that" would
+        be saying it works."""
+        return ToolExecutionResult(
+            success=False, outcome=OUTCOME_QUESTION,
+            reply_text=(
+                f"Nothing was changed. « {nom} » has a schedule, but it is "
+                f"suspended: it works for the goal « {pour} », and no open "
+                f"goal carries that name (closed, or no longer in "
+                f"objectifs.md), so nothing runs. Tell the user that, in "
+                f"their language. The `objectif:` line of its block in "
+                f"routines.md is theirs to change or remove, or they can "
+                f"ask for a routine under another name."
+            ),
+        )
+
+    def _sans_bloc(self, nom) -> ToolExecutionResult:
+        """The routine has a schedule and its block has gone from
+        routines.md: it runs nothing, and there is no line for him to
+        edit."""
+        return ToolExecutionResult(
+            success=False, outcome=OUTCOME_QUESTION,
+            reply_text=(
+                f"Nothing was changed. « {nom} » has a schedule but no "
+                f"block in routines.md any more, so it is suspended and "
+                f"nothing runs. Tell the user that, in their language. "
+                f"They can stop it (cancelRoutine, or the Routines tab) "
+                f"and ask again, or ask for a routine under another name."
+            ),
+        )
+
+    def _autre_objectif(self, nom, pour, demande) -> ToolExecutionResult:
+        """The routine runs already, for another goal than the call names,
+        or for none. Nothing is changed: which goal a routine works for is
+        a line of its block, and the yes he gave armed that block.
+
+        The way out she names is the one that works. Stopping it and
+        asking again would restart the block as written, goal included
+        (`_carte_dit_vrai`): the line is his to change, in his file."""
+        actuel = (f"it works for their goal « {pour} »" if pour
+                  else "it works for no goal of theirs")
+        voulu = (f"for « {demande} »" if demande else "for no goal")
+        return ToolExecutionResult(
+            success=False, outcome=OUTCOME_QUESTION,
+            reply_text=(
+                f"Nothing was changed. « {nom} » is already running, and "
+                f"{actuel}, not {voulu}. Tell the user that, in their "
+                f"language. Which goal a routine works for is the "
+                f"`objectif:` line of its block in routines.md: to change "
+                f"it they edit that line themselves, or ask for a routine "
+                f"under another name."
             ),
         )
 
@@ -685,7 +854,7 @@ def _lisible(due_local) -> str:
 
 
 def _confirmation(nom: str, regle: Regle, quand: datetime, outils: List[str],
-                  heure_supposee: bool) -> str:
+                  heure_supposee: bool, objectif: str) -> str:
     """What she says back, written by code rather than by the model.
 
     The envelope is in it because that is the part the user cannot see
@@ -703,6 +872,16 @@ def _confirmation(nom: str, regle: Regle, quand: datetime, outils: List[str],
     # user cannot see otherwise, and the only string they can search for
     # in routines.md.
     noms = ", ".join(f"`{n}`" for n in outils) or "`none`"
+    # The goal is the other thing he cannot see: its text leaves the
+    # machine at every pass, and nothing a pass finds is written to it.
+    pour = (
+        f" It works for their goal « {objectif} »: every time it runs it is "
+        f"given what that goal is, what they said would count as done and "
+        f"the last things they said about it, and nothing else about them. It writes "
+        f"nothing to the goal; what it finds goes to the journal, which "
+        f"they read. Say that too, naming the goal."
+        if objectif else ""
+    )
     return (
         f"Routine « {nom} » created, running {_quand_directive(regle)}, "
         f"first on {quand:%d/%m at %H:%M}. It can reach these tools and "
@@ -713,5 +892,5 @@ def _confirmation(nom: str, regle: Regle, quand: datetime, outils: List[str],
         f"can narrow that list in routines.md. Do NOT tell them they can "
         f"change the schedule there: that line is a copy, and editing it "
         f"moves nothing. Changing when it runs is something they say to "
-        f"her.{supposition}"
+        f"her.{supposition}{pour}"
     )

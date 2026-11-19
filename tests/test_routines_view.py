@@ -187,6 +187,58 @@ def test_a_routine_that_carries_the_profile_says_so(viewer):
     assert _list(client)[0]["memoire"] is True
 
 
+def test_a_routine_that_works_for_a_goal_says_which(viewer):
+    """That goal's text leaves the machine at every pass. Its name is
+    worth a word on the row, armed or stopped."""
+    db, client, cfg = viewer
+    from src.jarvis.routines.scope import routines_path
+
+    routines_path(cfg).write_text(
+        ROUTINES_FILE
+        + "\n## annonces\nobjectif: velo-cargo\noutils:\n- webSearch\n"
+        + "\n## veille\nobjectif: permis-bateau\noutils:\n- webSearch\n",
+        encoding="utf-8",
+    )
+    _add(db, nom="annonces")
+
+    by_name = {r["nom"]: r for r in _list(client)}
+    assert by_name["annonces"]["objectif"] == "velo-cargo"
+    assert by_name["veille"]["arretee"] and by_name["veille"]["objectif"] == "permis-bateau"
+    assert by_name["matin"]["objectif"] == ""
+
+
+def test_a_routine_whose_goal_is_closed_or_gone_says_it_does_nothing(viewer):
+    """Its passes are suspended and not counted, so nothing else on the row
+    would ever say so: it would look armed for good."""
+    db, client, cfg = viewer
+    from src.jarvis.objectifs.page import invalidate_objectifs_cache, objectifs_path
+    from src.jarvis.routines.scope import routines_path
+
+    objectifs_path(cfg).write_text(
+        "# Objectifs\n\n## velo-cargo\nphrase: trouver un vélo cargo\n"
+        "fini quand: le vélo est acheté\n"
+        "\n## garage\nphrase: vider le garage\nfini quand: il est vide\n"
+        "clos: 2026-09-01 · dit · c'est fait\n",
+        encoding="utf-8",
+    )
+    invalidate_objectifs_cache()
+    routines_path(cfg).write_text(
+        ROUTINES_FILE
+        + "\n## annonces\nobjectif: velo-cargo\noutils:\n- webSearch\n"
+        + "\n## vide\nobjectif: garage\noutils:\n- webSearch\n"
+        + "\n## perdu\nobjectif: croisière\noutils:\n- webSearch\n",
+        encoding="utf-8",
+    )
+    for nom in ("annonces", "vide"):
+        _add(db, nom=nom)
+
+    by_name = {r["nom"]: r for r in _list(client)}
+    assert by_name["annonces"]["objectif_absent"] is False
+    assert by_name["vide"]["objectif_absent"] is True
+    assert by_name["perdu"]["arretee"] and by_name["perdu"]["objectif_absent"] is True
+    assert by_name["matin"]["objectif_absent"] is False
+
+
 def test_a_routine_that_keeps_producing_nothing_shows_its_count(viewer):
     """It is four fifths of the way to switching itself off, and the
     only place that is visible before it happens is here."""

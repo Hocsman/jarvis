@@ -197,6 +197,28 @@ class RoutineRunner:
             )
             return
 
+        if scope.objectif:
+            from .objectif import goal_of
+
+            if goal_of(self._cfg, scope) is None:
+                # He closed the goal, or renamed it, or took it out, or
+                # the line names something no goal could be called. A
+                # pass that ran anyway would search for something nobody
+                # is asking for any more, every morning. Suspended like a
+                # routine whose block has gone, and for the same reason
+                # not counted: it has not failed.
+                self._settle(
+                    nom, rid, phrase, started_at, began, payload,
+                    erreur=(
+                        f"aucun objectif ouvert ne porte le nom "
+                        f"« {scope.objectif} » dans objectifs.md : elle est "
+                        f"suspendue tant qu'il n'y en a pas"
+                    ),
+                    outcome=OUTCOME_OUT_OF_SCOPE, texte=None, count=False,
+                    desaccord=desaccord,
+                )
+                return
+
         texte, erreur = self._ask_the_engine(phrase, scope)
         self._settle(
             nom, rid, phrase, started_at, began, payload,

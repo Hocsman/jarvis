@@ -18,9 +18,10 @@ something, she may say it, and only he can make it a fact.
 
 **It never reads prose a model wrote.** Its inputs are the goal's
 sentence, the ending condition the user gave, and his own dated lines.
-In this slice there is nothing else to read, and the rule is stated here
-so that the day an unattended pass exists, its write-up is already
-excluded by contract rather than by whoever remembers.
+A routine's pass that works for the goal writes its report to the
+journal and nothing to the goal, so there is nothing else here to read,
+and the rule is stated so that a write-up stays excluded by contract
+rather than by whoever remembers.
 
 It rides the reminder chain and its pin wherever the chat runs, like the
 journal reader. Unlike a time or a routine, what it reads is gathered
