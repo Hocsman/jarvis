@@ -224,6 +224,73 @@ def to_terminal(capsys, lines: List[str]) -> None:
 
 
 # =============================================================================
+# An invented page, as `fetchWebPage` hands it to the model
+# =============================================================================
+#
+# An eval that plants a page in a turn has the tool itself write the
+# result from the page's source, so the page reaches the model in the shape
+# the tool gives it and follows that shape when it moves. Nothing is
+# fetched: the request is answered here.
+
+
+class _ServedPage:
+    """A page as `requests` hands it over, streamed."""
+
+    is_redirect = False
+    is_permanent_redirect = False
+    status_code = 200
+    encoding = "utf-8"
+    headers = {"content-type": "text/html"}
+
+    def __init__(self, body: bytes):
+        self._body = body
+
+    def iter_content(self, chunk_size=8192):
+        yield self._body
+
+    def raise_for_status(self):
+        pass
+
+    def close(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+def page_as_fetched(url: str, title: str, lines: Tuple[str, ...]) -> str:
+    """What `fetchWebPage` returns for a page at `url` whose title is
+    `title` and whose text is `lines`, one paragraph each."""
+    from unittest.mock import patch
+
+    from jarvis.tools.base import ToolContext
+    from jarvis.tools.builtin import fetch_web_page
+
+    def escaped(text: str) -> str:
+        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    paragraphs = "\n".join(f"<p>{escaped(line)}</p>" for line in lines)
+    source = (
+        f"<html><head><title>{escaped(title)}</title></head>\n"
+        f"<body>\n{paragraphs}\n</body></html>"
+    )
+    context = ToolContext(
+        db=None, cfg=None, system_prompt="", original_prompt="",
+        redacted_text="", max_retries=1, user_print=lambda _m: None,
+        origin="voix",
+    )
+    with patch.object(fetch_web_page, "_is_public_url", return_value=True), \
+         patch.object(fetch_web_page.requests, "get",
+                      return_value=_ServedPage(source.encode("utf-8"))):
+        result = fetch_web_page.FetchWebPageTool().run({"url": url}, context)
+    assert result.success, result.reply_text
+    return result.reply_text
+
+
+# =============================================================================
 # Warm-memory seeding
 # =============================================================================
 #
