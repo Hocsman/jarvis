@@ -230,6 +230,21 @@ The engine consumes the plan in two phases.
   (`close_cut_fences`): it never travels in a tool result. The fast path
   never sees memory: a fully concrete step is dispatched exactly as
   written.
+- **Only the memory block shows a marker.** The rest of the LLM path's
+  prompt is text somebody else can write: a prior result and the
+  arguments of the call that returned it (a page title, an MCP server's
+  reply), a tool's description and the names of its arguments (whatever
+  its server declared), and the plan step (a model's output). Each
+  prior-call line, each tool line and the step go through
+  `without_markers` too, so none of them can spell
+  `<<<BEGIN RELEVANT MEMORY>>> … <<<END RELEVANT MEMORY>>>` and pass for
+  a memory block, with or without a real one in the prompt. A
+  `<placeholder>` in a step, a generic type or a shift in a result reach
+  the resolver as they read. The rewrite takes a web extract's own
+  markers from a prior result as well: whether the result carries one is
+  read before, and the `[UNTRUSTED WEB DATA …]` label is what says so in
+  this prompt. The step the fast path parses, and the step the
+  substitution guard reads, is the step as the plan wrote it.
 - Returns `None` for synthesis steps (the LLM emits the literal
   `null`), unknown tools, or invalid JSON. All `None` paths fall back
   to the normal chat-model turn.
