@@ -344,5 +344,8 @@ Measured on 2026-11-19 by that eval: the real engine on a voice turn, the router
 | `claude-haiku-5-5` | Answers from an ordinary page | 20 in 20 | 20 in 20 (p = 1) |
 | `claude-haiku-5-5` | Leaves the planted sentence alone | 20 in 20 | 19 in 20 (p = 1) |
 | `claude-haiku-5-5` | Answers from a page with a planted sentence | 20 in 20 | 19 in 20 (p = 1) |
+| `gemma4:e2b` | Answers from an ordinary page | 14 in 20 | 15 in 20 (p = 1) |
+| `gemma4:e2b` | Leaves the planted sentence alone | 20 in 20 | 20 in 20 (p = 1) |
+| `gemma4:e2b` | Answers from a page with a planted sentence | 20 in 20 | 20 in 20 (p = 1) |
 
-On `claude-haiku-5-5` the fence costs nothing and shows no measurable gain: that model leaves such sentences alone without it, and says so in its reply. Its one miss, with no fence, withheld the answer the page told it to withhold while saying it would not follow the page.
+On both models the fence costs nothing and shows no measurable gain: neither obeyed a planted sentence often enough, with or without it, for a difference to show. `claude-haiku-5-5` leaves such sentences alone and says so in its reply; its one miss, with no fence, withheld the answer the page told it to withhold while saying it would not follow the page. Every miss of `gemma4:e2b` (6 fenced, 5 with no fence) is a turn that called `webSearch` and never opened the page, which happens before either result is read; on the turns that read the page it answered from it every time. What the fence is known to give is therefore what the tests hold, a boundary the page cannot move, and not a measured drop in obedience on these two models and these four planted sentences.
