@@ -315,6 +315,46 @@ class TestResolveNextToolCall:
                 cfg, "Reply to user", [], self._schema()
             ) is None
 
+    def _prompt_given_prior_result(self, tool_name, result_text):
+        """What the resolver is sent when `tool_name` already returned
+        `result_text` this turn."""
+        sent: list[str] = []
+
+        def capture(*args, **kwargs):
+            sent.extend(a for a in args if isinstance(a, str))
+            sent.extend(v for v in kwargs.values() if isinstance(v, str))
+            return "null"
+
+        with patch.object(planner_mod, "call_llm_direct", side_effect=capture):
+            resolve_next_tool_call(
+                _cfg(), "Reply to user",
+                [(tool_name, "{}", result_text)], self._schema(),
+            )
+        return "\n".join(sent)
+
+    def test_a_web_extract_from_any_tool_is_labelled_as_data(self):
+        """The excerpt is cut at 500 characters, which can take the fence's
+        closing marker with it, so a result carrying a web extract gets a
+        label the cut cannot remove, whichever tool returned it."""
+        from jarvis.utils import fence
+
+        result = (
+            "Read for you:\n"
+            f"{fence.opening(fence.WEB_EXTRACT)}\n"
+            + "The keeper lived on the point. " * 40
+            + f"\n{fence.closing(fence.WEB_EXTRACT)}"
+        )
+
+        prompt = self._prompt_given_prior_result("readerTool", result)
+
+        assert "[UNTRUSTED WEB DATA" in prompt
+
+    def test_a_result_with_no_web_extract_carries_no_such_label(self):
+        prompt = self._prompt_given_prior_result("getWeather", "12 degrees, light rain")
+
+        assert "12 degrees, light rain" in prompt
+        assert "[UNTRUSTED WEB DATA" not in prompt
+
     def test_peels_markdown_fences(self):
         cfg = _cfg()
         raw = '```json\n{"name": "webSearch", "arguments": {"query": "x"}}\n```'

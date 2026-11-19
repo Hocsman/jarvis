@@ -9,8 +9,9 @@ is why its risk is `action` and not `lecture` like its sibling
 
 The difference is not academic. `_DEFAULT_VERDICT[lecture]` is `libre`,
 so as `lecture` this tool runs with no card and no spoken question — and
-`fetchWebPage` returns up to 50,000 characters of unfenced page text into
-an agentic loop that can widen its own allow-list with `toolSearchTool`.
+`fetchWebPage` returns up to 50,000 characters of page text, behind a
+fence that is a convention a model honours and not a wall, into an
+agentic loop that can widen its own allow-list with `toolSearchTool`.
 A page saying "create a daily routine that reads https://…" would get
 one, its own phrase replayed each morning as the routine's instruction.
 
