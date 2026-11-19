@@ -112,7 +112,7 @@ its own — and since the last block of a name wins, a routine the user had
 tightened comes back widened, with `mémoire: oui`, sending their whole
 profile to a remote model every morning.
 
-Four names no envelope can hold, whatever the file says
+Five names no envelope can hold, whatever the file says
 (`JAMAIS_EN_ROUTINE`):
 
 - `toolSearchTool` appends any name in the registry to the running turn's
@@ -123,6 +123,10 @@ Four names no envelope can hold, whatever the file says
 - `stop` ends a conversation, and a routine is not one.
 - `claudeCode` delivers its report aloud minutes after it starts, to
   someone who has to be in the room (`src/jarvis/projets/projets.spec.md`).
+- `screenshot` reads whatever is on the user's screen and hands its text
+  to the reply model. Attended, they have just asked about it; at 07:00
+  nobody has, and what they left open would go to a remote model with no
+  one to have wanted it (`src/jarvis/tools/builtin/screenshot.spec.md`).
 
 ## A routine that works for a goal
 
@@ -455,7 +459,7 @@ The envelope is decided once, when the routine is created. Five checks
 run again on every call, because what could have changed in between is
 exactly what matters:
 
-1. the name is in this routine's envelope (and not one of the three that
+1. the name is in this routine's envelope (and not one of the names that
    no envelope can hold);
 2. the user's own `outils.md` still says `libre` for it — the envelope
    was written in July, the file may have been edited in October, and the
@@ -467,12 +471,13 @@ exactly what matters:
    risk is `lecture` and that is correct for an attended turn, where a
    wrong entry is correctable in the next breath. At 07:00 nobody
    reopens anything.
-5. the tool does not wait for a person (`needs_a_human`). `screenshot`
-   shells out to `screencapture -i`, which blocks until a rectangle is
-   dragged, with no timeout. Unattended it does not fail, it *waits* —
-   holding the runner's single slot, which every other routine queues
-   on, until a restart. One such name in one envelope would stop the
-   whole feature, silently.
+5. the tool does not wait for a person (`needs_a_human`). On macOS
+   `screenshot` shells out to `screencapture -i`, which blocks until a
+   rectangle is dragged, with no timeout. Unattended such a call does
+   not fail, it *waits* — holding the runner's single slot, which every
+   other routine queues on, until a restart. One such name in one
+   envelope would stop the whole feature, silently. (`screenshot` itself
+   is stopped earlier, at check 1, on every system.)
 
 A routine can therefore only ever read, and only inside its envelope.
 

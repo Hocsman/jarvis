@@ -356,13 +356,18 @@ def _fenced(texts: List[str]) -> Optional[str]:
 class ScreenshotTool(Tool):
     """Reads the text on the screen."""
 
-    # `screencapture -i` waits for a rectangle to be dragged, with no
-    # timeout. Unattended it waits forever, and the routine runner's
-    # single slot with it.
-    needs_a_human = True
+    @property
+    def needs_a_human(self) -> bool:
+        """True where the capture is a rectangle he drags: `screencapture
+        -i` waits for it with no timeout, and unattended it would wait for
+        ever, the routine runner's single slot with it. No routine reaches
+        this tool on any system (`JAMAIS_EN_ROUTINE`); this says why the
+        call can block."""
+        return _platform() == "darwin"
 
     def risk_for(self, args):
-        """Looks at the world without changing it."""
+        """Looks without changing anything. What it looks at is his, which
+        is why no routine may hold it; attended, it runs when he asks."""
         from ..policy import RISK_READ
 
         return RISK_READ
@@ -373,7 +378,14 @@ class ScreenshotTool(Tool):
 
     @property
     def description(self) -> str:
-        return "Capture a selected screen region and OCR the text. Use only if the OCR will materially help."
+        return (
+            "Read the text that is on the user's screen right now. Use when they "
+            "ask what is on their screen, or about something they have in front "
+            "of them there (an error message, a window, a page they are looking "
+            "at). Not when they only mention a screen or a screenshot without "
+            "asking about what theirs shows now. Returns the text only: pictures "
+            "and layout are not described."
+        )
 
     @property
     def inputSchema(self) -> Dict[str, Any]:

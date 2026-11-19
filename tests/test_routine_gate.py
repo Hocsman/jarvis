@@ -276,8 +276,21 @@ def test_a_tool_that_waits_for_a_person_does_not_run_unattended():
     """It would not fail, it would wait — holding the runner's one slot,
     which every other routine queues on, until a restart. One such tool
     in one envelope would stop the whole feature, silently."""
-    tool = _Fake("screenshot")
+    tool = _Fake("attendUnGeste")
     tool.needs_a_human = True
+    db = MagicMock()
+
+    _run(tool, scope=RoutineScope(nom="matin", outils=["attendUnGeste"]), db=db)
+
+    assert tool.ran == []
+    assert _outcome(db) == OUTCOME_OUT_OF_SCOPE
+
+
+def test_no_routine_reads_his_screen_even_where_nothing_waits():
+    """On Windows the capture asks for no gesture, so nothing would hold
+    it back: whatever he left open at 07:00 would be read and handed to
+    the reply model with nobody there to have asked."""
+    tool = _Fake("screenshot")
     db = MagicMock()
 
     _run(tool, scope=RoutineScope(nom="matin", outils=["screenshot"]), db=db)
