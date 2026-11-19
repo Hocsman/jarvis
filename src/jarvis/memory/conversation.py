@@ -108,10 +108,11 @@ def _rewrite_diary_summary(
         # Fence the diary content so the model treats it as data, not
         # instructions. Same pattern used for untrusted web extracts —
         # the diary may contain any past LLM output, which can include
-        # text that *looks* like instructions.
+        # text that *looks* like instructions, or a marker that would
+        # end the fence early: the brackets one is made of are rewritten.
         user_prompt = (
             f"{_UNTRUSTED_FENCE_BEGIN}\n"
-            f"{summary}\n"
+            f"{fence.without_markers(summary)}\n"
             f"{_UNTRUSTED_FENCE_END}\n\n"
             "Return the cleaned text only."
         )
@@ -248,7 +249,12 @@ def rewrite_all_diary_summaries(
             }
             continue
 
-        if cleaned_stripped == original.strip():
+        # The model was shown the entry with its bracket runs rewritten,
+        # so an entry returned as shown had nothing to remove either.
+        if cleaned_stripped in (
+            original.strip(),
+            fence.without_markers(original).strip(),
+        ):
             yield {
                 "date_utc": date_utc,
                 "chars_before": chars_before,

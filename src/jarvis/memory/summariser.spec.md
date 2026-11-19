@@ -63,7 +63,7 @@ It is not a matter of style. Three readers consume these rows and none of them i
 - Output the cleaned text only. Empty string if the entire summary is deflection. Verbatim input if nothing needs removing.
 - Applies in every language; do NOT translate the output.
 
-**Untrusted-input fence:** the diary text is wrapped in `<<<BEGIN UNTRUSTED WEB EXTRACT>>>` / `<<<END UNTRUSTED WEB EXTRACT>>>` markers (the same fence used for web-search content) before being passed to the model, so a row containing what looks like instructions is treated as data, not as a directive to follow. The fence markers, if echoed back, are stripped from the response.
+**Untrusted-input fence:** the diary text is wrapped in `<<<BEGIN UNTRUSTED WEB EXTRACT>>>` / `<<<END UNTRUSTED WEB EXTRACT>>>` markers (the same fence used for web-search content) before being passed to the model, so a row containing what looks like instructions is treated as data, not as a directive to follow. A row can hold a marker of its own, which would end the fence early, so every run of three or more angle brackets in it becomes a single guillemet before it is fenced (`utils/fence.py::without_markers`). A row the model returns as it was shown had nothing to remove and is left as the diary holds it, brackets included; a row that did lose a sentence is written back with those runs as guillemets. The fence markers, if echoed back, are stripped from the response.
 
 **Empty-rewrite guard:** if the model returns an empty string (a row that was *entirely* deflection), the original is kept and a `would_empty: true` flag is surfaced. An empty diary entry is worse than a slightly-leaky one — downstream retrieval treats absence as "no record" and the user loses the topic entirely.
 
