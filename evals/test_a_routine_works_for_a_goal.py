@@ -2,8 +2,8 @@
 End-to-end eval: a routine that works for one of his goals.
 
 A routine's block may name one goal (`objectif: <nom>`). Three texts reach a
-model because of it, and each is measured here on the real chat model, every
-goal, routine and sentence invented:
+model because of it, measured here in four kinds of turn on the real chat
+model, every goal, routine and sentence invented:
 
 - the pass uses its goal. A pass is handed the goal it works for
   (`format_objectif_for_routine`). Its own sentence is generic ("regarde
@@ -19,7 +19,7 @@ goal, routine and sentence invented:
 - she says a routine works for it. Asked where a goal stands, with a
   routine armed for it, she says a routine works on it and that its
   write-ups are in the journal, without saying what they hold or offering
-  to read them: no tool of hers reaches the journal. Passes when a judge
+  to read them: no builtin tool of hers reaches the journal. Passes when a judge
   reads the first two in the reply and neither of the last.
 
 A turn whose reply is empty or the engine's fallback is a miss for the last
@@ -47,6 +47,7 @@ an otherwise empty memory.
 Run:
     ./scripts/run_evals.sh --single a_routine_works_for_a_goal
     EVAL_GOAL_ROUTINE_ROUNDS=5 pytest evals/test_a_routine_works_for_a_goal.py -k BeforeAndAfter -s
+    EVAL_GOAL_ROUTINE_ROUNDS=5 pytest evals/test_a_routine_works_for_a_goal.py -k TheGoalOnTheCall -s
 """
 
 import dataclasses

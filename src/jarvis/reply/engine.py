@@ -2332,8 +2332,11 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         # it comes up. Withheld from a routine turn unless the routine's
         # block explicitly asks for memory (« mémoire: oui »): his goals
         # are his life, and a pass summarising his mail has no business
-        # knowing them.
-        if scope is None or getattr(scope, "memoire", False):
+        # knowing them. A block that names one goal has said which: that
+        # one travels below, and the others stay home whatever else the
+        # block asks for.
+        if scope is None or (getattr(scope, "memoire", False)
+                             and not getattr(scope, "objectif", "")):
             try:
                 from ..objectifs.prompt import format_objectifs_block
 
@@ -2348,7 +2351,8 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 debug_log(f"goals block skipped (non-fatal): {e}", "memory")
 
         # The one goal a routine's block names (« objectif: nom ») travels
-        # with its pass: that goal's text and nothing else of his profile.
+        # with its pass: that goal and no other. His profile travels only
+        # when the block also says « mémoire: oui ».
         if scope is not None and getattr(scope, "objectif", ""):
             try:
                 from ..objectifs.prompt import format_objectif_for_routine

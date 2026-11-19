@@ -84,7 +84,7 @@ class RoutineScope:
     outils: List[str]
     memoire: bool = False
     # The one goal of his this routine works for, by name, or none. Its
-    # text travels with every pass, and nothing else of his profile does.
+    # text travels with every pass, and no other goal does.
     objectif: str = ""
 
     def allows(self, tool_name: str) -> bool:
@@ -425,9 +425,9 @@ _HEADER = (
     "\n"
     "  « objectif: nom » lui confie un de tes objectifs, et celui-là\n"
     "  seulement : à chaque passage elle reçoit sa phrase, ce qui le\n"
-    "  terminera et ce que tu en as dit. Elle n'y écrit jamais rien, son\n"
-    "  compte rendu va au journal. Objectif clos ou introuvable : elle\n"
-    "  est suspendue.\n"
+    "  terminera et les dernières choses que tu en as dites. Elle n'y\n"
+    "  écrit jamais rien, son compte rendu va au journal. Objectif clos\n"
+    "  ou introuvable : elle est suspendue.\n"
     "\n"
     "  Pas de joker ici, contrairement à outils.md : là-bas tu es présent\n"
     "  pour voir le résultat, ici non, et un serveur qui gagne un outil\n"

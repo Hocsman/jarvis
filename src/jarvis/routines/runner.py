@@ -201,7 +201,8 @@ class RoutineRunner:
             from .objectif import goal_of
 
             if goal_of(self._cfg, scope) is None:
-                # He closed the goal, or renamed it, or took it out. A
+                # He closed the goal, or renamed it, or took it out, or
+                # the line names something no goal could be called. A
                 # pass that ran anyway would search for something nobody
                 # is asking for any more, every morning. Suspended like a
                 # routine whose block has gone, and for the same reason
@@ -209,11 +210,12 @@ class RoutineRunner:
                 self._settle(
                     nom, rid, phrase, started_at, began, payload,
                     erreur=(
-                        f"l'objectif « {scope.objectif} » est clos ou n'est "
-                        f"plus dans objectifs.md : elle est suspendue tant "
-                        f"qu'aucun objectif ouvert ne porte ce nom"
+                        f"aucun objectif ouvert ne porte le nom "
+                        f"« {scope.objectif} » dans objectifs.md : elle est "
+                        f"suspendue tant qu'il n'y en a pas"
                     ),
                     outcome=OUTCOME_OUT_OF_SCOPE, texte=None, count=False,
+                    desaccord=desaccord,
                 )
                 return
 

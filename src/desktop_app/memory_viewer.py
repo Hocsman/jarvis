@@ -661,6 +661,10 @@ def routines_get() -> Response:
                 "memoire": bool(scope.memoire) if scope else False,
                 # The goal whose text travels with every pass, by name.
                 "objectif": scope.objectif if scope else "",
+                # Named in the block, and no open goal answers to it: its
+                # passes are suspended and not counted, so nothing else on
+                # the row would ever say so.
+                "objectif_absent": _objectif_absent(cfg, scope),
                 "suspendue": scope is None,
                 "arretee": False,
                 # Named in the block, gone from the machine. Without this
@@ -693,6 +697,7 @@ def routines_get() -> Response:
                 "due_local": "", "tz": "", "origin": None,
                 "outils": list(scope.outils), "memoire": bool(scope.memoire),
                 "objectif": scope.objectif,
+                "objectif_absent": _objectif_absent(cfg, scope),
                 "suspendue": False, "arretee": True,
                 "introuvables": missing_from_catalogue(scope),
                 "horaire_divergent": False, "steriles": 0,
@@ -714,6 +719,16 @@ def routines_cancel(routine_id: str) -> Response:
         return jsonify({"cancelled": get_activity_db().cancel_rappel(routine_id)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+def _objectif_absent(cfg, scope) -> bool:
+    """Whether a routine's block names a goal that no open goal answers
+    to: closed, gone from the file, or a name no goal could carry."""
+    if scope is None or not scope.objectif:
+        return False
+    from jarvis.routines.objectif import goal_of
+
+    return goal_of(cfg, scope) is None
 
 
 @app.route("/api/objectifs")
@@ -3216,8 +3231,9 @@ def index() -> str:
                         source : rien ici n'est déduit, la seule source qu'elle
                         sait produire est « dit », c'est-à-dire toi. Le fichier
                         est <code>yuba/objectifs.md</code> et il est à toi :
-                        corrige, réécris, supprime. Rien de tout ceci ne tourne
-                        tout seul.
+                        corrige, réécris, supprime. Un objectif ne tourne pas
+                        tout seul : ce qui tourne est une routine, si tu lui
+                        en as confié un (onglet Routines).
                     </p>
                 </div>
 
@@ -4012,8 +4028,10 @@ _VIEWER_SCRIPT = """        // Every write the page sends carries the launch tok
                 if (r.memoire) {
                     flags.push(flag('mémoire', "Ton profil et tes règles partent avec elle"));
                 }
-                if (r.objectif) {
-                    flags.push(flag('objectif : ' + r.objectif, "Elle travaille pour cet objectif : sa phrase, ce qui le terminera et ce que tu en as dit partent avec elle à chaque passage. Elle n'y écrit rien."));
+                if (r.objectif_absent) {
+                    flags.push(flag('suspendue : objectif ' + r.objectif + ' clos', "Son bloc nomme cet objectif, et il est clos ou n'est plus dans objectifs.md : rien ne tourne et rien ne part tant qu'aucun objectif ouvert ne porte ce nom.", true));
+                } else if (r.objectif) {
+                    flags.push(flag('objectif : ' + r.objectif, "Elle travaille pour cet objectif : sa phrase, ce qui le terminera et les dernières choses que tu en as dites partent avec elle à chaque passage. Elle n'y écrit rien."));
                 }
                 if (r.steriles) {
                     flags.push(flag(r.steriles + ' sans résultat', "Passages de suite sans rien produire. Au bout de 5, elle s'arrête.", true));

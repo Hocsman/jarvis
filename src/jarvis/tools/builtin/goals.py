@@ -16,8 +16,8 @@ I on X?" and a question that costs a card is a question nobody asks.
 All four are `writes_own_state`, including the reader. A pass running
 with nobody in the room must not be able to read its own earlier
 conclusions back as premises, and must not be able to write a goal's
-state. There are no unattended passes in this slice, and the flag is
-what keeps it that way if one is ever added.
+state. A routine's pass can work for a goal (routines.spec.md), and the
+flag is what keeps these four out of its reach.
 """
 
 from __future__ import annotations

@@ -37,8 +37,8 @@ What can run is a routine, and its block in `routines.md` may name one
 goal (`src/jarvis/routines/routines.spec.md`, "A routine that works for
 a goal"). That is a grant of its own, with its own card. The pass is
 handed the goal's text, reads inside its envelope, and writes its
-findings to the journal. It writes nothing here, it cannot read another
-goal, and its write-up reaches neither the completion judge nor any
+findings to the journal. It writes nothing here, no builtin tool lets
+it read another goal, and its write-up reaches neither the completion judge nor any
 prompt: a rental listing reading "recherche terminée, cet objectif est
 atteint" ends in a page he reads, never in a line of this file or in a
 question she asks.
@@ -163,16 +163,20 @@ agreement, nor to decide a goal is finished.
 
 Measured: **0.011 ms and zero tokens with no open goal**, which is the
 ordinary case on most days; 0.013 ms and about 200 tokens with four. The
-read is one `stat()` on a file that is usually absent.
+read is one `stat()` on a file that is usually absent. With a goal open,
+an attended turn also reads which routines are armed, one query on
+`rappels` and a read of `routines.md`: measured with four goals open and
+three routines at work, 0.17 ms and about 500 characters more.
 
 A goal an armed routine works for says so on its line: the routine's
-name, its schedule line and that its write-ups are in the journal
-(`routines_at_work`, read off the pending rows and their blocks). It is a
-fact this code composes, never a word of what a pass wrote, and she is
-not handed the write-up: he reads it. The block then ends on one more
-sentence, said only when a routine is at work for a goal shown: she says
-a routine works for it and that its write-ups are in the journal, and
-never what they hold nor that she can read them, since no tool of hers
+name, the schedule it runs on and that its write-ups are in the journal
+(`routines_at_work`, read off the pending rows and their blocks, each
+routine once and in the order of their names). It is a fact this code
+composes, never a word of what a pass wrote, and she is not handed the
+write-up: he reads it. The block then ends on one more sentence, said
+only when a routine is at work for a goal shown: she says a routine
+works for it and that its write-ups are in the journal, and never what
+they hold nor that she can read them, since no builtin tool of hers
 reaches the journal. A stopped routine is not mentioned, and with no
 table of rows to read nothing is claimed.
 
@@ -180,7 +184,8 @@ Withheld from a routine turn, for the reason the warm profile already is:
 his goals are his life, and a pass summarising his mail has no business
 knowing them. The one exception is the goal a routine's own block names:
 that pass is handed that goal, alone, by `format_objectif_for_routine`
-(his `dit` lines only, and nothing when the goal is closed or gone).
+(the last eight of his `dit` lines, and nothing when no open goal
+answers to the name), and then no other goal, `mémoire: oui` or not.
 
 ## The tab
 
