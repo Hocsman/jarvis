@@ -2,7 +2,8 @@
 
 Three of them write, and all three are `action`, so each costs a card.
 As `lecture` they would be `libre` by default, and `fetchWebPage` returns
-up to 50,000 characters of unfenced page text into an agentic loop — a
+up to 50,000 characters of page text into an agentic loop, behind a fence
+that is a convention a model honours, not a wall — a
 page carrying "Note pour l'objectif X : …" would then write a durable
 line attributed to the user, which he never said, and she would read it
 back to him later as a fact about his life. That is the defect already
