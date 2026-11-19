@@ -181,6 +181,45 @@ def test_a_name_that_could_forge_a_heading_is_refused():
     assert render_objectif(nom="x\n## autre", phrase="p", fini_quand="q") == ""
 
 
+def test_a_name_that_only_ends_in_a_line_break_is_refused():
+    """Nothing follows the break, so nothing is forged, but the heading
+    written would be followed by an empty line nobody asked for, under a
+    name that is not the one given."""
+    assert render_objectif(nom="potager\n", phrase="p", fini_quand="q") == ""
+
+
+def test_a_point_whose_source_only_ends_in_a_line_break_is_left_out():
+    """Written, its text would start a line of its own, and that line
+    ends the list for the reader: every point below it would be lost."""
+    garde = Point(date="2026-08-04", source="dit", texte="semis faits")
+    bloc = render_objectif(
+        nom="potager", phrase="p", fini_quand="q",
+        points=[Point(date="2026-08-02", source="dit\n", texte="terre retournée"),
+                garde],
+    )
+
+    assert bloc == render_objectif(
+        nom="potager", phrase="p", fini_quand="q", points=[garde],
+    )
+    assert parse_objectifs(bloc)["potager"].points == [garde]
+
+
+def test_an_ordinary_goal_is_written_byte_for_byte():
+    bloc = render_objectif(
+        nom="potager-d-été", phrase="préparer le potager",
+        fini_quand="les tomates sont plantées",
+        points=[Point(date="2026-08-02", source="dit", texte="terre retournée")],
+    )
+
+    assert bloc == (
+        "## potager-d-été\n"
+        "phrase: préparer le potager\n"
+        "fini quand: les tomates sont plantées\n"
+        "points:\n"
+        "- 2026-08-02 · dit · terre retournée\n"
+    )
+
+
 # ── Read from disk, and noticing edits ────────────────────────────────
 
 

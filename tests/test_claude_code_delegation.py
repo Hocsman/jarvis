@@ -1009,6 +1009,28 @@ def test_a_session_id_that_is_not_one_never_reaches_the_command_line(
     assert session not in follow_up["argv"]
 
 
+_UNE_SESSION = "aaaaaaaa-0000-4000-8000-000000000001"
+
+
+def test_a_session_id_that_only_ends_in_a_line_break_is_not_one():
+    """It is not the shape Claude Code prints, so it is neither kept from
+    a report nor put on a command line, like any other text that is not a
+    session id."""
+    sortie = json.dumps({"result": "fait", "session_id": _UNE_SESSION + "\n"})
+
+    assert dl.parse_report(sortie, "", 0)[2] is None
+    assert "--resume" not in dl.build_command(
+        ["claude"], modifier=False, resume=_UNE_SESSION + "\n")
+
+
+def test_an_ordinary_session_id_is_kept_and_resumed_as_given():
+    sortie = json.dumps({"result": "fait", "session_id": _UNE_SESSION})
+
+    assert dl.parse_report(sortie, "", 0)[2] == _UNE_SESSION
+    argv = dl.build_command(["claude"], modifier=False, resume=_UNE_SESSION)
+    assert argv[-2:] == ["--resume", _UNE_SESSION]
+
+
 # ── Failing to start ──────────────────────────────────────────────────
 
 

@@ -490,7 +490,7 @@ def _nom(raw, blocs) -> str:
     if not texte or len(texte.split()) > 4:
         return ""
     candidat = "-".join(texte.split())
-    return candidat if re.match(r"^[\w-]{1,64}$", candidat, re.UNICODE) else ""
+    return candidat if re.fullmatch(r"[\w-]{1,64}", candidat, re.UNICODE) else ""
 
 
 def _nom_derive(phrase: str, pris) -> str:

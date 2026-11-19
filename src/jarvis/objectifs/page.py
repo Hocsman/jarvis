@@ -195,7 +195,7 @@ def render_objectif(*, nom: str, phrase: str, fini_quand: str,
     route round it: the name and the notes arrive from a model reading a
     Whisper transcription, and a line break in either forges structure.
     """
-    if not _NOM_PROPRE.match(nom or ""):
+    if not is_goal_name(nom):
         debug_log(f"objectif not rendered: unusable name {nom!r}", "tools")
         return ""
     if not _tient_sur_une_ligne(phrase or "") or not _tient_sur_une_ligne(
@@ -210,7 +210,8 @@ def render_objectif(*, nom: str, phrase: str, fini_quand: str,
 
     gardes = [
         p for p in (points or [])
-        if _tient_sur_une_ligne(p.texte or "") and _NOM_PROPRE.match(p.source or "")
+        if _tient_sur_une_ligne(p.texte or "")
+        and _NOM_PROPRE.fullmatch(p.source or "")
     ]
     if gardes:
         lines.append("points:")

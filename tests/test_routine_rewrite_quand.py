@@ -124,6 +124,25 @@ def test_a_value_that_could_forge_a_line_is_refused(cfg):
     assert _texte(cfg) == avant
 
 
+@pytest.mark.parametrize("fin", ["\n", "\r\n"])
+def test_a_value_that_only_ends_in_a_line_break_is_refused(cfg, fin):
+    """Nothing follows the break, so no line is forged, but the file
+    would gain an empty line under the schedule that nobody wrote."""
+    avant = _texte(cfg)
+
+    assert rewrite_quand(cfg, "matin", "tous les jours à 08:30" + fin) is False
+    assert _texte(cfg) == avant
+
+
+def test_an_ordinary_value_is_written_byte_for_byte(cfg):
+    avant = _texte(cfg)
+
+    assert rewrite_quand(cfg, "matin", "tous les jours à 08:30") is True
+    assert _texte(cfg) == avant.replace(
+        "quand: tous les jours à 07:00\n", "quand: tous les jours à 08:30\n",
+    )
+
+
 # ── Every schedule line in the span, not just one ─────────────────────
 
 
