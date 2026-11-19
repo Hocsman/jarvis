@@ -144,6 +144,8 @@ def test_a_caller_that_cannot_establish_the_tools_still_extracts():
 @pytest.mark.parametrize("outils,attendu", [
     (["webSearch"], "web"),
     (["fetchWebPage"], "web"),
+    (["screenshot"], "web"),
+    (["getWeather", "screenshot"], "web"),
     (["getWeather"], "outil"),
     (["chrome-devtools__navigate_page"], "outil"),
     (["getWeather", "webSearch"], "web"),

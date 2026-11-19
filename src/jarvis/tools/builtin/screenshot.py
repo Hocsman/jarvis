@@ -8,29 +8,29 @@ See `screenshot.spec.md`.
 from typing import Any, Dict, List, Optional, Tuple
 import io
 import os
-import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 from ...debug import debug_log
+from ...utils import fence
 from ..base import Tool, ToolContext
 from ..types import ToolExecutionResult
 
-SCREEN_FENCE_BEGIN = "<<<BEGIN UNTRUSTED SCREEN TEXT>>>"
-SCREEN_FENCE_END = "<<<END UNTRUSTED SCREEN TEXT>>>"
+SCREEN_FENCE_BEGIN = fence.opening(fence.SCREEN_TEXT)
+SCREEN_FENCE_END = fence.closing(fence.SCREEN_TEXT)
 
 # A full pair of monitors of dense text runs to a few thousand characters.
 # Past this the reply model is reading a wall, and a small one has no
 # context left for the question.
 MAX_SCREEN_CHARS = 12_000
 
-# Any fence marker, ours or another tool's, however a recogniser spaced it.
-_FENCE_MARKER_RE = re.compile(r"<<<\s*(?:BEGIN|END)\s+UNTRUSTED[^<>\n]*>>>", re.IGNORECASE)
-
 # `Windows.Media.Ocr.OcrEngine.MaxImageDimension`.
 _WINDOWS_OCR_MAX_SIDE = 10_000
+# For the whole reading, every monitor included: past it he is listening to
+# silence.
 _WINDOWS_OCR_TIMEOUT_SEC = 30
 # The script's own exit code for "no recogniser for any of his languages".
 _WINDOWS_OCR_NO_LANGUAGE = 3
@@ -55,7 +55,7 @@ function Await($operation, $type) {
     $task.Result
 }
 $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
-if ($null -eq $engine) { exit 3 }
+if ($null -eq $engine) { exit NO_LANGUAGE }
 $bytes = New-Object System.IO.MemoryStream
 [Console]::OpenStandardInput().CopyTo($bytes)
 $bytes.Position = 0
@@ -78,7 +78,7 @@ $utf8 = [System.Text.Encoding]::UTF8.GetBytes($text)
 $out = [Console]::OpenStandardOutput()
 $out.Write($utf8, 0, $utf8.Length)
 $out.Flush()
-"""
+""".replace("NO_LANGUAGE", str(_WINDOWS_OCR_NO_LANGUAGE))
 
 
 class ScreenUnreadable(Exception):
@@ -172,18 +172,30 @@ def _powershell() -> str:
     return os.path.join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
 
 
+# A recognised line: its box (left, top, right, bottom, in pixels), then
+# its text.
 Fragment = Tuple[float, float, float, float, str]
+
+# Two boxes are on one row when they share more than this much of the
+# shorter one's height.
+_SAME_ROW_SHARE = 0.5
+# A piece continues a line when it starts no further right of the line's
+# end than this many line-heights (a wide space), and no further left of it
+# than `_OVERLAP_ALLOWED` (boxes of neighbouring words can touch).
+_WIDEST_GAP = 1.0
+_OVERLAP_ALLOWED = 0.3
 
 
 def _continues(line: List[Any], piece: List[Any]) -> bool:
-    """Whether `piece` starts where `line` ends: on the same row, no
-    further away than a wide space."""
-    height = max(line[3] - line[1], piece[3] - piece[1])
+    """Whether `piece` starts where `line` ends, on the same row. Both are
+    a `Fragment` held as a list: left, top, right, bottom, text."""
+    line_height, piece_height = line[3] - line[1], piece[3] - piece[1]
+    height = max(line_height, piece_height)
     shared = min(line[3], piece[3]) - max(line[1], piece[1])
     gap = piece[0] - line[2]
     return (
-        shared > 0.5 * min(line[3] - line[1], piece[3] - piece[1])
-        and -0.3 * height <= gap <= height
+        shared > _SAME_ROW_SHARE * min(line_height, piece_height)
+        and -_OVERLAP_ALLOWED * height <= gap <= _WIDEST_GAP * height
     )
 
 
@@ -200,29 +212,33 @@ def _join_fragments(pieces: List[Fragment]) -> List[str]:
     at = 0
     while at < len(lines):
         line = lines[at]
-        rest = next(
+        # The nearest piece first: taking a further one would move the
+        # line's end past the nearer, which could then never join.
+        rest = min(
             (i for i, piece in enumerate(lines) if i != at and _continues(line, piece)),
-            None,
+            key=lambda i: lines[i][0],
+            default=None,
         )
         if rest is None:
             at += 1
             continue
         piece = lines.pop(rest)
-        line[1], line[2], line[3] = min(line[1], piece[1]), piece[2], max(line[3], piece[3])
+        line[1], line[3] = min(line[1], piece[1]), max(line[3], piece[3])
+        line[2] = max(line[2], piece[2])
         line[4] = f"{line[4]} {piece[4]}"
         if rest < at:
             at -= 1
     return [line[4] for line in lines]
 
 
-def _recognise_windows(png: bytes) -> str:
+def _recognise_windows(png: bytes, timeout_sec: float = _WINDOWS_OCR_TIMEOUT_SEC) -> str:
     """The text Windows' built-in recogniser reads in one image."""
     try:
         done = subprocess.run(
             [_powershell(), "-NoProfile", "-NonInteractive", "-Command", _WINDOWS_OCR_SCRIPT],
             input=png,
             capture_output=True,
-            timeout=_WINDOWS_OCR_TIMEOUT_SEC,
+            timeout=timeout_sec,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except subprocess.TimeoutExpired as e:
@@ -311,7 +327,14 @@ def _read_screen() -> List[str]:
     """The text of each screen read, in order."""
     system = _platform()
     if system == "win32":
-        return [_recognise_windows(png) for png in _capture_windows()]
+        give_up_at = time.monotonic() + _WINDOWS_OCR_TIMEOUT_SEC
+        texts = []
+        for png in _capture_windows():
+            left = give_up_at - time.monotonic()
+            if left <= 0:
+                raise ScreenUnreadable("Reading the screen took too long and was given up.")
+            texts.append(_recognise_windows(png, left))
+        return texts
     if system == "darwin":
         return [_read_macos()]
     raise ScreenUnreadable("Reading the screen is not available on this system.")
@@ -321,11 +344,11 @@ def _fenced(texts: List[str]) -> Optional[str]:
     """The texts as one fenced block, or None when no screen showed any.
 
     What a screen shows is whatever a page, a message or a document put
-    there, so it is fenced like a web extract, and a marker the screen
-    itself displays is taken out: shown inside, it would close the fence
-    early and leave the rest reading as instructions.
+    there, so it is fenced like a web extract, and the brackets a marker
+    is made of are rewritten first: a marker shown on the screen would
+    close the fence early and leave the rest reading as instructions.
     """
-    cleaned = [_FENCE_MARKER_RE.sub("", text).strip() for text in texts]
+    cleaned = [fence.without_markers(text).strip() for text in texts]
     if not any(cleaned):
         return None
     if len(cleaned) == 1:
@@ -366,11 +389,14 @@ class ScreenshotTool(Tool):
         return _platform() == "darwin"
 
     def risk_for(self, args):
-        """Looks without changing anything. What it looks at is his, which
-        is why no routine may hold it; attended, it runs when he asks."""
-        from ..policy import RISK_READ
+        """Not `lecture`, though it changes nothing on the machine. It
+        takes the text of whatever he has open and hands it to the reply
+        model, and with a remote one that text has left for good. As
+        `libre` any turn could do that unasked; as `action` he is asked
+        first, and a spoken yes is enough."""
+        from ..policy import RISK_ACTION
 
-        return RISK_READ
+        return RISK_ACTION
 
     @property
     def name(self) -> str:

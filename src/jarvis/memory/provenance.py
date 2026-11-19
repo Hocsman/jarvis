@@ -28,8 +28,10 @@ SOURCE_TOOL = "outil"       # some other tool ran: weather, MCP, builtin
 SOURCE_UNKNOWN = "inconnu"  # written before this existed, or unestablishable
 SOURCES = (SOURCE_WEB, SOURCE_TOOL, SOURCE_UNKNOWN)
 
-# Tools whose output is a page the assistant did not write.
-_WEB_TOOLS = frozenset({"webSearch", "fetchWebPage"})
+# Tools whose output is text nobody vouches for: a page, or whatever a
+# screen was showing (a page, a message, a document). A fact resting on it
+# takes the weaker word.
+_WEB_TOOLS = frozenset({"webSearch", "fetchWebPage", "screenshot"})
 
 # Tools that consult nothing: they write, they steer, or they read his own
 # records. Running one is not having looked anything up, and counting it

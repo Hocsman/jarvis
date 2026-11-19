@@ -2,11 +2,16 @@
 End-to-end eval: asked about what is on the screen, she reads it; asked
 about anything else, she leaves it alone.
 
-`screenshot` runs without asking (`src/jarvis/tools/builtin/screenshot.spec.md`),
-so its description is all that decides when she reaches for it. Both
-directions are measured: a question about the screen must reach the tool,
-and a sentence that has nothing to do with the screen must not, since each
-capture hands the text of whatever is open to the reply model.
+`screenshot`'s description decides when she reaches for it
+(`src/jarvis/tools/builtin/screenshot.spec.md`). Both directions are
+measured: a question about the screen must reach the tool, and a sentence
+that has nothing to do with the screen must not. A call made for nothing
+costs the user a question they did not expect when the tool asks first,
+and a capture they did not want when their `outils.md` frees it.
+
+What is counted is the call the model makes, before the gate: whether the
+gate then asks is the policy's business, held in
+`tests/tools/builtin/test_screenshot.py`.
 
 Each turn runs the real engine on a voice turn (`origin="voix"`): the
 planner, the pre-loop router and the chat model as the user's settings name

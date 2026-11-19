@@ -166,11 +166,8 @@ def test_a_capture_that_asks_for_no_gesture_does_not_claim_one(monkeypatch):
     assert BUILTIN_TOOLS["screenshot"].needs_a_human is False
 
 
-def test_it_is_a_separate_axis_from_the_risk():
-    """Reading the screen is `lecture` and that is correct. The problem
-    is not that the call is dangerous, it is that its justification
-    assumes somebody is there."""
-    assert BUILTIN_TOOLS["screenshot"].risk_for({}) == RISK_READ
+def test_it_is_a_separate_axis_from_writing_her_state():
+    """Waiting for a gesture says nothing about what the call writes."""
     assert BUILTIN_TOOLS["screenshot"].writes_own_state is False
 
 

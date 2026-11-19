@@ -130,7 +130,9 @@ def test_an_empty_envelope_reaches_nothing():
     assert tool.ran == []
 
 
-@pytest.mark.parametrize("name", ["toolSearchTool", "refreshMCPTools", "stop", "claudeCode"])
+@pytest.mark.parametrize("name", [
+    "toolSearchTool", "refreshMCPTools", "stop", "claudeCode", "screenshot",
+])
 def test_the_names_no_envelope_can_hold_do_not_run_either(name):
     """They are kept out of the catalogue, so a well-behaved turn never
     reaches for one. The gate is what happens when the turn is not
