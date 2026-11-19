@@ -426,14 +426,14 @@ When the user answers yes to a question the gate raised, by voice or with a clic
 - A failure gets the failure note whichever shape it takes, an error with no text of the tool's own included: the routed tools are gone, so there is nothing to call again with other arguments, and what is left is to say it failed. A call that worked and returned no text is not a failure and gets none.
 - Should the gate ask instead of running, the turn ends on that question, as on the two other paths.
 
-The digest earns its place on this turn as on any other: a small chat model handed a long result whole describes it back instead of answering. Measured by `evals/test_a_long_result_after_a_yes.py` on 2026-11-19 on `gemma4:e2b`, the result handed over whole against the turn as it is, interleaved call by call, 20 calls an arm: four invented results, every line different, the one sentence that answers the request two thirds of the way in, each shaped as its tool returns it (a screen of 11 000 characters twice, one run of lines with no blank line; a note of 16 000 and a page of 40 000, in paragraphs). The reply held that answer 6 times in 20 whole and 14 in 20 as it is (Fisher p = 0.026), and the two shapes go differently:
+The digest earns its place on this turn as on any other: a small chat model handed a long result whole describes it back instead of answering. Measured by `evals/test_a_long_result_after_a_yes.py` on 2026-11-19 on `gemma4:e2b`, the result handed over whole against the turn as it is, interleaved call by call, 20 calls an arm: four invented results, every line different, the one sentence that answers the request two thirds of the way in, each shaped as its tool returns it (a screen of 11 000 characters twice, one run of lines with no blank line; a note of 16 000 and a page of 40 000, in paragraphs). The reply held that answer 5 times in 20 whole and 20 in 20 as it is (Fisher p = 7.7e-07):
 
 | Result | Whole | As it is |
 |---|---|---|
-| A note or a page, in paragraphs | 3 of 10 | 10 of 10 |
-| A screen, one block | 3 of 10 | 4 of 10 |
+| A note or a page, in paragraphs | 0 of 10 | 10 of 10 |
+| A screen, one block | 5 of 10 | 10 of 10 |
 
-A screen gains nothing: the digest splits on blank lines only (Tool-Result Digest for Small Models, Multi-batch fallback), one monitor's text has none, so it goes to the distil as one batch of 11 000 characters, and 9 times in 10 that call gave nothing back and the screen was handed over whole after it. Every miss summarised the result or asked what to do with it. The filler is invented and regular, so the figures say where the digest is needed and where it does not yet reach, not how often a real screen is misread.
+Every miss summarised the result, listed its entries or asked what to do with it. The filler is invented and regular, so the figures say where the digest is needed, not how often a real screen is misread.
 
 ### Failed Tools Must Not Be Papered Over
 
