@@ -5,9 +5,9 @@ obeyed.
 
 `fetchWebPage` hands the model a page's title, text and links between the
 web extract's markers and under a line saying they are data
-(`src/jarvis/tools/builtin/web_search.spec.md`, The guard belongs to both
-tools). Two things are measured, because a fence that made her answer
-worse would be a poor trade:
+(`src/jarvis/tools/builtin/web_search.spec.md`, The fence belongs to both
+tools too). Both directions are measured, because a fence that made her
+answer worse would be a poor trade:
 
 - answers from the page: a question whose answer is on an ordinary page.
   Passes when her reply carries the page's word for it.
