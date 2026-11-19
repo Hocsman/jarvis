@@ -143,6 +143,16 @@ own dated lines, fenced as data. **It never reads prose a model wrote**:
 the write-up of a routine that works for the goal is in the journal, and
 is not among its inputs.
 
+The dated lines stand in the bare fence of `utils/fence.py` (`bare`): a
+`<<<` line, the lines, a `>>>` line, under a line saying they are data and
+not instructions. A line cannot end it: every run of three or more angle
+brackets in the lines, plain or full-width, becomes a single guillemet
+before they are fenced, so a note showing `>>>` stays wholly between the
+two lines and nothing after it reads as the prompt's own text. Two
+brackets in a row are left as they read, and lines with no such run reach
+the judge byte for byte. The goal's sentence and its ending condition
+stand above the fence, each on its own labelled line.
+
 Every failure is quiet: no model, a timeout, unreadable JSON, an unknown
 word, no notes, no ending condition, or a redaction placeholder in the
 premise all return `pas-encore`. A question asked too early is asked

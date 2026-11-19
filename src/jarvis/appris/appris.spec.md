@@ -156,6 +156,23 @@ wrote them in the first place, or a router or judge given as
 `vendor/model`. A slashed local tag such as `hf.co/...` stays
 here only as a pin.
 
+**The notes are fenced as data, and a note cannot end the fence.** A
+journal row is written by LLM #9 from a conversation, and a conversation
+can quote a page fetched from the web, so a row can show anything. The
+rows reach the model in the bare fence of `utils/fence.py` (`bare`): a
+`<<<` line, the rows each under its date, a `>>>` line, under a line
+saying they are data and not instructions. Before that, every run of
+three or more angle brackets in a row, plain or full-width, becomes a
+single guillemet, so a row showing a `>>>` line stays wholly between the
+two lines and nothing after it reads as the prompt's own text. Two
+brackets in a row are left as they read, and rows with no such run reach
+the model byte for byte.
+
+The rewritten text is what the model read, so it is what a citation is
+looked for in (the `grounded` guard below): a citation copied across a
+rewritten run is found. What marks a row as read stays the digest of the
+row as the journal holds it.
+
 Seven guards run afterwards, in Python, each counted:
 
 | Guard | What it defends |
@@ -163,7 +180,7 @@ Seven guards run afterwards, in Python, each counted:
 | shape | an item that is not a dict, or fields that are not strings |
 | genre | an invented enum value becomes `fait` rather than costing the proposal |
 | renderable | one line, within the caps, no `~~` |
-| grounded | the citation must be findable in one of the notes under NFKC folding, and be long enough to identify a sentence. The matching note supplies the date |
+| grounded | the citation must be findable in one of the notes as the model read them, under NFKC folding, and be long enough to identify a sentence. The matching note supplies the date |
 | redaction | a placeholder in either field |
 | already believed | including entries he struck out by hand, so a retired belief is never offered back |
 | already asked | any state; struck counts as refused |

@@ -237,6 +237,15 @@ anything at all, and unlike a one-off reminder this sentence is replayed
 to a model every single morning — which is also why a redaction
 placeholder in it is refused outright rather than passed along.
 
+The fence is the bare one of `utils/fence.py` (`bare`): a `<<<` line, the
+sentence, a `>>>` line, under a line saying it is data and not
+instructions. The sentence cannot end it: every run of three or more
+angle brackets in it, plain or full-width, becomes a single guillemet
+before it is fenced, so a sentence showing a `>>>` line stays wholly
+between the two lines and nothing after it reads as the prompt's own
+text. Two brackets in a row are left as they read, and a sentence with no
+such run reaches the model byte for byte.
+
 It is read where the reminder sentence is read, by the same rule and
 through the same call: `setRoutine` is a tool of the reply loop too, so
 the chat model receives this sentence whatever the extractor does, in
