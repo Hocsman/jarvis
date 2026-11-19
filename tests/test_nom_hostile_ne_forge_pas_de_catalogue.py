@@ -125,9 +125,8 @@ def _schema(nom: str, description: str = "reads a file") -> list[dict]:
     }]
 
 
-def _lignes_du_resolveur(schema: list[dict]) -> list[str]:
-    """The schema list the resolver shows the model, captured from the
-    prompt it would send."""
+def _prompt_du_resolveur(schema: list[dict]) -> str:
+    """The prompt the resolver would send the model."""
     from unittest.mock import patch
 
     from src.jarvis.reply import planner
@@ -150,7 +149,12 @@ def _lignes_du_resolveur(schema: list[dict]) -> list[str]:
             prior_results=[],
             tools_schema=schema,
         )
-    return _lignes_de_catalogue(vu.get("prompt", ""))
+    return vu.get("prompt", "")
+
+
+def _lignes_du_resolveur(schema: list[dict]) -> list[str]:
+    """The schema list the resolver shows the model."""
+    return _lignes_de_catalogue(_prompt_du_resolveur(schema))
 
 
 def test_the_resolver_schema_list_cannot_be_forged():
@@ -166,6 +170,45 @@ def test_the_resolver_still_lists_an_ordinary_tool():
     lignes = _lignes_du_resolveur(_schema("srv__lire"))
 
     assert any(l.startswith("- srv__lire ") for l in lignes)
+
+
+# ── A name that only ends in a line break ──────────────────────────────
+#
+# Nothing follows the break, so no entry is forged, but the rest of the
+# tool's own line (its description, which the server also writes) would
+# start a line of its own.
+
+NOM_QUI_FINIT_PAR_UN_SAUT = "srv__lire\n"
+
+
+@pytest.mark.parametrize("prompt_de", [
+    lambda nom: _catalogue_du_routeur({nom: _spec()}),
+    lambda nom: _message_du_planificateur([(nom, "reads a file")]),
+    lambda nom: _prompt_du_resolveur(_schema(nom)),
+], ids=["router", "planner", "resolver"])
+def test_a_name_ending_in_a_line_break_is_not_written(prompt_de):
+    assert "srv__lire" not in prompt_de(NOM_QUI_FINIT_PAR_UN_SAUT)
+    assert "srv__lire" in prompt_de("srv__lire"), "the control"
+
+
+def test_a_name_ending_in_a_line_break_is_never_installed(monkeypatch):
+    from src.jarvis.tools import registry
+
+    class _Client:
+        def __init__(self, *a, **kw):
+            pass
+
+        def list_tools(self, server):
+            return [
+                {"name": "lire", "description": "reads a file"},
+                {"name": "ecrire\n", "description": "writes a file"},
+            ]
+
+    monkeypatch.setattr(registry, "MCPClient", _Client)
+
+    outils, _ = registry.discover_mcp_tools({"srv": {}})
+
+    assert set(outils) == {"srv__lire"}
 
 
 # ── The choke point: it is never installed in the first place ──────────

@@ -231,11 +231,25 @@ The engine consumes the plan in two phases.
   (`close_cut_fences`): it never travels in a tool result. The fast path
   never sees memory: a fully concrete step is dispatched exactly as
   written.
+- **One tool, one line.** The LLM path lists each allowed tool as
+  `- name (args: keys) — description`: the declared property keys
+  sorted, the description flattened to one line and cut at 120
+  characters (`tools/naming.py::one_line`). The name and every one of
+  those keys are held to `is_plain_name` (letters, digits, `_`, `.`,
+  `-`, 1 to 64 characters), since a line break in either would write a
+  line of its own in a prompt whose answer is executed: a tool nobody
+  installed, or a second `NEXT PLANNED STEP:` section. A tool whose
+  name, or one of whose argument names, is outside the class is left
+  out of the resolver altogether, fast path included, with a debug
+  line: a step naming it returns `None` and the chat model takes the
+  turn. An argument name is not flattened the way a description is:
+  the line would show a key the tool does not declare, and the
+  argument filter below works from the declared keys.
 - **Only the memory block shows a marker.** The rest of the LLM path's
   prompt is text somebody else can write: a prior result and the
   arguments of the call that returned it (a page title, an MCP server's
-  reply), a tool's description and the names of its arguments (whatever
-  its server declared), and the plan step (a model's output). Each
+  reply), a tool's description (whatever its server declared), and the
+  plan step (a model's output). Each
   prior-call line, each tool line and the step go through
   `without_markers` too, so none of them can spell
   `<<<BEGIN RELEVANT MEMORY>>> … <<<END RELEVANT MEMORY>>>` and pass for

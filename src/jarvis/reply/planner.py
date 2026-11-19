@@ -787,8 +787,21 @@ def resolve_next_tool_call(
             allowed_names.pop()
             allowed_props.pop(str(name), None)
             continue
-        # The argument names and the description are whatever the tool's
-        # server declared: the line cannot show a fence marker.
+        if not all(is_plain_name(k) for k in prop_keys):
+            # The argument names sit on that same line and come from the
+            # same server. Flattening one would show the model a key the
+            # tool does not declare, while the argument filter below
+            # works from the declared ones: the tool is left to the
+            # chat-model turn instead.
+            debug_log(
+                f"tool {name} omitted from resolver schema, unwritable argument name",
+                "planning",
+            )
+            allowed_names.pop()
+            allowed_props.pop(str(name), None)
+            continue
+        # The description is whatever the tool's server declared: the
+        # line cannot show a fence marker.
         schema_lines.append(fence.without_markers(
             f"- {name} (args: {keys}) — {one_line(fn.get('description') or '', 120)}"
         ))
