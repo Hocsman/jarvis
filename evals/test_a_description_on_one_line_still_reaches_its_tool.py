@@ -45,9 +45,11 @@ the third. `EVAL_CATALOGUE_CHAT_MODEL` names the model (default
 
 Measured on 2026-11-19, `gemma4:e2b`, eight rounds: its tool called 40 of
 48 times on each arm, with the right argument 22 of 48 on each, the tools
-left alone 32 of 32 on each. The misses are the same on both arms: the
-French sentence about the notebook answered from the empty memory with no
-call, and a call that carries no argument at all.
+left alone 32 of 32 on each. The misses are of the same kinds on both
+arms: the French sentence about the notebook answered from the empty
+memory with no call (8 of 8 turns as sent, 7 of 8 on one line), one turn
+on the one-line arm that ended on the fallback reply, and calls that carry
+no argument at all (18 of the 40 calls on each arm).
 
 Run:
     ./scripts/run_evals.sh --single a_description_on_one_line
