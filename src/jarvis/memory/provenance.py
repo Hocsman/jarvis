@@ -23,13 +23,15 @@ from typing import Optional, Sequence
 #
 # There is deliberately no word for "the model said it". A fact with no
 # tool behind it does not get a weaker label, it does not get written.
-SOURCE_WEB = "web"          # an untrusted page was fetched in the window
+SOURCE_WEB = "web"          # untrusted text was read in the window: a page, the screen
 SOURCE_TOOL = "outil"       # some other tool ran: weather, MCP, builtin
 SOURCE_UNKNOWN = "inconnu"  # written before this existed, or unestablishable
 SOURCES = (SOURCE_WEB, SOURCE_TOOL, SOURCE_UNKNOWN)
 
-# Tools whose output is a page the assistant did not write.
-_WEB_TOOLS = frozenset({"webSearch", "fetchWebPage"})
+# Tools whose output is text nobody vouches for: a page, or whatever a
+# screen was showing (a page, a message, a document). A fact resting on it
+# takes the weaker word.
+_WEB_TOOLS = frozenset({"webSearch", "fetchWebPage", "screenshot"})
 
 # Tools that consult nothing: they write, they steer, or they read his own
 # records. Running one is not having looked anything up, and counting it

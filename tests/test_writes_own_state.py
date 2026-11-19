@@ -146,20 +146,39 @@ def test_the_prose_no_longer_carries_the_claim_alone():
 # ── The other axis: a tool that waits for a person ────────────────────
 
 
-def test_a_tool_that_waits_for_a_gesture_says_so():
-    """`screencapture -i` waits for a rectangle to be dragged, with no
-    timeout. Unattended it does not fail, it *waits* — holding the
+def test_a_tool_that_waits_for_a_gesture_says_so(monkeypatch):
+    """On macOS `screencapture -i` waits for a rectangle to be dragged,
+    with no timeout. Unattended it does not fail, it *waits* — holding the
     routine runner's single slot, which every other routine queues on,
     until someone restarts the app."""
+    from src.jarvis.tools.builtin import screenshot
+
+    monkeypatch.setattr(screenshot, "_platform", lambda: "darwin")
+
     assert BUILTIN_TOOLS["screenshot"].needs_a_human is True
 
 
-def test_it_is_a_separate_axis_from_the_risk():
-    """Reading the screen is `lecture` and that is correct. The problem
-    is not that the call is dangerous, it is that its justification
-    assumes somebody is there."""
-    assert BUILTIN_TOOLS["screenshot"].risk_for({}) == RISK_READ
+def test_a_capture_that_asks_for_no_gesture_does_not_claim_one(monkeypatch):
+    from src.jarvis.tools.builtin import screenshot
+
+    monkeypatch.setattr(screenshot, "_platform", lambda: "win32")
+
+    assert BUILTIN_TOOLS["screenshot"].needs_a_human is False
+
+
+def test_it_is_a_separate_axis_from_writing_her_state():
+    """Waiting for a gesture says nothing about what the call writes."""
     assert BUILTIN_TOOLS["screenshot"].writes_own_state is False
+
+
+def test_no_routine_can_be_given_the_screen():
+    """Whatever the system and whatever his file says: the envelope is
+    written once and the screen is whatever he left open that morning."""
+    from src.jarvis.routines.eligibility import POURQUOI_JAMAIS, refuse_reason
+    from src.jarvis.routines.scope import RoutineScope
+
+    assert refuse_reason(None, "screenshot") == POURQUOI_JAMAIS
+    assert RoutineScope(nom="matin", outils=["screenshot"]).allows("screenshot") is False
 
 
 def test_waiting_for_a_person_is_false_by_default():

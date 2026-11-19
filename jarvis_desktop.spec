@@ -217,6 +217,7 @@ hiddenimports = [
     'numpy',
     'PIL',
     'PIL.Image',
+    'PIL.ImageGrab',
     'rapidfuzz',
     'rapidfuzz.fuzz',
     'bs4',

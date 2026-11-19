@@ -9,6 +9,7 @@ from typing import Any, Iterator, Optional, List, Sequence, Tuple, Union, Callab
 from .db import Database
 from ..llm import get_embedding_backend, get_llm_backend
 from ..debug import debug_log
+from ..utils import fence
 from ..utils.redact import redact, scrub_secrets
 
 
@@ -44,8 +45,8 @@ def _embed_text(text: str, cfg, *, timeout_sec: float = 15.0) -> Optional[list[f
         return None
 
 
-_UNTRUSTED_FENCE_BEGIN = "<<<BEGIN UNTRUSTED WEB EXTRACT>>>"
-_UNTRUSTED_FENCE_END = "<<<END UNTRUSTED WEB EXTRACT>>>"
+_UNTRUSTED_FENCE_BEGIN = fence.opening(fence.WEB_EXTRACT)
+_UNTRUSTED_FENCE_END = fence.closing(fence.WEB_EXTRACT)
 
 
 # ── Deflection rewrite (LLM-driven historical cleanup) ────────────────────
@@ -1269,15 +1270,7 @@ class DialogueMemory:
                     c = mm.get("content")
                     if isinstance(c, str) and len(c) > per_entry_chars:
                         cut = c[:per_entry_chars].rstrip() + "…"
-                        # If truncation sliced away the closing marker of an
-                        # UNTRUSTED WEB EXTRACT fence, re-append it so the
-                        # injection-defence fence stays intact downstream.
-                        if (
-                            _UNTRUSTED_FENCE_BEGIN in cut
-                            and _UNTRUSTED_FENCE_END not in cut
-                        ):
-                            cut = cut + "\n" + _UNTRUSTED_FENCE_END
-                        mm["content"] = cut
+                        mm["content"] = fence.close_cut_fences(cut)
                     truncated.append(mm)
                 timeline.append((ts, "group", truncated))
             timeline.sort(key=lambda t: t[0])

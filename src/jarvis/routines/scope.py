@@ -54,15 +54,19 @@ _COMMENT_OPEN, _COMMENT_CLOSE = "<!--", "-->"
 # else that writes a tool name onto a line.
 
 
-# Four names an envelope can never contain, whatever the file says.
+# Five names an envelope can never contain, whatever the file says.
 #
 # `toolSearchTool` appends any name in the registry to the running turn's
 # allow-list and regenerates the schema — an envelope that can widen
 # itself is not an envelope. `refreshMCPTools` rediscovers servers
 # mid-run, so the catalogue would change underneath it. `stop` ends a
 # conversation, and a routine is not one. `claudeCode` delivers its report
-# aloud minutes later, to someone who has to be in the room.
-JAMAIS_EN_ROUTINE = frozenset({"toolSearchTool", "refreshMCPTools", "stop", "claudeCode"})
+# aloud minutes later, to someone who has to be in the room. `screenshot`
+# reads whatever he left open on his screen and hands its text to the
+# reply model: attended, he has just asked; at 07:00 nobody has.
+JAMAIS_EN_ROUTINE = frozenset({
+    "toolSearchTool", "refreshMCPTools", "stop", "claudeCode", "screenshot",
+})
 
 # The one value that turns the profile on. Anything else — absent,
 # empty, negated, a word from another language, a typo — leaves it off.

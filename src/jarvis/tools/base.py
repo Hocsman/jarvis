@@ -82,8 +82,8 @@ class Tool(ABC):
 
     # Whether the tool blocks until a person does something.
     #
-    # `screenshot` shells out to `screencapture -i`, which waits for a
-    # rectangle to be dragged, with no timeout. At 07:00 nobody drags
+    # On macOS `screenshot` shells out to `screencapture -i`, which waits
+    # for a rectangle to be dragged, with no timeout. At 07:00 nobody drags
     # anything, and `subprocess.run` waits forever — holding the routine
     # runner's single slot, which is what every other routine queues on.
     # One such tool in one envelope would stop the whole feature until a

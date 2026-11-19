@@ -361,8 +361,8 @@ class Settings:
     # Tool-call + tool-result messages from prior replies in the hot window
     # are re-injected into the next turn so follow-ups can reuse them instead
     # of re-fetching. These knobs cap how many prior tool turns survive and
-    # how much of each tool payload is retained (the fence markers of
-    # UNTRUSTED WEB EXTRACT blocks are preserved on truncation).
+    # how much of each tool payload is retained (a fence of UNTRUSTED data
+    # cut by the truncation gets its closing marker back).
     tool_carryover_max_turns: int
     tool_carryover_per_entry_chars: int
     # Distil diary + graph into a short relevance-filtered note via a cheap

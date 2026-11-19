@@ -26,7 +26,7 @@ def _risk(name, args=None):
 
 
 @pytest.mark.parametrize("name", [
-    "webSearch", "fetchWebPage", "getWeather", "screenshot",
+    "webSearch", "fetchWebPage", "getWeather",
     "fetchMeals", "toolSearchTool", "stop",
 ])
 def test_a_tool_that_only_looks_is_read(name):
@@ -39,6 +39,13 @@ def test_a_tool_that_only_looks_is_read(name):
 @pytest.mark.parametrize("name", ["remember", "forget", "logMeal"])
 def test_writing_only_to_yubas_own_store_is_read(name):
     assert _risk(name) == RISK_READ
+
+
+def test_reading_his_screen_is_asked_about():
+    """It changes nothing, and it is not `lecture`: what it reads is
+    whatever he has open, and the text goes to the reply model. Free, any
+    turn could send that off the machine unasked."""
+    assert _risk("screenshot") == RISK_ACTION
 
 
 def test_deleting_the_users_records_is_destructive():

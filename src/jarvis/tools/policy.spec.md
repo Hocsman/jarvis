@@ -10,9 +10,11 @@ The asymmetry behind every default here: refusing a harmless tool costs a turn, 
 
 | Risk | Meaning | Examples |
 |------|---------|----------|
-| `lecture` | Looks, changes nothing outside Yuba's own store | `webSearch`, `getWeather`, `getTime`, `screenshot`, `remember`, `forget` |
-| `action` | Changes something recoverable | `refreshMCPTools`, an MCP tool with neither hint |
+| `lecture` | Looks, changes nothing outside Yuba's own store | `webSearch`, `getWeather`, `getTime`, `remember`, `forget` |
+| `action` | Changes something recoverable, or takes something of the user's to the reply model | `refreshMCPTools`, `screenshot`, an MCP tool with neither hint |
 | `destructif` | Changes something that may not come back | `localFiles` writing or deleting, `deleteMeal`, anything unclassified |
+
+`screenshot` changes nothing and is `action` all the same. A `lecture` looks at the world; this one looks at him: the text of whatever he has open, handed to the reply model, which with a remote one cannot be taken back. Asked about by default, and answerable aloud (`builtin/screenshot.spec.md`).
 
 Risk is a property of the call, not only of the name. `localFiles` reads, writes and deletes through one tool, so builtins resolve their own risk from their arguments via `Tool.risk_for(args)`.
 

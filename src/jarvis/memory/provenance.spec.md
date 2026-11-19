@@ -98,7 +98,7 @@ One word per fact, recorded at write time, never inferred later:
 
 | Source | Meaning |
 |---|---|
-| `web` | A page fetched by `webSearch` or `fetchWebPage` ran in the window. Untrusted by construction. |
+| `web` | A page fetched by `webSearch` or `fetchWebPage`, or the text of the screen read by `screenshot`, was in the window. Untrusted by construction: a screen shows whatever a page or a message put there. |
 | `outil` | Some other tool ran: weather, an MCP server, a builtin. Trusted as far as that tool is. |
 | `inconnu` | Written before this spec, or by a path that could not establish a source. |
 
