@@ -22,6 +22,8 @@ import re
 # Deliberately narrow. Every real tool name in the catalogue passes it,
 # and the failure it produces leans the safe way: a name outside the
 # class is unclassifiable, therefore destructive, therefore asked about.
+# For an argument name the failure is narrower: its tool is left out of
+# the step resolver, and the chat model takes that turn.
 # `\Z` and not `$`: `$` also matches just before a final line break, and
 # a name ending in one still breaks the line it is written on.
 PLAIN_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}\Z")
