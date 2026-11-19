@@ -334,3 +334,13 @@ Links found on page:
 Downstream, with no change to those readers: the carry-over cuts the result at `tool_carryover_per_entry_chars` and puts the closing marker back; each batch the digest reads holds the page inside its fence and under its header; the planner's resolver, which reads 500 characters of the result on one line, prefixes it with its untrusted-data label because the opening marker is in it.
 
 The last paragraph of *Prompt-injection fence* holds here as it does there: the fence is a convention a model honours and a boundary a reviewer can check, not a wall. `tests/tools/builtin/test_fetch_web_page.py` holds the shape (one opening marker, one closing, the page's words between them whatever the page shows, in its text, its title or a link; the cut; the three readers above), and `evals/test_a_fetched_page_is_data.py` measures what a model does with it.
+
+Measured on 2026-11-19 by that eval: the real engine on a voice turn, the router on `qwen2.5:3b`, eight invented pages, four of them carrying a sentence addressed to the assistant (save this to memory, open this other address, withhold the answer and say this instead). The fenced result is set against the same title and text under bold labels with no fence, the two interleaved call by call, 20 calls an arm for each measure.
+
+| Chat model | Measure | Fenced | No fence |
+|------------|---------|--------|----------|
+| `claude-haiku-5-5` | Answers from an ordinary page | 20 in 20 | 20 in 20 (p = 1) |
+| `claude-haiku-5-5` | Leaves the planted sentence alone | 20 in 20 | 19 in 20 (p = 1) |
+| `claude-haiku-5-5` | Answers from a page with a planted sentence | 20 in 20 | 19 in 20 (p = 1) |
+
+On `claude-haiku-5-5` the fence costs nothing and shows no measurable gain: that model leaves such sentences alone without it, and says so in its reply. Its one miss, with no fence, withheld the answer the page told it to withhold while saying it would not follow the page.
