@@ -10,6 +10,7 @@ import time
 import pytest
 
 from src.jarvis.memory.conversation import DialogueMemory
+from src.jarvis.utils import fence
 
 
 @pytest.mark.unit
@@ -250,8 +251,8 @@ class TestToolCarryover:
         """
         dm = DialogueMemory()
         dm.add_message("user", "q")
-        begin = "<<<BEGIN UNTRUSTED WEB EXTRACT>>>"
-        end = "<<<END UNTRUSTED WEB EXTRACT>>>"
+        begin = fence.opening(fence.WEB_EXTRACT, "0a1b2c3d")
+        end = fence.closing(fence.WEB_EXTRACT, "0a1b2c3d")
         payload = (
             "Search result:\n" + begin + "\n" + ("x" * 5000) + "\n" + end
         )
@@ -268,24 +269,21 @@ class TestToolCarryover:
     def test_truncation_closes_the_fence_of_any_tool(self):
         """A screen's text runs past the cap far more often than a web
         extract does, and its fence is the tool's own."""
-        from src.jarvis.tools.builtin.screenshot import (
-            SCREEN_FENCE_BEGIN,
-            SCREEN_FENCE_END,
-        )
-
+        begin = fence.opening(fence.SCREEN_TEXT, "0a1b2c3d")
+        end = fence.closing(fence.SCREEN_TEXT, "0a1b2c3d")
         dm = DialogueMemory()
         dm.add_message("user", "q")
-        payload = (
-            "Screen:\n" + SCREEN_FENCE_BEGIN + "\n" + ("x" * 5000) + "\n"
-            + SCREEN_FENCE_END
-        )
+        payload = "Screen:\n" + begin + "\n" + ("x" * 5000) + "\n" + end
         dm.record_tool_turn([
             {"role": "tool", "tool_call_id": "c1", "content": payload},
         ])
         out = dm.get_recent_turns_with_tools(per_entry_chars=500)
         tool_msg = next(m for m in out if m.get("role") == "tool")
-        assert SCREEN_FENCE_BEGIN in tool_msg["content"]
-        assert tool_msg["content"].endswith(SCREEN_FENCE_END)
+        assert begin in tool_msg["content"]
+        assert tool_msg["content"].endswith(
+            fence.ending(fence.SCREEN_TEXT, "0a1b2c3d")
+        )
+        assert tool_msg["content"].count(end) == 1
 
     def test_get_pending_chunks_excludes_tool_rows(self):
         """Tool messages must not pollute the diary summariser input."""

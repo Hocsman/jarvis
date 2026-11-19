@@ -238,6 +238,17 @@ def to_terminal(capsys, lines: List[str]) -> None:
 # so the memory-search path hits real entries and produces a digest that
 # matches the production shape.
 
+def fenced_extract(text: str) -> str:
+    """A page's text as ``webSearch`` fences it in its result, for the evals
+    that hand the engine a search result they wrote themselves: the fence
+    is the tool's own, so such a result reads as a real one does."""
+    from jarvis.utils import fence
+
+    return fence.fenced(
+        fence.WEB_EXTRACT, "**Content from top result**", text.rstrip("\n"),
+    ) + "\n\n"
+
+
 def seed_diary_summaries(
     db,
     topic_summaries: List[Tuple[str, str]],

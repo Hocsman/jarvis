@@ -72,7 +72,13 @@ class TestDiaryScrubEndpoint:
             # The user prompt is the diary text wrapped in untrusted-input
             # fence markers — strip them to recover the original.
             text = user_prompt
-            for marker in ("<<<BEGIN UNTRUSTED WEB EXTRACT>>>", "<<<END UNTRUSTED WEB EXTRACT>>>"):
+            from jarvis.utils import fence
+
+            _, number, _ = fence.opened(text, fence.WEB_EXTRACT)
+            for marker in (
+                fence.opening(fence.WEB_EXTRACT, number),
+                fence.closing(fence.WEB_EXTRACT, number),
+            ):
                 text = text.replace(marker, "")
             text = text.replace("Return the cleaned text only.", "").strip()
             # Drop any sentence containing "the assistant".

@@ -340,9 +340,9 @@ class TestResolveNextToolCall:
 
         result = (
             "Read for you:\n"
-            f"{fence.opening(fence.WEB_EXTRACT)}\n"
+            f"{fence.opening(fence.WEB_EXTRACT, '0a1b2c3d')}\n"
             + "The keeper lived on the point. " * 40
-            + f"\n{fence.closing(fence.WEB_EXTRACT)}"
+            + f"\n{fence.closing(fence.WEB_EXTRACT, '0a1b2c3d')}"
         )
 
         prompt = self._prompt_given_prior_result("readerTool", result)

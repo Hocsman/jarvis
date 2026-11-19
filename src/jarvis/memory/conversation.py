@@ -45,9 +45,6 @@ def _embed_text(text: str, cfg, *, timeout_sec: float = 15.0) -> Optional[list[f
         return None
 
 
-_UNTRUSTED_FENCE_BEGIN = fence.opening(fence.WEB_EXTRACT)
-_UNTRUSTED_FENCE_END = fence.closing(fence.WEB_EXTRACT)
-
 
 # ── Deflection rewrite (LLM-driven historical cleanup) ────────────────────
 #
@@ -105,16 +102,20 @@ def _rewrite_diary_summary(
         return summary
 
     shown = fence.without_markers(summary)
+    number = fence.new_number(shown)
+    fence_begin = fence.opening(fence.WEB_EXTRACT, number)
+    fence_end = fence.closing(fence.WEB_EXTRACT, number)
     try:
         # Fence the diary content so the model treats it as data, not
-        # instructions. Same pattern used for untrusted web extracts —
+        # instructions. Same markers as an untrusted web extract —
         # the diary may contain any past LLM output, which can include
         # text that *looks* like instructions, or a marker that would
-        # end the fence early: the brackets one is made of are rewritten.
+        # end the fence early: the brackets one is made of are rewritten,
+        # and the markers carry a number the entry cannot show.
         user_prompt = (
-            f"{_UNTRUSTED_FENCE_BEGIN}\n"
+            f"{fence_begin}\n"
             f"{shown}\n"
-            f"{_UNTRUSTED_FENCE_END}\n\n"
+            f"{fence_end}\n\n"
             "Return the cleaned text only."
         )
         raw = _direct_llm(
@@ -154,10 +155,10 @@ def _rewrite_diary_summary(
             cleaned = cleaned.rstrip()[:-3]
         cleaned = cleaned.strip()
     # Some models like to echo the fence markers back. Strip them if so.
-    if cleaned.startswith(_UNTRUSTED_FENCE_BEGIN):
-        cleaned = cleaned[len(_UNTRUSTED_FENCE_BEGIN):].lstrip()
-    if cleaned.endswith(_UNTRUSTED_FENCE_END):
-        cleaned = cleaned[:-len(_UNTRUSTED_FENCE_END)].rstrip()
+    if cleaned.startswith(fence_begin):
+        cleaned = cleaned[len(fence_begin):].lstrip()
+    if cleaned.endswith(fence_end):
+        cleaned = cleaned[:-len(fence_end)].rstrip()
 
     # The model was shown the entry with its bracket runs rewritten. One
     # it returns as shown had nothing to remove, and is handed back as the
