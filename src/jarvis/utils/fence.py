@@ -64,9 +64,13 @@ def block(
     `label`, the note saying what follows is data, then the text between
     the two markers of `kind`.
 
-    The note and the markers are written here and nowhere else, and reply
-    models were measured on them byte for byte: a change to either is a
-    change to every tool that fences, to be measured again.
+    Every tool that returns somebody else's text to the reply model gets
+    its block here, and reply models were measured on the note and the
+    markers byte for byte: a change to either is a change to each of those
+    tools, to be measured again.
+
+    `label` and `holder` are written as they are, outside the rewriting:
+    they are the caller's own words, never text it was handed.
 
     The brackets a marker is made of are rewritten in the text first
     (`without_markers`): a marker shown by a page or a screen would close
@@ -99,7 +103,11 @@ def block(
     cut = max_chars is not None and len(body) > max_chars
     if cut:
         body = body[:max_chars].rstrip()
-        debug_log(f"{kind.lower()} cut at {max_chars} characters inside its fence", "fence")
+        debug_log(
+            f"{holder} text cut at {max_chars} characters inside its "
+            f"{kind.lower()} fence",
+            "fence",
+        )
     if holder is not None and not body.strip():
         body = f"(the {holder} held no text)"
 

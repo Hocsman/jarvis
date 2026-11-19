@@ -210,12 +210,30 @@ def test_a_cut_that_lands_on_a_line_break_leaves_no_empty_line():
     assert _inside(fenced, WEB_EXTRACT) == "\nfirst line\n"
 
 
-@pytest.mark.parametrize("nothing", ["", " \n\t", " " * 30 + "words"])
+@pytest.mark.parametrize("nothing", [
+    "",
+    " \n\t",
+    # Whether there is text to show is asked of what the cut left.
+    pytest.param(" " * 30 + "words", id="only-whitespace-before-the-cap"),
+])
 def test_a_holder_with_no_text_to_show_says_so_between_the_markers(nothing):
     """An empty line between the markers reads as a fence that failed."""
     fenced = block(WEB_EXTRACT, "Label", nothing, holder="page", max_chars=20)
 
     assert _inside(fenced, WEB_EXTRACT) == "\n(the page held no text)\n"
+
+
+def test_a_holder_under_no_cap_says_so_too():
+    fenced = block(SCREEN_TEXT, "Label", " \n", holder="screen")
+
+    assert _inside(fenced, SCREEN_TEXT) == "\n(the screen held no text)\n"
+    assert fenced.endswith(closing(SCREEN_TEXT))
+
+
+def test_with_no_holder_empty_text_is_fenced_as_it_is():
+    fenced = block(WEB_EXTRACT, "Label", "")
+
+    assert _inside(fenced, WEB_EXTRACT) == "\n\n"
 
 
 @pytest.mark.parametrize("kind", KINDS)

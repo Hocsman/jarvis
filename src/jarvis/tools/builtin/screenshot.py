@@ -19,11 +19,6 @@ from ...utils import fence
 from ..base import Tool, ToolContext
 from ..types import ToolExecutionResult
 
-# The two markers of this tool's fence, for whoever has to find the screen's
-# text in a result.
-SCREEN_FENCE_BEGIN = fence.opening(fence.SCREEN_TEXT)
-SCREEN_FENCE_END = fence.closing(fence.SCREEN_TEXT)
-
 # A full pair of monitors of dense text runs to a few thousand characters.
 # Past this the reply model is reading a wall, and a small one has no
 # context left for the question. On the turn that follows a yes nothing

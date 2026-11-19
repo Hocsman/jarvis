@@ -15,12 +15,11 @@ import pytest
 
 from src.jarvis.tools.base import ToolContext
 from src.jarvis.tools.builtin import screenshot as shot
-from src.jarvis.tools.builtin.screenshot import (
-    SCREEN_FENCE_BEGIN,
-    SCREEN_FENCE_END,
-    ScreenshotTool,
-    ScreenUnreadable,
-)
+from src.jarvis.tools.builtin.screenshot import ScreenshotTool, ScreenUnreadable
+from src.jarvis.utils import fence
+
+SCREEN_FENCE_BEGIN = fence.opening(fence.SCREEN_TEXT)
+SCREEN_FENCE_END = fence.closing(fence.SCREEN_TEXT)
 
 windows_only = pytest.mark.skipif(sys.platform != "win32", reason="Windows capture and OCR")
 
