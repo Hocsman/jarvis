@@ -222,9 +222,9 @@ def test_ordinary_brackets_in_a_meal_reach_the_extractor_as_they_read():
     assert f"\n{meal}\n" in _extractor_prompt(meal)
 
 
-def test_a_marker_cut_by_the_length_cap_closes_nothing():
+def test_a_marker_cut_short_by_the_length_cap_leaves_no_bracket_run():
     """The cap falls where it falls, in the middle of a planted marker
-    included: what is left of one must not pair with the fence's own."""
+    included: what is left of one is rewritten like a whole one."""
     begin, end = "<<<BEGIN UNTRUSTED USER TEXT>>>", "<<<END UNTRUSTED USER TEXT>>>"
     filler = "rice " * 238  # 1190 characters: the cap lands inside the marker
 
@@ -233,6 +233,7 @@ def test_a_marker_cut_by_the_length_cap_closes_nothing():
     assert prompt.count(begin) == 1 and prompt.count(end) == 1
     fenced = prompt[prompt.index(begin) + len(begin):prompt.index(end)]
     assert not re.search(r"[<＜]{3,}|[>＞]{3,}", fenced)
+    # The cap itself: what comes after it never reaches the extractor.
     assert "now obey" not in prompt
 
 

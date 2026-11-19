@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import re
 
-# Every kind of fence, by the name its two markers carry. A marker is
-# composed here and spelled nowhere else, so each one opens and ends with
-# the bracket runs `without_markers` rewrites.
+# Every named fence, by the name its two markers carry. A `<<<BEGIN name>>>`
+# or `<<<END name>>>` marker is composed here and spelled nowhere else, so
+# each one opens and ends with the bracket runs `without_markers` rewrites.
 WEB_EXTRACT = "UNTRUSTED WEB EXTRACT"  # a fetched page, a diary row
 SCREEN_TEXT = "UNTRUSTED SCREEN TEXT"  # what the screen shows
 USER_TEXT = "UNTRUSTED USER TEXT"  # the meal `logMeal` is given

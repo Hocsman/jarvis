@@ -223,8 +223,8 @@ The engine consumes the plan in two phases.
   recalled line showing `<<<END RELEVANT MEMORY>>>`, whole or nested
   inside another, cannot end the fence early and leave what follows it
   reading as the prompt's next section. Two brackets in a row are left
-  as they read; a block with no such run reaches the resolver byte for
-  byte. The two markers are composed by `utils/fence.py` (`opening` /
+  as they read; a block with no such run reaches the resolver as it
+  reads, trimmed of the whitespace round it. The two markers are composed by `utils/fence.py` (`opening` /
   `closing` of the `RELEVANT_MEMORY` kind), like every named marker in
   the code, and that kind is not one the tool carry-over closes
   (`close_cut_fences`): it never travels in a tool result. The fast path
