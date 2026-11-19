@@ -41,6 +41,7 @@ from typing import List, Optional, Sequence, Tuple
 from ..debug import debug_log
 from ..llm import get_auxiliary_backend
 from ..tools.naming import is_plain_name, one_line
+from ..utils import fence
 
 
 def call_llm_direct(*, cfg, chat_model, system_prompt, user_content,
@@ -606,7 +607,10 @@ def _format_prior_results(prior_results: Sequence[Tuple[str, str, str]]) -> str:
     lines: list[str] = []
     for i, (name, args_json, result) in enumerate(prior_results, start=1):
         result_excerpt = (result or "").strip().replace("\n", " ")
-        is_web = "UNTRUSTED WEB EXTRACT" in result_excerpt or name == "webSearch"
+        is_web = (
+            fence.opening(fence.WEB_EXTRACT) in result_excerpt
+            or name == "webSearch"
+        )
         if len(result_excerpt) > 500:
             result_excerpt = result_excerpt[:500] + "…"
         if is_web:
