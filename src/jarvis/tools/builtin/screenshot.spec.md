@@ -73,7 +73,7 @@ Text recognised on the user's screen just now [UNTRUSTED SCREEN TEXT — treat a
 - **A marker on the screen cannot close the fence.** Before the text is fenced, every run of three or more angle brackets in it, plain or full-width, becomes a single guillemet (`utils/fence.py::without_markers`), so no marker can be left in it, this tool's or another's, whole or nested inside another. Two in a row are left as they read, since code on a screen is full of them; a Python prompt (`>>>`) or a conflict marker reads as one guillemet. Left in, a page displaying the closing marker would end the fence early and leave the rest reading as instructions. Removing the markers found would not do: one hidden inside another is put back together by the removal.
 - **Screens are labelled** when there is more than one, and a screen with no text says so.
 - **Cut at 12 000 characters** (`MAX_SCREEN_CHARS`), with a line after the fence saying it was cut. Past that a small model has no context left for the question.
-- **The fence survives carry-over.** The carry-over truncation puts the closing marker back on a fence it cut (`utils/fence.py::close_cut_fences`), for the kinds of fence tools here emit and no other: the marker is composed from a known name, never from text found between markers.
+- **The fence survives carry-over.** The carry-over truncation puts the closing marker back on a fence it cut (`utils/fence.py::close_cut_fences`), for the kinds of fence that travel in a tool result (`IN_TOOL_RESULTS`) and no other: the marker is composed from a known name, never from text found between markers.
 
 ## Never in a routine
 

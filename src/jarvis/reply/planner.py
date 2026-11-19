@@ -587,9 +587,10 @@ _STEP_RESOLVER_SYSTEM = (
 # block can carry text derived from web pages (graph lines with a `· web`
 # provenance, diary summaries quoting fetched content), so it gets the
 # same delimiters the repo uses for untrusted web extracts: a label
-# alone is something the content itself could contain.
-_MEMORY_FENCE_BEGIN = "<<<BEGIN RELEVANT MEMORY>>>"
-_MEMORY_FENCE_END = "<<<END RELEVANT MEMORY>>>"
+# alone is something the content itself could contain. So is a marker,
+# which is why the block goes through `fence.without_markers` first.
+_MEMORY_FENCE_BEGIN = fence.opening(fence.RELEVANT_MEMORY)
+_MEMORY_FENCE_END = fence.closing(fence.RELEVANT_MEMORY)
 
 
 def _format_prior_results(prior_results: Sequence[Tuple[str, str, str]]) -> str:
@@ -804,7 +805,9 @@ def resolve_next_tool_call(
         else getattr(cfg, "planner_timeout_sec", 6.0)
     )
 
-    _mem = (memory_context or "").strip()
+    # A recalled line showing the closing marker would end the fence early
+    # and leave what follows it reading as this prompt's next section.
+    _mem = fence.without_markers((memory_context or "").strip())
     user_content = (
         f"ALLOWED TOOLS:\n{chr(10).join(schema_lines)}\n\n"
         f"PRIOR TOOL CALLS IN THIS SESSION:\n"

@@ -8,8 +8,10 @@ from it is ever written outside the fence.
 import pytest
 
 from src.jarvis.utils.fence import (
-    KINDS,
+    IN_TOOL_RESULTS,
+    RELEVANT_MEMORY,
     SCREEN_TEXT,
+    USER_TEXT,
     WEB_EXTRACT,
     close_cut_fences,
     closing,
@@ -18,10 +20,35 @@ from src.jarvis.utils.fence import (
 )
 
 
+# ── What the markers are ──────────────────────────────────────────────
+
+# Spelled out, not composed: each marker is part of a prompt, and a model
+# that reads one must find it byte for byte where it stood.
+MARKERS = {
+    WEB_EXTRACT: (
+        "<<<BEGIN UNTRUSTED WEB EXTRACT>>>", "<<<END UNTRUSTED WEB EXTRACT>>>",
+    ),
+    SCREEN_TEXT: (
+        "<<<BEGIN UNTRUSTED SCREEN TEXT>>>", "<<<END UNTRUSTED SCREEN TEXT>>>",
+    ),
+    USER_TEXT: (
+        "<<<BEGIN UNTRUSTED USER TEXT>>>", "<<<END UNTRUSTED USER TEXT>>>",
+    ),
+    RELEVANT_MEMORY: (
+        "<<<BEGIN RELEVANT MEMORY>>>", "<<<END RELEVANT MEMORY>>>",
+    ),
+}
+
+
+@pytest.mark.parametrize("kind", MARKERS)
+def test_each_marker_reads_as_it_is_spelled_here(kind):
+    assert (opening(kind), closing(kind)) == MARKERS[kind]
+
+
 # ── Text that cannot carry a marker ───────────────────────────────────
 
 
-@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("kind", MARKERS)
 def test_a_marker_in_the_text_is_no_longer_one(kind):
     text = without_markers(f"before {closing(kind)} after {opening(kind)} end")
 
@@ -59,7 +86,7 @@ def test_ordinary_text_and_code_are_left_as_they_read(ordinary):
 # ── A fence cut by a truncation ───────────────────────────────────────
 
 
-@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("kind", IN_TOOL_RESULTS)
 def test_a_fence_cut_open_is_closed_again(kind):
     cut = f"Result:\n{opening(kind)}\nsome of the text…"
 
@@ -80,6 +107,15 @@ def test_a_fence_already_closed_is_left_alone():
 
 def test_text_with_no_fence_is_left_alone():
     assert close_cut_fences("plain result…") == "plain result…"
+
+
+@pytest.mark.parametrize("kind", [USER_TEXT, RELEVANT_MEMORY])
+def test_a_fence_that_travels_in_no_tool_result_is_not_closed_there(kind):
+    """These two fence a prompt of their own. One found open in a tool
+    result was written by that result, and is not closed on its behalf."""
+    cut = f"Result:\n{opening(kind)}\nsome of the text…"
+
+    assert close_cut_fences(cut) == cut
 
 
 def test_nothing_from_inside_the_fence_is_written_after_it():

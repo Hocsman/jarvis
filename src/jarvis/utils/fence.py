@@ -1,23 +1,31 @@
-"""The fence a tool puts round text it did not write.
+"""The fence put round text the prompt it sits in did not write.
 
-A web page, or whatever a screen is showing, is somebody else's text and
-can say anything, "ignore your instructions" included. Such text reaches
-the model between two markers and under a line saying it is data. This
-module holds what the markers are, how one cut off by a truncation is put
-back, and how text is kept from carrying a marker of its own.
+A web page, whatever a screen is showing, a line recalled from memory or
+an argument a model composed is somebody else's text and can say anything,
+"ignore your instructions" included. Such text reaches the model between
+two markers and under a line saying it is data. This module holds what the
+markers are, how one cut off by a truncation is put back, and how text is
+kept from carrying a marker of its own.
 """
 
 from __future__ import annotations
 
 import re
 
-WEB_EXTRACT = "WEB EXTRACT"
-SCREEN_TEXT = "SCREEN TEXT"
+# Every kind of fence, by the name its two markers carry. A marker is
+# composed here and spelled nowhere else, so each one opens and ends with
+# the bracket runs `without_markers` rewrites.
+WEB_EXTRACT = "UNTRUSTED WEB EXTRACT"  # a fetched page, a diary row
+SCREEN_TEXT = "UNTRUSTED SCREEN TEXT"  # what the screen shows
+USER_TEXT = "UNTRUSTED USER TEXT"  # the meal `logMeal` is given
+RELEVANT_MEMORY = "RELEVANT MEMORY"  # the memory block of the step resolver
 
-# Every kind of fence a tool here emits. A closing marker is only ever
-# composed from one of these names, never from text found between markers:
-# that text is the untrusted part.
-KINDS = (WEB_EXTRACT, SCREEN_TEXT)
+# The kinds that travel in a tool's result, where the carry-over can cut
+# one open. A closing marker is only ever put back for one of these: never
+# for a name found between markers, which is the untrusted part, and never
+# for a kind that fences a prompt of its own, which a tool result has no
+# business opening.
+IN_TOOL_RESULTS = (WEB_EXTRACT, SCREEN_TEXT)
 
 # Three or more angle brackets in a row, plain or full-width: what a marker
 # opens and ends with. Text with no such run left holds no marker, whole,
@@ -29,11 +37,11 @@ _CLOSING_RUN_RE = re.compile(r"[>＞]{3,}")
 
 
 def opening(kind: str) -> str:
-    return f"<<<BEGIN UNTRUSTED {kind}>>>"
+    return f"<<<BEGIN {kind}>>>"
 
 
 def closing(kind: str) -> str:
-    return f"<<<END UNTRUSTED {kind}>>>"
+    return f"<<<END {kind}>>>"
 
 
 def without_markers(text: str) -> str:
@@ -55,7 +63,7 @@ def close_cut_fences(cut: str) -> str:
     A fence is open when its last opening marker comes after its last
     closing one.
     """
-    for kind in KINDS:
+    for kind in IN_TOOL_RESULTS:
         if cut.rfind(opening(kind)) > cut.rfind(closing(kind)):
             cut = f"{cut}\n{closing(kind)}"
     return cut

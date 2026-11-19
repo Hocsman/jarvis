@@ -70,6 +70,22 @@ models still occasionally honour in-fence instructions, but the fence is a
 detectable boundary for evals and reviewers, and reduces the surface for
 trivial "ignore previous instructions" injections in meal descriptions.
 
+**A marker in the meal cannot close the fence.** The `meal` argument is
+written by a model, so it can derive from something that model read, a web
+page included. After the cut at 1200 characters and before the text is
+fenced, every run of three or more angle brackets in it, plain or
+full-width, becomes a single guillemet (`utils/fence.py::without_markers`),
+so no marker can be left in it, whole, nested inside another or cut short
+by the length cap. Left in, a meal showing `<<<END UNTRUSTED USER TEXT>>>`
+would end the fence early and whatever it said next would read as text
+outside the fence. Two brackets in a row are left as they read (`<10 g`,
+`>>`); a meal with no such run is fenced byte for byte.
+
+The two markers are composed by `utils/fence.py` (`opening` / `closing` of
+the `USER_TEXT` kind), like every named marker in the code. That kind is
+not one the tool carry-over closes (`close_cut_fences`): the fence stands
+in the extractor's prompt and never travels in a tool result.
+
 ### LLM passes
 
 Two passes against the chat model (`cfg.llm_chat_model`):

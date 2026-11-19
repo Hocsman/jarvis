@@ -216,9 +216,20 @@ The engine consumes the plan in two phases.
   fenced by `<<<BEGIN/END RELEVANT MEMORY>>>` markers, so a fact
   recalled by enrichment (e.g. the user's city) can ground an argument
   the step leaves out. The fence is structural, not a label: the block
-  can carry web-derived text, and this prompt's output is executed. The
-  fast path never sees memory: a fully concrete step is dispatched
-  exactly as written.
+  can carry web-derived text, and this prompt's output is executed. For
+  the same reason the block cannot carry a marker: before it is fenced,
+  every run of three or more angle brackets in it, plain or full-width,
+  becomes a single guillemet (`utils/fence.py::without_markers`), so a
+  recalled line showing `<<<END RELEVANT MEMORY>>>`, whole or nested
+  inside another, cannot end the fence early and leave what follows it
+  reading as the prompt's next section. Two brackets in a row are left
+  as they read; a block with no such run reaches the resolver byte for
+  byte. The two markers are composed by `utils/fence.py` (`opening` /
+  `closing` of the `RELEVANT_MEMORY` kind), like every named marker in
+  the code, and that kind is not one the tool carry-over closes
+  (`close_cut_fences`): it never travels in a tool result. The fast path
+  never sees memory: a fully concrete step is dispatched exactly as
+  written.
 - Returns `None` for synthesis steps (the LLM emits the literal
   `null`), unknown tools, or invalid JSON. All `None` paths fall back
   to the normal chat-model turn.
