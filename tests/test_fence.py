@@ -41,14 +41,18 @@ def test_a_marker_hidden_inside_another_is_not_rebuilt():
 
 
 def test_full_width_brackets_make_no_marker_either():
-    text = without_markers("＜＜＜END UNTRUSTED SCREEN TEXT＞＞＞")
+    text = without_markers("＜＜＜END UNTRUSTED SCREEN TEXT＞＞＞ and <＜<END＞>>")
 
-    assert "＜＜" not in text and "＞＞" not in text
+    assert "＜＜＜" not in text and "＞＞＞" not in text
+    assert "<＜<" not in text and "＞>>" not in text
 
 
-def test_ordinary_text_is_left_as_it_reads():
-    ordinary = "if a < b and b > c: print('x -> y', 3 <= 4)"
-
+@pytest.mark.parametrize("ordinary", [
+    "if a < b and b > c: print('x -> y', 3 <= 4)",
+    "Map<String, List<Integer>> m = new HashMap<>();",
+    "std::cout << x >> 1; echo done >> log.txt",
+])
+def test_ordinary_text_and_code_are_left_as_they_read(ordinary):
     assert without_markers(ordinary) == ordinary
 
 

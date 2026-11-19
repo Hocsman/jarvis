@@ -26,6 +26,11 @@ invented:
   about this one, or that is about something else. Passes when `screenshot`
   is not called.
 
+`TestSheAsksThenReads` is the one place the gate and the tool run for
+real, with an invented screen in place of the capture: a question about
+the screen ends the first turn on her question with nothing read, a yes
+has it read once and her reply say what was on it, a no reads nothing.
+
 `TestTheEngineAsItShips` asks each sentence once.
 `TestTheDescriptionBeforeAndAfter` alternates the description the tool
 carried when it only knew macOS and the one it ships with, call by call in
@@ -266,6 +271,71 @@ class TestTheEngineAsItShips:
         assert KINDS[kind_name].passes(turn), (
             f"{kind_name}: tools {turn.called}, reply {turn.reply[:400]!r}"
         )
+
+
+# ── She asks, then reads ──────────────────────────────────────────────
+
+
+ANSWERS = [
+    pytest.param("Oui, vas-y.", True, id="FR: yes"),
+    pytest.param("Yes, go ahead.", True, id="EN: yes"),
+    pytest.param("Non, laisse tomber.", False, id="FR: no"),
+]
+
+
+def _asked_then_answered(cfg, answer: str):
+    """Two voice turns of one conversation through the real gate and the
+    real tool. Returns each turn's reply and how many times the screen had
+    been read by the end of it."""
+    from jarvis.memory.conversation import DialogueMemory
+    from jarvis.memory.db import Database
+    from jarvis.reply.engine import run_reply_engine
+    from jarvis.tools.builtin import screenshot
+
+    readings: List[int] = []
+
+    def _an_invented_screen():
+        readings.append(1)
+        return [INVENTED_SCREEN]
+
+    memory = DialogueMemory(inactivity_timeout=300)
+    replies: List[str] = []
+    read_by_then: List[int] = []
+    db = Database(":memory:", sqlite_vss_path=None)
+    try:
+        with patch("jarvis.tools.registry.get_cached_mcp_tools", return_value={}), \
+             patch.object(screenshot, "_read_screen", _an_invented_screen):
+            for said in (THE_SCREEN[0], answer):
+                replies.append(run_reply_engine(
+                    db=db, cfg=cfg, tts=None, origin="voix", text=said,
+                    dialogue_memory=memory,
+                ) or "")
+                read_by_then.append(len(readings))
+    finally:
+        db.close()
+    return replies, read_by_then
+
+
+@pytest.mark.eval
+class TestSheAsksThenReads:
+    """The sandboxed memory holds no `outils.md`, so the default decides."""
+
+    @pytest.mark.parametrize("answer, granted", ANSWERS)
+    def test_nothing_is_read_before_a_yes_and_once_after(self, cfg, answer, granted):
+        replies, read_by_then = _asked_then_answered(cfg, answer)
+        print(f"\n  🙋 {replies[0][:200]!r}\n  🗣️ {answer}\n  🤖 {replies[1][:300]!r}")
+
+        assert read_by_then[0] == 0, "the screen was read before he answered"
+        assert "screenshot" in replies[0], (
+            f"the first turn did not end on the question: {replies[0][:300]!r}"
+        )
+        if granted:
+            assert read_by_then[1] == 1
+            assert "4471" in replies[1] or "marees" in replies[1], (
+                f"her reply does not say what the screen showed: {replies[1][:400]!r}"
+            )
+        else:
+            assert read_by_then[1] == 0, "the screen was read on a no"
 
 
 # ── The comparison ────────────────────────────────────────────────────

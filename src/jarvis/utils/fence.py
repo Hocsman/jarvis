@@ -19,11 +19,13 @@ SCREEN_TEXT = "SCREEN TEXT"
 # that text is the untrusted part.
 KINDS = (WEB_EXTRACT, SCREEN_TEXT)
 
-# Two or more angle brackets in a row, plain or full-width. A marker needs
-# three, so text with none of these runs left holds no marker, whole,
-# nested or rebuilt by removing another.
-_OPENING_RUN_RE = re.compile(r"[<＜]{2,}")
-_CLOSING_RUN_RE = re.compile(r"[>＞]{2,}")
+# Three or more angle brackets in a row, plain or full-width: what a marker
+# opens and ends with. Text with no such run left holds no marker, whole,
+# nested or rebuilt by removing another. Two in a row are left alone: they
+# are a shift, a redirection or the end of a generic type far more often
+# than anything else.
+_OPENING_RUN_RE = re.compile(r"[<＜]{3,}")
+_CLOSING_RUN_RE = re.compile(r"[>＞]{3,}")
 
 
 def opening(kind: str) -> str:
@@ -35,8 +37,8 @@ def closing(kind: str) -> str:
 
 
 def without_markers(text: str) -> str:
-    """`text` with every run of angle brackets a marker could be made of
-    turned into a single guillemet.
+    """`text` with every run of three or more angle brackets, which is
+    what a marker is made of, turned into a single guillemet.
 
     Removing the markers found would not do: `<<<END UNTRUSTED <<<END
     UNTRUSTED X>>>SCREEN TEXT>>>` loses its inner marker and becomes a real

@@ -23,7 +23,7 @@ from typing import Optional, Sequence
 #
 # There is deliberately no word for "the model said it". A fact with no
 # tool behind it does not get a weaker label, it does not get written.
-SOURCE_WEB = "web"          # an untrusted page was fetched in the window
+SOURCE_WEB = "web"          # untrusted text was read in the window: a page, the screen
 SOURCE_TOOL = "outil"       # some other tool ran: weather, MCP, builtin
 SOURCE_UNKNOWN = "inconnu"  # written before this existed, or unestablishable
 SOURCES = (SOURCE_WEB, SOURCE_TOOL, SOURCE_UNKNOWN)

@@ -24,7 +24,8 @@ SCREEN_FENCE_END = fence.closing(fence.SCREEN_TEXT)
 
 # A full pair of monitors of dense text runs to a few thousand characters.
 # Past this the reply model is reading a wall, and a small one has no
-# context left for the question.
+# context left for the question. On the turn that follows a yes nothing
+# distils the result, so this is the only bound there.
 MAX_SCREEN_CHARS = 12_000
 
 # `Windows.Media.Ocr.OcrEngine.MaxImageDimension`.
