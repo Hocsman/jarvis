@@ -599,16 +599,15 @@ def _format_prior_results(prior_results: Sequence[Tuple[str, str, str]]) -> str:
     """Render prior tool calls as ``N. <name>(<args>) → <result excerpt>``.
 
     Each element is ``(tool_name, args_json, result_text)``. The result
-    text is truncated so the resolver prompt stays short. Web-search results
-    are re-labelled as untrusted data so the resolver treats them as reference
-    material, not as instructions — the UNTRUSTED WEB EXTRACT fence from the
-    tool payload may be truncated away by the 500-char cutoff, so we add an
-    explicit label that survives regardless.
+    text is truncated so the resolver prompt stays short.
 
     A result and the arguments of a call are somebody else's text, so each
     line goes through `fence.without_markers`: none can show the markers
-    of the memory block. That takes the web extract's own markers too,
-    which is why the result is checked for one first.
+    of the memory block. That takes the web extract's own markers too
+    (the 500-char cutoff can take the closing one before that), so a web
+    result is labelled as untrusted data, and the result is checked for
+    the extract's opening marker before the rewrite. The label is what
+    tells the resolver the line is reference material, not instructions.
     """
     if not prior_results:
         return "(none)"

@@ -335,9 +335,10 @@ class TestResolveNextToolCall:
         return "\n".join(sent)
 
     def test_a_web_extract_from_any_tool_is_labelled_as_data(self):
-        """The excerpt is cut at 500 characters, which can take the fence's
-        closing marker with it, so a result carrying a web extract gets a
-        label the cut cannot remove, whichever tool returned it."""
+        """The excerpt keeps no fence of its own in this prompt: the cut at
+        500 characters can take the closing marker, and the opening one is
+        rewritten like any bracket run. So a result carrying a web extract
+        gets a label instead, whichever tool returned it."""
         from jarvis.utils import fence
 
         result = (
@@ -350,6 +351,8 @@ class TestResolveNextToolCall:
         prompt = self._prompt_given_prior_result("readerTool", result)
 
         assert "[UNTRUSTED WEB DATA" in prompt
+        assert fence.opening(fence.WEB_EXTRACT) not in prompt
+        assert "The keeper lived on the point." in prompt
 
     def test_a_result_with_no_web_extract_carries_no_such_label(self):
         prompt = self._prompt_given_prior_result("getWeather", "12 degrees, light rain")
