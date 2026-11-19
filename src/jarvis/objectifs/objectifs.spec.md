@@ -99,7 +99,8 @@ one by overwriting that line is a different act, and it is his.
 
 The three that write are `action` so each costs a card. As `lecture` they
 would be `libre` by default, and `fetchWebPage` returns up to 50,000
-characters of unfenced page text into an agentic loop — a page carrying
+characters of page text into an agentic loop, behind a fence that is a
+convention a model honours, not a wall — a page carrying
 "Note pour l'objectif X : …" would write a durable line attributed to
 him, which she then reads back as a fact about his life. That is the
 defect already seen in production for `remember`, one level up.
