@@ -22,10 +22,12 @@ After the reply:
 
 Which model calls read it depends on how the call came to run:
 
-- **After a yes** (the default). The turn that follows the answer does one thing: it runs the approved call and says what it found (`../../reply/engine.py`, the resume turn). The result goes to the chat model whole, and that turn has no tools and no plan, so nothing can be called with what was read. No digest and no resolver see it.
-- **Under a `## Libre` line.** The call runs inside the ordinary loop. When a plan has a further step, the planner's resolver is shown the first 500 characters of the result to fill that step's arguments (`docs/llm_contexts.md`, #12). On a small chat model the tool-result digest distils the text first, on that same chat model (#5), and the console line announcing a digest shows its first 80 characters; the console is on screen, and in a file when `JARVIS_DEBUG_FILE` mirrors it there.
+- **After a yes** (the default). The turn that follows the answer does one thing: it runs the approved call and says what it found (`../../reply/reply.spec.md`, The Turn That Runs an Approved Call). The result goes to the chat model as any tool result does (below). That turn has no plan and none of the routed tools, so no resolver sees the result; `stop` and `toolSearchTool` are the tools it still offers, and a tool that `toolSearchTool` surfaces can be called in that same turn, through the gate like any call.
+- **Under a `## Libre` line.** The call runs inside the ordinary loop. When a plan has a further step, the planner's resolver is shown the first 500 characters of the result to fill that step's arguments (`docs/llm_contexts.md`, #12).
 
-**What a yes opens.** The carry-over keeps the screen's text, cut and fenced, in front of the later turns of the same conversation, where the tools that run free are back, `webSearch` and `fetchWebPage` among them. A page on the screen that carries instructions is fenced as data (below), and a fence is a convention a model honours, not a wall: a model that followed such a page could put what it read into a search or an address. Asking first keeps this to the conversations in which the user said yes; under a `## Libre` line it holds for any conversation in which the model reads the screen.
+Either way, a large chat model reads the text whole. On a small chat model the tool-result digest distils it first, on that same chat model (`docs/llm_contexts.md`, #5), and the console line announcing a digest shows its first 80 characters; the console is on screen, and in a file when `JARVIS_DEBUG_FILE` mirrors it there.
+
+**What a yes opens.** The carry-over keeps what the chat model read (the screen's text, cut and fenced, or on a small chat model the digest's note of it, which carries no fence) in front of the later turns of the same conversation, where the tools that run free are back, `webSearch` and `fetchWebPage` among them. A page on the screen that carries instructions is fenced as data (below), and a fence is a convention a model honours, not a wall: a model that followed such a page could put what it read into a search or an address. Asking first keeps this to the conversations in which the user said yes; under a `## Libre` line it holds for any conversation in which the model reads the screen.
 
 ## Contract
 
@@ -35,7 +37,7 @@ Which model calls read it depends on how the call came to run:
 - **The file decides.** `yuba/outils.md` is the user's: `- screenshot` under `## Libre` lets her read without asking, under `## Demande` she asks, under `## Jamais` the tool is off. A freshly generated file lists it under `## Demande`. A file that already lists it under `## Libre` keeps doing so until the user moves the line: the file is never rewritten (`../policy.spec.md`, The file the user controls).
 - **Input schema**: no argument.
 - **Output**, success: the recognised text inside a fence (below). When no text was recognised, a plain sentence saying the screen was captured and held none.
-- **Output**, failure: `success=False` and the reason in `reply_text`, never an empty success. An empty result would leave the model free to describe a screen it never read. After a yes, and on the planner's direct execution, the reason reaches the model as the tool's result, with the failure recorded on the carry-over; in the agentic loop it comes under the engine's "no data was returned" banner as well.
+- **Output**, failure: `success=False` and the reason in `reply_text`, never an empty success. An empty result would leave the model free to describe a screen it never read. However the call came to run (after a yes, in the agentic loop, on the planner's direct execution), the reason reaches the model as the tool's result, followed by the engine's "no data was returned" note, and the failure is recorded on the carry-over (`../../reply/reply.spec.md`, One Reading of a Tool Result).
 
 ## Windows
 
