@@ -1028,7 +1028,7 @@ def test_an_ordinary_session_id_is_kept_and_resumed_as_given():
 
     assert dl.parse_report(sortie, "", 0)[2] == _UNE_SESSION
     argv = dl.build_command(["claude"], modifier=False, resume=_UNE_SESSION)
-    assert argv[-2:] == ["--resume", _UNE_SESSION]
+    assert argv[argv.index("--resume") + 1] == _UNE_SESSION
 
 
 # ── Failing to start ──────────────────────────────────────────────────
