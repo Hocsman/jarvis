@@ -49,6 +49,11 @@ ERROR_ONLY = ToolExecutionResult(
     error_message=f"Tool '{TOOL}' raised: connection reset",
 )
 SUCCESS = ToolExecutionResult(success=True, reply_text=LONG_PAGE)
+SILENT_SUCCESS = ToolExecutionResult(success=True, reply_text=None)
+# A tool that stopped to ask the user something: not a failure, and its
+# text tells the model what to ask.
+ASKS = "Nothing was recorded yet: ask the user which page they mean, naming these exactly as written: horaires, tarifs."
+TOOL_QUESTION = ToolExecutionResult(success=False, outcome="question", reply_text=ASKS)
 REFUSAL = ToolExecutionResult(
     success=False, refused=True,
     reply_text=(
@@ -223,6 +228,27 @@ def test_a_result_that_worked_carries_no_note(path):
     assert not seen.remembered_as_failed
 
 
+# ── A question the tool put to the user ───────────────────────────────
+
+
+@pytest.mark.parametrize("path", EVERY_PATH)
+def test_a_question_from_the_tool_is_not_a_failure(path):
+    """The tool stopped to ask him something and wrote what to ask. The
+    note would say no data came back and to state nothing the tool
+    provided, over the words the tool wants repeated."""
+    seen = path(TOOL_QUESTION)
+
+    assert ASKS in seen.text
+    assert "FAILED" not in seen.text
+
+
+@pytest.mark.parametrize("path", EVERY_PATH)
+def test_a_question_from_the_tool_keeps_the_tool_for_his_answer(path):
+    """`tool_failed` is what brings the tool back next turn, which is the
+    turn he answers on."""
+    assert path(TOOL_QUESTION).remembered_as_failed
+
+
 # ── A refusal ─────────────────────────────────────────────────────────
 
 
@@ -298,6 +324,34 @@ def test_an_error_with_no_text_of_its_own_gets_the_note_after_a_yes(path):
 
     assert "connection reset" in seen.text
     assert f"[{TOOL} FAILED" in seen.text
+    assert seen.remembered_as_failed
+
+
+@pytest.mark.parametrize("path", [
+    pytest.param(_after_a_click, id="after a click on yes"),
+    pytest.param(_after_a_spoken_yes, id="after a spoken yes"),
+])
+def test_a_call_that_worked_and_said_nothing_is_not_called_a_failure(path):
+    """An action that returns no text ran. Told it failed, she would say
+    so, and he would ask for it a second time."""
+    seen = path(SILENT_SUCCESS)
+
+    assert seen.results, "the call and its result still reach the model"
+    assert "FAILED" not in seen.text
+    assert not seen.remembered_as_failed
+
+
+@pytest.mark.parametrize("path", [
+    pytest.param(_in_the_loop, id="the agentic loop"),
+    pytest.param(_by_direct_execution, id="the planner's direct execution"),
+])
+def test_an_error_with_no_text_of_its_own_gets_no_note_where_she_can_call_again(path):
+    """There the model still holds its tools and can call again with other
+    arguments; the note would tell it to ask the user instead."""
+    seen = path(ERROR_ONLY)
+
+    assert "connection reset" in seen.text
+    assert "FAILED" not in seen.text
     assert seen.remembered_as_failed
 
 

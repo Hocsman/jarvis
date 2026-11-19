@@ -37,7 +37,6 @@ Run: ./scripts/run_evals.sh -k tool_failure
 
 from __future__ import annotations
 
-import dataclasses
 import os
 import re
 from contextlib import nullcontext
@@ -46,15 +45,15 @@ import pytest
 from unittest.mock import patch
 
 from conftest import requires_judge_llm
-from helpers import ToolCallCapture, fisher_two_sided, rate, to_terminal
+from helpers import ToolCallCapture
 from test_a_failed_call_after_a_yes import (
-    MEASURES, NO_INVENTION, Case, Turn, read_reply, without_the_note,
+    NO_INVENTION, Case, Turn, compare_arms, models_for, without_the_note,
 )
 
 ROUNDS = int(os.environ.get("EVAL_TOOL_FAILURE_ROUNDS", "0") or 0)
 LOCAL_CHAT = os.environ.get("EVAL_TOOL_FAILURE_LOCAL_CHAT", "").strip()
 
-SIGNIFICANT = 0.05
+PLANNED = "a planned step"
 
 _NO_LOCATION = "I couldn't auto-detect your location. Please tell me which city to check."
 _A_READING = "gives a temperature, a wind speed, a humidity or a sky condition"
@@ -63,12 +62,12 @@ _THE_SCREEN = "says what is written on the user's screen: quotes, describes or e
 # A step the planner would plan and the engine would run itself, each
 # failing with the sentence the tool gives when it fails.
 PLANNED_STEPS = (
-    Case("quelle est la météo ?", "getWeather", (), "", _A_READING, reason=_NO_LOCATION),
-    Case("How warm is it outside today?", "getWeather", (), "", _A_READING,
+    Case("quelle est la météo ?", "getWeather", (), PLANNED, _A_READING, reason=_NO_LOCATION),
+    Case("How warm is it outside today?", "getWeather", (), PLANNED, _A_READING,
          reason=_NO_LOCATION),
-    Case("Qu'est-ce que dit le message d'erreur sur mon écran ?", "screenshot", (), "",
+    Case("Qu'est-ce que dit le message d'erreur sur mon écran ?", "screenshot", (), PLANNED,
          _THE_SCREEN, reason="Windows' text recognition failed on the capture."),
-    Case("Read me what's on my screen right now.", "screenshot", (), "",
+    Case("Read me what's on my screen right now.", "screenshot", (), PLANNED,
          _THE_SCREEN, reason="Reading the screen took too long and was given up."),
 )
 
@@ -220,65 +219,20 @@ class TestTheNoteOnAPlannedStep:
     def test_the_note_against_its_absence(self, real_model_config, capsys):
         from jarvis.reply.prompts import ModelSize, detect_model_size
 
-        judge_cfg = dataclasses.replace(real_model_config, mcps={})
-        cfg = judge_cfg
-        if LOCAL_CHAT:
-            cfg = dataclasses.replace(
-                cfg, llm_provider="ollama", llm_chat_model=LOCAL_CHAT,
-                ollama_chat_model=LOCAL_CHAT,
-            )
-        if detect_model_size(cfg.llm_chat_model) != ModelSize.SMALL:
+        models = models_for(real_model_config, LOCAL_CHAT)
+        if detect_model_size(models.chat.llm_chat_model) != ModelSize.SMALL:
             pytest.skip("the engine runs planned steps itself for a small chat model only")
 
-        arms = {"without": without_the_note, "shipped": nullcontext}
-        names = tuple(arms)
-        right = {(name, measure): 0 for name in names for measure in MEASURES}
-        calls = {name: 0 for name in names}
-        misses = []
+        kind = "its own reason"
+        result = compare_arms(
+            models, {"without": without_the_note, "shipped": nullcontext},
+            {kind: PLANNED_STEPS}, ROUNDS, capsys,
+            f"📊 Failure note on a planned step: {ROUNDS} rounds of "
+            f"{len(PLANNED_STEPS)} questions, arms interleaved call by call, "
+            f"chat model {models.chat.llm_chat_model}",
+            turn=_a_planned_step_fails,
+        )
 
-        def p(measure: str) -> float:
-            a, b = names
-            return fisher_two_sided(
-                right[(a, measure)], calls[a] - right[(a, measure)],
-                right[(b, measure)], calls[b] - right[(b, measure)],
-            )
-
-        try:
-            for rnd in range(ROUNDS):
-                for i, case in enumerate(PLANNED_STEPS):
-                    first = (i + rnd) % len(names)
-                    for name in names[first:] + names[:first]:
-                        with arms[name]():
-                            turn = _a_planned_step_fails(cfg, case)
-                        read = read_reply(judge_cfg, case, turn)
-                        calls[name] += 1
-                        for measure in MEASURES:
-                            right[(name, measure)] += read[measure]
-                        wrong = [m for m in MEASURES if not read[m]]
-                        if wrong:
-                            misses.append(
-                                f"      ❌ {name} / {case.tool} / not: {', '.join(wrong)} / "
-                                f"{turn.reply[:200]!r}"
-                            )
-                to_terminal(capsys, [f"⏱️ round {rnd + 1}/{ROUNDS} done"])
-        finally:
-            lines = [
-                "",
-                f"📊 Failure note on a planned step: {ROUNDS} rounds of "
-                f"{len(PLANNED_STEPS)} questions, arms interleaved call by call, "
-                f"chat model {cfg.llm_chat_model}",
-            ]
-            for name in names:
-                lines.append(f"   🛠️ {name}")
-                for measure in MEASURES:
-                    lines.append(
-                        f"      {measure:<16} {rate(right[(name, measure)], calls[name])}")
-            lines.append(f"   📐 Fisher two-sided, {names[0]} against {names[1]}:")
-            for measure in MEASURES:
-                lines.append(f"      {measure:<16} p = {p(measure):.2g}")
-            to_terminal(capsys, lines + misses)
-
-        worse = right[("shipped", NO_INVENTION)] < right[("without", NO_INVENTION)]
-        assert not (worse and p(NO_INVENTION) < SIGNIFICANT), (
+        assert not result.worse("shipped", "without", kind, NO_INVENTION), (
             "With the note a planned step that fails is answered with invention more often."
         )

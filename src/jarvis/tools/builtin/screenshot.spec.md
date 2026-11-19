@@ -27,7 +27,7 @@ Which model calls read it depends on how the call came to run:
 
 Either way, a large chat model reads the text whole. On a small chat model the tool-result digest distils it first, on that same chat model (`docs/llm_contexts.md`, #5), and the console line announcing a digest shows its first 80 characters; the console is on screen, and in a file when `JARVIS_DEBUG_FILE` mirrors it there.
 
-**What a yes opens.** The carry-over keeps the screen's text, cut and fenced, in front of the later turns of the same conversation, where the tools that run free are back, `webSearch` and `fetchWebPage` among them. A page on the screen that carries instructions is fenced as data (below), and a fence is a convention a model honours, not a wall: a model that followed such a page could put what it read into a search or an address. Asking first keeps this to the conversations in which the user said yes; under a `## Libre` line it holds for any conversation in which the model reads the screen.
+**What a yes opens.** The carry-over keeps what the chat model read (the screen's text, cut and fenced, or on a small chat model the digest's note of it, which carries no fence) in front of the later turns of the same conversation, where the tools that run free are back, `webSearch` and `fetchWebPage` among them. A page on the screen that carries instructions is fenced as data (below), and a fence is a convention a model honours, not a wall: a model that followed such a page could put what it read into a search or an address. Asking first keeps this to the conversations in which the user said yes; under a `## Libre` line it holds for any conversation in which the model reads the screen.
 
 ## Contract
 

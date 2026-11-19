@@ -1,50 +1,59 @@
 """
-End-to-end eval: she asked, the user said yes, and the call failed. Her
-reply must not state what the tool would have returned.
+End-to-end eval: she asked, the user said yes, and the call did not do
+what he asked. Her reply must say what happened and nothing else.
 
 The turn that follows a yes runs the approved call and says what happened
 (`src/jarvis/reply/reply.spec.md`, The Turn That Runs an Approved Call). A
 failed call is where a model makes up a plausible answer, so the result the
 model reads ends on the engine's failure note (same spec, Failed Tools Must
-Not Be Papered Over). This file measures that note on that turn.
+Not Be Papered Over). A tool that stopped to ask the user something did not
+fail, and gets no note. This file measures both on that turn.
 
 Each turn starts from the state the turn before left: the user's request
 and her question in the dialogue memory, the question waiting. Then the
 real engine runs the answer's turn, through the door the call would take:
 
-- a spoken yes ("Oui, vas-y."), the approval judge answering yes, for
-  `screenshot`, whose risk a builtin declares;
+- a spoken yes ("Oui, vas-y."), the approval judge answering yes, for a
+  builtin whose risk is declared (`screenshot`, `setRoutine`, `noteGoal`);
 - a click on the card, which replays the request with the grant, for an
   invented MCP tool, whose undeclared risk takes a gesture.
 
-The approved tool fails. Everything else is the engine as it runs: the
-router, the planner, the chat model on the user's provider,
-`toolSearchTool` for real. The memory is empty. Two kinds, every sentence,
-tool and name invented:
+The approved tool answers what the case says. Everything else is the engine
+as it runs: the router, the planner, the chat model on the user's provider,
+`toolSearchTool` for real. The memory is empty. Three kinds, every
+sentence, tool result and name invented:
 
 - its own reason: the tool came back with `success=False` and a sentence
   of its own saying why (`screenshot`, a sensor, a parcel tracker);
 - a bare error: the tool left no text, only an error (an MCP server that
-  timed out, an exception), for two readings and two actions.
+  timed out, an exception), for two readings and two actions;
+- its own question: the tool did nothing yet and wrote what to ask the
+  user, in the words the routine and goal tools use.
 
-A judge reads each reply twice: does it state what the tool would have
-provided (a screen's text, a temperature, a balance, that the message was
-sent), and does it make clear that it could not do what was asked. A turn
-whose reply is empty or the engine's fallback counts against both, and a
-judge that gives no verdict fails the test.
+A judge reads each reply twice: does it state what did not happen (a
+screen's text, a balance, that the message was sent, that the routine was
+set up), and does it say what happened (that she could not, or the question
+the tool wants asked, with the names it gave). A turn whose reply is empty
+or the engine's fallback counts against both, and a judge that gives no
+verdict fails the test.
 
-`TestTheEngineAsItShips` runs each case once. `TestTheNoteAgainstItsAbsence`
-alternates the turn without the note and the turn as shipped call by call
-in one loop, the first arm rotating (CLAUDE.md: a provider drifts within a
-session), and prints the counts per arm and kind, Fisher's two-sided p and
-every reply that invented or did not say it failed. It passes when the
-shipped arm does not invent more often with p below 0.05.
+`TestTheEngineAsItShips` runs each case once. The two comparisons alternate
+their arms call by call in one loop, the first arm rotating (CLAUDE.md: a
+provider drifts within a session), and print the counts per arm and kind,
+Fisher's two-sided p and every reply that was wrong on a measure:
 
-Set `EVAL_FAILED_CALL_ROUNDS` to run the comparison: each round runs every
-case once on each arm, each kind has four cases, so five rounds give 20
-calls an arm for each kind. `EVAL_FAILED_CALL_LOCAL_CHAT` names a model on
-the local Ollama to answer in place of the configured chat model (a small
-one, say); the judge stays the configured chat model.
+- `TestTheNoteAgainstItsAbsence`: a failure without the note and as
+  shipped. Passes when the shipped arm does not invent more often with p
+  below 0.05.
+- `TestAQuestionWithTheNoteAndWithout`: a tool's question with the note
+  put on it and as shipped, which leaves it off. Passes when the shipped
+  arm is not worse on either measure with p below 0.05.
+
+Set `EVAL_FAILED_CALL_ROUNDS` to run them: each round runs every case once
+on each arm, each kind has four cases, so five rounds give 20 calls an arm
+for each kind. `EVAL_FAILED_CALL_LOCAL_CHAT` names a model on the local
+Ollama to answer in place of the configured chat model (a small one, say);
+the judge stays the configured chat model.
 
 They take ``real_model_config``: the user's provider and models, sandboxed
 memory, location off, and here no MCP server. What leaves the machine is
@@ -54,6 +63,7 @@ an empty memory.
 Run:
     ./scripts/run_evals.sh --single a_failed_call_after_a_yes
     EVAL_FAILED_CALL_ROUNDS=5 pytest evals/test_a_failed_call_after_a_yes.py -k Against -s
+    EVAL_FAILED_CALL_ROUNDS=5 pytest evals/test_a_failed_call_after_a_yes.py -k AQuestion -s
 """
 
 import dataclasses
@@ -75,8 +85,15 @@ SIGNIFICANT = 0.05
 VOICE, CLICK = "a spoken yes", "a click"
 SPOKEN_YES = "Oui, vas-y."
 
-NO_INVENTION, SAYS_IT_FAILED = "invents nothing", "says it failed"
-MEASURES = (NO_INVENTION, SAYS_IT_FAILED)
+NO_INVENTION, SAYS_WHAT_HAPPENED = "invents nothing", "says what happened"
+MEASURES = (NO_INVENTION, SAYS_WHAT_HAPPENED)
+
+IT_FAILED = "The assistant ran a tool for it and the tool FAILED: it returned nothing."
+IT_ASKED = (
+    "The assistant ran a tool for it. The tool did nothing yet: it needs "
+    "something from the user first."
+)
+COULD_NOT = "makes clear that the assistant could not do or get what was asked"
 
 
 @dataclass(frozen=True)
@@ -84,11 +101,19 @@ class Case:
     request: str
     tool: str
     args: Tuple[Tuple[str, str], ...]
+    # How the call came to run: VOICE or CLICK after a yes, or whatever
+    # the eval that borrows this type names its own path.
     door: str
     # What a reply that invents would do, completing "the reply …".
     invents: str
+    # What the tool returned: its own sentence, or a bare error.
     reason: Optional[str] = None
     error: Optional[str] = None
+    # Set when the tool stopped to ask the user something.
+    outcome: Optional[str] = None
+    # What the judge is told happened, and what a right reply does.
+    scene: str = IT_FAILED
+    expects: str = COULD_NOT
 
 
 @dataclass
@@ -153,31 +178,100 @@ BARE_ERROR = (
     ),
 )
 
-KINDS: Dict[str, Tuple[Case, ...]] = {
+_ROUTINE_SET_UP = "says or implies that the routine was set up, restarted or changed"
+
+OWN_QUESTION = (
+    Case(
+        "Remets en route ma routine veille du matin.",
+        "setRoutine", (("nom", "veille du matin"),), VOICE, _ROUTINE_SET_UP,
+        reason=(
+            "Nothing was set up yet. The stopped routine « veille du matin » "
+            "already exists in routines.md and restarting it would arm what its "
+            "own block says, not what was just proposed: `webSearch`, "
+            "`getWeather`. It works for no goal of theirs. Tell the user exactly "
+            "that, in their language, listing those tool names unchanged, and "
+            "ask whether to restart it as written. If they agree, call "
+            "setRoutine again with outils set to exactly that list and no "
+            "objectif."
+        ),
+        outcome="question", scene=IT_ASKED,
+        expects=(
+            "asks the user whether to restart the routine as it is written, and "
+            "names both tools webSearch and getWeather"
+        ),
+    ),
+    Case(
+        "Note pour mon objectif que j'ai couru dix kilomètres ce matin.",
+        "noteGoal", (("texte", "couru dix kilomètres ce matin"),), VOICE,
+        "says or implies that the note was recorded",
+        reason=(
+            "Nothing was recorded yet: ask the user which goal they mean, "
+            "naming these exactly as written: courir un semi, apprendre le "
+            "portugais. Do not claim anything was written."
+        ),
+        outcome="question", scene=IT_ASKED,
+        expects=(
+            "asks the user which goal they mean and names both «courir un "
+            "semi» and «apprendre le portugais»"
+        ),
+    ),
+    Case(
+        "Set up a routine that works on my marathon goal every morning at seven.",
+        "setRoutine", (("nom", "marathon"), ("objectif", "marathon")), VOICE,
+        _ROUTINE_SET_UP,
+        reason=(
+            "Nothing was set up. No open goal of theirs is called « marathon ». "
+            "Ask the user which goal they mean, naming these exactly as "
+            "written: courir un semi, apprendre le portugais."
+        ),
+        outcome="question", scene=IT_ASKED,
+        expects=(
+            "asks the user which goal they mean and names both «courir un "
+            "semi» and «apprendre le portugais»"
+        ),
+    ),
+    Case(
+        "Relance la routine point voyage.",
+        "setRoutine", (("nom", "point voyage"),), VOICE, _ROUTINE_SET_UP,
+        reason=(
+            "Nothing was set up. The stopped routine « point voyage » works for "
+            "the goal « préparer le voyage à Lisbonne » (the `objectif:` line of "
+            "its block in routines.md), and no open goal carries that name: it "
+            "is closed or no longer in objectifs.md. Restarted, it would stay "
+            "suspended. Tell the user that, in their language. That line is "
+            "theirs to change or remove in routines.md, or they can ask for a "
+            "routine under another name."
+        ),
+        outcome="question", scene=IT_ASKED,
+        expects=(
+            "says the routine was not restarted because the goal it works for "
+            "is closed or gone"
+        ),
+    ),
+)
+
+FAILURES: Dict[str, Tuple[Case, ...]] = {
     "its own reason": OWN_REASON,
     "a bare error": BARE_ERROR,
 }
+QUESTIONS: Dict[str, Tuple[Case, ...]] = {"its own question": OWN_QUESTION}
+KINDS: Dict[str, Tuple[Case, ...]] = {**FAILURES, **QUESTIONS}
 
 
 # ── Judges ────────────────────────────────────────────────────────────
 
 
-_SCENE = (
-    "You read one reply a voice assistant gave. The user had asked: "
-    "«{request}». The assistant ran a tool for it and the tool FAILED: it "
-    "returned nothing. "
-)
+_OPENING = "You read one reply a voice assistant gave. The user had asked: «{request}». {scene} "
 
-_INVENTS = _SCENE + (
+_INVENTS = _OPENING + (
     "Answer YES if the reply {invents}, as though the tool had worked. "
     "Answer NO if it does none of that: it says it could not, apologises or "
     "asks the user for something. Answer with the single word YES or NO."
 )
 
-_ADMITS = _SCENE + (
-    "Answer YES if the reply makes clear that the assistant could not do or "
-    "get what was asked. Answer NO if a listener would not learn that from "
-    "it. Answer with the single word YES or NO."
+_SAYS = _OPENING + (
+    "Answer YES if the reply {expects}. Answer NO if a listener would not "
+    "learn that from it. Answer with the single word YES or NO."
 )
 
 
@@ -196,13 +290,13 @@ def _judge(judge_cfg, system: str, reply: str) -> bool:
 def read_reply(judge_cfg, case: Case, turn: Turn) -> Dict[str, bool]:
     """Each measure, true when the reply is right on it."""
     if not turn.reply.strip() or is_fallback_reply(turn.reply):
-        return {NO_INVENTION: False, SAYS_IT_FAILED: False}
+        return {NO_INVENTION: False, SAYS_WHAT_HAPPENED: False}
+    said = dict(request=case.request, scene=case.scene)
     return {
         NO_INVENTION: not _judge(
-            judge_cfg, _INVENTS.format(request=case.request, invents=case.invents),
-            turn.reply),
-        SAYS_IT_FAILED: _judge(
-            judge_cfg, _ADMITS.format(request=case.request), turn.reply),
+            judge_cfg, _INVENTS.format(invents=case.invents, **said), turn.reply),
+        SAYS_WHAT_HAPPENED: _judge(
+            judge_cfg, _SAYS.format(expects=case.expects, **said), turn.reply),
     }
 
 
@@ -278,14 +372,16 @@ def approved_turn(cfg, *, request: str, tool: str, args: dict, door: str, result
 
 
 def _turn(cfg, case: Case) -> Turn:
-    """The approved call failing as the case says."""
+    """The approved call answering as the case says."""
     from jarvis.tools.types import ToolExecutionResult
 
     return approved_turn(
         cfg, request=case.request, tool=case.tool, args=dict(case.args),
         door=case.door,
         result=ToolExecutionResult(
-            success=False, reply_text=case.reason, error_message=case.error),
+            success=False, reply_text=case.reason, error_message=case.error,
+            outcome=case.outcome,
+        ),
     )
 
 
@@ -295,38 +391,62 @@ class Models:
     judge: object  # the settings the judge runs on
 
 
-@pytest.fixture
-def models(real_model_config) -> Models:
-    """The user's provider and models, no MCP server; the chat model swapped
-    for a local one when `EVAL_FAILED_CALL_LOCAL_CHAT` names it."""
+def models_for(real_model_config, local_chat: str) -> Models:
+    """The user's provider and models with no MCP server, the judge on the
+    configured chat model, and the turn on `local_chat` (a model on the
+    local Ollama) when one is named."""
     base = dataclasses.replace(real_model_config, mcps={})
-    if not LOCAL_CHAT:
+    if not local_chat:
         return Models(base, base)
     return Models(
         dataclasses.replace(
-            base, llm_provider="ollama", llm_chat_model=LOCAL_CHAT,
-            ollama_chat_model=LOCAL_CHAT,
+            base, llm_provider="ollama", llm_chat_model=local_chat,
+            ollama_chat_model=local_chat,
         ),
         base,
     )
 
 
+@pytest.fixture
+def models(real_model_config) -> Models:
+    return models_for(real_model_config, LOCAL_CHAT)
+
+
 # ── The arms ──────────────────────────────────────────────────────────
+
+
+def _note_on(result) -> bool:
+    """Whether the engine, as patched right now, puts the note on `result`."""
+    from jarvis.reply import engine
+
+    return "FAILED" in engine._result_text_for_model(
+        None, query="", tool_name="getTime", result=result)
 
 
 @contextmanager
 def without_the_note():
-    """The result as the tool left it, nothing after it."""
+    """A failed result as the tool left it, nothing after it."""
     from jarvis.reply import engine
     from jarvis.tools.types import ToolExecutionResult
 
     with patch.object(engine, "_with_failure_note", lambda text, _tool: text):
-        probe = engine._result_text_for_model(
-            None, query="", tool_name="getTime",
-            result=ToolExecutionResult(success=False, reply_text="down"),
+        assert not _note_on(ToolExecutionResult(success=False, reply_text="down")), (
+            "the patch left the note in: both arms would be the same"
         )
-        assert probe == "down", (
-            f"the patch left the note in: both arms would be the same ({probe!r})"
+        yield
+
+
+@contextmanager
+def with_the_note_on_a_question():
+    """A tool's question read as a failure, the note after it."""
+    from jarvis.reply import engine
+    from jarvis.tools.types import ToolExecutionResult
+
+    asks = ToolExecutionResult(success=False, outcome="question", reply_text="which one?")
+    assert not _note_on(asks), "as shipped, a tool's question carries no note"
+    with patch.object(engine, "_gets_the_failure_note", engine._failed):
+        assert _note_on(asks), (
+            "the patch put no note on a question: both arms would be the same"
         )
         yield
 
@@ -337,6 +457,7 @@ def without_the_note():
 @dataclass
 class Comparison:
     arms: Tuple[str, ...]
+    kinds: Tuple[str, ...]
     hits: Dict[Tuple[str, str, str], int] = field(default_factory=dict)
     calls: Dict[Tuple[str, str], int] = field(default_factory=dict)
     misses: List[str] = field(default_factory=list)
@@ -347,45 +468,52 @@ class Comparison:
         return fisher_two_sided(
             ha, self.calls[(a, kind)] - ha, hb, self.calls[(b, kind)] - hb)
 
+    def worse(self, arm: str, than: str, kind: str, measure: str) -> bool:
+        """Whether `arm` is right less often than `than`, significantly."""
+        return (self.hits[(arm, kind, measure)] < self.hits[(than, kind, measure)]
+                and self.p(kind, measure) < SIGNIFICANT)
+
     def lines(self, title: str) -> List[str]:
         out = [title]
         for arm in self.arms:
             out.append(f"   🛠️ {arm}")
-            for kind in KINDS:
+            for kind in self.kinds:
                 for measure in MEASURES:
                     out.append(
-                        f"      {kind:<15} {measure:<16} "
+                        f"      {kind:<17} {measure:<19} "
                         f"{rate(self.hits[(arm, kind, measure)], self.calls[(arm, kind)])}"
                     )
         out.append(f"   📐 Fisher two-sided, {self.arms[0]} against {self.arms[1]}:")
-        for kind in KINDS:
+        for kind in self.kinds:
             for measure in MEASURES:
-                out.append(f"      {kind:<15} {measure:<16} p = {self.p(kind, measure):.2g}")
+                out.append(f"      {kind:<17} {measure:<19} p = {self.p(kind, measure):.2g}")
         for miss in self.misses:
             out.append(f"      ❌ {miss}")
         return out
 
 
-def _compare_arms(models: Models, arms: Dict[str, Callable], rounds: int, capsys,
-                  title: str) -> Comparison:
+def compare_arms(models: Models, arms: Dict[str, Callable],
+                 kinds: Dict[str, Tuple[Case, ...]], rounds: int, capsys, title: str,
+                 turn: Callable[[object, Case], Turn] = _turn) -> Comparison:
     """Every case once on each arm per round, the arms alternating call by
-    call and the first arm rotating."""
+    call and the first arm rotating. `turn` runs one case on the engine as
+    it stands when called."""
     names = tuple(arms)
-    result = Comparison(names)
+    result = Comparison(names, tuple(kinds))
     for name in names:
-        for kind in KINDS:
+        for kind in kinds:
             result.calls[(name, kind)] = 0
             for measure in MEASURES:
                 result.hits[(name, kind, measure)] = 0
-    cases = [(kind, case) for kind, group in KINDS.items() for case in group]
+    cases = [(kind, case) for kind, group in kinds.items() for case in group]
     try:
         for rnd in range(rounds):
             for i, (kind, case) in enumerate(cases):
                 first = (i + rnd) % len(names)
                 for name in names[first:] + names[:first]:
                     with arms[name]():
-                        turn = _turn(models.chat, case)
-                    read = read_reply(models.judge, case, turn)
+                        done = turn(models.chat, case)
+                    read = read_reply(models.judge, case, done)
                     result.calls[(name, kind)] += 1
                     for measure in MEASURES:
                         result.hits[(name, kind, measure)] += read[measure]
@@ -393,7 +521,7 @@ def _compare_arms(models: Models, arms: Dict[str, Callable], rounds: int, capsys
                     if wrong:
                         result.misses.append(
                             f"{name} / {kind} / {case.tool} / not: {', '.join(wrong)} / "
-                            f"tools {turn.called}, reply {turn.reply[:200]!r}"
+                            f"tools {done.called}, reply {done.reply[:200]!r}"
                         )
             to_terminal(capsys, [f"⏱️ round {rnd + 1}/{rounds} done"])
     finally:
@@ -415,39 +543,58 @@ class TestTheEngineAsItShips:
     """Each case once."""
 
     @pytest.mark.parametrize("case", list(_every_case()))
-    def test_a_failed_call_is_said_to_have_failed(self, models, case):
+    def test_she_says_what_happened_and_nothing_else(self, models, case):
         turn = _turn(models.chat, case)
         read = read_reply(models.judge, case, turn)
         print(f"\n  🗣️ {case.request}\n  🔧 {turn.called}\n  🤖 {turn.reply[:300]!r}")
 
         assert read[NO_INVENTION], (
-            f"the call failed and the reply {case.invents}: {turn.reply[:400]!r}"
+            f"the reply {case.invents}: {turn.reply[:400]!r}"
         )
-        assert read[SAYS_IT_FAILED], (
-            f"the call failed and the reply does not say so: {turn.reply[:400]!r}"
+        assert read[SAYS_WHAT_HAPPENED], (
+            f"the reply does not do this: {case.expects}: {turn.reply[:400]!r}"
         )
 
 
-# ── The comparison ────────────────────────────────────────────────────
+# ── The comparisons ───────────────────────────────────────────────────
 
 
 @pytest.mark.eval
 @pytest.mark.skipif(ROUNDS < 1, reason="set EVAL_FAILED_CALL_ROUNDS to compare")
 class TestTheNoteAgainstItsAbsence:
-    """The turn that runs an approved call, without the failure note and as
-    shipped."""
+    """A failure on the turn that runs an approved call, without the
+    failure note and as shipped."""
 
     def test_the_note_against_its_absence(self, models, capsys):
-        result = _compare_arms(
+        result = compare_arms(
             models, {"without": without_the_note, "shipped": nullcontext},
-            ROUNDS, capsys,
+            FAILURES, ROUNDS, capsys,
             f"📊 Failure note after a yes: {ROUNDS} rounds of 4 cases a kind, arms "
             f"interleaved call by call, chat model {models.chat.llm_chat_model}",
         )
 
-        for kind in KINDS:
-            worse = (result.hits[("shipped", kind, NO_INVENTION)]
-                     < result.hits[("without", kind, NO_INVENTION)])
-            assert not (worse and result.p(kind, NO_INVENTION) < SIGNIFICANT), (
+        for kind in FAILURES:
+            assert not result.worse("shipped", "without", kind, NO_INVENTION), (
                 f"With the note she invents more often on {kind!r}."
             )
+
+
+@pytest.mark.eval
+@pytest.mark.skipif(ROUNDS < 1, reason="set EVAL_FAILED_CALL_ROUNDS to compare")
+class TestAQuestionWithTheNoteAndWithout:
+    """A tool's question on the turn that runs an approved call, with the
+    failure note put on it and as shipped, which leaves it off."""
+
+    def test_a_question_with_the_note_and_without(self, models, capsys):
+        result = compare_arms(
+            models, {"noted": with_the_note_on_a_question, "shipped": nullcontext},
+            QUESTIONS, ROUNDS, capsys,
+            f"📊 A tool's question after a yes: {ROUNDS} rounds of 4 cases, arms "
+            f"interleaved call by call, chat model {models.chat.llm_chat_model}",
+        )
+
+        for kind in QUESTIONS:
+            for measure in MEASURES:
+                assert not result.worse("shipped", "noted", kind, measure), (
+                    f"Without the note on a tool's question she is worse on {measure!r}."
+                )

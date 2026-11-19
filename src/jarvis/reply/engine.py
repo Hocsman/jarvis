@@ -1108,6 +1108,19 @@ def _failed(result) -> bool:
     return not result.success and not result.refused
 
 
+def _gets_the_failure_note(result) -> bool:
+    """Whether the failure note follows this result.
+
+    A failure does. A tool that stopped to ask the user something did not
+    fail: it says so with an `outcome` of its own, and its text already
+    tells the model what to ask. The note would say that no data came
+    back and to state nothing the tool provided, over the very words the
+    tool wants repeated. It stays `tool_failed` all the same, which is
+    what brings the tool back for the user's answer.
+    """
+    return _failed(result) and not result.outcome
+
+
 def _result_text_for_model(cfg, *, query: str, tool_name: str, result) -> str:
     """What the chat model reads of a result that came back with text.
 
@@ -1119,7 +1132,8 @@ def _result_text_for_model(cfg, *, query: str, tool_name: str, result) -> str:
     it goes through untouched: no distil to paraphrase it, and no failure
     note telling the model to ask for what is missing. Nothing is
     missing, he said no. Anything else is distilled when the chat model
-    needs long results distilled, and a failure then carries the note.
+    needs long results distilled, and a failure then carries the note
+    (a question the tool put to the user is not one).
     """
     if result.refused:
         return result.reply_text or ""
@@ -1129,7 +1143,7 @@ def _result_text_for_model(cfg, *, query: str, tool_name: str, result) -> str:
         tool_name=tool_name,
         raw_tool_result=result.reply_text,
     )
-    if _failed(result):
+    if _gets_the_failure_note(result):
         text = _with_failure_note(text, tool_name)
     return text
 
@@ -2141,7 +2155,8 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
 
     if _settled.approval is not None:
         # A resume turn does one thing: run the call the user approved and
-        # say what happened. It gets no tools and no plan.
+        # say what happened. It gets no plan and none of the routed tools;
+        # `stop` and `toolSearchTool` are still added below.
         #
         # The click path replays the original query, so the planner
         # produces the same first step and the model re-proposes the same
@@ -2152,7 +2167,7 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         action_plan = []
         allowed_tools = []
         mcp_tools = {}
-        debug_log("resume turn: no tools, no plan — narrate the approved call", "tools")
+        debug_log("resume turn: no routed tools, no plan — narrate the approved call", "tools")
     if action_plan and not _plan_under_specified:
         for _plan_name in tool_names_in_plan(action_plan, _full_catalog_names):
             if _plan_name not in allowed_tools:
@@ -2572,6 +2587,11 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
         if _granted_result.pending_id:
             # The gate asked instead of running. The turn ends on the
             # question the code wrote, as on the two other paths.
+            debug_log(
+                f"approved call {_granted.tool}: the gate asked again, "
+                f"ending the turn on its question",
+                "tools",
+            )
             return _end_turn_with_question(
                 _granted_result, dialogue_memory, redacted, tts=tts, cfg=cfg,
                 record_carryover=_maybe_record_tool_carryover,
@@ -2587,13 +2607,19 @@ def run_reply_engine(db: "Database", cfg, tts: Optional[Any],
                 tool_name=_granted.tool, result=_granted_result,
             )
         else:
-            # An exception, an MCP error: the tool left no text of its
-            # own. This turn has no tool to try again with, so what is
-            # left is to say it failed, and the note says so.
-            _granted_text = _with_failure_note(
-                f"Error: {_granted_result.error_message or '(no result)'}",
-                _granted.tool,
-            )
+            _granted_text = f"Error: {_granted_result.error_message or '(no result)'}"
+            if _gets_the_failure_note(_granted_result):
+                # An exception, an MCP error: the tool failed and left no
+                # text of its own. The routed tools are gone from this
+                # turn, so there is nothing to try again with: what is
+                # left is to say it failed, and the note says so.
+                _granted_text = _with_failure_note(_granted_text, _granted.tool)
+        debug_log(
+            f"approved call {_granted.tool}: result for the model "
+            f"{len(_granted_text)} chars (failed={_failed(_granted_result)}, "
+            f"refused={_granted_result.refused})",
+            "tools",
+        )
         try:
             print(f"    🙋 Approved → {_granted.tool}", flush=True)
         except Exception:

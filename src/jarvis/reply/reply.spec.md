@@ -380,7 +380,7 @@ Behaviour:
 - **Gating**: `tool_result_digest_enabled` (config). `None` (default) means auto-on for SMALL models, off for LARGE. Explicit `true`/`false` forces.
 - **Short-circuit**: if the raw result is below `_TOOL_DIGEST_MIN_CHARS` (400 chars), it's passed through unchanged.
 - **Single-batch fast path**: if the raw result fits under `_TOOL_DIGEST_BATCH_MAX_CHARS` (2500 chars), one distil call produces the note. This is the typical case for webSearch.
-- **Multi-batch fallback**: if the raw result exceeds the per-batch cap, it's split on paragraph boundaries (blank-line-separated) so envelope framing and fence markers stay in whichever chunk contains them; each chunk is distilled independently and surviving notes are joined.
+- **Multi-batch fallback**: if the raw result exceeds the per-batch cap, it's split on paragraph boundaries (blank-line-separated) so envelope framing and fence markers stay in whichever chunk contains them; each chunk is distilled independently and surviving notes are joined. A stretch with no blank line in it is one chunk whatever its size: the text of one monitor, as `screenshot` returns it, goes to the distil whole (up to 12 000 characters), which a small model mostly cannot answer within the timeout, and the raw result is then used.
 - **Source attribution preserved**: the distil prompt requires a source framing ("According to the web extract…", "The search result says…"); bare claims are explicitly forbidden. This keeps the untrusted-vs-established-fact distinction visible to the main model.
 - **No new facts**: the distil is forbidden from adding facts not present in the tool output — no year, cast, director etc. unless they appear verbatim in the payload.
 - **NONE sentinel**: when the distil judges nothing relevant it returns NONE; the caller keeps the raw payload (suppressing it entirely is worse than a noisy substrate). A user-facing `🧩 Tool digest: no relevant facts — using raw payload (Nch)` line prints on this branch so the fallback is visible in the field.
@@ -396,11 +396,21 @@ Three places in the engine run a tool and hand its result to the chat model: the
 
 - **A refusal** (`refused`) is read as the gate wrote it. Its text is written by code and already addressed to the model: no distil paraphrases it, no failure note follows it (the note says to ask for what is missing, and nothing is missing: the user said no), and it is not flagged `tool_failed`.
 - **Anything else** goes through the tool-result digest, which distils it when the chat model needs long results distilled (Tool-Result Digest for Small Models) and returns it whole otherwise.
-- **A failure** (`success=False`, not refused) is then followed by the failure note (Failed Tools Must Not Be Papered Over) and flagged `tool_failed`.
+- **A failure** (`success=False`, not refused, no `outcome` of the tool's own) is then followed by the failure note (Failed Tools Must Not Be Papered Over) and flagged `tool_failed`.
+- **A question the tool put to the user** (`success=False` with an `outcome`, as `setRoutine` and the goal tools return when they need something from the user first) is not a failure and gets no note: its text already tells the model what to ask, and the note would say that no data came back and to state nothing the tool provided, over the words the tool wants repeated. It is flagged `tool_failed` all the same, which is what brings the tool back on the turn the user answers.
 
-A question (`pending_id`) is none of these: nothing ran, the turn ends on the question the code wrote, and the model is not called again (`../tools/policy.spec.md`, Asking). All three places check it first.
+A question the gate raised (`pending_id`) is none of these: nothing ran, the turn ends on the question the code wrote, and the model is not called again (`../tools/policy.spec.md`, Asking). All three places check it first.
 
-A failure that carries no text of the tool's own (an exception, an MCP error: `reply_text` empty, the reason in `error_message`) reaches the model as `Error: <reason>` (`[Tool error: <tool>] <reason>` on the text-tool protocol), flagged `tool_failed`. In the loop and on direct execution the model still holds its tools and can call again with other arguments, and no note follows. On the turn that runs an approved call the note follows that too.
+A result that carries no text of the tool's own (an exception, an MCP error: `reply_text` empty, the reason in `error_message`) does not go through the helper. Each place writes it itself:
+
+| Where | What the model reads | The note |
+|---|---|---|
+| The loop, native tools | a tool message `Error: <reason>` | none |
+| The loop, text tools | `[Tool error: <tool>] <reason>` | none |
+| Direct execution | `[Tool result: <tool>]` then `Error: <reason>` | none |
+| After a yes | `[Tool result: <tool>]` then `Error: <reason>` | follows a failure |
+
+In the loop and on direct execution the model still holds its tools and can call again with other arguments, which the note would turn into a question to the user. On the turn that runs an approved call the routed tools are gone, and the note follows when the call failed. A call that succeeded and returned no text is written the same way on all three, `(no result)` standing for the reason, without the note. The loop flags every result without text `tool_failed`; the two other places flag it when the call failed.
 
 ### The Turn That Runs an Approved Call
 
@@ -409,10 +419,17 @@ When the user answers yes to a question the gate raised, by voice or with a clic
 - The plan and the routed tools are dropped: a click replays the original request, so the planner would plan the same step and the model would propose the same call, and one approval would buy two actions. `stop` and `toolSearchTool` are the tools the turn still offers.
 - The call and its result are appended as an assistant tool call and a `[Tool result: <tool>]` message, composed as on the two other paths (One Reading of a Tool Result) and recorded on the carry-over like any tool turn.
 - The digest, when the chat model needs one, is asked the request that raised the call (`PendingAction.query_redacted`), not this turn's own text: after a spoken yes that text is the answer ("oui"), and nothing in a result is relevant to it.
-- A failure of any shape gets the failure note, an error with no text of the tool's own included: the routed tools are gone, so there is nothing to call again with other arguments, and what is left is to say it failed.
+- A failure gets the failure note whichever shape it takes, an error with no text of the tool's own included: the routed tools are gone, so there is nothing to call again with other arguments, and what is left is to say it failed. A call that worked and returned no text is not a failure and gets none.
 - Should the gate ask instead of running, the turn ends on that question, as on the two other paths.
 
-The digest earns its place on this turn as on any other: a small chat model handed a long result whole describes it back instead of answering. Measured by `evals/test_a_long_result_after_a_yes.py` on 2026-11-19 on `gemma4:e2b`, the result handed over whole against the turn as it is, interleaved call by call, 20 calls an arm: four invented results of 11 000 to 40 000 characters (a screen twice, a note, a page), every line different, the one sentence that answers the request two thirds of the way in. The reply held that answer 5 times in 20 whole and 20 in 20 distilled (Fisher p = 8e-7); every miss summarised the result or asked what to do with it. The filler is invented and regular, so the figures say the digest is needed there, not how often a real screen is misread.
+The digest earns its place on this turn as on any other: a small chat model handed a long result whole describes it back instead of answering. Measured by `evals/test_a_long_result_after_a_yes.py` on 2026-11-19 on `gemma4:e2b`, the result handed over whole against the turn as it is, interleaved call by call, 20 calls an arm: four invented results, every line different, the one sentence that answers the request two thirds of the way in, each shaped as its tool returns it (a screen of 11 000 characters twice, one run of lines with no blank line; a note of 16 000 and a page of 40 000, in paragraphs). The reply held that answer 6 times in 20 whole and 14 in 20 as it is (Fisher p = 0.026), and the two shapes go differently:
+
+| Result | Whole | As it is |
+|---|---|---|
+| A note or a page, in paragraphs | 3 of 10 | 10 of 10 |
+| A screen, one block | 3 of 10 | 4 of 10 |
+
+A screen gains nothing: the digest splits on blank lines only (Tool-Result Digest for Small Models, Multi-batch fallback), one monitor's text has none, so it goes to the distil as one batch of 11 000 characters, and 9 times in 10 that call gave nothing back and the screen was handed over whole after it. Every miss summarised the result or asked what to do with it. The filler is invented and regular, so the figures say where the digest is needed and where it does not yet reach, not how often a real screen is misread.
 
 ### Failed Tools Must Not Be Papered Over
 
@@ -423,7 +440,7 @@ Two layers guard this, because the prompt alone was not enough (it only moved 2/
 1. **System prompt** (`system_prompt.py`, "Tool results (hard)"): tool results are the only source for live data; when one fails, say so and ask for what is missing, never state the figures it would have returned.
 2. **Failure note appended to the result** (`engine.py`, `_with_failure_note`): when a tool fails, the tool-result message the model reads gets `[<tool> FAILED — no data was returned. … Do NOT state any figure, measurement, or fact this tool would have provided …]`. This is what actually holds: the system prompt sits thousands of tokens back, while this lands in the last thing the model reads before answering. Together: **0 of 6**.
 
-The note follows a failure wherever the call ran: in the agentic loop, on the planner's direct execution and on the turn that runs an approved call (One Reading of a Tool Result). A refusal by the gate is not a failure and never gets it.
+The note follows a failure that came back with the tool's own text wherever the call ran: in the agentic loop, on the planner's direct execution and on the turn that runs an approved call, where it follows a bare error as well (One Reading of a Tool Result). A refusal by the gate is not a failure and never gets it, and neither is a question the tool put to the user.
 
 Covered by `evals/test_tool_failure_honesty.py`, which samples several runs rather than one — fabrication is probabilistic, so a single-shot assertion would have passed two thirds of the time against the pre-fix behaviour and let the regression through.
 
@@ -431,13 +448,22 @@ Measured on the two other paths on 2026-11-19, the turn without the note against
 
 | Path, chat model | Calls an arm | Invents nothing, without → with | Says it failed, without → with |
 |---|---|---|---|
-| After a yes, a failure with the tool's own reason, Claude Haiku 5.5 | 24 | 24 → 24 | 24 → 24 |
-| After a yes, an error with no text of the tool's own, Claude Haiku 5.5 | 24 | 24 → 24 | 24 → 24 |
+| After a yes, a failure with the tool's own reason, Claude Haiku 5.5 | 40 | 40 → 40 | 40 → 40 |
+| After a yes, an error with no text of the tool's own, Claude Haiku 5.5 | 40 | 40 → 40 | 40 → 40 |
 | After a yes, the tool's own reason, `gemma4:e2b` | 40 | 30 → 40 (p = 0.001) | 30 → 40 (p = 0.001) |
 | After a yes, an error with no text, `gemma4:e2b` | 40 | 40 → 40 | 40 → 40 |
 | Direct execution, the tool's own reason, `gemma4:e2b` | 40 | 30 → 40 (p = 0.001) | 20 → 31 (p = 0.019) |
 
-On Claude Haiku 5.5 the note changes nothing that 48 failed calls an arm can show: no reply invented and every reply said the call had failed, with it or without. On `gemma4:e2b` every invention comes from one case, on both paths, and it comes every time: asked what the error message on the screen says, with `screenshot` failing on "Windows' text recognition failed on the capture.", the model without the note answers that the error message says text recognition failed, taking the tool's reason for what the screen shows (10 of 10 after a yes, 10 of 10 on direct execution; 0 of 10 with the note on both). So the figures say how that case goes, not how often a failure is invented around. On direct execution with the note, the nine replies counted as not saying it failed are weather replies that ask for the city without saying a lookup was tried. The cases: `evals/test_a_failed_call_after_a_yes.py` (a spoken yes for `screenshot`, a click for invented MCP tools, four cases a kind) and `TestTheNoteOnAPlannedStep` in `evals/test_tool_failure_honesty.py` (`getWeather` and `screenshot`, the plan and the router pinned to the one step).
+On Claude Haiku 5.5 the note changes nothing that 80 failed calls an arm can show: no reply invented and every reply said the call had failed, with it or without. On `gemma4:e2b` every invention comes from one case, on both paths, and it comes every time: asked what the error message on the screen says, with `screenshot` failing on "Windows' text recognition failed on the capture.", the model without the note answers that the error message says text recognition failed, taking the tool's reason for what the screen shows (10 of 10 after a yes, 10 of 10 on direct execution; 0 of 10 with the note on both). So the figures say how that case goes, not how often a failure is invented around. Whether such a reply counts as an invention hangs on the judge's sentence: asked without "as though the tool had worked", the judge counted 1 of those 10 replies as inventing and all 10 as not saying the call failed (39 → 40 and 30 → 40 after a yes, 40 calls an arm). On direct execution with the note, the nine replies counted as not saying it failed are weather replies that ask for the city without saying a lookup was tried. The cases: `evals/test_a_failed_call_after_a_yes.py` (a spoken yes for `screenshot`, a click for invented MCP tools, four cases a kind) and `TestTheNoteOnAPlannedStep` in `evals/test_tool_failure_honesty.py` (`getWeather` and `screenshot`, the plan and the router pinned to the one step).
+
+A question the tool put to the user gets no note. Measured the same day by `TestAQuestionWithTheNoteAndWithout` in `evals/test_a_failed_call_after_a_yes.py`, after a yes, the note put on the question against the turn as it is, interleaved call by call, four invented questions in the words `setRoutine` and `noteGoal` use, the judge reading whether the reply asks what the tool said to ask, with the names it gave:
+
+| Chat model | Calls an arm | Asks his question, with the note → without | Claims nothing done, with → without |
+|---|---|---|---|
+| Claude Haiku 5.5 | 40 | 38 → 40 (p = 0.49) | 40 → 40 |
+| `gemma4:e2b` | 20 | 2 → 5 (p = 0.41) | 20 → 17 (p = 0.23) |
+
+No run settles it alone. On Claude Haiku 5.5 every miss is one case, the routine whose tool names the question must give unchanged: with the note she put them into French ("la recherche web et la météo") 8 times in 25 over the three runs made that day, and never without it (Fisher p = 0.004 on that case, 92 of 100 against 100 of 100 on all four, p = 0.007; the judge's sentence differed by one word in the last run). `gemma4:e2b` seldom relays such a question either way, and three of its replies without the note, all to one case, answered as though the note had been taken.
 
 ### Logging and Privacy
 - Use `debug_log` for key steps: `memory`, `planning`, and `voice` categories.
