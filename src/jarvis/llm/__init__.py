@@ -31,6 +31,7 @@ import requests  # noqa: F401  — re-exported for test patching, see module doc
 from .anthropic_backend import AnthropicBackend
 from .backend import (
     CACHE_MARKS,
+    CHAT_NUM_CTX,
     LLMBackend,
     ToolsNotSupportedError,
     strip_nonstandard_message_fields,
@@ -48,6 +49,7 @@ from .factory import (
 
 __all__ = [
     "CACHE_MARKS",
+    "CHAT_NUM_CTX",
     "chat_is_remote",
     "get_auxiliary_backend",
     "get_private_backend",

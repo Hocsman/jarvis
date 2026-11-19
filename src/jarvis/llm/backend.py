@@ -38,6 +38,14 @@ _ALLOWED_FIELDS_BY_ROLE: Dict[str, set[str]] = {
 CACHE_MARKS = "_cache_marks"
 
 
+# The context window a ``chat()`` call asks for where the provider has one
+# to ask for (Ollama's ``num_ctx``). A single-shot call that runs on the
+# chat model between two of its turns asks for the same one: Ollama loads a
+# model again for another context size, which costs that call the reload
+# and the next chat call a second one.
+CHAT_NUM_CTX = 8192
+
+
 def cache_marks(message: Dict[str, Any]) -> List[int]:
     """The usable marks of ``message``: whole offsets strictly inside its
     text, in order, each once. Anything else is ignored rather than

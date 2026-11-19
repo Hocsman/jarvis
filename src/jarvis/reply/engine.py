@@ -1024,7 +1024,7 @@ def _maybe_digest_tool_result(
         return raw_tool_result
 
     try:
-        digested = digest_tool_result_for_query(
+        digest = digest_tool_result_for_query(
             query=query,
             tool_name=tool_name,
             tool_result=raw_tool_result,
@@ -1040,40 +1040,67 @@ def _maybe_digest_tool_result(
         )
         return raw_tool_result
 
-    if digested and digested != raw_tool_result:
-        flat = digested.replace("\n", " ")
+    if not digest.parts:
+        # Short enough to be read as it is: no round-trip happened, and
+        # there is nothing to report.
+        return raw_tool_result
+
+    if digest.note:
+        flat = digest.note.replace("\n", " ")
         preview = flat[:80] + ("…" if len(flat) > 80 else "")
         print(
-            f"    🧩 Tool digest: {len(digested)} chars — \"{preview}\"",
+            f"    🧩 Tool digest: {len(digest.note)} chars — \"{preview}\"",
             flush=True,
         )
+        if digest.unanswered:
+            # The note stands on the parts that answered. The others may
+            # have held what was asked for, and the note cannot say.
+            print(
+                f"    ⏱️ Tool digest: {digest.unanswered} of {digest.parts} "
+                f"parts timed out or failed and are not in the note",
+                flush=True,
+            )
         debug_log(
             f"tool digest [{tool_name}]: raw payload "
             f"({len(raw_tool_result)}ch) replaced by digest "
-            f"({len(digested)}ch)",
+            f"({len(digest.note)}ch), {digest.unanswered} of "
+            f"{digest.parts} parts unanswered",
             "tools",
         )
-        return digested
+        return digest.note
 
-    if not digested:
-        # The distil judged nothing relevant. Keep the raw payload —
-        # suppressing it entirely would be worse than a possibly-noisy
-        # substrate. Mirror the memory-digest visibility so the user can
-        # see the pass ran and fell back explicitly.
+    if digest.unanswered:
+        # Not a verdict: the distil did not read some or all of the
+        # result. The raw payload is kept, as it is when nothing was
+        # found, and the console says which of the two happened.
         print(
-            f"    🧩 Tool digest: no relevant facts — using raw payload "
+            f"    ⏱️ Tool digest: timed out or failed on {digest.unanswered} "
+            f"of {digest.parts} parts — using raw payload "
             f"({len(raw_tool_result)} chars)",
             flush=True,
         )
         debug_log(
-            f"tool digest [{tool_name}]: NONE returned, keeping raw "
+            f"tool digest [{tool_name}]: {digest.unanswered} of "
+            f"{digest.parts} parts unanswered and no note, keeping raw "
             f"payload ({len(raw_tool_result)}ch)",
             "tools",
         )
         return raw_tool_result
 
-    # digested == raw_tool_result (short-circuit pass-through below
-    # _TOOL_DIGEST_MIN_CHARS). No round-trip happened; don't log.
+    # The distil read every part and judged nothing relevant. Keep the raw
+    # payload — suppressing it entirely would be worse than a
+    # possibly-noisy substrate. Mirror the memory-digest visibility so the
+    # user can see the pass ran and fell back explicitly.
+    print(
+        f"    🧩 Tool digest: no relevant facts — using raw payload "
+        f"({len(raw_tool_result)} chars)",
+        flush=True,
+    )
+    debug_log(
+        f"tool digest [{tool_name}]: NONE returned, keeping raw "
+        f"payload ({len(raw_tool_result)}ch)",
+        "tools",
+    )
     return raw_tool_result
 
 

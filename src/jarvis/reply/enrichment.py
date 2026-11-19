@@ -1,9 +1,12 @@
 from __future__ import annotations
+import time
+from dataclasses import dataclass, replace
 from typing import Optional
 from datetime import datetime, timezone
 
-from ..llm import get_auxiliary_backend
+from ..llm import CHAT_NUM_CTX, get_auxiliary_backend
 from ..debug import debug_log
+from ..utils import fence
 from .prompts.system import SPOKEN_FORM
 
 
@@ -521,6 +524,42 @@ _TOOL_DIGEST_BATCH_MAX_CHARS = 2500
 # here so the combined output stays bounded.
 _TOOL_DIGEST_MAX_CHARS = 600
 
+# A line is cut by length only where at least this much of it goes into
+# the batch being filled: below that the batch is closed and the line
+# opens the next one.
+_TOOL_DIGEST_MIN_CUT_CHARS = 200
+
+# The batches of one result are read one after another, each under the
+# digest's timeout, and a page of `fetchWebPage`'s full size is some
+# twenty of them. Together they get this many timeouts and no more: the
+# user is waiting for the reply the whole time.
+_TOOL_DIGEST_DEADLINE_TIMEOUTS = 3
+
+
+def tool_digest_deadline_sec(timeout_sec: float) -> float:
+    """How long the batches of one tool result have between them, given
+    the timeout of one."""
+    return _TOOL_DIGEST_DEADLINE_TIMEOUTS * timeout_sec
+
+
+@dataclass(frozen=True)
+class ToolDigest:
+    """What the distil made of one tool result.
+
+    ``note`` is what the reply model reads in place of the result: the
+    result itself when it was short enough to need no distil (``parts`` is
+    then 0), the joined notes of its parts otherwise, or "" when no part
+    gave one. ``unanswered`` counts the parts that got no answer: a
+    timeout, a failed call, or the deadline passing before their turn. An
+    empty note with no part unanswered is the distil's verdict that nothing
+    in the result bears on the query; with some unanswered it is no
+    verdict at all.
+    """
+
+    note: str
+    parts: int = 0
+    unanswered: int = 0
+
 _TOOL_DIGEST_SYSTEM_PROMPT = (
     "You are a fact extractor for a personal AI assistant. You will be "
     "given:\n"
@@ -584,8 +623,18 @@ def _distil_tool_batch(
     chat_model: str,
     timeout_sec: float,
     thinking: bool,
-) -> str:
-    """Run one distil LLM call over ``raw_block``; returns the fact note or ""."""
+) -> Optional[str]:
+    """Run one distil LLM call over ``raw_block``.
+
+    Returns the fact note, "" when the distil read the block and judged
+    nothing in it relevant, and None when it gave no answer: the backends
+    hand back None on a timeout and on a transport error rather than
+    raising. "NONE" is a verdict; no answer is a fault.
+
+    The call asks for the chat call's context window. It runs on the chat
+    model between two of its turns, and Ollama loads a model again for
+    another context size.
+    """
     user_content = (
         f"CURRENT QUERY: {query}\n\n"
         f"TOOL OUTPUT:\n{raw_block}\n\n"
@@ -599,13 +648,14 @@ def _distil_tool_batch(
             user_content=user_content,
             timeout_sec=timeout_sec,
             thinking=thinking,
+            num_ctx=CHAT_NUM_CTX,
         )
     except Exception as e:
         debug_log(f"tool digest batch failed: {e}", "tools")
-        return ""
+        return None
 
     if not response:
-        return ""
+        return None
 
     cleaned = response.strip().strip('"').strip("'")
     if not cleaned or cleaned.upper().rstrip(".") in _NONE_SENTINELS:
@@ -616,34 +666,162 @@ def _distil_tool_batch(
     return cleaned
 
 
-def _split_on_paragraph_boundary(text: str, max_chars: int) -> list[str]:
-    """Chunk ``text`` into batches that stay under ``max_chars`` each.
+@dataclass(frozen=True)
+class _Piece:
+    """A length of a tool result small enough to share a batch."""
 
-    We split on blank-line boundaries (``\\n\\n``) to keep fence markers and
-    envelope paragraphs intact whenever possible; a section that exceeds the
-    cap on its own becomes its own oversized chunk rather than being sliced
-    mid-sentence. Preserves the input order so downstream callers can
-    concatenate the distilled notes sensibly.
+    text: str
+    # What stood between it and the piece before it in the result.
+    joint: str
+    # Which stretch of the result it is from, and the kind of fence that
+    # stretch sits in (None outside any).
+    stretch: int
+    kind: Optional[str]
+
+
+# What a part of fenced text is labelled in a batch that does not hold the
+# tool's own header. `fence.block` writes the note saying it is data.
+_PART_LABEL = "Part of the tool's output"
+
+
+def _stretches(raw: str) -> list[tuple[Optional[str], str]]:
+    """``raw`` as its stretches of text in order, each with the kind of
+    fence it sits in, or None outside any.
+
+    A fence runs from an opening marker of a known kind to the next
+    closing marker of that kind, or to the end of the result when there is
+    none: text after an opening marker is somebody else's whether or not
+    the result closes the fence. Fenced text has the brackets a marker is
+    made of rewritten, which changes nothing in what the tools here fence
+    (they rewrite them first) and keeps a result from elsewhere from
+    closing the fence a batch puts round it.
     """
-    if not text:
-        return []
-    paragraphs = text.split("\n\n")
-    batches: list[str] = []
-    current_parts: list[str] = []
-    current_len = 0
-    for para in paragraphs:
-        piece = para + "\n\n"
-        piece_len = len(piece)
-        if current_parts and current_len + piece_len > max_chars:
-            batches.append("".join(current_parts).rstrip())
-            current_parts = [piece]
-            current_len = piece_len
+    found: list[tuple[Optional[str], str]] = []
+    at = 0
+    while at < len(raw):
+        openings = [
+            (start, kind)
+            for kind in fence.KINDS
+            if (start := raw.find(fence.opening(kind), at)) != -1
+        ]
+        if not openings:
+            found.append((None, raw[at:]))
+            break
+        start, kind = min(openings)
+        found.append((None, raw[at:start]))
+        body_from = start + len(fence.opening(kind))
+        end = raw.find(fence.closing(kind), body_from)
+        if end == -1:
+            found.append((kind, raw[body_from:]))
+            break
+        found.append((kind, raw[body_from:end]))
+        at = end + len(fence.closing(kind))
+    return [
+        (kind, (fence.without_markers(text) if kind else text).strip("\n"))
+        for kind, text in found
+        if text.strip()
+    ]
+
+
+def _rendered(pieces: list[_Piece]) -> str:
+    """The pieces of one batch as the text the distil reads.
+
+    The pieces of one stretch are joined as the result joined them. A
+    fenced stretch stands between its kind's markers. Where the text just
+    before the fence is in the batch too, the fence opens under it as it
+    did in the result. A batch that opens on fenced text opens on the
+    block `fence.block` writes under `_PART_LABEL`: the note and the
+    markers come from the one builder every tool's fence comes from,
+    composed from the kind alone and from nothing the result holds.
+    """
+    runs: list[tuple[Optional[str], str]] = []
+    before: Optional[_Piece] = None
+    for piece in pieces:
+        if before is not None and piece.stretch == before.stretch:
+            kind, text = runs[-1]
+            runs[-1] = (kind, f"{text}{piece.joint}{piece.text}")
         else:
-            current_parts.append(piece)
-            current_len += piece_len
-    if current_parts:
-        batches.append("".join(current_parts).rstrip())
-    return [b for b in batches if b]
+            runs.append((piece.kind, piece.text))
+        before = piece
+    out: list[str] = []
+    for number, (kind, text) in enumerate(runs):
+        if kind is None:
+            out.append(text)
+        elif number == 0:
+            out.append(fence.block(kind, _PART_LABEL, text))
+        else:
+            out.append(f"{fence.opening(kind)}\n{text}\n{fence.closing(kind)}")
+    return "\n".join(out)
+
+
+def _cut(line: str, room: int) -> tuple[str, str, str]:
+    """``line`` cut to ``room`` characters: its head, the rest, and what
+    stood between the two. The cut falls on a space in the second half of
+    the room when there is one, and by length otherwise."""
+    if len(line) <= room:
+        return line, "", ""
+    at = line.rfind(" ", room // 2, room + 1)
+    if at <= 0:
+        return line[:room], line[room:], ""
+    return line[:at], line[at + 1:], " "
+
+
+def _split_tool_result(raw: str, max_chars: int) -> list[str]:
+    """``raw`` as batches of at most ``max_chars`` characters each, in the
+    result's order, every batch readable on its own.
+
+    Text is kept in the largest lengths that fit: a paragraph (text
+    between blank lines) whole, else its lines whole, else a line cut by
+    length. A length that does not fit what is left of the batch being
+    filled opens the next batch when this one is at least half full, and
+    is cut finer otherwise, so no batch goes out holding a header alone.
+
+    Fenced text stays fenced: each batch holding some of it holds it
+    between the fence's two markers and under a line saying it is data
+    (:func:`_rendered`), so no batch hands the distil somebody else's
+    words as the tool's own.
+    """
+    batches: list[str] = []
+    current: list[_Piece] = []
+
+    def left_for(piece: _Piece) -> int:
+        return max_chars - len(_rendered(current + [replace(piece, text="")]))
+
+    def close() -> None:
+        if current:
+            batches.append(_rendered(current))
+            current.clear()
+
+    def place(text: str, joint: str, stretch: int, kind: Optional[str],
+              finer: tuple[str, ...]) -> None:
+        piece = _Piece(text, joint, stretch, kind)
+        if len(text) <= left_for(piece):
+            current.append(piece)
+            return
+        if len(_rendered(current)) >= max_chars // 2:
+            close()
+            if len(text) <= left_for(piece):
+                current.append(piece)
+                return
+        if finer:
+            for part in text.split(finer[0]):
+                if part.strip("\n"):
+                    place(part.strip("\n"), joint, stretch, kind, finer[1:])
+                    joint = finer[0]
+            return
+        while text:
+            room = left_for(replace(piece, joint=joint))
+            if current and room < min(len(text), _TOOL_DIGEST_MIN_CUT_CHARS):
+                close()
+                room = left_for(piece)
+            head, text, gap = _cut(text, max(room, 1))
+            current.append(_Piece(head, joint, stretch, kind))
+            joint = gap
+
+    for stretch, (kind, text) in enumerate(_stretches(raw)):
+        place(text, "\n\n", stretch, kind, ("\n\n", "\n"))
+    close()
+    return batches
 
 
 def digest_tool_result_for_query(
@@ -654,7 +832,7 @@ def digest_tool_result_for_query(
     chat_model: str,
     timeout_sec: float = 8.0,
     thinking: bool = False,
-) -> str:
+) -> ToolDigest:
     """Condense a raw tool-result payload into a short, attributed fact note.
 
     Small models (~2B) struggle to ground on long tool outputs — the
@@ -666,24 +844,26 @@ def digest_tool_result_for_query(
     Brandon Cronenberg…" gives the small reply model a short, unambiguous
     substrate to repeat.
 
-    Behaviour mirrors ``digest_memory_for_query``:
-      - Below ``_TOOL_DIGEST_MIN_CHARS`` the raw text is returned unchanged.
-      - Single-batch fast path when the payload fits in
-        ``_TOOL_DIGEST_BATCH_MAX_CHARS``.
-      - Multi-batch fallback when it doesn't — splits on blank-line
-        boundaries so fence markers/envelope paragraphs survive.
-      - Returns empty string when the distil decides nothing is relevant,
-        when the tool result is empty, or when every LLM call fails.
+      - Below ``_TOOL_DIGEST_MIN_CHARS`` the raw text is the note and no
+        call is made.
+      - A result that fits ``_TOOL_DIGEST_BATCH_MAX_CHARS`` is one batch,
+        handed over as the tool wrote it.
+      - A longer one is read in batches (:func:`_split_tool_result`), one
+        call each, the notes joined. The batches share one deadline
+        (:func:`tool_digest_deadline_sec`): those it leaves unread are
+        counted with the ones that got no answer.
+
+    See :class:`ToolDigest` for what comes back.
     """
     raw = (tool_result or "").strip()
     if not raw:
-        return ""
+        return ToolDigest("")
 
     # Cheap bail-out. Sending a short raw result straight through keeps the
     # common case fast and avoids making the reply model wait for a
     # distillation round-trip that shaves off <200 chars.
     if len(raw) < _TOOL_DIGEST_MIN_CHARS:
-        return raw
+        return ToolDigest(raw)
 
     # Expose the tool name in the distil's query framing so its source
     # attribution can reference the tool (e.g. webSearch) when helpful.
@@ -692,52 +872,62 @@ def digest_tool_result_for_query(
         f"'{tool_name}'.)"
     )
 
-    # Single-batch fast path — the typical webSearch result fits here.
     if len(raw) <= _TOOL_DIGEST_BATCH_MAX_CHARS:
-        cleaned = _distil_tool_batch(
-            framed_query, raw, cfg, chat_model,
-            timeout_sec, thinking,
-        )
-        if not cleaned:
+        batches = [raw]
+    else:
+        batches = _split_tool_result(raw, _TOOL_DIGEST_BATCH_MAX_CHARS)
+
+    deadline = tool_digest_deadline_sec(timeout_sec)
+    give_up_at = time.monotonic() + deadline
+    notes: list[str] = []
+    unanswered = 0
+    for number, batch in enumerate(batches, start=1):
+        left = give_up_at - time.monotonic()
+        if left <= 0:
+            unanswered += len(batches) - number + 1
             debug_log(
-                f"tool digest [{tool_name}]: NONE — no relevant facts",
+                f"tool digest [{tool_name}]: the {deadline:.0f}s the batches "
+                f"share ran out, batches {number} to {len(batches)} of "
+                f"{len(batches)} not read",
                 "tools",
             )
-            return ""
-        debug_log(
-            f"tool digest [{tool_name}]: raw={len(raw)}ch → "
-            f"digest={len(cleaned)}ch",
-            "tools",
-        )
-        return cleaned
-
-    # Multi-batch path. Split on paragraph boundaries so the fence framing
-    # and envelope headers stay in whichever batch contains them.
-    chunks = _split_on_paragraph_boundary(raw, _TOOL_DIGEST_BATCH_MAX_CHARS)
-    notes: list[str] = []
-    for chunk in chunks:
+            break
         note = _distil_tool_batch(
-            framed_query, chunk, cfg, chat_model,
-            timeout_sec, thinking,
+            framed_query, batch, cfg, chat_model,
+            min(timeout_sec, left), thinking,
         )
-        if note:
+        if note is None:
+            unanswered += 1
+            debug_log(
+                f"tool digest [{tool_name}]: batch {number} of {len(batches)} "
+                f"({len(batch)}ch) got no answer (timed out or failed)",
+                "tools",
+            )
+        elif note:
             notes.append(note)
 
-    if not notes:
+    combined = " ".join(notes)
+    if combined:
         debug_log(
-            f"tool digest [{tool_name}]: {len(chunks)} batches all returned "
+            f"tool digest [{tool_name}]: raw={len(raw)}ch across "
+            f"{len(batches)} batches → digest={len(combined)}ch "
+            f"({len(notes)} relevant, {unanswered} unanswered)",
+            "tools",
+        )
+    elif unanswered:
+        debug_log(
+            f"tool digest [{tool_name}]: no note, and {unanswered} of "
+            f"{len(batches)} batches got no answer (timed out or failed); "
+            f"the {len(batches) - unanswered} read returned NONE",
+            "tools",
+        )
+    else:
+        debug_log(
+            f"tool digest [{tool_name}]: {len(batches)} batches all returned "
             f"NONE — no relevant facts",
             "tools",
         )
-        return ""
-
-    combined = " ".join(notes)
-    debug_log(
-        f"tool digest [{tool_name}]: raw={len(raw)}ch across {len(chunks)} "
-        f"batches → digest={len(combined)}ch ({len(notes)} relevant)",
-        "tools",
-    )
-    return combined
+    return ToolDigest(combined, parts=len(batches), unanswered=unanswered)
 
 
 # ── Max-turn loop digest ────────────────────────────────────────────────────
