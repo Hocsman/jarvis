@@ -993,9 +993,11 @@ def _maybe_digest_tool_result(
 
     Extracted from the reply loop so the gating logic is testable in isolation
     and the reply loop stays readable. Gates on ``tool_result_digest_enabled``
-    (``None`` = auto-on for SMALL models). Prints user-facing logs for each
-    outcome (digest applied / NONE fallback / digest disabled) so the console
-    matches the memory-digest visibility convention. Always returns the
+    (``None`` = auto-on for SMALL models). Prints a user-facing line for each
+    outcome of a distil that ran (a note, a note that some parts are missing
+    from, nothing relevant found, timed out or failed) so the console
+    matches the memory-digest visibility convention and a distil that did
+    not answer is never read as one that found nothing. Always returns the
     content the caller should append — the raw payload when digestion is off,
     short-circuits, returns NONE, or fails.
     """
