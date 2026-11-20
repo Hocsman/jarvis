@@ -30,6 +30,8 @@ LLM context #16, in `extract_reminder_time`. A model reads the sentence, because
 
 The prompt names no day, no month, no temporal adverb, in any language, and carries no worked example: an example containing "tomorrow" is a hardcoded language pattern smuggled in by demonstration, and it would make the model generalise worse to Turkish than no example at all.
 
+**The sentence is fenced as data.** It arrives through Whisper and may carry anything at all, so it reaches the model in the bare fence of `utils/fence.py` (`bare`): a `<<<` line, the sentence, a `>>>` line, under a line saying it is data and not instructions. The sentence cannot end that fence: every run of three or more angle brackets in it, plain or full-width, becomes a single guillemet before it is fenced, so a sentence showing a `>>>` line stays wholly between the two lines and nothing after it reads as the prompt's own text. Two brackets in a row are left as they read, and a sentence with no such run reaches the model as it reads, trimmed of the whitespace round it.
+
 Guards sit on the parsed object rather than being phrased as rules in the prompt, because a rule in a prompt is a request and a guard is a fact. Unknown kind, unparseable date or time, an instant in the past, one beyond 400 days, an empty subject, a timeout, an exception — each raises with its reason, and the reason is spoken. A redaction placeholder is refused, which bites harder here than on the core: a placeholder stored as a fact is merely useless, one in a reminder is read aloud twenty minutes later.
 
 ## Setting one
