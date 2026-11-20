@@ -764,34 +764,59 @@ def resolve_next_tool_call(
     allowed_names: list[str] = []
     schema_lines: list[str] = []
     allowed_props: dict[str, set[str]] = {}
+    # The tools this list cannot show on one line. They are not offered,
+    # and a step asking for one is not resolved.
+    left_out: set[str] = set()
     for entry in tools_schema:
         fn = entry.get("function", {}) if isinstance(entry, dict) else {}
         name = fn.get("name") if isinstance(fn, dict) else None
         if not name:
             continue
-        allowed_names.append(str(name))
+        name = str(name)
         params = (fn.get("parameters") or {}) if isinstance(fn, dict) else {}
         props = params.get("properties") if isinstance(params, dict) else None
-        if isinstance(props, dict):
-            prop_keys = set(props.keys())
-            keys = ", ".join(sorted(prop_keys))
-        else:
-            prop_keys = set()
-            keys = ""
-        allowed_props[str(name)] = prop_keys
-        if not is_plain_name(str(name)):
+        prop_keys = set(props.keys()) if isinstance(props, dict) else set()
+        if not is_plain_name(name):
             # Same rule as the plan catalogue above: this list is read one
             # entry per line, so a name carrying a break offers the model a
             # tool nobody installed.
             debug_log("tool omitted from resolver schema, unwritable name", "planning")
-            allowed_names.pop()
-            allowed_props.pop(str(name), None)
+            left_out.add(name)
             continue
-        # The argument names and the description are whatever the tool's
-        # server declared: the line cannot show a fence marker.
+        if not all(is_plain_name(k) for k in prop_keys):
+            # The argument names sit on that same line and come from the
+            # same server. Flattening one would show the model a key the
+            # tool does not declare, while the argument filter below
+            # works from the declared ones: the tool is left to the
+            # chat-model turn instead.
+            debug_log(
+                f"tool {name} omitted from resolver schema, unwritable argument name",
+                "planning",
+            )
+            left_out.add(name)
+            continue
+        allowed_names.append(name)
+        allowed_props[name] = prop_keys
+        # The description is whatever the tool's server declared: the
+        # line cannot show a fence marker.
         schema_lines.append(fence.without_markers(
-            f"- {name} (args: {keys}) — {one_line(fn.get('description') or '', 120)}"
+            f"- {name} (args: {', '.join(sorted(prop_keys))}) — "
+            f"{one_line(fn.get('description') or '', 120)}"
         ))
+
+    # The plan step's head names the tool the planner asked for.
+    _head, _, _ = next_step_text.strip().partition(" ")
+    _head_name = _head.strip().rstrip(":")
+    if _head_name in left_out:
+        # The resolver cannot answer with that tool, so anything it did
+        # answer would be another tool in its place, executed without the
+        # chat model ever seeing it. No parse and no model call.
+        debug_log(
+            "planner.resolve_next_tool_call: step asks for a tool left out "
+            "of the resolver schema, left to the chat model",
+            "planning",
+        )
+        return None
 
     # Fast path: fully-concrete plan step parses deterministically.
     fast = _parse_plan_step_concrete(
@@ -903,13 +928,11 @@ def resolve_next_tool_call(
             "planning",
         )
         return None
-    # The plan step's head names the tool the planner asked for. A
-    # resolved call for a different allowed tool is a substitution —
-    # misresolution at best, memory-borne injected text steering the
-    # choice at worst — and this output is executed without the chat
-    # model ever seeing it: fall back to the chat-model turn instead.
-    _head, _, _ = next_step_text.strip().partition(" ")
-    _head_name = _head.strip().rstrip(":")
+    # A resolved call for a different allowed tool than the one the step
+    # heads with is a substitution — misresolution at best, memory-borne
+    # injected text steering the choice at worst — and this output is
+    # executed without the chat model ever seeing it: fall back to the
+    # chat-model turn instead.
     if _head_name in allowed_names and _head_name != name:
         debug_log(
             f"planner.resolve_next_tool_call: rejected tool substitution "

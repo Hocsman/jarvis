@@ -231,11 +231,31 @@ The engine consumes the plan in two phases.
   (`close_cut_fences`): it never travels in a tool result. The fast path
   never sees memory: a fully concrete step is dispatched exactly as
   written.
+- **One tool, one line.** The LLM path lists each allowed tool as
+  `- name (args: keys) — description`: the declared property keys
+  sorted, the description flattened to one line and cut at 120
+  characters (`tools/naming.py::one_line`). The name and every one of
+  those keys are held to `is_plain_name` (ASCII letters, digits, `_`,
+  `.`, `-`, 1 to 64 characters), since a line break in either would
+  write a line of its own in a prompt whose answer is executed: a tool
+  nobody installed, or a second `NEXT PLANNED STEP:` section. A tool
+  whose name, or one of whose argument names, is outside the class is
+  left out of the resolver altogether, with a debug line: it is not
+  listed, and it is not on the allow-list. An argument name is not
+  flattened the way a description is: the line would show a key the
+  tool does not declare, and the argument filter below works from the
+  declared keys.
+- **A step for a tool left out is not resolved.** When the step text
+  heads with the name of such a tool (read like the substitution guard
+  reads it), the resolver returns `None` before the fast path and
+  before any LLM call, and the chat model takes the turn. The resolver
+  could not answer with that tool, so whatever it answered would be
+  another tool in its place.
 - **Only the memory block shows a marker.** The rest of the LLM path's
   prompt is text somebody else can write: a prior result and the
   arguments of the call that returned it (a page title, an MCP server's
-  reply), a tool's description and the names of its arguments (whatever
-  its server declared), and the plan step (a model's output). Each
+  reply), a tool's description (whatever its server declared), and the
+  plan step (a model's output). Each
   prior-call line, each tool line and the step go through
   `without_markers` too, so none of them can spell
   `<<<BEGIN RELEVANT MEMORY>>> … <<<END RELEVANT MEMORY>>>` and pass for
@@ -254,7 +274,8 @@ The engine consumes the plan in two phases.
 - Returns `None` for synthesis steps (the LLM emits the literal
   `null`), unknown tools, or invalid JSON. All `None` paths fall back
   to the normal chat-model turn.
-- Validates the tool name against the provided schema's allow-list.
+- Validates the tool name against the allow-list: the tools of the
+  provided schema that are listed in the prompt.
 - **Substitution guard**: when the step text heads with an allow-listed
   tool name, a resolved call naming a different tool is rejected
   (`None`) — the plan asked for the head tool, and the resolver's
