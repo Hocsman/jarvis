@@ -36,7 +36,7 @@ from .builtin.goals import (
 from .builtin.stop import StopTool
 from .builtin.tool_search import ToolSearchTool
 from .types import ToolExecutionResult
-from .naming import is_plain_name
+from .naming import PLAIN_NAME, is_plain_name, one_line
 from ..config import Settings
 from .external.mcp_client import MCPClient
 from ..debug import debug_log
@@ -168,6 +168,11 @@ def _spec_from_tool_info(server_name: str, tool_info: Dict[str, Any]) -> ToolSpe
     )
 
 
+def _escaped(text: Any, limit: int = 120) -> str:
+    """Third-party text as it can be shown: escaped, cut, on one line."""
+    return str(text).encode("unicode_escape").decode("ascii")[:limit]
+
+
 def discover_mcp_tools(mcps_config: Dict[str, Any]) -> Tuple[Dict[str, ToolSpec], Dict[str, str]]:
     """Discover all tools from configured MCP servers and create ToolSpec entries for them.
 
@@ -200,8 +205,7 @@ def discover_mcp_tools(mcps_config: Dict[str, Any]) -> Tuple[Dict[str, ToolSpec]
                         # called. Said out loud once, at discovery: a
                         # capability quietly missing looks exactly like a
                         # server that never offered it.
-                        montre = full_tool_name.encode(
-                            "unicode_escape").decode("ascii")[:120]
+                        montre = _escaped(full_tool_name)
                         debug_log(
                             f"MCP tool dropped, name outside the plain class: {montre}",
                             "mcp",
@@ -294,8 +298,73 @@ def generate_tools_json_schema(allowed_tools: Optional[List[str]] = None, mcp_to
     return tools
 
 
+def _plain_word(word: Any) -> bool:
+    """Whether a word from a tool's schema can sit on a catalogue line.
+
+    The class a tool name is held to. ``fullmatch`` rather than
+    ``is_plain_name``: a schema word can be any JSON value, and the whole
+    word has to be in the class, a final line break included.
+    """
+    return isinstance(word, str) and PLAIN_NAME.fullmatch(word) is not None
+
+
+def _type_word(definition: Any) -> str:
+    """What the ``Input:`` line says an argument's type is.
+
+    JSON Schema allows one type name or a list of them, and a server can
+    send anything at all. A plain word, or a list of plain words, is
+    written; anything else reads as no type given.
+    """
+    kind = definition.get("type", "any") if isinstance(definition, dict) else "any"
+    if _plain_word(kind):
+        return kind
+    if isinstance(kind, list) and all(_plain_word(k) for k in kind):
+        return str(kind)
+    return "any"
+
+
+def _input_line(tool_name: str, schema: Any) -> Optional[str]:
+    """The ``Input:`` line of one catalogue entry, if it has arguments to name.
+
+    The line is ``key: type`` pairs between commas, and a model reads it
+    as the tool's signature. An argument whose name is not a plain word is
+    left out rather than rewritten to fit: a rewritten name is one the
+    tool does not declare. The tool keeps its entry and its other
+    arguments, and its whole schema where tools are passed as schemas.
+    """
+    props = schema.get("properties") if isinstance(schema, dict) else None
+    if not isinstance(props, dict):
+        return None
+    required = schema.get("required")
+    if not isinstance(required, list):
+        required = []
+    params = []
+    left_out = []
+    for prop_name, prop_def in props.items():
+        req_marker = " (required)" if prop_name in required else ""
+        if not _plain_word(prop_name):
+            left_out.append(f"{_escaped(prop_name, 40)}{req_marker}")
+            continue
+        params.append(f"{prop_name}: {_type_word(prop_def)}{req_marker}")
+    if left_out:
+        debug_log(
+            f"text catalogue: {tool_name} is shown without {len(left_out)} argument(s), "
+            f"name outside the plain class: {', '.join(left_out[:8])}",
+            "tools",
+        )
+    return f"Input: {', '.join(params)}" if params else None
+
+
 def generate_tools_description(allowed_tools: Optional[List[str]] = None, mcp_tools: Optional[Dict[str, ToolSpec]] = None) -> str:
-    """Produce a compact tool help string for the system prompt using OpenAI standard format."""
+    """The tool catalogue a chat model reads as text in its system prompt.
+
+    One entry a tool: a blank line, ``name: description``, then an
+    ``Input:`` line naming its arguments. A builtin's description is ours
+    and is written as it is. An MCP tool's name, description, argument
+    names and types are a server's: the description is put on one line,
+    the others are written only as plain words, so a server writes its
+    tool's entry and no line beside it.
+    """
     # Same rule as the schema: ``None`` is everything, ``[]`` is nothing.
     names = list(BUILTIN_TOOLS.keys()) if allowed_tools is None else list(allowed_tools)
     lines: List[str] = []
@@ -309,36 +378,26 @@ def generate_tools_description(allowed_tools: Optional[List[str]] = None, mcp_to
         if not tool:
             continue
         lines.append(f"\n{tool.name}: {tool.description}")
-        if tool.inputSchema:
-            # Extract a simple parameter summary from the JSON schema
-            props = tool.inputSchema.get("properties", {})
-            required = tool.inputSchema.get("required", [])
-            param_descriptions = []
-            for prop_name, prop_def in props.items():
-                prop_type = prop_def.get("type", "any")
-                is_required = prop_name in required
-                req_marker = " (required)" if is_required else ""
-                param_descriptions.append(f"{prop_name}: {prop_type}{req_marker}")
-            if param_descriptions:
-                lines.append(f"Input: {', '.join(param_descriptions)}")
+        input_line = _input_line(tool.name, tool.inputSchema)
+        if input_line:
+            lines.append(input_line)
 
     # Add discovered MCP tools
     if mcp_tools:
         for tool_name, spec in mcp_tools.items():
-            if tool_name in names:  # Only include if allowed
-                lines.append(f"\n{spec.name}: {spec.description}")
-                if spec.inputSchema:
-                    # Extract a simple parameter summary from the JSON schema
-                    props = spec.inputSchema.get("properties", {})
-                    required = spec.inputSchema.get("required", [])
-                    param_descriptions = []
-                    for prop_name, prop_def in props.items():
-                        prop_type = prop_def.get("type", "any")
-                        is_required = prop_name in required
-                        req_marker = " (required)" if is_required else ""
-                        param_descriptions.append(f"{prop_name}: {prop_type}{req_marker}")
-                    if param_descriptions:
-                        lines.append(f"Input: {', '.join(param_descriptions)}")
+            if tool_name not in names:  # Only include if allowed
+                continue
+            if not _plain_word(spec.name):
+                debug_log(
+                    f"text catalogue: MCP tool left out, name outside the plain class: "
+                    f"{_escaped(spec.name)}",
+                    "tools",
+                )
+                continue
+            lines.append(f"\n{spec.name}: {one_line(spec.description)}")
+            input_line = _input_line(spec.name, spec.inputSchema)
+            if input_line:
+                lines.append(input_line)
 
     return "\n".join(lines)
 
@@ -480,8 +539,7 @@ def ensure_policy_file(cfg: Settings, *, discovery_failed: bool = False) -> None
                 # Escaped, and on one line: an unwritable name is
                 # unwritable here too, and a newline in one would forge a
                 # second line of this very report.
-                montre = name.encode("unicode_escape").decode("ascii")
-                print(f"     • {montre[:120]}", flush=True)
+                print(f"     • {_escaped(name)}", flush=True)
             print(
                 "     ↳ traités comme destructifs : elle demandera avant "
                 f"chaque appel. Fichier : {path}",
