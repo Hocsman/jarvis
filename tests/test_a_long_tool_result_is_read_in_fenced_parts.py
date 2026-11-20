@@ -486,7 +486,7 @@ class TestTheFenceOfALaterPartIsComposedNotCopied:
         handed, _ = batches_of(relayed, tool_name="relay__read")
 
         assert any(
-            {opened.kind for opened in fence.openings(batch)} == set(fence.IN_TOOL_RESULTS)
+            {opened.kind for opened in fence.openings(batch)} == {fence.SCREEN_TEXT, WEB}
             for batch in handed
         )
         for batch in handed:
