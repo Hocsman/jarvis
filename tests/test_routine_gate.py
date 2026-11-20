@@ -132,6 +132,7 @@ def test_an_empty_envelope_reaches_nothing():
 
 @pytest.mark.parametrize("name", [
     "toolSearchTool", "refreshMCPTools", "stop", "claudeCode", "screenshot",
+    "readAgenda",
 ])
 def test_the_names_no_envelope_can_hold_do_not_run_either(name):
     """They are kept out of the catalogue, so a well-behaved turn never

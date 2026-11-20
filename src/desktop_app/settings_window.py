@@ -524,6 +524,12 @@ def _build_field_metadata() -> List[FieldMeta]:
       "Use Wikipedia as a last-resort source when other search engines fail. "
       "No key, no account, privacy-light.",
       "features", "bool")
+    f("agenda_source", "Agenda Source",
+      "Where your calendar is read from: the path of an .ics file, or the "
+      "private https:// iCal address of your calendar. Read-only. Leave "
+      "empty to keep the agenda tool off. The address is a secret: whoever "
+      "holds it can read your calendar.",
+      "features", "str", nullable=True)
     f("low_power_mode", "Low Power Mode",
       "Reduce background LLM residency and skip LLM startup warmup",
       "features", "bool")

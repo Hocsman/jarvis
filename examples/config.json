@@ -165,6 +165,7 @@
   "web_search_enabled": true,
   "brave_search_api_key": "",
   "wikipedia_fallback_enabled": true,
+  "agenda_source": "",
   "dictation_enabled": true,
   "dictation_filler_removal": false,
   "dictation_thinking_enabled": false,

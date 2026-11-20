@@ -269,8 +269,9 @@ The engine consumes the plan in two phases.
   rewrite takes the markers a prior result carries of its own as well.
   For a web extract, whether the result carries one is read first,
   before the rewrite, and the `[UNTRUSTED WEB DATA …]` label says so in
-  this prompt; a screen text keeps the label its tool wrote in front of
-  it. The step the fast path parses, and the step the substitution
+  this prompt; a screen text and an agenda keep the label and the note
+  their tool wrote in front of the fence, whose words outlast the
+  rewrite of its brackets. The step the fast path parses, and the step the substitution
   guard reads, is the step as the plan wrote it.
 - Returns `None` for synthesis steps (the LLM emits the literal
   `null`), unknown tools, or invalid JSON. All `None` paths fall back

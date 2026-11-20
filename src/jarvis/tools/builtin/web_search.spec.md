@@ -78,11 +78,11 @@ The whole block is built by `utils/fence.py::block`, for the
 one function writes the note, the two markers, the number they carry, the
 reminder after the closing marker and the rewriting described below for
 every tool that returns somebody else's text to the reply model:
-`webSearch`, `fetchWebPage` and `screenshot` differ by the label, the
-kind, what they put in the text, and whether `block` caps it
+`webSearch`, `fetchWebPage`, `screenshot` and `readAgenda` differ by the
+label, the kind, what they put in the text, and whether `block` caps it
 (`webSearch`'s extract is cut where it is fetched). The note, the markers
 and the reminder are what reply models were measured on, so a change to
-`block` is a change to all three, to be measured again; tests in each
+`block` is a change to all four, to be measured again; tests in each
 tool's file and in `tests/test_fence.py` spell the block out byte for
 byte.
 
@@ -95,10 +95,10 @@ this fence.
 The same module composes every `<<<BEGIN …>>>` / `<<<END …>>>` marker in
 the code (`opening` / `closing` of a kind): the fences tools put round
 text they did not write (this one, `fetchWebPage`'s, `screenshot`'s,
-`logMeal`'s) and the one the step resolver puts round the memory block
+`readAgenda`'s, `logMeal`'s) and the one the step resolver puts round the memory block
 (`reply/planner.spec.md`). Of those kinds, the ones that travel in a tool
-result are listed apart (`IN_TOOL_RESULTS`: `WEB_EXTRACT` and
-`SCREEN_TEXT`). They are the only ones `block` builds, the only ones whose
+result are listed apart (`IN_TOOL_RESULTS`: `WEB_EXTRACT`,
+`SCREEN_TEXT` and `AGENDA_TEXT`). They are the only ones `block` builds, the only ones whose
 markers carry a number, the only ones found in a result (`opened`, by the
 opening marker whatever its number) and the only ones the carry-over
 closes. A fence that is a prompt of its own (`logMeal`'s, the memory

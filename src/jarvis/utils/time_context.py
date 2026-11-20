@@ -4,8 +4,8 @@ Prefers the user's local timezone (derived from location) so the assistant can
 answer "what time is it?" in the form the user expects, instead of UTC.
 """
 
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import date, datetime, timezone, tzinfo
+from typing import Optional, Tuple
 
 try:
     from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -36,6 +36,11 @@ def _spell(moment: datetime) -> str:
         f"{_WEEKDAYS[moment.weekday()]}, {_MONTHS[moment.month - 1]} "
         f"{moment.day:02d}, {moment.year} at {moment.hour:02d}:{moment.minute:02d}"
     )
+
+
+def spell_day(day: date) -> str:
+    """`Thursday 26 November 2026`, whatever the locale says."""
+    return f"{_WEEKDAYS[day.weekday()]} {day.day} {_MONTHS[day.month - 1]} {day.year}"
 
 
 def format_time_context(
@@ -181,3 +186,24 @@ def local_timezone_name() -> str:
     except Exception:
         pass
     return ""
+
+
+def machine_zone() -> Tuple[tzinfo, str]:
+    """The zone of the machine's own clock, and its IANA name when the
+    system gives one (empty otherwise).
+
+    For what is shown beside the user's own calendar: the times must be
+    the ones the machine's clock would show. Never GeoIP, which follows a
+    VPN's exit node. Where the system names no IANA zone (Windows), the
+    zone is the operating system's local time, daylight-saving rules
+    included, and it has no name to give.
+    """
+    name = _read_system_timezone()
+    if name and ZoneInfo is not None:
+        try:
+            return ZoneInfo(name), name
+        except Exception:
+            pass
+    from dateutil import tz as dateutil_tz
+
+    return dateutil_tz.tzlocal(), ""

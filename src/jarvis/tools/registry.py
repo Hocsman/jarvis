@@ -10,6 +10,7 @@ from pathlib import Path
 import os
 
 from .builtin.screenshot import ScreenshotTool
+from .builtin.agenda import ReadAgendaTool
 from .builtin.web_search import WebSearchTool
 from .builtin.local_files import LocalFilesTool
 from .builtin.fetch_web_page import FetchWebPageTool
@@ -54,6 +55,11 @@ BUILTIN_TOOLS = {
     "refreshMCPTools": RefreshMCPToolsTool(),
     "getWeather": WeatherTool(),
     "getTime": TimeTool(),
+    # Here and not elsewhere: the router reads the catalogue in this order,
+    # and where this entry sits moves what a small router offers for the
+    # other tools (`builtin/agenda/read_agenda.spec.md`, What the evals
+    # hold).
+    "readAgenda": ReadAgendaTool(),
     "remember": RememberTool(),
     "forget": ForgetTool(),
     "setReminder": SetReminderTool(),

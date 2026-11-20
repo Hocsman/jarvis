@@ -179,6 +179,7 @@ dedicated page:
 - `dictation_hotkey`
 - `dictation_filler_removal`
 - `dictation_custom_dictionary`
+- `agenda_source` (a file path or a private iCal address, shown as typed)
 
 `dictation_hotkey` is a dropdown of `DICTATION_HOTKEY_PRESETS` (`jarvis/config.py`)
 built by `dictation_hotkey_choices()` (`jarvis/dictation/hotkeys.py`), the same builder the setup wizard's

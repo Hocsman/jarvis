@@ -67,10 +67,13 @@ Running a tool is not the same as having consulted something. `stop`,
 `toolSearchTool` and `stopClaudeCode` steer (a report `stopClaudeCode`
 carries came from the `claudeCode` job that produced it); `remember`,
 `forget`, `logMeal`, `setReminder` and the goal tools write;
-`fetchMeals`, `listGoals` and `reviewLearnings` read his own records,
-which are not the world. Only the rest counts, and only the rest decides
+`fetchMeals`, `listGoals`, `reviewLearnings` and `readAgenda` read his
+own records, which are not the world. Only the rest counts, and only the rest decides
 the source label — a window that merely wrote a reminder looked nothing
-up.
+up. One exception keeps the weaker word: `readAgenda` is no lookup, but
+the titles it returns are written by whoever sent the invitation, so a
+window where it ran beside a lookup is `web`
+(`provenance.py::window_source`).
 
 Observed 2026-08-17: a turn whose only tool was `toolSearchTool` — which
 returns a list of tool *names* — satisfied the gate as first written.
@@ -98,7 +101,7 @@ One word per fact, recorded at write time, never inferred later:
 
 | Source | Meaning |
 |---|---|
-| `web` | A page fetched by `webSearch` or `fetchWebPage`, or the text of the screen read by `screenshot`, was in the window. Untrusted by construction: a screen shows whatever a page or a message put there. |
+| `web` | A page fetched by `webSearch` or `fetchWebPage`, the text of the screen read by `screenshot`, or his agenda read by `readAgenda`, was in the window. Untrusted by construction: a screen shows whatever a page or a message put there, and an invitation's title is its sender's. |
 | `outil` | Some other tool ran: weather, an MCP server, a builtin. Trusted as far as that tool is. |
 | `inconnu` | Written before this spec, or by a path that could not establish a source. |
 

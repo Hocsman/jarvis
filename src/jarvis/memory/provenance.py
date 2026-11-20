@@ -28,10 +28,11 @@ SOURCE_TOOL = "outil"       # some other tool ran: weather, MCP, builtin
 SOURCE_UNKNOWN = "inconnu"  # written before this existed, or unestablishable
 SOURCES = (SOURCE_WEB, SOURCE_TOOL, SOURCE_UNKNOWN)
 
-# Tools whose output is text nobody vouches for: a page, or whatever a
-# screen was showing (a page, a message, a document). A fact resting on it
-# takes the weaker word.
-_WEB_TOOLS = frozenset({"webSearch", "fetchWebPage", "screenshot"})
+# Tools whose output is text nobody vouches for: a page, whatever a screen
+# was showing (a page, a message, a document), or his agenda, whose titles
+# are written by whoever sent the invitation. A fact resting on it takes
+# the weaker word.
+_WEB_TOOLS = frozenset({"webSearch", "fetchWebPage", "screenshot", "readAgenda"})
 
 # Tools that consult nothing: they write, they steer, or they read his own
 # records. Running one is not having looked anything up, and counting it
@@ -54,7 +55,7 @@ _NOT_A_LOOKUP = frozenset({
     "setReminder", "setRoutine", "cancelRoutine",
     "setGoal", "noteGoal", "closeGoal",
     # read his own records, which are not the world
-    "fetchMeals", "listGoals", "reviewLearnings",
+    "fetchMeals", "listGoals", "reviewLearnings", "readAgenda",
 })
 
 
@@ -92,6 +93,19 @@ def source_for_tools(tools_used: Optional[Sequence[str]]) -> str:
     if any(nom in _WEB_TOOLS for nom in tools_used):
         return SOURCE_WEB
     return SOURCE_TOOL
+
+
+def window_source(tools_used: Optional[Sequence[str]]) -> str:
+    """The word for the facts of a window where `tools_used` ran.
+
+    What looked something up decides it, so a reminder written beside a
+    weather lookup leaves `outil`. Text nobody vouches for makes it `web`
+    whether or not it counts as a lookup: his agenda is his own record,
+    and its titles are still written by whoever sent the invitation.
+    """
+    if tools_used and any(nom in _WEB_TOOLS for nom in tools_used):
+        return SOURCE_WEB
+    return source_for_tools(lookup_tools(tools_used) if tools_used else tools_used)
 
 
 def fact_line(fact: str, source: str, date_utc: Optional[str] = None) -> str:
