@@ -120,7 +120,10 @@ def test_a_weekday_said_on_that_weekday_is_the_next_one():
     assert agenda.resolve_days("friday", None, FRIDAY).first == date(2026, 11, 27)
 
 
-@pytest.mark.parametrize("day", ["jeudi", "next week", "2026-13-40", "26/11/2026", "soon", 26])
+@pytest.mark.parametrize("day", [
+    "jeudi", "next week", "2026-13-40", "26/11/2026", "soon", 26,
+    "9999-12-31", "0001-01-01",
+])
 def test_a_day_that_is_not_understood_is_refused_and_today_is_not_read_instead(day):
     with pytest.raises(BadDays, match="YYYY-MM-DD"):
         agenda.resolve_days(day, None, FRIDAY)
@@ -325,7 +328,31 @@ def test_an_event_that_crosses_midnight_is_clipped_to_each_day(an_agenda):
         "Friday 27 November 2026\n"
         "- all day: Traversée de nuit\n"
         "Saturday 28 November 2026\n"
-        "- 00:00 to 01:30, began the day before: Traversée de nuit\n"
+        "- 00:00 to 01:30, began on Thursday 26 November 2026: Traversée de nuit\n"
+    )
+
+
+def test_an_event_from_the_evening_before_says_it_began_the_day_before(an_agenda):
+    an_agenda["text"] = _calendar([
+        "UID:a@invented", "DTSTART:20261125T220000", "DTEND:20261126T013000",
+        "SUMMARY:Traversée de nuit",
+    ])
+
+    assert "\n- 00:00 to 01:30, began the day before: Traversée de nuit\n" in _run().reply_text
+
+
+def test_the_last_day_of_a_long_event_names_the_day_it_began(an_agenda):
+    an_agenda["text"] = _calendar([
+        "UID:a@invented", "DTSTART:20261124T090000", "DTEND:20261127T100000",
+        "SUMMARY:Stage de voile",
+    ])
+    inside = _inside_fence(_run({"date": "2026-11-26", "days": 2}).reply_text)
+
+    assert inside == (
+        "\nThursday 26 November 2026\n"
+        "- all day: Stage de voile\n"
+        "Friday 27 November 2026\n"
+        "- 00:00 to 10:00, began on Tuesday 24 November 2026: Stage de voile\n"
     )
 
 
@@ -464,6 +491,37 @@ def test_a_very_long_title_and_place_are_cut(an_agenda):
     assert "t" * (agenda.MAX_FIELD_CHARS + 1) not in line
     assert "p" * agenda.MAX_FIELD_CHARS + "…" in line
     assert "p" * (agenda.MAX_FIELD_CHARS + 1) not in line
+
+
+def test_a_title_of_a_megabyte_is_cut_in_time(an_agenda):
+    """An invitation's title is as long as its sender makes it."""
+    import time
+
+    an_agenda["text"] = _calendar([
+        "UID:a@invented", "DTSTART:20261126T140000", "DTEND:20261126T150000",
+        "SUMMARY:" + "abcdefgh" * 125_000, "LOCATION:" + "z" * 1_000_000,
+    ])
+    began = time.monotonic()
+    text = _run().reply_text
+
+    assert time.monotonic() - began < 2
+    assert "abcdefgh" in text
+
+
+@pytest.mark.parametrize("hidden", [
+    "‮", "⁦", "​", "﻿", "\U000e0041\U000e0042", "",
+])
+def test_characters_that_show_nothing_are_taken_out_of_a_title(an_agenda, hidden):
+    """A title can carry text the calendar app shows nobody but a model
+    reads: reversed runs, zero-width marks, the tag characters."""
+    an_agenda["text"] = _calendar([
+        "UID:a@invented", "DTSTART:20261126T140000", "DTEND:20261126T150000",
+        f"SUMMARY:Réu{hidden}nion", f"LOCATION:Salle{hidden} Cassiopée",
+    ])
+    text = _run().reply_text
+
+    assert "\n- 14:00 to 15:00: Réunion [place: Salle Cassiopée]\n" in text
+    assert hidden not in text
 
 
 def test_a_very_full_range_is_cut_and_says_so(an_agenda, monkeypatch):
@@ -699,3 +757,32 @@ def test_reading_his_agenda_is_not_looking_something_up_in_the_world():
 
     assert lookup_tools(["readAgenda"]) == []
     assert lookup_tools(["readAgenda", "getWeather"]) == ["getWeather"]
+
+
+def test_a_fact_from_a_window_where_the_agenda_was_read_takes_the_weaker_word():
+    """Its titles are written by whoever sent the invitation: what rests
+    on them is vouched for by nobody."""
+    from src.jarvis.memory.provenance import SOURCE_TOOL, SOURCE_WEB, window_source
+
+    assert window_source(["getWeather", "readAgenda"]) == SOURCE_WEB
+    assert window_source(["getWeather", "setReminder"]) == SOURCE_TOOL
+
+
+def test_its_result_reaches_the_reply_model_whole_and_never_shows_on_the_console(an_agenda, capsys):
+    """A summary of his day drops the events he did not ask about, and
+    its preview line would print their titles on the console."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from src.jarvis.reply.engine import _maybe_digest_tool_result
+
+    raw = _run().reply_text
+    cfg = SimpleNamespace(tool_result_digest_enabled=True,
+                          ollama_chat_model="gemma4:e2b", llm_chat_model="gemma4:e2b")
+    with patch("src.jarvis.reply.enrichment.call_llm_direct", return_value="Détartrage à 14h") as llm:
+        out = _maybe_digest_tool_result(cfg=cfg, query="q", tool_name="readAgenda",
+                                        raw_tool_result=raw * 3)
+        llm.assert_not_called()
+
+    assert out == raw * 3
+    assert "Détartrage" not in capsys.readouterr().out

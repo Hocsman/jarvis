@@ -11,6 +11,7 @@ exception's message, which quotes the address. See `read_agenda.spec.md`.
 from __future__ import annotations
 
 import os
+import threading
 import time
 from pathlib import Path
 from urllib.parse import urljoin
@@ -25,7 +26,9 @@ MAX_SOURCE_BYTES = 10 * 1024 * 1024
 _MAX_REDIRECTS = 3
 # For the whole fetch, redirects and body included: he is listening to
 # silence meanwhile. `timeout` on a request bounds the connection and each
-# read, never the fetch.
+# read, never the fetch: a server sending a byte now and then keeps every
+# read alive. So the fetch runs on a thread of its own and is waited for
+# this long, no longer.
 _FETCH_WALL_CLOCK_SEC = 15.0
 _CONNECT_TIMEOUT_SEC = 5.0
 _READ_TIMEOUT_SEC = 10.0
@@ -36,6 +39,9 @@ _HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; ical-reader)",
     "Accept": "text/calendar, text/plain;q=0.9, */*;q=0.1",
 }
+
+
+NOT_CONFIGURED = "No agenda is configured: the `agenda_source` setting is empty."
 
 
 class AgendaUnreadable(Exception):
@@ -65,9 +71,7 @@ def read_source(setting) -> str:
     named = str(setting or "").strip()
     kind = kind_of(named)
     if not kind:
-        raise AgendaUnreadable(
-            "No agenda is configured: the `agenda_source` setting is empty."
-        )
+        raise AgendaUnreadable(NOT_CONFIGURED)
     raw = _read_file(named) if kind == "file" else _fetch(named)
     # UTF-8 is what the format asks for. A byte that is not UTF-8 costs
     # one character of one title, not the whole reading.
@@ -110,11 +114,34 @@ def _read_file(named: str) -> bytes:
 
 
 def _fetch(address: str) -> bytes:
-    """The body the address answers with, over HTTPS and nothing else.
+    """The body the address answers with, over HTTPS and nothing else,
+    within `_FETCH_WALL_CLOCK_SEC`.
 
-    Redirects are walked by hand so each hop is checked: a redirect to
-    plain HTTP would send the calendar across the network readable.
+    The thread left behind by a fetch given up ends at its next read: it
+    looks at the same clock between two reads, and holds nothing anyone
+    waits for.
     """
+    outcome: dict = {}
+
+    def fetch() -> None:
+        try:
+            outcome["body"] = _fetch_on_this_thread(address)
+        except BaseException as e:  # handed to the caller, raised there
+            outcome["failure"] = e
+
+    worker = threading.Thread(target=fetch, name="agenda-fetch", daemon=True)
+    worker.start()
+    worker.join(_FETCH_WALL_CLOCK_SEC)
+    if worker.is_alive():
+        raise _too_long()
+    if "failure" in outcome:
+        raise outcome["failure"]
+    return outcome["body"]
+
+
+def _fetch_on_this_thread(address: str) -> bytes:
+    """Redirects are walked by hand so each hop is checked: a redirect to
+    plain HTTP would send the calendar across the network readable."""
     url = address
     if url.lower().startswith("webcal://"):
         url = "https://" + url[len("webcal://"):]
@@ -161,7 +188,7 @@ def _fetch(address: str) -> bytes:
                 debug_log(f"agenda: status {status}", "agenda")
                 raise AgendaUnreadable(f"The agenda address answered with status {status}.")
             body = bytearray()
-            for chunk in answer.iter_content(chunk_size=65536):
+            for chunk in answer.iter_content(chunk_size=8192):
                 if _clock() >= give_up_at:
                     raise _too_long()
                 body.extend(chunk)

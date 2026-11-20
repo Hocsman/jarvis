@@ -980,6 +980,10 @@ _DIGEST_SKIP_TOOLS = frozenset({
     # repeat word for word, and Claude Code's report quoted as its words.
     "claudeCode",
     "stopClaudeCode",
+    # Written by code and bounded, one line per event: a summary of his day
+    # drops the events he did not name, and the digest's console preview
+    # would print his events' titles.
+    "readAgenda",
 })
 
 

@@ -10,6 +10,7 @@ See `read_agenda.spec.md`.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, tzinfo
 from typing import Any, Dict, List, Optional, Tuple
@@ -20,7 +21,7 @@ from ....utils.time_context import machine_zone, spell_day
 from ...base import Tool, ToolContext
 from ...types import ToolExecutionResult
 from . import ics
-from .source import AgendaUnreadable, kind_of, read_source
+from .source import NOT_CONFIGURED, AgendaUnreadable, kind_of, read_source
 
 # A month at most: past that the answer to "what do I have" is a wall.
 MAX_DAYS = 31
@@ -29,6 +30,10 @@ MAX_DAYS = 31
 MAX_AGENDA_CHARS = 6_000
 # For a title or a place, each on its one line.
 MAX_FIELD_CHARS = 120
+# How much of a title or a place is looked at, before anything is taken
+# out of it: enough for a link in front of the words, and a title of a
+# megabyte costs no more than this.
+_FIELD_READ_CHARS = 1_000
 
 _WEEKDAYS = (
     "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
@@ -44,17 +49,26 @@ _WHOLE_NUMBER_RE = re.compile(r"^[+-]?\d+$")
 # or a host followed by a path with no scheme written (`host.example/j/1`).
 # The last form also takes a few things that are no link (two words joined
 # by a full stop and a slash); a word lost from a title costs less than a
-# link that lets someone into the meeting.
+# link that lets someone into the meeting. A scheme is looked for only
+# where one can begin, never inside a word: tried at every letter of a
+# long word, the search would cost the square of its length.
 _ADDRESS_RE = re.compile(
-    r"(?:[a-z][a-z0-9+.\-]*://|www\.)\S*"
+    r"(?:(?<![a-z0-9+.\-])[a-z][a-z0-9+.\-]*://|www\.)\S*"
     r"|(?<![\w.\-])(?:[a-z0-9\-]+\.)+[a-z]{2,}/\S*",
     re.IGNORECASE,
 )
 # Whitespace of every kind and the control characters: what could break a
 # line or hide in one.
 _BREAKS_RE = re.compile(r"[\s\x00-\x1f\x7f-\x9f]+")
+# Characters that show nothing of themselves: formatting (a reversed run,
+# a zero-width mark, the tag characters), private use and surrogates. In a
+# title they can carry words his calendar shows nobody and a model reads.
+_HIDDEN_CATEGORIES = frozenset({"Cf", "Co", "Cs"})
 
 _ONE_DAY = timedelta(days=1)
+# How far from the first and the last day of the calendar a day asked
+# about must be.
+_EDGE = timedelta(days=3)
 
 _DAY_HELP = (
     "The day was not understood. Give `day` as `today`, `tomorrow`, `yesterday` "
@@ -82,7 +96,8 @@ def resolve_days(day: Any, days: Any, today: date) -> Days:
     `day` is a word of the tool's own small vocabulary (`DAY_WORDS`) or a
     date; no sentence of the user's is read here. A weekday is the first such day
     after today, never today itself. Anything not understood raises: read
-    as today, it would answer another question than the one asked.
+    as today, it would answer another question than the one asked. So does
+    a date at the very end of the calendar, which no day after it follows.
     """
     if day is None:
         word = ""
@@ -124,11 +139,11 @@ def resolve_days(day: Any, days: Any, today: date) -> Days:
 
     capped = count > MAX_DAYS
     count = max(1, min(count, MAX_DAYS))
-    try:
-        last = first + timedelta(days=count - 1)
-    except OverflowError:
-        raise BadDays(_DAY_HELP) from None
-    return Days(first, last, capped)
+    # The reading looks past either end of the days asked about, by a day
+    # and by a clock's offset.
+    if first - date.min < _EDGE or date.max - first < _EDGE + timedelta(days=count):
+        raise BadDays(_DAY_HELP)
+    return Days(first, first + timedelta(days=count - 1), capped)
 
 
 def _zone() -> Tuple[tzinfo, str]:
@@ -150,15 +165,20 @@ def _shown(text: str) -> str:
 
     A place is often a meeting link, and the link is what lets someone
     join. A line break would let an invitation write a day heading or an
-    event of its own below its title.
+    event of its own below its title, and a character that shows nothing
+    would let it say what his calendar does not show him.
     """
+    text = "".join(
+        ch for ch in text[:_FIELD_READ_CHARS]
+        if unicodedata.category(ch) not in _HIDDEN_CATEGORIES
+    )
     text = _BREAKS_RE.sub(" ", _ADDRESS_RE.sub(" ", text)).strip()
     if len(text) > MAX_FIELD_CHARS:
         text = text[:MAX_FIELD_CHARS].rstrip() + "…"
     return text
 
 
-def _clock(moment: datetime) -> str:
+def _hh_mm(moment: datetime) -> str:
     return f"{moment.hour:02d}:{moment.minute:02d}"
 
 
@@ -169,7 +189,7 @@ def _day_lines(day: date, zone: tzinfo, occurrences: List[ics.Occurrence]) -> Li
     closes = datetime.combine(day + _ONE_DAY, time.min, tzinfo=zone)
     rows: List[Tuple[int, datetime, str]] = []
     for event in occurrences:
-        if not (event.start < closes and (event.end > opens or event.start >= opens)):
+        if not event.touches(opens, closes):
             continue
         began_before = event.start < opens
         goes_on = event.end > closes
@@ -177,13 +197,17 @@ def _day_lines(day: date, zone: tzinfo, occurrences: List[ics.Occurrence]) -> Li
         if whole_day:
             when = "all day"
         else:
-            begins = "00:00" if began_before else _clock(event.start)
-            ends = "24:00" if event.end >= closes else _clock(event.end)
+            begins = "00:00" if began_before else _hh_mm(event.start)
+            ends = "24:00" if event.end >= closes else _hh_mm(event.end)
             when = begins if event.end == event.start else f"{begins} to {ends}"
             if goes_on:
                 when += ", goes on the next day"
             elif began_before:
-                when += ", began the day before"
+                began = event.start.astimezone(zone).date()
+                when += (
+                    ", began the day before" if began == day - _ONE_DAY
+                    else f", began on {spell_day(began)}"
+                )
         line = f"- {when}: {_shown(event.title) or '(no title)'}"
         place = _shown(event.place)
         if place:
@@ -318,10 +342,7 @@ class ReadAgendaTool(Tool):
         setting = str(getattr(context.cfg, "agenda_source", "") or "").strip()
         if not kind_of(setting):
             debug_log("readAgenda: no source configured", "agenda")
-            return ToolExecutionResult(
-                success=False,
-                reply_text="No agenda is configured: the `agenda_source` setting is empty.",
-            )
+            return ToolExecutionResult(success=False, reply_text=NOT_CONFIGURED)
 
         zone, zone_name = _zone()
         try:

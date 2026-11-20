@@ -18,7 +18,7 @@ geoip2==4.8.0
 tzdata==2026.1; sys_platform == "win32"
 # Expands the recurrence rules of calendar events (readAgenda) and reads the
 # time zones a calendar file defines itself.
-python-dateutil>=2.9.0
+python-dateutil==2.9.0.post0
 miniupnpc==2.2.8
 pytest==8.3.2
 pytest-repeat==0.9.3

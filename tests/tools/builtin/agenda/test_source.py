@@ -248,6 +248,39 @@ def test_a_fetch_past_its_clock_is_given_up(web, monkeypatch):
         source.read_source(ADDRESS)
 
 
+@pytest.mark.parametrize("where", ["the request", "the body"])
+def test_a_server_that_answers_drop_by_drop_cannot_hold_the_fetch(where, monkeypatch):
+    """A socket's timeout counts from the last byte received: a server
+    sending one byte at a time, never quite slowly enough to trip it,
+    would hold the turn for ever. The limit is on the whole fetch."""
+    import threading
+    import time
+
+    monkeypatch.setattr(source, "_FETCH_WALL_CLOCK_SEC", 0.3)
+    released = threading.Event()
+
+    class _Trickle(_Answer):
+        def iter_content(self, chunk_size=None):
+            # One read that a byte now and then keeps from timing out.
+            released.wait(5)
+            yield b" "
+
+    def get(url, **kwargs):
+        if where == "the request":
+            released.wait(5)
+            raise requests.Timeout("never answered")
+        return _Trickle()
+
+    monkeypatch.setattr(source.requests, "get", get)
+    began = time.monotonic()
+    try:
+        with pytest.raises(AgendaUnreadable, match="too long"):
+            source.read_source(ADDRESS)
+        assert time.monotonic() - began < 2
+    finally:
+        released.set()
+
+
 def test_every_answer_is_closed(web):
     _asked, script = web
     elsewhere = "https://autre.invented.example/final.ics"
@@ -262,7 +295,7 @@ def test_every_answer_is_closed(web):
 # ── The address is a secret ───────────────────────────────────────────
 
 
-def _failures(script):
+def _failures():
     """Each way a fetch can fail, as (what the address answers, what the
     redirect target answers)."""
     quoting = requests.ConnectionError(f"HTTPSConnectionPool: Max retries exceeded with url: {ADDRESS}")
@@ -281,7 +314,7 @@ def _failures(script):
 ])
 def test_no_failure_and_no_log_line_ever_holds_the_address(kind, web, logged):
     _asked, script = web
-    script[ADDRESS] = _failures(script)[kind]
+    script[ADDRESS] = _failures()[kind]
 
     with pytest.raises(AgendaUnreadable) as failure:
         source.read_source(ADDRESS)

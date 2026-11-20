@@ -36,6 +36,34 @@ MAX_OCCURRENCES = 50_000
 # such rules costs this long plus one rule, not their sum.
 _READ_WALL_CLOCK_SEC = 10.0
 
+# How deep components are followed. A calendar nests three deep (the
+# calendar, an event, its alarm); a component opened past this is not
+# followed, so a text opening thousands and closing none costs no more
+# than one that closes them.
+_MAX_DEPTH = 16
+
+# Past this a `TZID` names no zone: the longest Windows display name is
+# under a hundred characters.
+_MAX_TZID_CHARS = 256
+# An IANA name has three pieces at most (`America/Argentina/Salta`): the
+# tail of a path-prefixed `TZID` is tried at those lengths only.
+_MAX_ZONE_NAME_PIECES = 3
+
+# A zone the file defines is a recurrence too, walked from its own start
+# on every conversion of a time. A real zone changes its clock a few times
+# a year, by a yearly rule on one month and one weekday (or a week of days
+# of the month), and carries a few hundred dated changes at most. A zone
+# outside that is not read: the events in it are counted, never placed.
+_ZONE_RULE_KEYS = frozenset({
+    "FREQ", "INTERVAL", "UNTIL", "COUNT", "BYMONTH", "BYDAY", "BYMONTHDAY", "WKST",
+})
+_MAX_ZONE_PARTS = 400
+_MAX_ZONE_DATES = 1_000
+
+# How far a single event's wall clock may sit from the days asked about
+# and still be looked at: no zone moves a clock by two days.
+_FAR = timedelta(days=2)
+
 _LINE_BREAK_RE = re.compile(r"\r\n|\n|\r")
 _DATE_RE = re.compile(r"^(\d{4})(\d{2})(\d{2})$")
 _DATETIME_RE = re.compile(r"^(\d{4})(\d{2})(\d{2})[Tt](\d{2})(\d{2})(\d{2})([Zz]?)$")
@@ -65,6 +93,13 @@ class _Unreadable(Exception):
     shown, and the rest of the calendar is still read."""
 
 
+# What stops one event, and that event alone: what the reader says it
+# cannot place, and a date or a length past what a clock can hold (the
+# year 9999, a duration of a billion days, a number of five thousand
+# digits), which Python reports as an overflow or a bad value.
+_UNPLACED = (_Unreadable, ArithmeticError, ValueError)
+
+
 @dataclass(frozen=True)
 class Occurrence:
     """One event on the days asked about: `start` and `end` in the zone
@@ -75,6 +110,11 @@ class Occurrence:
     all_day: bool
     title: str
     place: str
+
+    def touches(self, opens: datetime, closes: datetime) -> bool:
+        """Whether it falls in `[opens, closes)`: it overlaps that span, or
+        it takes no time and happens inside it."""
+        return self.start < closes and (self.end > opens or self.start >= opens)
 
 
 @dataclass
@@ -99,11 +139,18 @@ def _unfolded(text: str) -> List[str]:
     """The content lines, each long one put back together (a line that
     opens with a space or a tab continues the one before)."""
     lines: List[str] = []
+    # The pieces of the line being put back together, joined once it is
+    # whole: adding each to a string would copy it again at every piece.
+    pieces: List[str] = []
     for raw in _LINE_BREAK_RE.split(text):
-        if raw[:1] in (" ", "\t") and lines:
-            lines[-1] += raw[1:]
+        if raw[:1] in (" ", "\t") and pieces:
+            pieces.append(raw[1:])
         else:
-            lines.append(raw)
+            if pieces:
+                lines.append("".join(pieces))
+            pieces = [raw]
+    if pieces:
+        lines.append("".join(pieces))
     return lines
 
 
@@ -168,7 +215,8 @@ def _components(lines: List[str]) -> Tuple[List[List[_Line]], List[str], bool]:
     defines, and whether the text holds a calendar at all.
 
     What is nested inside an event (an alarm has a `SUMMARY` and a
-    `DESCRIPTION` of its own) is not read as the event's.
+    `DESCRIPTION` of its own) is not read as the event's. An event whose
+    alarm is never closed still ends where the event does.
     """
     events: List[List[_Line]] = []
     zone_lines: List[str] = []
@@ -181,6 +229,8 @@ def _components(lines: List[str]) -> Tuple[List[List[_Line]], List[str], bool]:
         if line is None:
             continue
         if line.name == "BEGIN":
+            if len(stack) >= _MAX_DEPTH:
+                continue
             kind = line.value.strip().upper()
             stack.append(kind)
             if kind == "VCALENDAR":
@@ -194,7 +244,7 @@ def _components(lines: List[str]) -> Tuple[List[List[_Line]], List[str], bool]:
             kind = line.value.strip().upper()
             if "VTIMEZONE" in stack:
                 zone_lines.append(raw)
-            if kind == "VEVENT" and current is not None and stack and stack[-1] == "VEVENT":
+            if kind == "VEVENT" and current is not None and "VEVENT" in stack:
                 events.append(current)
                 current = None
             if kind in stack:
@@ -227,12 +277,18 @@ class _Zones:
         return self._known[tzid]
 
     def _resolve(self, tzid: str) -> tzinfo:
+        tzid = tzid.strip()
+        if len(tzid) > _MAX_TZID_CHARS:
+            raise _Unreadable(f"a TZID of {len(tzid)} characters")
+        candidates = [tzid]
         # Some writers prefix the IANA name with a path of their own
         # (`/example.org/20260101/Europe/Paris`): the name is its tail.
-        pieces = [p for p in tzid.strip().split("/") if p]
-        candidates = [tzid.strip()]
-        if tzid.strip().startswith("/"):
-            candidates += ["/".join(pieces[at:]) for at in range(1, len(pieces))]
+        if tzid.startswith("/"):
+            pieces = [p for p in tzid.split("/") if p]
+            candidates += [
+                "/".join(pieces[-count:])
+                for count in range(min(_MAX_ZONE_NAME_PIECES, len(pieces)), 0, -1)
+            ]
         for candidate in candidates:
             try:
                 return ZoneInfo(candidate)
@@ -245,8 +301,12 @@ class _Zones:
 
     def _from_the_file(self, tzid: str) -> Optional[tzinfo]:
         if self._of_the_file is None:
+            kept = [
+                line for block in _zone_blocks(self._zone_lines) if _is_a_real_zone(block)
+                for line in block
+            ]
             try:
-                self._of_the_file = dateutil_tz.tzical(io.StringIO("\n".join(self._zone_lines)))
+                self._of_the_file = dateutil_tz.tzical(io.StringIO("\n".join(kept))) if kept else False
             except Exception:
                 self._of_the_file = False
         if not self._of_the_file:
@@ -255,6 +315,61 @@ class _Zones:
             return self._of_the_file.get(tzid)
         except Exception:
             return None
+
+
+def _zone_blocks(zone_lines: List[str]) -> List[List[str]]:
+    """The file's `VTIMEZONE` components, each with its raw lines."""
+    blocks: List[List[str]] = []
+    current: Optional[List[str]] = None
+    for raw in zone_lines:
+        line = _content_line(raw)
+        if line is None:
+            continue
+        if line.name == "BEGIN" and line.value.strip().upper() == "VTIMEZONE":
+            current = [raw]
+        elif current is not None:
+            current.append(raw)
+            if line.name == "END" and line.value.strip().upper() == "VTIMEZONE":
+                blocks.append(current)
+                current = None
+    return blocks
+
+
+def _is_a_real_zone(block: List[str]) -> bool:
+    """Whether a `VTIMEZONE` changes its clock the way a real zone does
+    (`_ZONE_RULE_KEYS`): one that changes it every second would cost
+    minutes on each time converted in it."""
+    parts = 0
+    dates = 0
+    for raw in block:
+        line = _content_line(raw)
+        if line is None:
+            continue
+        if line.name == "BEGIN":
+            parts += 1
+        elif line.name == "RDATE":
+            dates += len(line.value.split(","))
+        elif line.name == "RRULE" and not _is_a_zone_rule(line.value):
+            return False
+    return parts <= _MAX_ZONE_PARTS and dates <= _MAX_ZONE_DATES
+
+
+def _is_a_zone_rule(value: str) -> bool:
+    found: Dict[str, List[str]] = {}
+    for part in value.split(";"):
+        if not part.strip():
+            continue
+        key, _, values = part.partition("=")
+        key = key.strip().upper()
+        if key not in _ZONE_RULE_KEYS:
+            return False
+        found[key] = [v for v in values.split(",") if v.strip()]
+    return (
+        [v.strip().upper() for v in found.get("FREQ", [])] == ["YEARLY"]
+        and len(found.get("BYMONTH", [])) <= 1
+        and len(found.get("BYDAY", [])) <= 1
+        and len(found.get("BYMONTHDAY", [])) <= 7
+    )
 
 
 # ── When ──────────────────────────────────────────────────────────────
@@ -314,10 +429,13 @@ def _duration(value: str) -> timedelta:
     if not match:
         raise _Unreadable("a duration that does not parse")
     sign, weeks, days, hours, minutes, seconds = match.groups()
-    length = timedelta(
-        weeks=int(weeks or 0), days=int(days or 0), hours=int(hours or 0),
-        minutes=int(minutes or 0), seconds=int(seconds or 0),
-    )
+    try:
+        length = timedelta(
+            weeks=int(weeks or 0), days=int(days or 0), hours=int(hours or 0),
+            minutes=int(minutes or 0), seconds=int(seconds or 0),
+        )
+    except (ArithmeticError, ValueError):
+        raise _Unreadable("a duration no date can hold") from None
     return -length if sign == "-" else length
 
 
@@ -328,15 +446,20 @@ def _duration(value: str) -> timedelta:
 class _Event:
     uid: str
     start: _When
-    duration: timedelta
+    # `DTEND` as written, or None, and then `length` is the event's length
+    # (its `DURATION`, or the default).
+    end: Optional[_When]
+    length: timedelta
     title: str
     place: str
     cancelled: bool
     rule: Optional[str] = None
     added: List[_When] = field(default_factory=list)
     excluded: List[_When] = field(default_factory=list)
-    # Set on an event that replaces one occurrence of a recurring one.
+    # Set on an event that replaces one occurrence of a recurring one, with
+    # the name of that occurrence (`_key`) beside its series' `uid`.
     replaces: Optional[_When] = None
+    replaced_key: Optional[Tuple[str, Tuple[str, datetime]]] = None
 
 
 def _event(lines: List[_Line], zones: _Zones) -> _Event:
@@ -361,22 +484,14 @@ def _event(lines: List[_Line], zones: _Zones) -> _Event:
         raise _Unreadable("no start")
     start = _when(first["DTSTART"].value, first["DTSTART"].params, zones)
 
+    end = None
     if "DTEND" in first:
         end = _when(first["DTEND"].value, first["DTEND"].params, zones)
-        if end.is_date != start.is_date:
-            length = _ONE_DAY if start.is_date else timedelta(0)
-        elif start.is_date:
-            length = end.naive - start.naive
-        else:
-            length = end.instant() - start.instant()
+        length = timedelta(0)
     elif "DURATION" in first:
         length = _duration(first["DURATION"].value)
     else:
         length = _ONE_DAY if start.is_date else timedelta(0)
-    if length < timedelta(0):
-        length = timedelta(0)
-    if start.is_date and length < _ONE_DAY:
-        length = _ONE_DAY
 
     replaces = None
     if "RECURRENCE-ID" in first:
@@ -385,7 +500,8 @@ def _event(lines: List[_Line], zones: _Zones) -> _Event:
     return _Event(
         uid=first["UID"].value.strip() if "UID" in first else "",
         start=start,
-        duration=length,
+        end=end,
+        length=length,
         title=_unescaped(first["SUMMARY"].value) if "SUMMARY" in first else "",
         place=_unescaped(first["LOCATION"].value) if "LOCATION" in first else "",
         cancelled=(
@@ -396,6 +512,39 @@ def _event(lines: List[_Line], zones: _Zones) -> _Event:
         excluded=excluded,
         replaces=replaces,
     )
+
+
+def _length(event: _Event, exact: bool) -> timedelta:
+    """How long the event lasts. Exact, from `DTEND`, it takes both ends'
+    zones, which for a zone the file defines is a walk of its rules; not
+    exact, it is the difference of the two wall clocks, which is all
+    `_far_from` needs."""
+    start, end = event.start, event.end
+    if end is None:
+        length = event.length
+    elif end.is_date != start.is_date:
+        length = _ONE_DAY if start.is_date else timedelta(0)
+    elif start.is_date or not exact:
+        length = end.naive - start.naive
+    else:
+        length = end.instant() - start.instant()
+    if length < timedelta(0):
+        length = timedelta(0)
+    if start.is_date and length < _ONE_DAY:
+        length = _ONE_DAY
+    return length
+
+
+def _far_from(event: _Event, opens: datetime, closes: datetime) -> bool:
+    """Whether an event that happens once sits days away from `[opens,
+    closes)` on the wall clock, wherever its zone is: then it is left
+    without converting a time, which is what costs in a zone the file
+    defines."""
+    if event.rule or event.added:
+        return False
+    begins = event.start.naive
+    ends = begins + _length(event, exact=False)
+    return ends < opens - _FAR or begins >= closes + _FAR
 
 
 def _key(when: _When) -> Tuple[str, datetime]:
@@ -432,19 +581,39 @@ def _until(value: str, event: _Event, zones: _Zones) -> datetime:
 
 def _rule_starts(event: _Event, zones: _Zones, not_before: datetime, before: datetime) -> Iterator[datetime]:
     """The starts the rule gives in `[not_before, before)`, on the event's
-    own wall clock, so an hour stays the same hour across a clock change."""
+    own wall clock, so an hour stays the same hour across a clock change.
+
+    A rule that ended before those days is not walked. One that steps by
+    days or weeks, with no count, is walked from its last step before
+    them: the same days, without the years in between."""
     parts: List[str] = []
+    named: Dict[str, str] = {}
+    until: Optional[datetime] = None
     for part in event.rule.split(";"):
         key, _, value = part.partition("=")
         if not part.strip():
             continue
-        if key.strip().upper() == "UNTIL":
-            parts.append("UNTIL=" + _until(value, event, zones).strftime("%Y%m%dT%H%M%S"))
+        key = key.strip().upper()
+        named[key] = value.strip().upper()
+        if key == "UNTIL":
+            until = _until(value, event, zones)
+            parts.append("UNTIL=" + until.strftime("%Y%m%dT%H%M%S"))
         else:
             parts.append(part.strip())
+    if until is not None and until < not_before:
+        return
+    first = event.start.naive
+    if named.get("FREQ") in ("DAILY", "WEEKLY") and "COUNT" not in named and "BYSETPOS" not in named:
+        try:
+            interval = max(1, int(named.get("INTERVAL") or 1))
+        except ValueError:
+            raise _Unreadable("a rule that cannot be read") from None
+        step = timedelta(days=interval * (7 if named["FREQ"] == "WEEKLY" else 1))
+        if first + step < not_before:
+            first += step * ((not_before - first) // step)
     try:
         rule = dateutil_rrule.rrulestr(
-            "RRULE:" + ";".join(parts), dtstart=event.start.naive, cache=False,
+            "RRULE:" + ";".join(parts), dtstart=first, cache=False,
         )
         walked = 0
         for start in rule:
@@ -467,6 +636,7 @@ def _occurrences(
 ) -> List[Occurrence]:
     """The event's occurrences that touch `[opens, closes)`."""
     local = zones.local
+    duration = _length(event, exact=True)
     if event.start.is_date:
         frame_opens = opens.replace(tzinfo=None)
         frame_closes = closes.replace(tzinfo=None)
@@ -475,7 +645,7 @@ def _occurrences(
         frame_closes = closes.astimezone(event.start.zone).replace(tzinfo=None)
     # A day of margin on each side: the exact test is made below, on
     # instants, and a clock change must not push a start out of the walk.
-    not_before = frame_opens - event.duration - _ONE_DAY
+    not_before = frame_opens - duration - _ONE_DAY
     before = frame_closes + _ONE_DAY
 
     starts: Set[datetime] = {event.start.naive}
@@ -498,16 +668,17 @@ def _occurrences(
     for start in starts:
         if event.start.is_date:
             begins = start.replace(tzinfo=local)
-            ends = (start + event.duration).replace(tzinfo=local)
+            ends = (start + duration).replace(tzinfo=local)
         else:
             instant = start.replace(tzinfo=event.start.zone).astimezone(timezone.utc)
             begins = instant.astimezone(local)
-            ends = (instant + event.duration).astimezone(local)
-        if begins < closes and (ends > opens or begins >= opens):
-            found.append(Occurrence(
-                start=begins, end=ends, all_day=event.start.is_date,
-                title=event.title, place=event.place,
-            ))
+            ends = (instant + duration).astimezone(local)
+        occurrence = Occurrence(
+            start=begins, end=ends, all_day=event.start.is_date,
+            title=event.title, place=event.place,
+        )
+        if occurrence.touches(opens, closes):
+            found.append(occurrence)
     return found
 
 
@@ -517,6 +688,10 @@ def read_events(text: str, first: date, last: date, zone: tzinfo) -> Reading:
 
     Raises `NotACalendar` when the text holds no calendar: an empty list
     would read as a free day. Raises `TooLong` past the time limit.
+
+    An event that cannot be placed is counted in `unreadable`, whatever
+    stops it: a date past the last year the clock knows is somebody
+    else's text too, and costs that event alone.
     """
     give_up_at = _clock() + _READ_WALL_CLOCK_SEC
     event_lines, zone_lines, is_calendar = _components(_unfolded(text))
@@ -527,17 +702,20 @@ def read_events(text: str, first: date, last: date, zone: tzinfo) -> Reading:
     unreadable = 0
     events: List[_Event] = []
     for lines in event_lines:
+        if _clock() >= give_up_at:
+            raise TooLong("the reading passed its time limit")
         try:
-            events.append(_event(lines, zones))
-        except _Unreadable:
+            event = _event(lines, zones)
+            if event.replaces is not None and event.uid:
+                event.replaced_key = (event.uid, _key(event.replaces))
+            events.append(event)
+        except _UNPLACED:
             unreadable += 1
 
-    replaced = {
-        (event.uid, _key(event.replaces))
-        for event in events if event.replaces is not None and event.uid
-    }
+    replaced = {event.replaced_key for event in events if event.replaced_key}
     opens = datetime.combine(first, time.min, tzinfo=zone)
     closes = datetime.combine(last + _ONE_DAY, time.min, tzinfo=zone)
+    wall_opens, wall_closes = opens.replace(tzinfo=None), closes.replace(tzinfo=None)
 
     found: List[Occurrence] = []
     for event in events:
@@ -546,8 +724,10 @@ def read_events(text: str, first: date, last: date, zone: tzinfo) -> Reading:
         if _clock() >= give_up_at:
             raise TooLong("the reading passed its time limit")
         try:
+            if _far_from(event, wall_opens, wall_closes):
+                continue
             found.extend(_occurrences(event, zones, opens, closes, replaced))
-        except _Unreadable:
+        except _UNPLACED:
             unreadable += 1
     found.sort(key=lambda o: (o.start, 0 if o.all_day else 1, o.title, o.place))
     return Reading(found, unreadable)

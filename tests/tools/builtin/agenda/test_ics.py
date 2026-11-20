@@ -435,7 +435,7 @@ def test_a_rule_that_never_falls_on_a_day_ends_and_yields_nothing():
     and comes back empty-handed."""
     text = _calendar(
         ["UID:x@invented", "DTSTART:20260101T090000",
-         "RRULE:FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30", "SUMMARY:Jamais"],
+         "RRULE:FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=30", "SUMMARY:Jamais"],
         GOOD,
     )
     reading = _read(text)
@@ -470,3 +470,193 @@ def test_a_daily_event_begun_decades_ago_is_still_read():
 
     assert reading.unreadable == 0
     assert [e.start for e in reading.occurrences] == [_at(7, 30)]
+
+
+@pytest.mark.parametrize("every,since", [
+    ("DAILY;INTERVAL=3", "20010307T081500"),
+    ("WEEKLY;INTERVAL=2;BYDAY=TH,FR", "19991104T081500"),
+    ("DAILY;BYDAY=MO,TH", "19950102T081500"),
+])
+def test_a_series_begun_long_ago_falls_on_the_same_days_as_it_always_did(every, since):
+    """However the walk to the days asked about is shortened, each day of
+    a month around them is the one the rule names, counted from its
+    start."""
+    from dateutil import rrule as dateutil_rrule
+
+    start = datetime.strptime(since, "%Y%m%dT%H%M%S")
+    text = _calendar([
+        "UID:a@invented", f"DTSTART;TZID=Europe/Paris:{since}", "DURATION:PT30M",
+        "SUMMARY:Arrosage des semis", f"RRULE:FREQ={every}",
+    ])
+    first, last = date(2026, 11, 2), date(2026, 12, 2)
+    expected = [
+        moment.replace(tzinfo=PARIS)
+        for moment in dateutil_rrule.rrulestr(f"RRULE:FREQ={every}", dtstart=start)
+        .between(datetime(2026, 11, 2), datetime(2026, 12, 3), inc=True)
+    ]
+
+    reading = ics.read_events(text, first, last, PARIS)
+
+    assert [e.start for e in reading.occurrences] == expected
+    assert expected
+
+
+# ── What somebody else's calendar text can do ─────────────────────────
+#
+# An invitation lands in the calendar unasked, and a subscribed feed is
+# written by whoever serves it. Neither may cost the rest of the agenda,
+# nor hold the call.
+
+
+@pytest.mark.parametrize("hostile", [
+    pytest.param(["UID:x@invented", "DTSTART:99991231T230000Z", "DURATION:PT2H",
+                  "SUMMARY:Fin des temps"], id="an end past the last year"),
+    pytest.param(["UID:x@invented", "DTSTART:20261126T090000", "DURATION:P999999999D",
+                  "SUMMARY:Interminable"], id="a duration past any date"),
+    pytest.param(["UID:x@invented", "DTSTART:20261126T090000", "DURATION:P" + "9" * 5000 + "D",
+                  "SUMMARY:Chiffres"], id="a duration of five thousand digits"),
+    pytest.param(["UID:x@invented", "DTSTART;VALUE=DATE:00010101",
+                  "DTEND;VALUE=DATE:99991231", "SUMMARY:Toujours"], id="all days there are"),
+    pytest.param(["UID:x@invented", "DTSTART:00010101T000000", "RRULE:FREQ=YEARLY",
+                  "SUMMARY:An un"], id="a series from the year one"),
+    pytest.param(["UID:x@invented", "DTSTART:20261126T090000", "RDATE:99991231T235959Z",
+                  "SUMMARY:Rendez-vous lointain"], id="an added date at the end of time"),
+    pytest.param(["UID:x@invented", "DTSTART:20261126T090000",
+                  "RECURRENCE-ID:00010101T000000", "SUMMARY:Déplacé"], id="a moved occurrence of the year one"),
+])
+def test_an_event_past_the_ends_of_the_calendar_costs_only_itself(hostile):
+    reading = _read(_calendar(hostile, GOOD))
+
+    assert "Lisible" in [e.title for e in reading.occurrences]
+
+
+def _zone_with_rule(tzid, rule):
+    return [
+        "BEGIN:VTIMEZONE", f"TZID:{tzid}",
+        "BEGIN:STANDARD", "DTSTART:20260301T000000", f"RRULE:{rule}",
+        "TZOFFSETFROM:+0200", "TZOFFSETTO:+0100", "END:STANDARD",
+        "BEGIN:DAYLIGHT", "DTSTART:20260301T000001", f"RRULE:{rule}",
+        "TZOFFSETFROM:+0100", "TZOFFSETTO:+0200", "END:DAYLIGHT",
+        "END:VTIMEZONE",
+    ]
+
+
+def test_a_zone_that_changes_its_clock_every_second_is_not_read():
+    """A zone of the file's own is a recurrence too, walked from its
+    start on every conversion: one that changes every second would hold
+    the call on its first event. No real zone changes more than a few
+    times a year."""
+    text = _calendar(
+        ["UID:x@invented", 'DTSTART;TZID="Heure folle":20261126T090000',
+         'DTEND;TZID="Heure folle":20261126T100000', "SUMMARY:Piège"],
+        GOOD,
+        before=_zone_with_rule("Heure folle", "FREQ=SECONDLY"),
+    )
+    began = time.monotonic()
+    reading = _read(text)
+
+    assert time.monotonic() - began < 2
+    assert reading.unreadable == 1
+    assert [e.title for e in reading.occurrences] == ["Lisible"]
+
+
+# How Outlook writes the zone of Paris: rules from the year 1601.
+W_EUROPE = [
+    "BEGIN:VTIMEZONE", "TZID:W. Europe Standard Time",
+    "BEGIN:STANDARD", "DTSTART:16010101T030000", "TZOFFSETFROM:+0200", "TZOFFSETTO:+0100",
+    "RRULE:FREQ=YEARLY;INTERVAL=1;BYDAY=-1SU;BYMONTH=10", "END:STANDARD",
+    "BEGIN:DAYLIGHT", "DTSTART:16010101T020000", "TZOFFSETFROM:+0100", "TZOFFSETTO:+0200",
+    "RRULE:FREQ=YEARLY;INTERVAL=1;BYDAY=-1SU;BYMONTH=3", "END:DAYLIGHT",
+    "END:VTIMEZONE",
+]
+
+
+def test_a_zone_written_the_way_outlook_writes_it_is_read():
+    summer = _only(_calendar([
+        "UID:a@invented", "DTSTART;TZID=W. Europe Standard Time:20260702T090000",
+        "DTEND;TZID=W. Europe Standard Time:20260702T100000", "SUMMARY:Point d'été",
+    ], before=W_EUROPE), date(2026, 7, 2))
+    winter = _only(_calendar([
+        "UID:b@invented", "DTSTART;TZID=W. Europe Standard Time:20261126T090000",
+        "DTEND;TZID=W. Europe Standard Time:20261126T100000", "SUMMARY:Point d'hiver",
+    ], before=W_EUROPE))
+
+    assert summer.start == datetime(2026, 7, 2, 9, tzinfo=PARIS)
+    assert winter.start == _at(9)
+
+
+def test_a_large_calendar_in_a_zone_of_its_own_is_read_in_time():
+    """Years of single events, each in the file's own zone: those far
+    from the days asked about cost no conversion."""
+    others = [
+        [f"UID:{n}@invented", "DTSTART;TZID=W. Europe Standard Time:20190314T090000",
+         "DTEND;TZID=W. Europe Standard Time:20190314T100000", "SUMMARY:Ancien"]
+        for n in range(30_000)
+    ]
+    text = _calendar(*others, [
+        "UID:z@invented", "DTSTART;TZID=W. Europe Standard Time:20261126T090000",
+        "DTEND;TZID=W. Europe Standard Time:20261126T100000", "SUMMARY:Aujourd'hui",
+    ], before=W_EUROPE)
+    began = time.monotonic()
+    reading = _read(text)
+
+    assert time.monotonic() - began < 3
+    assert [e.title for e in reading.occurrences] == ["Aujourd'hui"]
+
+
+def test_a_very_long_zone_name_is_not_tried_piece_by_piece():
+    tzid = "/x" * 8000
+    text = _calendar(
+        ["UID:x@invented", f"DTSTART;TZID={tzid}:20261126T090000", "SUMMARY:Chemin"],
+        GOOD,
+    )
+    began = time.monotonic()
+    reading = _read(text)
+
+    assert time.monotonic() - began < 2
+    assert reading.unreadable == 1
+    assert [e.title for e in reading.occurrences] == ["Lisible"]
+
+
+def test_a_zone_name_with_a_path_in_front_is_read_by_its_tail():
+    event = _only(_calendar([
+        "UID:a@invented", "DTSTART;TZID=/invented.example/20260101/America/New_York:20261126T090000",
+        "SUMMARY:Appel du matin",
+    ]))
+
+    assert event.start == _at(15)
+
+
+def test_a_very_long_folded_line_is_put_back_together_in_time():
+    """An export can carry an attachment inline, folded every 75
+    characters over megabytes."""
+    folded = "DESCRIPTION:" + "\r\n ".join(["x" * 74] * 60_000)
+    text = _calendar(["UID:a@invented", "DTSTART:20261126T090000", folded,
+                      "SUMMARY:Avec pièce jointe"])
+    began = time.monotonic()
+    reading = _read(text)
+
+    assert time.monotonic() - began < 2
+    assert [e.title for e in reading.occurrences] == ["Avec pièce jointe"]
+
+
+def test_components_opened_and_never_closed_do_not_hold_the_reading():
+    text = _calendar(
+        GOOD,
+        before=[f"BEGIN:X-RIEN-{n % 7}" for n in range(80_000)],
+    )
+    began = time.monotonic()
+    _read(text)
+
+    assert time.monotonic() - began < 2
+
+
+def test_an_event_whose_alarm_is_never_closed_is_still_read():
+    reading = _read(_calendar([
+        "UID:a@invented", "DTSTART:20261126T090000", "DTEND:20261126T100000",
+        "SUMMARY:Point budget", "BEGIN:VALARM", "ACTION:DISPLAY",
+        "SUMMARY:Le texte de l'alarme",
+    ]))
+
+    assert [e.title for e in reading.occurrences] == ["Point budget"]
+    assert reading.unreadable == 0

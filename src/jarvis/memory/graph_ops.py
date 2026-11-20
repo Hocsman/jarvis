@@ -36,7 +36,7 @@ from .provenance import (
     fact_source,
     fact_text,
     lookup_tools,
-    source_for_tools,
+    window_source,
 )
 from .core import (
     SECTION_PROFILE,
@@ -1522,9 +1522,7 @@ def update_graph_from_dialogue(
 
     # What the window rests on, decided once for the whole flush: every
     # fact here came out of the same summary of the same window.
-    # Only what actually consulted something decides the label: a window
-    # that merely wrote a reminder looked nothing up.
-    source = source_for_tools(lookup_tools(tools_used) if tools_used else tools_used)
+    source = window_source(tools_used)
 
     # Grouped bare: the new facts reach the merge without a suffix. The
     # suffix is written by the plain-append path, and put back by the
