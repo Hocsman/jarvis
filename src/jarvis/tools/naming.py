@@ -6,7 +6,9 @@ no character class, no length bound, no normalisation between the wire
 and here. Everything downstream is line-based — the confirmation card's
 heading, the routine envelope's list, `outils.md`'s sections, and the
 one-tool-per-line catalogues the router and planner read — so a newline
-in a name writes a line nobody intended.
+in a name writes a line nobody intended. The step resolver's list also
+writes a tool's argument names, declared by the same server, and holds
+them to the same class.
 
 The class binds what this codebase *writes*. It never binds what it
 reads back from the user's own files: a line he typed by hand means what
@@ -20,12 +22,19 @@ import re
 # Deliberately narrow. Every real tool name in the catalogue passes it,
 # and the failure it produces leans the safe way: a name outside the
 # class is unclassifiable, therefore destructive, therefore asked about.
+# For an argument name the failure is narrower: its tool is left out of
+# the step resolver, and the chat model takes that turn.
 PLAIN_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 
 
 def is_plain_name(name: str) -> bool:
-    """Whether this name can be written on a line without forging one."""
-    return bool(PLAIN_NAME.match(name or ""))
+    """Whether this name can be written on a line without forging one.
+
+    `fullmatch` and not `match`: `$` also matches just before a final
+    line break, and a name ending in one still breaks the line it is
+    written on.
+    """
+    return PLAIN_NAME.fullmatch(name or "") is not None
 
 
 def one_line(text: str, limit: int = 0) -> str:

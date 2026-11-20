@@ -103,8 +103,8 @@ that gains a tool overnight would gain it inside the envelope too.
 
 A tool name is third-party text: MCP names are `f"{server}__{tool}"` from
 whatever a server announces, with only emptiness checked. Only names
-matching `^[A-Za-z0-9_.-]{1,64}$` are written into the file or read back
-out of it, enforced inside `render_block` and `parse_routines` rather
+of 1 to 64 characters, all from `[A-Za-z0-9_.-]` (`is_plain_name` in
+`tools/naming.py`), are written into the file or read back out of it, enforced inside `render_block` and `parse_routines` rather
 than at the call sites, so no future caller routes round it. A name
 carrying a newline and `-->` would otherwise close the rejected-tools
 comment, turn what follows back into file content, and append a block of

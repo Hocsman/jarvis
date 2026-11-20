@@ -783,9 +783,9 @@ class TestAFetchedPageDownstream:
         assert kept.count(END) == 1
 
     def test_every_batch_the_digest_reads_holds_the_page_inside_its_fence(self):
-        """The digest splits a long result on blank lines. A page's words
-        in a batch without the markers round them would be read by the
-        distil model as the tool's own."""
+        """The digest reads a long result a batch at a time. A page's
+        words in a batch without the markers round them would be read by
+        the distil model as the tool's own."""
         from src.jarvis.reply import enrichment
 
         reply = self._read(self._a_long_page(), include_links=True)

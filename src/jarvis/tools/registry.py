@@ -37,7 +37,7 @@ from .builtin.goals import (
 from .builtin.stop import StopTool
 from .builtin.tool_search import ToolSearchTool
 from .types import ToolExecutionResult
-from .naming import PLAIN_NAME, is_plain_name, one_line
+from .naming import is_plain_name, one_line
 from ..config import Settings
 from .external.mcp_client import MCPClient
 from ..debug import debug_log
@@ -307,11 +307,10 @@ def generate_tools_json_schema(allowed_tools: Optional[List[str]] = None, mcp_to
 def _plain_word(word: Any) -> bool:
     """Whether a word from a tool's schema can sit on a catalogue line.
 
-    The class a tool name is held to. ``fullmatch`` rather than
-    ``is_plain_name``: a schema word can be any JSON value, and the whole
-    word has to be in the class, a final line break included.
+    The class a tool name is held to, asked only of a string: a schema
+    word can be any JSON value.
     """
-    return isinstance(word, str) and PLAIN_NAME.fullmatch(word) is not None
+    return isinstance(word, str) and is_plain_name(word)
 
 
 def _type_word(definition: Any) -> str:

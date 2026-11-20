@@ -19,6 +19,7 @@ import requests
 
 from ..debug import debug_log
 from .backend import (
+    CHAT_NUM_CTX,
     LLMBackend,
     ToolsNotSupportedError,
     strip_nonstandard_message_fields,
@@ -303,7 +304,7 @@ class OllamaBackend(LLMBackend):
         raw response JSON. Caller is responsible for interpreting
         assistant content (including JSON / tool calls).
 
-        Main agentic chat uses ``num_ctx=8192`` so the system prompt
+        Main agentic chat uses ``num_ctx=CHAT_NUM_CTX`` so the system prompt
         (tool list + protocol guidance + memory context) does not
         overflow and force Ollama to truncate the tool schema — small
         models like ``gemma4:e2b`` then fall back to pre-trained
@@ -315,7 +316,7 @@ class OllamaBackend(LLMBackend):
             "messages": sanitised,
             "stream": False,
             "cache_prompt": True,
-            "options": {"num_ctx": 8192},
+            "options": {"num_ctx": CHAT_NUM_CTX},
         }
         # A request carrying tools never says ``think: false``. gemma4:e2b
         # has a thinking mode, and an explicit false that switches it off

@@ -637,7 +637,7 @@ class TestDigestToolResultForQuery:
         with patch("jarvis.reply.enrichment.call_llm_direct") as mock_llm:
             result = digest_tool_result_for_query(
                 tool_result="", **self._base_kwargs()
-            )
+            ).note
             mock_llm.assert_not_called()
         assert result == ""
 
@@ -648,7 +648,7 @@ class TestDigestToolResultForQuery:
         with patch("jarvis.reply.enrichment.call_llm_direct") as mock_llm:
             result = digest_tool_result_for_query(
                 tool_result="   \n\n   \t   ", **self._base_kwargs()
-            )
+            ).note
             mock_llm.assert_not_called()
         assert result == ""
 
@@ -660,7 +660,7 @@ class TestDigestToolResultForQuery:
         with patch("jarvis.reply.enrichment.call_llm_direct") as mock_llm:
             result = digest_tool_result_for_query(
                 tool_result=short_result, **self._base_kwargs()
-            )
+            ).note
             mock_llm.assert_not_called()
         assert result == short_result
 
@@ -673,7 +673,7 @@ class TestDigestToolResultForQuery:
         ):
             result = digest_tool_result_for_query(
                 tool_result=self._big_payload(), **self._base_kwargs()
-            )
+            ).note
         assert result == ""
 
     def test_returns_digest_with_source_attribution_preserved(self):
@@ -692,7 +692,7 @@ class TestDigestToolResultForQuery:
         ):
             result = digest_tool_result_for_query(
                 tool_result=self._big_payload(), **self._base_kwargs()
-            )
+            ).note
         assert "Cronenberg" in result
         # The framing phrase must survive into the distilled output — a bare
         # "Possessor is a 2020 horror film…" would re-open the UNTRUSTED vs
@@ -708,9 +708,9 @@ class TestDigestToolResultForQuery:
         ):
             result = digest_tool_result_for_query(
                 tool_result=self._big_payload(), **self._base_kwargs()
-            )
-        # Helper must swallow the exception and return "" — the caller is
-        # responsible for falling back to the raw payload.
+            ).note
+        # Helper must swallow the exception and hand back no note — the
+        # caller is responsible for falling back to the raw payload.
         assert result == ""
 
     def test_truncates_oversized_digest(self):
@@ -726,7 +726,7 @@ class TestDigestToolResultForQuery:
         ):
             result = digest_tool_result_for_query(
                 tool_result=self._big_payload(), **self._base_kwargs()
-            )
+            ).note
         assert len(result) <= _TOOL_DIGEST_MAX_CHARS + 1  # +1 for ellipsis
         assert result.endswith("…")
 
@@ -761,7 +761,7 @@ class TestDigestToolResultForQuery:
         ):
             result = digest_tool_result_for_query(
                 tool_result=payload, **self._base_kwargs()
-            )
+            ).note
 
         assert call_count["n"] >= 2
         assert "note 1" in result
@@ -783,7 +783,7 @@ class TestDigestToolResultForQuery:
         ):
             result = digest_tool_result_for_query(
                 tool_result=payload, **self._base_kwargs()
-            )
+            ).note
         assert result == ""
 
     def test_multi_batch_partial_llm_failure_keeps_surviving_notes(self):
@@ -811,7 +811,7 @@ class TestDigestToolResultForQuery:
         ):
             result = digest_tool_result_for_query(
                 tool_result=payload, **self._base_kwargs()
-            )
+            ).note
         # First and later calls succeed — surviving notes survive.
         assert "note 1" in result
 
