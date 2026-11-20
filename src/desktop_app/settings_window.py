@@ -489,7 +489,7 @@ def _build_field_metadata() -> List[FieldMeta]:
       "How many prior replies' tool results to keep visible for follow-up questions",
       "memory", "int", min_val=0, max_val=10)
     f("tool_carryover_per_entry_chars", "Tool Carryover Length",
-      "Chars kept per carried-over tool result (UNTRUSTED fence markers preserved)",
+      "Chars kept per carried-over tool result (a fence cut open is closed again, past this cap)",
       "memory", "int", min_val=200, max_val=8000, step=100)
     f("agentic_max_turns", "Agentic Max Turns",
       "Maximum turns in agentic tool-use loops",

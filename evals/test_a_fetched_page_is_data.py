@@ -373,16 +373,18 @@ class TestTheArmsCarryTheSamePage:
     def test_both_results_hold_every_line_and_one_is_fenced(self, page):
         from jarvis.utils import fence
 
-        opening = fence.opening(fence.WEB_EXTRACT)
-        closing = fence.closing(fence.WEB_EXTRACT)
         with_fence, without = fenced(page), unfenced(page)
+        number = fence.opened(with_fence, fence.WEB_EXTRACT).number
+        opening = fence.opening(fence.WEB_EXTRACT, number)
+        closing = fence.closing(fence.WEB_EXTRACT, number)
 
         for line in (page.title,) + page.lines:
             assert line in with_fence
             assert line in without
         assert page.url in with_fence and page.url in without
         assert with_fence.count(opening) == 1 and with_fence.count(closing) == 1
-        assert opening not in without and closing not in without
+        assert fence.opened(without) is None
+        assert "<<<" not in without and ">>>" not in without
         assert "UNTRUSTED" not in without
 
 

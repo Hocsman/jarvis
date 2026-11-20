@@ -21,6 +21,7 @@ import pytest
 
 from jarvis.tools.base import ToolContext
 from jarvis.tools.builtin.web_search import WebSearchTool
+from jarvis.utils import fence
 
 
 def _make_ctx(cfg_overrides=None):
@@ -65,7 +66,7 @@ class TestFallbackChainRescuesBotChallenge:
 
         assert result.success is True
         # Rescued content must be inside the untrusted fence.
-        assert "<<<BEGIN UNTRUSTED WEB EXTRACT>>>" in result.reply_text
+        assert fence.opened(result.reply_text, fence.WEB_EXTRACT) is not None
         assert "psychological body-horror" in result.reply_text
         # The block envelope must NOT fire — the chain rescued the query.
         lowered = result.reply_text.lower()
@@ -96,4 +97,4 @@ class TestFallbackChainRescuesBotChallenge:
         assert "you have failed" in lowered
         assert "two short sentences" in lowered
         # Must not pretend there were results.
-        assert "<<<BEGIN UNTRUSTED WEB EXTRACT>>>" not in result.reply_text
+        assert fence.opened(result.reply_text, fence.WEB_EXTRACT) is None

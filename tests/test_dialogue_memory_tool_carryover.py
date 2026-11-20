@@ -248,10 +248,12 @@ class TestToolCarryover:
         truncated, the closing marker must be re-appended so the downstream
         prompt-injection defence fence stays intact.
         """
+        from src.jarvis.utils import fence
+
         dm = DialogueMemory()
         dm.add_message("user", "q")
-        begin = "<<<BEGIN UNTRUSTED WEB EXTRACT>>>"
-        end = "<<<END UNTRUSTED WEB EXTRACT>>>"
+        begin = "<<<BEGIN UNTRUSTED WEB EXTRACT 0a1b2c3d>>>"
+        end = "<<<END UNTRUSTED WEB EXTRACT 0a1b2c3d>>>"
         payload = (
             "Search result:\n" + begin + "\n" + ("x" * 5000) + "\n" + end
         )
@@ -261,31 +263,52 @@ class TestToolCarryover:
         out = dm.get_recent_turns_with_tools(per_entry_chars=500)
         tool_msg = next(m for m in out if m.get("role") == "tool")
         assert begin in tool_msg["content"]
-        assert end in tool_msg["content"], (
+        assert tool_msg["content"].count(end) == 1, (
             "closing fence marker must survive truncation"
         )
+        assert tool_msg["content"].endswith(
+            fence.reminder(fence.WEB_EXTRACT, "0a1b2c3d")
+        ), "the line that says the fenced text came from outside must follow it"
 
-    def test_truncation_closes_the_fence_of_any_tool(self):
+    @pytest.mark.parametrize("kind_name", ["WEB_EXTRACT", "SCREEN_TEXT"])
+    def test_truncation_closes_the_fence_of_any_tool(self, kind_name):
         """A screen's text runs past the cap far more often than a web
-        extract does, and its fence is the tool's own."""
+        extract does, and its fence is the tool's own: the block every
+        tool gets from `fence.block`, cut by the carry-over, ends on the
+        closing marker and the reminder its number names."""
         from src.jarvis.utils import fence
 
-        SCREEN_FENCE_BEGIN = fence.opening(fence.SCREEN_TEXT)
-        SCREEN_FENCE_END = fence.closing(fence.SCREEN_TEXT)
-
+        kind = getattr(fence, kind_name)
         dm = DialogueMemory()
         dm.add_message("user", "q")
-        payload = (
-            "Screen:\n" + SCREEN_FENCE_BEGIN + "\n" + ("x" * 5000) + "\n"
-            + SCREEN_FENCE_END
-        )
+        payload = "Result:\n" + fence.block(kind, "What was read", "x" * 5000)
+        number = fence.opened(payload, kind).number
         dm.record_tool_turn([
             {"role": "tool", "tool_call_id": "c1", "content": payload},
         ])
         out = dm.get_recent_turns_with_tools(per_entry_chars=500)
         tool_msg = next(m for m in out if m.get("role") == "tool")
-        assert SCREEN_FENCE_BEGIN in tool_msg["content"]
-        assert tool_msg["content"].endswith(SCREEN_FENCE_END)
+        assert fence.opening(kind, number) in tool_msg["content"]
+        assert tool_msg["content"].endswith(fence.ending(kind, number))
+        assert tool_msg["content"].count(fence.closing(kind, number)) == 1
+
+    def test_truncation_inside_the_reminder_puts_the_whole_reminder_back(self):
+        """A result barely longer than the cap is cut after its closing
+        marker, inside the line that says the fenced text came from
+        outside. Half of that line says nothing."""
+        from src.jarvis.utils import fence
+
+        dm = DialogueMemory()
+        dm.add_message("user", "q")
+        payload = fence.block(fence.WEB_EXTRACT, "What was read", "x" * 300)
+        number = fence.opened(payload, fence.WEB_EXTRACT).number
+        dm.record_tool_turn([
+            {"role": "tool", "tool_call_id": "c1", "content": payload},
+        ])
+        out = dm.get_recent_turns_with_tools(per_entry_chars=len(payload) - 60)
+        tool_msg = next(m for m in out if m.get("role") == "tool")
+        assert tool_msg["content"] == payload
+        assert tool_msg["content"].count(fence.closing(fence.WEB_EXTRACT, number)) == 1
 
     def test_get_pending_chunks_excludes_tool_rows(self):
         """Tool messages must not pollute the diary summariser input."""
