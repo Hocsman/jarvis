@@ -67,8 +67,8 @@ Running a tool is not the same as having consulted something. `stop`,
 `toolSearchTool` and `stopClaudeCode` steer (a report `stopClaudeCode`
 carries came from the `claudeCode` job that produced it); `remember`,
 `forget`, `logMeal`, `setReminder` and the goal tools write;
-`fetchMeals`, `listGoals` and `reviewLearnings` read his own records,
-which are not the world. Only the rest counts, and only the rest decides
+`fetchMeals`, `listGoals`, `reviewLearnings` and `readAgenda` read his
+own records, which are not the world. Only the rest counts, and only the rest decides
 the source label — a window that merely wrote a reminder looked nothing
 up.
 

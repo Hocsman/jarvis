@@ -152,11 +152,12 @@ def test_there_is_no_wildcard():
     assert scope.allows("chrome-devtools__take_snapshot") is False
 
 
-# ── Five names no envelope can hold ───────────────────────────────────
+# ── Six names no envelope can hold ────────────────────────────────────
 
 
 @pytest.mark.parametrize("name", [
     "toolSearchTool", "refreshMCPTools", "stop", "claudeCode", "screenshot",
+    "readAgenda",
 ])
 def test_a_few_tools_are_refused_even_when_the_file_names_them(name):
     """`toolSearchTool` appends any name in the registry to the running

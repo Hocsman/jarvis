@@ -54,7 +54,7 @@ _NOT_A_LOOKUP = frozenset({
     "setReminder", "setRoutine", "cancelRoutine",
     "setGoal", "noteGoal", "closeGoal",
     # read his own records, which are not the world
-    "fetchMeals", "listGoals", "reviewLearnings",
+    "fetchMeals", "listGoals", "reviewLearnings", "readAgenda",
 })
 
 

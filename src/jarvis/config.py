@@ -425,6 +425,12 @@ class Settings:
     # language.
     wikipedia_fallback_enabled: bool
 
+    # Agenda. Where `readAgenda` reads the user's calendar from: a path to
+    # an .ics file, or the https:// address that serves the calendar in
+    # iCalendar form. Empty means "not configured" and the tool is off.
+    # The address is a credential: whoever holds it reads the calendar.
+    agenda_source: str
+
     # Dictation (hold-to-dictate)
     dictation_enabled: bool
     dictation_hotkey: str
@@ -487,8 +493,8 @@ def _save_json(path: Path, data: Dict[str, Any]) -> bool:
     truncating config.json if the process is terminated mid-write.
 
     Restricts the saved file to ``0o600`` on POSIX so credentials in
-    config (``llm_api_key``, ``embedding_api_key``, ``brave_search_api_key``)
-    are not readable by other users on multi-user systems. ``chmod`` is a
+    config (``llm_api_key``, ``embedding_api_key``, ``brave_search_api_key``,
+    a private calendar address in ``agenda_source``) are not readable by other users on multi-user systems. ``chmod`` is a
     no-op on Windows but is wrapped in a try so platform quirks never
     fail the save.
     """
@@ -1091,6 +1097,12 @@ def get_default_config() -> Dict[str, Any]:
         "brave_search_api_key": "",
         "wikipedia_fallback_enabled": True,
 
+        # Agenda: where `readAgenda` reads the user's calendar from. A path
+        # to an .ics file, or the https:// address that serves the calendar
+        # in iCalendar form (that address is a secret: whoever holds it
+        # reads the calendar). Empty: the tool is off.
+        "agenda_source": "",
+
         # Dictation (hold-to-dictate, WisprFlow-like)
         "dictation_enabled": True,
         "dictation_hotkey": _default_dictation_hotkey(),
@@ -1442,6 +1454,7 @@ def load_settings() -> Settings:
     web_search_enabled = bool(merged.get("web_search_enabled", True))
     brave_search_api_key = str(merged.get("brave_search_api_key", "") or "").strip()
     wikipedia_fallback_enabled = bool(merged.get("wikipedia_fallback_enabled", True))
+    agenda_source = str(merged.get("agenda_source", "") or "").strip()
     dictation_enabled = bool(merged.get("dictation_enabled", True))
     dictation_hotkey = str(merged.get("dictation_hotkey", _default_dictation_hotkey())).strip()
     dictation_filler_removal = bool(merged.get("dictation_filler_removal", False))
@@ -1674,6 +1687,9 @@ def load_settings() -> Settings:
         web_search_enabled=web_search_enabled,
         brave_search_api_key=brave_search_api_key,
         wikipedia_fallback_enabled=wikipedia_fallback_enabled,
+
+        # Agenda
+        agenda_source=agenda_source,
 
         # Dictation
         dictation_enabled=dictation_enabled,

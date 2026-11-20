@@ -10,6 +10,7 @@ from pathlib import Path
 import os
 
 from .builtin.screenshot import ScreenshotTool
+from .builtin.agenda import ReadAgendaTool
 from .builtin.web_search import WebSearchTool
 from .builtin.local_files import LocalFilesTool
 from .builtin.fetch_web_page import FetchWebPageTool
@@ -45,6 +46,7 @@ from ..debug import debug_log
 # Registry of all builtin tools
 BUILTIN_TOOLS = {
     "screenshot": ScreenshotTool(),
+    "readAgenda": ReadAgendaTool(),
     "webSearch": WebSearchTool(),
     "localFiles": LocalFilesTool(),
     "fetchWebPage": FetchWebPageTool(),

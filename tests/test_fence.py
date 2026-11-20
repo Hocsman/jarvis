@@ -8,6 +8,7 @@ from it is ever written outside the fence.
 import pytest
 
 from src.jarvis.utils.fence import (
+    AGENDA_TEXT,
     IN_TOOL_RESULTS,
     RELEVANT_MEMORY,
     SCREEN_TEXT,
@@ -32,6 +33,9 @@ MARKERS = {
     ),
     SCREEN_TEXT: (
         "<<<BEGIN UNTRUSTED SCREEN TEXT>>>", "<<<END UNTRUSTED SCREEN TEXT>>>",
+    ),
+    AGENDA_TEXT: (
+        "<<<BEGIN UNTRUSTED AGENDA TEXT>>>", "<<<END UNTRUSTED AGENDA TEXT>>>",
     ),
     USER_TEXT: (
         "<<<BEGIN UNTRUSTED USER TEXT>>>", "<<<END UNTRUSTED USER TEXT>>>",

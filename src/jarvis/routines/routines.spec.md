@@ -112,7 +112,7 @@ its own — and since the last block of a name wins, a routine the user had
 tightened comes back widened, with `mémoire: oui`, sending their whole
 profile to a remote model every morning.
 
-Five names no envelope can hold, whatever the file says
+Six names no envelope can hold, whatever the file says
 (`JAMAIS_EN_ROUTINE`):
 
 - `toolSearchTool` appends any name in the registry to the running turn's
@@ -127,6 +127,11 @@ Five names no envelope can hold, whatever the file says
   to the reply model. Attended, they have just asked about it; at 07:00
   nobody has, and what they left open would go to a remote model with no
   one to have wanted it (`src/jarvis/tools/builtin/screenshot.spec.md`).
+- `readAgenda` reads the user's calendar and hands the times, titles and
+  places of their events to the reply model. Attended, they have just
+  asked and said yes; in a routine their day would go to that model every
+  morning with no one in the room to have wanted it
+  (`src/jarvis/tools/builtin/agenda/read_agenda.spec.md`).
 
 ## A routine that works for a goal
 

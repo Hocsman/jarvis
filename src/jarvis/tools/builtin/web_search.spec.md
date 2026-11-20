@@ -71,21 +71,21 @@ The whole block is built by `utils/fence.py::block`, for the
 `WEB_EXTRACT` kind and under the label `**Content from top result**`. That
 one function writes the note, the two markers and the rewriting described
 below for every tool that returns somebody else's text to the reply
-model: `webSearch`, `fetchWebPage` and `screenshot` differ by the label,
-the kind, what they put in the text, and whether `block` caps it
-(`webSearch`'s extract is cut where it is fetched). The note and the markers are
-what reply models were measured on, so a change to `block` is a change to
-all three, to be measured again; tests in each tool's file and in
+model: `webSearch`, `fetchWebPage`, `screenshot` and `readAgenda` differ
+by the label, the kind, what they put in the text, and whether `block`
+caps it (`webSearch`'s extract is cut where it is fetched). The note and
+the markers are what reply models were measured on, so a change to `block`
+is a change to all four, to be measured again; tests in each tool's file and in
 `tests/test_fence.py` spell the block out byte for byte.
 
 The same module composes every `<<<BEGIN …>>>` / `<<<END …>>>` marker in
 the code (`opening` / `closing` of a kind): the fences tools put round
 text they did not write (this one, `fetchWebPage`'s, `screenshot`'s,
-`logMeal`'s) and the one the step resolver puts round the memory block
-(`reply/planner.spec.md`). Of those kinds, the ones that travel in a tool
-result are listed apart (`IN_TOOL_RESULTS`: `WEB_EXTRACT` and
-`SCREEN_TEXT`). They are the only ones `block` builds, and the only ones
-the carry-over closes.
+`readAgenda`'s, `logMeal`'s) and the one the step resolver puts round the
+memory block (`reply/planner.spec.md`). Of those kinds, the ones that
+travel in a tool result are listed apart (`IN_TOOL_RESULTS`: `WEB_EXTRACT`,
+`SCREEN_TEXT` and `AGENDA_TEXT`). They are the only ones `block` builds,
+and the only ones the carry-over closes.
 
 It also composes the one fence that carries no name
 (`bare(text)`): a `<<<` line, the text with every run of three or more

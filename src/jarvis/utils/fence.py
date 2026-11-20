@@ -1,8 +1,9 @@
 """The fence put round text the prompt it sits in did not write.
 
-A web page, whatever a screen is showing, a line recalled from memory, an
-argument a model composed or a sentence heard through Whisper is somebody
-else's text and can say anything, "ignore your instructions" included.
+A web page, whatever a screen is showing, the title of an invitation, a
+line recalled from memory, an argument a model composed or a sentence
+heard through Whisper is somebody else's text and can say anything,
+"ignore your instructions" included.
 Such text reaches the model between two markers and under a line saying it
 is data. This module holds what the markers are, how text is kept from
 carrying a marker of its own, the block a tool returns (`block`), the bare
@@ -28,6 +29,7 @@ from ..debug import debug_log
 # ends with the bracket runs `without_markers` rewrites.
 WEB_EXTRACT = "UNTRUSTED WEB EXTRACT"  # a fetched page, a diary row
 SCREEN_TEXT = "UNTRUSTED SCREEN TEXT"  # what the screen shows
+AGENDA_TEXT = "UNTRUSTED AGENDA TEXT"  # the titles and places of his events
 USER_TEXT = "UNTRUSTED USER TEXT"  # the meal `logMeal` is given
 RELEVANT_MEMORY = "RELEVANT MEMORY"  # the memory block of the step resolver
 
@@ -36,7 +38,7 @@ RELEVANT_MEMORY = "RELEVANT MEMORY"  # the memory block of the step resolver
 # for a name found between markers, which is the untrusted part, and never
 # for a kind that fences a prompt of its own, which a tool result has no
 # business opening.
-IN_TOOL_RESULTS = (WEB_EXTRACT, SCREEN_TEXT)
+IN_TOOL_RESULTS = (WEB_EXTRACT, SCREEN_TEXT, AGENDA_TEXT)
 
 # Three or more angle brackets in a row, plain or full-width: what a marker
 # opens and ends with. Text with no such run left holds no marker, whole,

@@ -14,7 +14,8 @@ capabilities.
 
 The same hole covers `remember`, `forget`, `logMeal`, `setReminder`,
 `setGoal` — those write. And `fetchMeals`, `listGoals`,
-`reviewLearnings` — those read *his* data, which is not the world.
+`reviewLearnings`, `readAgenda` — those read *his* data, which is not
+the world.
 
 Which is the very error the rule exists to prevent, committed inside the
 fix against it: treating "a tool ran" as "something was learned".
@@ -67,7 +68,7 @@ def test_an_mcp_tool_counts():
     "logMeal", "deleteMeal",                   # écrivent
     "setReminder", "setRoutine", "cancelRoutine",
     "setGoal", "noteGoal", "closeGoal",
-    "fetchMeals", "listGoals", "reviewLearnings",  # lisent ses données
+    "fetchMeals", "listGoals", "reviewLearnings", "readAgenda",  # lisent ses données
 ])
 def test_a_tool_that_writes_or_reads_his_own_data_does_not_count(nom):
     assert lookup_tools([nom]) == []
