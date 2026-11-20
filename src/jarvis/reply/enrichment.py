@@ -737,18 +737,18 @@ def _rendered(pieces: list[_Piece]) -> str:
     every tool's fence comes from, composed from the kind alone and from
     nothing the result holds.
     """
-    runs: list[tuple[Optional[str], str]] = []
+    runs: list[tuple[Optional[str], list[str]]] = []
     before: Optional[_Piece] = None
     for piece in pieces:
         if before is not None and piece.stretch == before.stretch:
-            kind, text = runs[-1]
-            runs[-1] = (kind, f"{text}{piece.joint}{piece.text}")
+            runs[-1][1].extend((piece.joint, piece.text))
         else:
-            runs.append((piece.kind, piece.text))
+            runs.append((piece.kind, [piece.text]))
         before = piece
     out: list[str] = []
     after_text = False
-    for kind, text in runs:
+    for kind, parts in runs:
+        text = "".join(parts)
         if kind is None:
             out.append(text)
         elif after_text:
@@ -757,6 +757,18 @@ def _rendered(pieces: list[_Piece]) -> str:
             out.append(fence.block(kind, _PART_LABEL, text))
         after_text = kind is None
     return "\n".join(out)
+
+
+def _run_length(kind: Optional[str], chars: int, after_text: bool) -> int:
+    """How long :func:`_rendered` writes a run of ``chars`` characters of
+    text, given whether unfenced text stands just before it in the batch.
+    The fenced text is written as it is: it holds no marker left to
+    rewrite."""
+    if kind is None:
+        return chars
+    if after_text:
+        return len(fence.opening(kind)) + 1 + chars + 1 + len(fence.closing(kind))
+    return len(fence.block(kind, _PART_LABEL, "")) + chars
 
 
 def _cut(line: str, room: int) -> tuple[str, str, str]:
@@ -788,25 +800,44 @@ def _split_tool_result(raw: str, max_chars: int) -> list[str]:
     """
     batches: list[str] = []
     current: list[_Piece] = []
+    # How long the batch being filled reads, kept as pieces are added so
+    # that a result of many short lines is not rendered again for each.
+    size = 0
+
+    def added(piece: _Piece) -> int:
+        """How much longer the batch reads with ``piece`` at its end."""
+        if not current:
+            return _run_length(piece.kind, len(piece.text), after_text=False)
+        last = current[-1]
+        if piece.stretch == last.stretch:
+            return len(piece.joint) + len(piece.text)
+        return 1 + _run_length(piece.kind, len(piece.text), last.kind is None)
 
     def left_for(piece: _Piece) -> int:
-        return max_chars - len(_rendered(current + [replace(piece, text="")]))
+        return max_chars - size - added(replace(piece, text=""))
+
+    def append(piece: _Piece) -> None:
+        nonlocal size
+        size += added(piece)
+        current.append(piece)
 
     def close() -> None:
+        nonlocal size
         if current:
             batches.append(_rendered(current))
             current.clear()
+            size = 0
 
     def place(text: str, joint: str, stretch: int, kind: Optional[str],
               finer: tuple[str, ...]) -> None:
         piece = _Piece(text, joint, stretch, kind)
         if len(text) <= left_for(piece):
-            current.append(piece)
+            append(piece)
             return
-        if len(_rendered(current)) >= max_chars // 2:
+        if size >= max_chars // 2:
             close()
             if len(text) <= left_for(piece):
-                current.append(piece)
+                append(piece)
                 return
         if finer:
             for part in text.split(finer[0]):
@@ -820,7 +851,7 @@ def _split_tool_result(raw: str, max_chars: int) -> list[str]:
                 close()
                 room = left_for(piece)
             head, text, gap = _cut(text, max(room, 1))
-            current.append(_Piece(head, joint, stretch, kind))
+            append(_Piece(head, joint, stretch, kind))
             joint = gap
 
     for stretch, (kind, text) in enumerate(_stretches(raw)):

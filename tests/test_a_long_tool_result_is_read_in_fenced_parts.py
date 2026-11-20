@@ -12,6 +12,7 @@ is told when a batch got no answer.
 Every screen, page and name here is invented.
 """
 
+import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -501,7 +502,7 @@ class TestAPartThatGotNoAnswer:
 
 class TestThePartsShareOneDeadline:
     """Each part has the digest's timeout to itself, and a page of the
-    tool's full size is some twenty parts: read one after another with
+    tool's full size is twenty to thirty parts: read one after another with
     nothing to bound the sum, a slow model would hold the reply for
     minutes."""
 
@@ -549,6 +550,36 @@ class TestThePartsShareOneDeadline:
 
 
 # ── The context the distil asks for ───────────────────────────────────
+
+
+class TestCuttingAResultTakesLittleTime:
+    """The cut runs before the first part goes to the distil and before
+    the parts' deadline starts, while the user waits for the reply. A
+    result of very short lines (a relayed list, a page a hostile site laid
+    out one character to a line) is as many pieces as it has lines."""
+
+    @pytest.mark.parametrize("fenced", [True, False], ids=["fenced", "unfenced"])
+    def test_a_result_of_one_character_lines_reaches_the_distil_quickly(self, fenced):
+        lines = "\n".join("x" for _ in range(100_000))
+        result = (
+            fence.block(fence.WEB_EXTRACT, "A page, relayed", lines) if fenced
+            else f"A list, relayed:\n{lines}"
+        )
+        started = time.perf_counter()
+        first_call: list[float] = []
+
+        def distil(**kwargs):
+            if not first_call:
+                first_call.append(time.perf_counter() - started)
+            return "NONE"
+
+        with patch.object(enrichment, "call_llm_direct", side_effect=distil):
+            digest_tool_result_for_query(
+                query="q", tool_name="relay__read", tool_result=result,
+                cfg=SimpleNamespace(), chat_model="small", timeout_sec=8.0,
+            )
+
+        assert first_call and first_call[0] < 2.0, first_call
 
 
 class TestTheDistilAsksForTheChatModelSContext:
