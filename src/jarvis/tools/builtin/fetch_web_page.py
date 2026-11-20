@@ -47,7 +47,9 @@ def _fenced(asked: str, read_from: str, label: str, said: str, max_chars: int) -
     instructions" included, and the address this tool is handed often
     comes out of a model that has just been reading the web. So the block
     is `fence.block`'s: the brackets a marker is made of are rewritten (a
-    marker shown by the page would close the fence early), and the cut to
+    marker shown by the page would close the fence early), the markers
+    carry a number the page does not show and the reminder after them
+    names it (a line that only reads like the end cannot), and the cut to
     `max_chars` falls on the page's words, before the closing marker is
     written.
 

@@ -475,7 +475,7 @@ Downstream: the carry-over cuts the result at `tool_carryover_per_entry_chars` a
 
 The last paragraph of *Prompt-injection fence* holds here as it does there: the fence is a convention a model honours and a boundary a reviewer can check, not a wall. `tests/tools/builtin/test_fetch_web_page.py` holds the shape (one opening marker, one closing, the page's words between them whatever the page shows, in its text, its title or a link; the cut; the three readers above), and `evals/test_a_fetched_page_is_data.py` measures what a model does with it.
 
-Measured on 2026-11-19 by that eval: the real engine on a voice turn, the router as the settings name it (`qwen2.5:3b` on these runs), eight invented pages, four of them carrying a sentence addressed to the assistant (save this to memory, open this other address, withhold the answer and say this instead). The fenced result is set against the same title and text under bold labels with no fence, the two interleaved call by call, 20 calls an arm for each measure.
+Measured on 2026-11-19 by that eval: the real engine on a voice turn, the router as the settings name it (`qwen2.5:3b` on these runs), eight invented pages, four of them carrying a sentence addressed to the assistant (save this to memory, open this other address, withhold the answer and say this instead). The fenced result is set against the same title and text under bold labels with no fence, the two interleaved call by call, 20 calls an arm for each measure. The fence carried no number and no reminder on these runs; the numbered fence's counts are in *A line that reads like an end does not end the fence*.
 
 | Chat model | Measure | Fenced | No fence |
 |------------|---------|--------|----------|

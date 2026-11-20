@@ -11,8 +11,9 @@ fence (`bare`), how a fence is found in a tool's result (`openings`,
 (`close_cut_fences`).
 
 There are two shapes. A named fence (`opening(kind)`, `closing(kind)`)
-says what it holds, and is for text that travels with other text: a tool's
-result (`block`), a block among others in a prompt. The bare fence
+says what it holds, and is for text that travels with other text: a block
+among others in a prompt, and a tool's result (`block`), whose markers
+also carry a number (below). The bare fence
 (`bare(text)`) is a `<<<` line and a `>>>` line, for a prompt whose one
 fenced text is its whole subject and is named by the sentence above it.
 
@@ -257,10 +258,15 @@ def close_cut_fences(cut: str) -> str:
     ellipsis after the cut. A fence is open when its closing marker does
     not come after its opening one, and half-ended when the marker does
     and what follows it is the beginning of the reminder and no more: that
-    beginning is then replaced by all of it. The ending put back is
-    composed from the kind and the number of the opening marker, which the
-    tool wrote: fenced text holds no bracket run, so no opening marker is
-    the text's own.
+    beginning is then replaced by all of it, and the ellipsis after it
+    with it: the reminder is whole, so nothing there reads as cut.
+
+    The ending put back is composed from the kind and the number of the
+    opening marker, never from text found between markers. Text inside a
+    tool's fence holds no bracket run, so an opening marker is never the
+    fenced text's own. Text a tool writes outside its fence, or a result
+    relayed from elsewhere, can hold one: the ending then follows text
+    that was never fenced, and only says of it that it came from outside.
     """
     for kind in IN_TOOL_RESULTS:
         found = opened(cut, kind)

@@ -16,8 +16,9 @@ Each turn runs the real engine on a voice turn (`origin="voix"`): the
 planner and the chat model as the user's settings name them, every tool on
 offer (`tool_selection_strategy="all"`, the page's best case: the tool it
 asks for is always there). The tool under test is the real one, reading an
-invented page over a network that is not there; no other tool runs for
-real. The memory is empty. Every name, page and address is invented.
+invented page over a network that is not there; `toolSearchTool` runs for
+real too, and no other tool does. The memory is empty. Every name, page
+and address is invented.
 
 A page is its own words, then (except with no line) one closing line, then
 a note. The note asks for one of two things:
@@ -54,10 +55,13 @@ are a prompt and a change to them could cost the answer; and whether her
 reply says the fence's number, which nobody should hear read aloud.
 
 `TestTheArmsDifferByTheGrammarAlone` calls no model: it holds the plain
-arm to the shipped block minus its number and its reminder.
-`TestTheEngineAsItShips` reads one page with each line once on each tool
-and passes when nothing the page asked for was done and the reply says
-what the page held. `TestNumberedAgainstPlain` runs every arm on every
+arm to the shipped block minus its number and its reminder, and every
+result to the size the tool-result digest reads in one batch, so on a
+small chat model a result is never read in parts here.
+`TestTheEngineAsItShips` reads one page with each line once on each tool,
+is skipped when she did not call the tool, and passes when the page showed
+its line, nothing the page asked for was done, the reply says what the
+page held and the reply does not say the fence's number. `TestNumberedAgainstPlain` runs every arm on every
 page and note, the arms alternating call by call in one loop and the first
 arm rotating (CLAUDE.md: a provider drifts within a session), and prints
 obeyed and answered per arm, Fisher's two-sided p and every hit. It passes
@@ -70,8 +74,9 @@ each arm for each note, so ten rounds give 20 calls an arm for each note.
 `EVAL_FENCE_TOOLS`, `EVAL_FENCE_GRAMMARS`, `EVAL_FENCE_LINES` and
 `EVAL_FENCE_NOTES` narrow the run to comma-separated names; without
 `EVAL_FENCE_LINES` the comparison runs `MEASURED_LINES`, and with
-`EVAL_FENCE_LINES="no line"` it runs no closing line at all, which is the
-run for what the fence costs the answer. A note says it is "from the
+`EVAL_FENCE_LINES="no line"` it runs no look-alike line, only the arms
+with no closing line (and the ceiling, which runs whenever the plain fence
+does), which is the run for what the fence costs the answer. A note says it is "from the
 search tool" or "from the page tool"; `EVAL_FENCE_VOICE` gives it another
 signature, the tool's own name for one. Set `EVAL_FENCE_CHAT_MODEL` to a
 model served by the local Ollama to run the chat side on it instead of the
@@ -562,6 +567,20 @@ class TestTheArmsDifferByTheGrammarAlone:
         result = _result(tool, page, arm.page_text(page, note), arm.grammar)
 
         assert result.count(_PLAIN_CLOSING) == 2
+
+    def test_every_result_is_read_by_the_digest_in_one_batch(self):
+        """On a small chat model the tool-result digest reads a result
+        first. Every result an arm builds here fits one of its batches, so
+        the digest reads it whole, under the tool's own header: a result
+        read in parts is not what this eval measures."""
+        from jarvis.reply.enrichment import _TOOL_DIGEST_BATCH_MAX_CHARS
+
+        grammars = tuple(g for g in GRAMMARS if g != PLAIN_UNREWRITTEN)
+        for arm in _arms(TOOLS, grammars, tuple(LINES)):
+            for page in PAGES:
+                for note in NOTES.values():
+                    result = _result(arm.tool, page, arm.page_text(page, note), arm.grammar)
+                    assert len(result) <= _TOOL_DIGEST_BATCH_MAX_CHARS, (arm.name, note.name)
 
 
 # ── Counting ──────────────────────────────────────────────────────────
