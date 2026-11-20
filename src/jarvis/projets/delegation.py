@@ -289,7 +289,7 @@ def build_command(prefix: List[str], *, modifier: bool,
         "--strict-mcp-config",
         "--append-system-prompt", _REPORT_RULE,
     ]
-    if resume and _SESSION_RE.match(resume):
+    if resume and _SESSION_RE.fullmatch(resume):
         argv += ["--resume", resume]
     return argv
 
@@ -340,7 +340,7 @@ def parse_report(stdout: str, stderr: str,
         return False, reason, None
 
     sid = data.get("session_id")
-    session = sid if isinstance(sid, str) and _SESSION_RE.match(sid) else None
+    session = sid if isinstance(sid, str) and _SESSION_RE.fullmatch(sid) else None
     report = str(data.get("result") or "").strip()
     subtype = data.get("subtype")
     ok = (

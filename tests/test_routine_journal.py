@@ -244,6 +244,42 @@ def test_anything_that_is_not_a_dated_page_is_left_alone(tmp_path):
     assert mine.exists()
 
 
+class _Page:
+    def __init__(self, name):
+        self.name = name
+        self.gone = False
+
+    def unlink(self):
+        self.gone = True
+
+
+class _Dossier:
+    def __init__(self, pages):
+        self._pages = pages
+
+    def is_dir(self):
+        return True
+
+    def iterdir(self):
+        return iter(self._pages)
+
+
+def test_a_name_that_only_ends_in_a_line_break_is_not_a_dated_page(
+        tmp_path, monkeypatch):
+    """Such a file is somebody's, not a page this code wrote. Windows
+    cannot hold a name like it, so the folder is stood in for."""
+    from src.jarvis.routines import journal
+
+    dated = _Page("2020-01-01.md")
+    other = _Page("2020-01-01.md\n")
+    monkeypatch.setattr(journal, "journal_dir",
+                        lambda cfg: _Dossier([dated, other]))
+
+    # The sweep really did run: it took the page next to this one.
+    assert prune_journal(_Cfg(tmp_path), 90) == 1
+    assert dated.gone and not other.gone
+
+
 def test_pruning_nothing_is_not_an_error(tmp_path):
     assert prune_journal(_Cfg(tmp_path), 90) == 0
 

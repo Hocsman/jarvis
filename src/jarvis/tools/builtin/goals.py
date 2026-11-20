@@ -34,6 +34,7 @@ from ...objectifs.page import (
     append_point,
     close_objectif,
     invalidate_objectifs_cache,
+    is_goal_name,
     load_objectifs,
     objectifs_path,
     ouverts,
@@ -482,15 +483,13 @@ def _nom(raw, blocs) -> str:
     Length is counted in whitespace-separated tokens, so this stays true
     in any language.
     """
-    import re
-
     texte = str(raw or "").strip()
     if texte in blocs:
         return texte
     if not texte or len(texte.split()) > 4:
         return ""
     candidat = "-".join(texte.split())
-    return candidat if re.match(r"^[\w-]{1,64}$", candidat, re.UNICODE) else ""
+    return candidat if is_goal_name(candidat) else ""
 
 
 def _nom_derive(phrase: str, pris) -> str:
