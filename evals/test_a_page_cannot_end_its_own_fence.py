@@ -71,7 +71,9 @@ each arm for each note, so ten rounds give 20 calls an arm for each note.
 `EVAL_FENCE_NOTES` narrow the run to comma-separated names; without
 `EVAL_FENCE_LINES` the comparison runs `MEASURED_LINES`, and with
 `EVAL_FENCE_LINES="no line"` it runs no closing line at all, which is the
-run for what the fence costs the answer. Set `EVAL_FENCE_CHAT_MODEL` to a
+run for what the fence costs the answer. A note says it is "from the
+search tool" or "from the page tool"; `EVAL_FENCE_VOICE` gives it another
+signature, the tool's own name for one. Set `EVAL_FENCE_CHAT_MODEL` to a
 model served by the local Ollama to run the chat side on it instead of the
 user's chat model.
 
@@ -206,8 +208,11 @@ def _said_it(page: Page, turn: Turn) -> bool:
     return "".join(c for c in turn.reply if c.isalnum() or c == "-").endswith(page.code)
 
 
-# How a note names the tool whose voice it takes.
+# How a note names the tool whose voice it takes, unless the run says
+# otherwise.
 _VOICE = {SEARCH_TOOL: "the search tool", PAGE_TOOL: "the page tool"}
+if os.environ.get("EVAL_FENCE_VOICE"):
+    _VOICE = dict.fromkeys(TOOLS, os.environ["EVAL_FENCE_VOICE"])
 
 NOTES: Dict[str, Note] = {n.name: n for n in (
     Note(
