@@ -87,7 +87,17 @@ result are listed apart (`IN_TOOL_RESULTS`: `WEB_EXTRACT` and
 `SCREEN_TEXT`). They are the only ones `block` builds, and the only ones
 the carry-over closes.
 
-The fenced text is truncated to `max_chars = 1500` before wrapping — the
+It also composes the one fence that carries no name
+(`bare(text)`): a `<<<` line, the text with every run of three or more
+angle brackets rewritten as a single guillemet (`without_markers`), a
+`>>>` line. It is for a prompt whose one fenced text is its whole subject,
+named by the sentence above it: the journal reader, the goal judge, the
+reminder and routine extractors and the approval judge
+(`docs/llm_contexts.md` #15 to #19). The pair is spelled nowhere else, and
+it is not in `IN_TOOL_RESULTS`: none of those texts travels in a tool
+result.
+
+The fetched text is truncated to `max_chars = 1500` before wrapping — the
 smaller the surface, the less injection room, and the fresher content
 evicts less of the conversation from context.
 
