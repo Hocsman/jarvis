@@ -760,10 +760,15 @@ class TestResolveNextToolCall:
         answer = '{"name": "notes__lookup", "arguments": {"tag": "garden"}}'
 
         assert "notes__lookup" not in self._resolver_prompt(schema=schema)
-        with patch.object(planner_mod, "call_llm_direct", return_value=answer):
+        # A step in prose, headed by no tool: the allow-list is all that
+        # stands between this answer and its execution.
+        with patch.object(
+            planner_mod, "call_llm_direct", return_value=answer,
+        ) as asked:
             assert resolve_next_tool_call(
-                _cfg(), self._PLACEHOLDER_STEP, [], schema,
+                _cfg(), "find the note about the garden", [], schema,
             ) is None
+        assert asked.called
         assert resolve_next_tool_call(
             _cfg(), "webSearch query='lighthouses'", [], schema,
         ) == ("webSearch", {"query": "lighthouses"})
