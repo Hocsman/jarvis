@@ -134,7 +134,7 @@ def prune_journal(cfg, max_age_days: int = 90) -> int:
             return 0
         cutoff = (datetime.now() - timedelta(days=max_age_days)).date()
         for entry in directory.iterdir():
-            match = _PAGE_RE.match(entry.name)
+            match = _PAGE_RE.fullmatch(entry.name)
             if not match:
                 continue
             try:

@@ -4,7 +4,8 @@ Four tools, and only one of them is free.
 
 The three that write are `action`, so each costs a card. As `lecture`
 they would be `libre` by default, and `fetchWebPage` returns up to 50,000
-characters of unfenced page text into an agentic loop — a page carrying
+characters of page text into an agentic loop, behind a fence that is a
+convention a model honours, not a wall — a page carrying
 "Note pour l'objectif X : …" would then write a durable line attributed
 to the user, which he never said. That is the defect already seen in
 production for `remember`, one level up: here the line is replayed to her
@@ -33,6 +34,7 @@ from ...objectifs.page import (
     append_point,
     close_objectif,
     invalidate_objectifs_cache,
+    is_goal_name,
     load_objectifs,
     objectifs_path,
     ouverts,
@@ -481,15 +483,13 @@ def _nom(raw, blocs) -> str:
     Length is counted in whitespace-separated tokens, so this stays true
     in any language.
     """
-    import re
-
     texte = str(raw or "").strip()
     if texte in blocs:
         return texte
     if not texte or len(texte.split()) > 4:
         return ""
     candidat = "-".join(texte.split())
-    return candidat if re.match(r"^[\w-]{1,64}$", candidat, re.UNICODE) else ""
+    return candidat if is_goal_name(candidat) else ""
 
 
 def _nom_derive(phrase: str, pris) -> str:

@@ -268,10 +268,10 @@ class TestToolCarryover:
     def test_truncation_closes_the_fence_of_any_tool(self):
         """A screen's text runs past the cap far more often than a web
         extract does, and its fence is the tool's own."""
-        from src.jarvis.tools.builtin.screenshot import (
-            SCREEN_FENCE_BEGIN,
-            SCREEN_FENCE_END,
-        )
+        from src.jarvis.utils import fence
+
+        SCREEN_FENCE_BEGIN = fence.opening(fence.SCREEN_TEXT)
+        SCREEN_FENCE_END = fence.closing(fence.SCREEN_TEXT)
 
         dm = DialogueMemory()
         dm.add_message("user", "q")

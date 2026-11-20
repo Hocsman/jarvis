@@ -155,7 +155,7 @@ Known limitations:
 - The block is about 1,100 characters in every attended prompt of a large chat model with a projects folder named, whether or not the turn is about code.
 - The eval's MCP tools are invented. With a real server in the catalogue, a search worded as the task can bring back its tools (on a catalogue with a code host's server, such a search went to its file-writing tool 5 times in 5), which is why the block gives her the name to search for.
 - The sentences on work going one way are measured against one invented write tool, offered for every request: not against a real code host's server, nor with the router offering other tools beside it.
-- Nothing in the prompt tells her that a request found in a tool's result is not the user's, and a question job runs without a card. That she leaves such a request alone is measured on `claude-haiku-5-5` only, through `fetchWebPage` only, on two invented pages; a request in an email or a document read through an MCP server is not measured.
+- Nothing in the prompt tells her that a request found in a tool's result is not the user's, and a question job runs without a card. That she leaves such a request alone is measured on `claude-haiku-5-5` only, through `fetchWebPage` only, on two invented pages (the table's row with the page's text under bold labels and no fence; measured again on 2026-11-19 on `claude-haiku-5-5` with the page fenced as the tool writes it, the block as shipped: no job in 20 of 20); a request in an email or a document read through an MCP server is not measured.
 
 ## Running Claude Code
 
