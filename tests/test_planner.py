@@ -343,15 +343,16 @@ class TestResolveNextToolCall:
 
         result = (
             "Read for you:\n"
-            f"{fence.opening(fence.WEB_EXTRACT)}\n"
+            f"{fence.opening(fence.WEB_EXTRACT, '0a1b2c3d')}\n"
             + "The keeper lived on the point. " * 40
-            + f"\n{fence.closing(fence.WEB_EXTRACT)}"
+            + f"\n{fence.closing(fence.WEB_EXTRACT, '0a1b2c3d')}"
         )
 
         prompt = self._prompt_given_prior_result("readerTool", result)
 
         assert "[UNTRUSTED WEB DATA" in prompt
-        assert fence.opening(fence.WEB_EXTRACT) not in prompt
+        assert fence.opened(prompt) is None
+        assert "<<<BEGIN UNTRUSTED" not in prompt
         assert "The keeper lived on the point." in prompt
 
     def test_a_result_with_no_web_extract_carries_no_such_label(self):

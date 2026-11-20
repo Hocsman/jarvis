@@ -362,7 +362,8 @@ class Settings:
     # are re-injected into the next turn so follow-ups can reuse them instead
     # of re-fetching. These knobs cap how many prior tool turns survive and
     # how much of each tool payload is retained (a fence of UNTRUSTED data
-    # cut by the truncation gets its closing marker back).
+    # cut by the truncation gets its closing marker and its reminder back,
+    # some 325 characters past the cap).
     tool_carryover_max_turns: int
     tool_carryover_per_entry_chars: int
     # Distil diary + graph into a short relevance-filtered note via a cheap

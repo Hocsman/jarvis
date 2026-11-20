@@ -290,6 +290,18 @@ def page_as_fetched(url: str, title: str, lines: Tuple[str, ...]) -> str:
     return result.reply_text
 
 
+def fenced_extract(text: str) -> str:
+    """A page's text as `webSearch` fences it in its result, with the blank
+    line the tool leaves after it, for the evals that hand the engine a
+    search result they wrote themselves: the block is the tool's own
+    builder's, so such a result follows the tool's shape when it moves."""
+    from jarvis.utils import fence
+
+    return fence.block(
+        fence.WEB_EXTRACT, "**Content from top result**", text.rstrip("\n"),
+    ) + "\n\n"
+
+
 # =============================================================================
 # Warm-memory seeding
 # =============================================================================

@@ -1,7 +1,7 @@
 from __future__ import annotations
 import time
 from dataclasses import dataclass, replace
-from typing import Optional
+from typing import NamedTuple, Optional
 from datetime import datetime, timezone
 
 from ..llm import CHAT_NUM_CTX, get_auxiliary_backend
@@ -667,6 +667,16 @@ def _distil_tool_batch(
     return cleaned
 
 
+class _Fence(NamedTuple):
+    """The fence a stretch of a tool result sits in."""
+
+    kind: str
+    # The number the result's opening marker carries, which the parts
+    # written under the tool's own header carry again; None when the
+    # stretch's text shows it, and every part gets a number of its own.
+    number: Optional[str]
+
+
 @dataclass(frozen=True)
 class _Piece:
     """A length of a tool result small enough to share a batch."""
@@ -674,10 +684,10 @@ class _Piece:
     text: str
     # What stood between it and the piece before it in the result.
     joint: str
-    # Which stretch of the result it is from, and the kind of fence that
-    # stretch sits in (None outside any).
+    # Which stretch of the result it is from, and the fence that stretch
+    # sits in (None outside any).
     stretch: int
-    kind: Optional[str]
+    fenced: Optional[_Fence]
 
 
 # What a part of fenced text is labelled in a batch that does not hold the
@@ -685,90 +695,119 @@ class _Piece:
 _PART_LABEL = "Part of the tool's output"
 
 
-def _stretches(raw: str) -> list[tuple[Optional[str], str]]:
-    """``raw`` as its stretches of text in order, each with the kind of
-    fence it sits in, or None outside any.
+def _stretches(raw: str) -> list[tuple[Optional[_Fence], str]]:
+    """``raw`` as its stretches of text in order, each with the fence it
+    sits in, or None outside any.
 
-    A fence runs from an opening marker of a known kind to the next
-    closing marker of that kind, or to the end of the result when there is
-    none: text after an opening marker is somebody else's whether or not
-    the result closes the fence. Fenced text has the brackets a marker is
-    made of rewritten, which changes nothing in what the tools here fence
-    (they rewrite them first) and keeps a result from elsewhere from
-    closing the fence a batch puts round it.
+    A fence runs from a numbered opening marker of a known kind
+    (`fence.openings`) to the closing marker carrying the same number, or
+    to the end of the result when there is none: text after an opening
+    marker is somebody else's whether or not the result closes the fence.
+    The reminder a fence is followed by is not kept as a stretch of its
+    own: `_rendered` writes it again after every part of the fence, and
+    left where it stood it would follow a part whose markers it does not
+    name. Fenced text has the brackets a marker is made of rewritten,
+    which changes nothing in what the tools here fence (they rewrite them
+    first) and keeps a result from elsewhere from closing the fence a
+    batch puts round it.
+
+    The fence keeps the result's number only while its text does not show
+    it. A tool's own block never does (`fence.block` draws one the text
+    does not hold); an opening marker that text outside a fence wrote, an
+    echoed query say, carries a number the page after it may know.
     """
-    found: list[tuple[Optional[str], str]] = []
+    found: list[tuple[Optional[fence.Opened], str]] = []
     at = 0
-    while at < len(raw):
-        openings = [
-            (start, kind)
-            for kind in fence.IN_TOOL_RESULTS
-            if (start := raw.find(fence.opening(kind), at)) != -1
-        ]
-        if not openings:
-            found.append((None, raw[at:]))
-            break
-        start, kind = min(openings)
-        found.append((None, raw[at:start]))
-        body_from = start + len(fence.opening(kind))
-        end = raw.find(fence.closing(kind), body_from)
+    for opened in fence.openings(raw):
+        if opened.start < at:
+            # An opening marker inside a fence already open is its text.
+            continue
+        found.append((None, raw[at:opened.start]))
+        body_from = opened.start + len(fence.opening(opened.kind, opened.number))
+        closing = fence.closing(opened.kind, opened.number)
+        end = raw.find(closing, body_from)
         if end == -1:
-            found.append((kind, raw[body_from:]))
+            found.append((opened, raw[body_from:]))
+            at = len(raw)
             break
-        found.append((kind, raw[body_from:end]))
-        at = end + len(fence.closing(kind))
-    return [
-        (kind, (fence.without_markers(text) if kind else text).strip("\n"))
-        for kind, text in found
-        if text.strip()
-    ]
+        found.append((opened, raw[body_from:end]))
+        ending = fence.ending(opened.kind, opened.number)
+        at = end + len(ending if raw.startswith(ending, end) else closing)
+    found.append((None, raw[at:]))
+    stretches: list[tuple[Optional[_Fence], str]] = []
+    for opened, text in found:
+        if not text.strip():
+            continue
+        if opened is None:
+            stretches.append((None, text.strip("\n")))
+            continue
+        text = fence.without_markers(text).strip("\n")
+        number: Optional[str] = opened.number
+        if number in text:
+            debug_log(
+                f"{opened.kind.lower()} fence opened with a number its text "
+                "shows: each part gets a number of its own",
+                "tools",
+            )
+            number = None
+        stretches.append((_Fence(opened.kind, number), text))
+    return stretches
 
 
 def _rendered(pieces: list[_Piece]) -> str:
     """The pieces of one batch as the text the distil reads.
 
     The pieces of one stretch are joined as the result joined them. A
-    fenced stretch stands between its kind's markers. Where the text just
-    before the fence is in the batch too, the fence opens under it as it
-    did in the result. Fenced text with no such text before it in the
-    batch, because the batch opens on it or because another fence closes
-    just before it, stands in the block `fence.block` writes under
-    `_PART_LABEL`: the note and the markers come from the one builder
-    every tool's fence comes from, composed from the kind alone and from
-    nothing the result holds.
+    fenced stretch stands between its kind's markers and is followed by
+    the reminder. Where the text just before the fence is in the batch
+    too, the fence opens under it as it did in the result, with the number
+    that text names, unless the fenced text shows that number too
+    (`_stretches`). Any other fenced text, because the batch opens on it,
+    because another fence closes just before it or because its number is
+    not kept, stands in the block `fence.block` writes under
+    `_PART_LABEL`, with a number of its own: the note, the markers and the
+    reminder come from the one builder every tool's fence comes from,
+    composed from the kind alone and from nothing the result holds.
     """
-    runs: list[tuple[Optional[str], list[str]]] = []
+    runs: list[tuple[Optional[_Fence], list[str]]] = []
     before: Optional[_Piece] = None
     for piece in pieces:
         if before is not None and piece.stretch == before.stretch:
             runs[-1][1].extend((piece.joint, piece.text))
         else:
-            runs.append((piece.kind, [piece.text]))
+            runs.append((piece.fenced, [piece.text]))
         before = piece
     out: list[str] = []
     after_text = False
-    for kind, parts in runs:
+    for fenced, parts in runs:
         text = "".join(parts)
-        if kind is None:
+        if fenced is None:
             out.append(text)
-        elif after_text:
-            out.append(f"{fence.opening(kind)}\n{text}\n{fence.closing(kind)}")
+        elif after_text and fenced.number:
+            out.append(
+                f"{fence.opening(fenced.kind, fenced.number)}\n{text}\n"
+                f"{fence.ending(fenced.kind, fenced.number)}"
+            )
         else:
-            out.append(fence.block(kind, _PART_LABEL, text))
-        after_text = kind is None
+            out.append(fence.block(fenced.kind, _PART_LABEL, text))
+        after_text = fenced is None
     return "\n".join(out)
 
 
-def _run_length(kind: Optional[str], chars: int, after_text: bool) -> int:
+def _run_length(fenced: Optional[_Fence], chars: int, after_text: bool) -> int:
     """How long :func:`_rendered` writes a run of ``chars`` characters of
-    text, given whether unfenced text stands just before it in the batch.
-    The fenced text is written as it is: it holds no marker left to
-    rewrite."""
-    if kind is None:
+    text, given the fence it sits in and whether unfenced text stands just
+    before it in the batch. The fenced text is written as it is: it holds
+    no marker left to rewrite. Every number is as long as another, so the
+    block of a later part is as long as this one's."""
+    if fenced is None:
         return chars
-    if after_text:
-        return len(fence.opening(kind)) + 1 + chars + 1 + len(fence.closing(kind))
-    return len(fence.block(kind, _PART_LABEL, "")) + chars
+    if after_text and fenced.number:
+        return (
+            len(fence.opening(fenced.kind, fenced.number)) + 1 + chars + 1
+            + len(fence.ending(fenced.kind, fenced.number))
+        )
+    return len(fence.block(fenced.kind, _PART_LABEL, "")) + chars
 
 
 def _cut(line: str, room: int) -> tuple[str, str, str]:
@@ -807,11 +846,11 @@ def _split_tool_result(raw: str, max_chars: int) -> list[str]:
     def added(piece: _Piece) -> int:
         """How much longer the batch reads with ``piece`` at its end."""
         if not current:
-            return _run_length(piece.kind, len(piece.text), after_text=False)
+            return _run_length(piece.fenced, len(piece.text), after_text=False)
         last = current[-1]
         if piece.stretch == last.stretch:
             return len(piece.joint) + len(piece.text)
-        return 1 + _run_length(piece.kind, len(piece.text), last.kind is None)
+        return 1 + _run_length(piece.fenced, len(piece.text), last.fenced is None)
 
     def left_for(piece: _Piece) -> int:
         return max_chars - size - added(replace(piece, text=""))
@@ -828,9 +867,9 @@ def _split_tool_result(raw: str, max_chars: int) -> list[str]:
             current.clear()
             size = 0
 
-    def place(text: str, joint: str, stretch: int, kind: Optional[str],
+    def place(text: str, joint: str, stretch: int, fenced: Optional[_Fence],
               finer: tuple[str, ...]) -> None:
-        piece = _Piece(text, joint, stretch, kind)
+        piece = _Piece(text, joint, stretch, fenced)
         if len(text) <= left_for(piece):
             append(piece)
             return
@@ -842,7 +881,7 @@ def _split_tool_result(raw: str, max_chars: int) -> list[str]:
         if finer:
             for part in text.split(finer[0]):
                 if part.strip("\n"):
-                    place(part.strip("\n"), joint, stretch, kind, finer[1:])
+                    place(part.strip("\n"), joint, stretch, fenced, finer[1:])
                     joint = finer[0]
             return
         while text:
@@ -851,11 +890,11 @@ def _split_tool_result(raw: str, max_chars: int) -> list[str]:
                 close()
                 room = left_for(piece)
             head, text, gap = _cut(text, max(room, 1))
-            append(_Piece(head, joint, stretch, kind))
+            append(_Piece(head, joint, stretch, fenced))
             joint = gap
 
-    for stretch, (kind, text) in enumerate(_stretches(raw)):
-        place(text, "\n\n", stretch, kind, ("\n\n", "\n"))
+    for stretch, (fenced, text) in enumerate(_stretches(raw)):
+        place(text, "\n\n", stretch, fenced, ("\n\n", "\n"))
     close()
     return batches
 
