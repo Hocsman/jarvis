@@ -28,6 +28,7 @@ import pytest
 
 from src.jarvis.memory.conversation import DialogueMemory
 from src.jarvis.reply.engine import run_reply_engine
+from src.jarvis.reply.enrichment import ToolDigest
 from src.jarvis.tools.confirmation import (
     CHANNEL_PAROLE, GRANTED, Approval, PendingAction, SPOKEN_TEMPLATE,
 )
@@ -113,7 +114,7 @@ def _run(seen: Seen, runner, *, cfg, plan, model_calls_the_tool: bool, **engine)
 
     def _distil(*, query, tool_name, tool_result, **_kw):
         seen.distil_queries.append(query)
-        return NOTE
+        return ToolDigest(NOTE, parts=1)
 
     def _text(response):
         return (response.get("message") or {}).get("content", "")

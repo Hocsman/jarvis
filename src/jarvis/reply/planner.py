@@ -39,7 +39,7 @@ import re
 from typing import List, Optional, Sequence, Tuple
 
 from ..debug import debug_log
-from ..llm import get_auxiliary_backend
+from ..llm import CHAT_NUM_CTX, get_auxiliary_backend
 from ..tools.naming import is_plain_name, one_line
 from ..utils import fence
 
@@ -482,7 +482,7 @@ def plan_query(
             user_content=user_content,
             timeout_sec=effective_timeout,
             thinking=False,
-            num_ctx=8192,
+            num_ctx=CHAT_NUM_CTX,
         )
     except Exception as exc:  # pragma: no cover — defensive
         debug_log(f"planner: LLM call failed — {exc}", "planning")
@@ -876,7 +876,7 @@ def resolve_next_tool_call(
             user_content=user_content,
             timeout_sec=effective_timeout,
             thinking=False,
-            num_ctx=8192,
+            num_ctx=CHAT_NUM_CTX,
             temperature=0.0,
         )
     except Exception as exc:  # pragma: no cover — defensive
