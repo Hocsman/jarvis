@@ -615,7 +615,7 @@ def _format_prior_results(prior_results: Sequence[Tuple[str, str, str]]) -> str:
     for i, (name, args_json, result) in enumerate(prior_results, start=1):
         result_excerpt = (result or "").strip().replace("\n", " ")
         is_web = (
-            fence.opening(fence.WEB_EXTRACT) in result_excerpt
+            fence.opened(result_excerpt, fence.WEB_EXTRACT) is not None
             or name == "webSearch"
         )
         if len(result_excerpt) > 500:

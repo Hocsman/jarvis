@@ -904,10 +904,13 @@ class WebSearchTool(Tool):
             # embed instructions like "ignore previous instructions and..."),
             # so it goes between explicit delimiters, under a note that
             # everything inside is data, not instructions, and with the
-            # brackets a marker is made of rewritten (`fence.block`). Small
-            # models still occasionally honour in-page instructions, but the
-            # fence makes it detectable in evals and gives larger models a
-            # clear boundary.
+            # brackets a marker is made of rewritten (`fence.block`). The
+            # page can still write a line that only reads like the closing
+            # marker, so the fence carries a number the page cannot show and
+            # is followed by a line saying all of it came from outside.
+            # Small models still occasionally honour in-page instructions,
+            # but the fence makes it detectable in evals and gives larger
+            # models a clear boundary.
             if fetched_content:
                 all_results.append(fence.block(
                     fence.WEB_EXTRACT, "**Content from top result**", fetched_content))

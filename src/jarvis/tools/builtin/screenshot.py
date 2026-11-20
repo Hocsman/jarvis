@@ -345,8 +345,10 @@ def _fenced(texts: List[str]) -> Optional[str]:
     there, so it is fenced like a web extract (`fence.block`), which
     rewrites the brackets a marker is made of: a marker shown on the
     screen would close the fence early and leave the rest reading as
-    instructions. Several screens go inside the one fence, each under a
-    line this tool writes.
+    instructions. The same block numbers the fence and follows it with a
+    line saying all of it came from outside, for a window that shows a
+    line only reading like the closing marker. Several screens go inside
+    the one fence, each under a line this tool writes.
     """
     shown = [text.strip() for text in texts]
     if not any(shown):
