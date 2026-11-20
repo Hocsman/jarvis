@@ -374,11 +374,11 @@ class TestTheFenceOfALaterPartIsComposedNotCopied:
 
         assert any(SCREEN_END in batch and WEB_BEGIN in batch for batch in handed)
         for batch in handed:
-            for kind in fence.KINDS:
+            for kind in fence.IN_TOOL_RESULTS:
                 begin = fence.opening(kind)
                 if begin in batch:
                     note = batch[:batch.index(begin)].rstrip("\n").split("\n")[-1]
-                    assert f"[UNTRUSTED {kind} " in note, batch[:600]
+                    assert f"[{kind} — " in note, batch[:600]
 
 
 # ── Results with no fence ─────────────────────────────────────────────

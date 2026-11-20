@@ -702,7 +702,7 @@ def _stretches(raw: str) -> list[tuple[Optional[str], str]]:
     while at < len(raw):
         openings = [
             (start, kind)
-            for kind in fence.KINDS
+            for kind in fence.IN_TOOL_RESULTS
             if (start := raw.find(fence.opening(kind), at)) != -1
         ]
         if not openings:

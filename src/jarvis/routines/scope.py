@@ -304,7 +304,7 @@ def rewrite_quand(cfg, nom: str, valeur: str) -> bool:
     always a legal state: `quand:` is a mirror, and a stale mirror is
     reported rather than forced.
     """
-    if not _QUAND_PROPRE.match(valeur or ""):
+    if not _QUAND_PROPRE.fullmatch(valeur or ""):
         debug_log(f"quand not rewritten: unusable value for {nom}", "tools")
         return False
 

@@ -748,7 +748,7 @@ def _nom(raw) -> str:
     if not text or len(text.split()) > _NOM_MAX_MOTS:
         return ""
     candidate = "-".join(text.split())
-    return candidate if _NOM_PROPRE.match(candidate) else ""
+    return candidate if _NOM_PROPRE.fullmatch(candidate) else ""
 
 
 def _nom_derive(regle: Regle, pris) -> str:

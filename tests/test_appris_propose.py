@@ -120,6 +120,37 @@ def test_an_invented_genre_becomes_a_fact_rather_than_a_loss(tmp_path):
 # ── The citation has to be real ───────────────────────────────────────
 
 
+def test_a_citation_across_a_rewritten_bracket_run_is_still_grounded(tmp_path):
+    """A note showing `>>>` reaches the model with that run rewritten, so
+    the fence holds. A citation copied from what the model read has to be
+    found in what the model read, or the rewriting would cost him the
+    proposal."""
+    from src.jarvis.utils.fence import without_markers
+
+    cfg = _Cfg(tmp_path)
+    note = "The user typed >>> and said he runs on Tuesday mornings before work."
+    lue = without_markers(note)
+    assert lue != note
+    reponse = _ok([dict(UN_FAIT[0], citation=lue[lue.index("typed"):])])
+
+    lecture = _lire(cfg, _db([("2026-08-04", note)]), _core(tmp_path), reponse)
+
+    assert [c.date for c in lecture.gardes] == ["2026-08-04"]
+
+
+def test_a_note_is_recorded_as_read_under_the_digest_of_what_the_journal_holds(tmp_path):
+    """The rewriting is for the prompt. What marks a row as read is the
+    row itself, or a note showing `>>>` would be read again on every pass."""
+    cfg = _Cfg(tmp_path)
+    note = "The user typed >>> and said he runs on Tuesday mornings before work."
+
+    lecture = _lire(cfg, _db([("2026-08-04", note)]), _core(tmp_path), _ok([]))
+
+    assert lecture.lues == [
+        ("2026-08-04", hashlib.sha256(note.encode("utf-8")).hexdigest()),
+    ]
+
+
 def test_a_paraphrased_citation_is_dropped(tmp_path):
     """The citation is what lets him check a sentence about himself
     rather than trust it. A citation that is not in his journal makes
