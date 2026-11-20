@@ -6,8 +6,9 @@ else's text and can say anything, "ignore your instructions" included.
 Such text reaches the model between two markers and under a line saying it
 is data. This module holds what the markers are, how text is kept from
 carrying a marker of its own, the block a tool returns (`block`), the bare
-fence (`bare`), how a fence is found in a tool's result (`opened`), and
-how one cut off by a truncation is put back (`close_cut_fences`).
+fence (`bare`), how a fence is found in a tool's result (`openings`,
+`opened`), and how one cut off by a truncation is put back
+(`close_cut_fences`).
 
 There are two shapes. A named fence (`opening(kind)`, `closing(kind)`)
 says what it holds, and is for text that travels with other text: a tool's
@@ -31,7 +32,7 @@ from __future__ import annotations
 
 import re
 import secrets
-from typing import NamedTuple, Optional
+from typing import Iterator, NamedTuple, Optional
 
 from ..debug import debug_log
 
@@ -227,21 +228,25 @@ class Opened(NamedTuple):
     start: int  # where its opening marker starts
 
 
-def opened(text: str, kind: Optional[str] = None) -> Optional[Opened]:
-    """The last numbered fence `text` opens, of `kind` when one is named,
-    or None when it opens none.
+def openings(text: str) -> Iterator[Opened]:
+    """Every numbered opening marker in `text`, in order.
 
     Only a kind that travels in a tool's result is found, and only by a
     marker carrying a number: that is what `block` writes, and a marker
     with no number belongs to a prompt of its own.
     """
-    last = None
     for found in _NUMBERED_OPENING_RE.finditer(text):
-        if kind is None or found.group("kind") == kind:
+        yield Opened(found.group("kind"), found.group("number"), found.start())
+
+
+def opened(text: str, kind: Optional[str] = None) -> Optional[Opened]:
+    """The last numbered fence `text` opens (`openings`), of `kind` when
+    one is named, or None when it opens none."""
+    last = None
+    for found in openings(text):
+        if kind is None or found.kind == kind:
             last = found
-    if last is None:
-        return None
-    return Opened(last.group("kind"), last.group("number"), last.start())
+    return last
 
 
 def close_cut_fences(cut: str) -> str:

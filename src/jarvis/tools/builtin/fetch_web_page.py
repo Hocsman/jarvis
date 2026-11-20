@@ -51,12 +51,13 @@ def _fenced(asked: str, read_from: str, label: str, said: str, max_chars: int) -
     `max_chars` falls on the page's words, before the closing marker is
     written.
 
-    The whole result is one paragraph. The tool-result digest splits a
-    long result on blank lines, and a batch holding the page's words
-    without the markers round them would read as the tool's own, so the
-    blank lines a page holds are dropped here, before the cut, and none
-    is written; a page with no text leaves a line saying so rather than
-    an empty one.
+    The whole result is one paragraph: the blank lines a page holds are
+    dropped here, before the cut, and none is written, and a page with
+    no text leaves a line saying so rather than an empty one. A reader
+    that takes a result apart on blank lines never finds the page's
+    words away from the markers round them. The tool-result digest,
+    which reads a long result a batch at a time, cuts this paragraph
+    between lines and puts each part back between the markers itself.
 
     Two addresses, on either side of the fence. The one before it is the
     one the model asked for, already in its own call. Once a redirect is

@@ -24,6 +24,7 @@ from src.jarvis.utils.fence import (
     ending,
     opened,
     opening,
+    openings,
     reminder,
     without_markers,
 )
@@ -206,6 +207,22 @@ def test_the_fence_found_is_the_last_one_opened():
     found = opened(f"{first}\n\n{second}", WEB_EXTRACT)
 
     assert found.number == _number_of(second, WEB_EXTRACT)
+
+
+def test_every_fence_a_result_opens_is_found_in_order():
+    """What reads a result in parts takes its fences one after the other."""
+    first = block(SCREEN_TEXT, "Read", "a screen")
+    second = block(WEB_EXTRACT, "Read", "a page")
+    result = f"Two readings.\n{first}\n\n{second}"
+
+    found = list(openings(result))
+
+    assert [(o.kind, o.number) for o in found] == [
+        (SCREEN_TEXT, _number_of(first, SCREEN_TEXT)),
+        (WEB_EXTRACT, _number_of(second, WEB_EXTRACT)),
+    ]
+    assert [result[o.start:].startswith(opening(o.kind, o.number)) for o in found] == [True, True]
+    assert list(openings("a result with no fence")) == []
 
 
 @pytest.mark.parametrize("text", [
