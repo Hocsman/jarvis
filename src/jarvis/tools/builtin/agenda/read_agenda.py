@@ -34,6 +34,11 @@ MAX_FIELD_CHARS = 120
 # out of it: enough for a link in front of the words, and a title of a
 # megabyte costs no more than this.
 _FIELD_READ_CHARS = 1_000
+# How many events are written out, the earliest first. Each line is
+# twenty characters at least, so these always fill `MAX_AGENDA_CHARS`
+# and the result says it was cut; a rule firing every second, which
+# yields tens of thousands, costs no more to write than this.
+MAX_WRITTEN_EVENTS = 2_000
 
 _WEEKDAYS = (
     "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
@@ -64,6 +69,24 @@ _BREAKS_RE = re.compile(r"[\s\x00-\x1f\x7f-\x9f]+")
 # a zero-width mark, the tag characters), private use and surrogates. In a
 # title they can carry words his calendar shows nobody and a model reads.
 _HIDDEN_CATEGORIES = frozenset({"Cf", "Co", "Cs"})
+# And those of other categories that show nothing either: the variation
+# selectors (what text hidden in an emoji is written with), the combining
+# grapheme joiner, the Khmer and Mongolian invisible marks, the Hangul
+# fillers and the blank braille pattern. Unicode's default-ignorable set,
+# beside the categories above, and one blank symbol.
+_HIDDEN_RANGES = (
+    (0x034F, 0x034F), (0x115F, 0x1160), (0x17B4, 0x17B5), (0x180B, 0x180F),
+    (0x2800, 0x2800), (0x3164, 0x3164), (0xFE00, 0xFE0F), (0xFFA0, 0xFFA0),
+    (0xE0000, 0xE0FFF),
+)
+
+
+def _shows_nothing(ch: str) -> bool:
+    code = ord(ch)
+    return (
+        unicodedata.category(ch) in _HIDDEN_CATEGORIES
+        or any(low <= code <= high for low, high in _HIDDEN_RANGES)
+    )
 
 _ONE_DAY = timedelta(days=1)
 # How far from the first and the last day of the calendar a day asked
@@ -168,10 +191,7 @@ def _shown(text: str) -> str:
     event of its own below its title, and a character that shows nothing
     would let it say what his calendar does not show him.
     """
-    text = "".join(
-        ch for ch in text[:_FIELD_READ_CHARS]
-        if unicodedata.category(ch) not in _HIDDEN_CATEGORIES
-    )
+    text = "".join(ch for ch in text[:_FIELD_READ_CHARS] if not _shows_nothing(ch))
     text = _BREAKS_RE.sub(" ", _ADDRESS_RE.sub(" ", text)).strip()
     if len(text) > MAX_FIELD_CHARS:
         text = text[:MAX_FIELD_CHARS].rstrip() + "…"
@@ -182,9 +202,18 @@ def _hh_mm(moment: datetime) -> str:
     return f"{moment.hour:02d}:{moment.minute:02d}"
 
 
-def _day_lines(day: date, zone: tzinfo, occurrences: List[ics.Occurrence]) -> List[str]:
+def _day_lines(
+    day: date, zone: tzinfo, occurrences: List[ics.Occurrence], shown: Dict[str, str],
+) -> List[str]:
     """One line per event that touches `day`, clipped to it: all-day
-    events first, then by start."""
+    events first, then by start. `shown` keeps each title and place as
+    `_shown` gives it, for the occurrences of one series share them."""
+
+    def as_shown(text: str) -> str:
+        if text not in shown:
+            shown[text] = _shown(text)
+        return shown[text]
+
     opens = datetime.combine(day, time.min, tzinfo=zone)
     closes = datetime.combine(day + _ONE_DAY, time.min, tzinfo=zone)
     rows: List[Tuple[int, datetime, str]] = []
@@ -208,8 +237,8 @@ def _day_lines(day: date, zone: tzinfo, occurrences: List[ics.Occurrence]) -> Li
                     ", began the day before" if began == day - _ONE_DAY
                     else f", began on {spell_day(began)}"
                 )
-        line = f"- {when}: {_shown(event.title) or '(no title)'}"
-        place = _shown(event.place)
+        line = f"- {when}: {as_shown(event.title) or '(no title)'}"
+        place = as_shown(event.place)
         if place:
             line += f" [place: {place}]"
         rows.append((0 if whole_day else 1, event.start, line))
@@ -230,10 +259,11 @@ def _result_text(days: Days, zone: tzinfo, zone_name: str, reading: ics.Reading)
     this tool's own words."""
     if reading.occurrences:
         body: List[str] = []
+        shown: Dict[str, str] = {}
         day = days.first
         while day <= days.last:
             body.append(spell_day(day))
-            body.extend(_day_lines(day, zone, reading.occurrences) or ["(nothing)"])
+            body.extend(_day_lines(day, zone, reading.occurrences, shown) or ["(nothing)"])
             day += _ONE_DAY
         times = zone_name or "the computer's local time"
         text = fence.block(
@@ -362,7 +392,9 @@ class ReadAgendaTool(Tool):
             "agenda",
         )
         try:
-            reading = ics.read_events(read_source(setting), days.first, days.last, zone)
+            reading = ics.read_events(
+                read_source(setting), days.first, days.last, zone, keep=MAX_WRITTEN_EVENTS,
+            )
         except AgendaUnreadable as why:
             return self._not_read(context, str(why))
         except ics.NotACalendar:

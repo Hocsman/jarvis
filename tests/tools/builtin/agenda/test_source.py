@@ -32,6 +32,16 @@ class _Answer:
         self.closed = True
 
 
+@pytest.fixture(autouse=True)
+def no_fetch_left_running():
+    """A test that gives a fetch up releases it before it ends; wait for
+    its thread, so the next test does not find a fetch still running."""
+    yield
+    left = getattr(source, "_last_fetch", None)
+    if left is not None:
+        left.join(5)
+
+
 @pytest.fixture
 def web(monkeypatch):
     """`requests.get` answering from a script, and what it was asked."""
@@ -279,6 +289,37 @@ def test_a_server_that_answers_drop_by_drop_cannot_hold_the_fetch(where, monkeyp
         assert time.monotonic() - began < 2
     finally:
         released.set()
+
+
+def test_a_fetch_still_held_by_its_server_is_not_joined_by_another(monkeypatch):
+    """A server trickling its headers keeps the thread of a fetch given
+    up alive, and it never looks at its clock there. One such thread at
+    a time: the next reading says so rather than leave another behind."""
+    import threading
+
+    monkeypatch.setattr(source, "_FETCH_WALL_CLOCK_SEC", 0.2)
+    released = threading.Event()
+    asked = []
+
+    def get(url, **kwargs):
+        asked.append(url)
+        if not released.is_set():
+            released.wait(5)
+            raise requests.Timeout("never answered")
+        return _Answer(body=CALENDAR.encode("utf-8"))
+
+    monkeypatch.setattr(source.requests, "get", get)
+    try:
+        with pytest.raises(AgendaUnreadable, match="too long"):
+            source.read_source(ADDRESS)
+        with pytest.raises(AgendaUnreadable, match="still"):
+            source.read_source(ADDRESS)
+        assert len(asked) == 1
+    finally:
+        released.set()
+    source._last_fetch.join(2)
+
+    assert source.read_source(ADDRESS) == CALENDAR
 
 
 def test_every_answer_is_closed(web):

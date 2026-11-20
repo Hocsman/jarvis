@@ -12,6 +12,7 @@ line may hold it.
 
 from __future__ import annotations
 
+import heapq
 import io
 import re
 from dataclasses import dataclass, field
@@ -59,6 +60,16 @@ _ZONE_RULE_KEYS = frozenset({
 })
 _MAX_ZONE_PARTS = 400
 _MAX_ZONE_DATES = 1_000
+# A zone's rules are what is walked; its dated changes cost nothing. A
+# real zone carries two rules in force, and a few more in its history.
+_MAX_ZONE_RULES = 10
+# The first year of the Gregorian calendar: Outlook starts its rules in
+# 1601, other writers in 1970. A rule starting earlier walks centuries
+# that no real zone has.
+_FIRST_ZONE_YEAR = 1583
+
+# The longest each month can be, February in a leap year.
+_MONTH_DAYS = (31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
 
 # How far a single event's wall clock may sit from the days asked about
 # and still be looked at: no zone moves a clock by two days.
@@ -232,6 +243,14 @@ def _components(lines: List[str]) -> Tuple[List[List[_Line]], List[str], bool]:
             if len(stack) >= _MAX_DEPTH:
                 continue
             kind = line.value.strip().upper()
+            if kind == "VEVENT" and "VTIMEZONE" in stack:
+                # A zone never closed ends where the next event begins:
+                # left open, it would take every later event for its own.
+                while stack:
+                    open_kind = stack.pop()
+                    zone_lines.append(f"END:{open_kind}")
+                    if open_kind == "VTIMEZONE":
+                        break
             stack.append(kind)
             if kind == "VCALENDAR":
                 is_calendar = True
@@ -244,7 +263,12 @@ def _components(lines: List[str]) -> Tuple[List[List[_Line]], List[str], bool]:
             kind = line.value.strip().upper()
             if "VTIMEZONE" in stack:
                 zone_lines.append(raw)
-            if kind == "VEVENT" and current is not None and "VEVENT" in stack:
+            if (
+                current is not None and "VEVENT" in stack and kind in stack
+                and stack.index(kind) <= stack.index("VEVENT")
+            ):
+                # The event's own end, or the end of what holds it (the
+                # calendar closed with the event still open).
                 events.append(current)
                 current = None
             if kind in stack:
@@ -255,6 +279,9 @@ def _components(lines: List[str]) -> Tuple[List[List[_Line]], List[str], bool]:
             zone_lines.append(raw)
         elif current is not None and stack and stack[-1] == "VEVENT":
             current.append(line)
+    if current is not None:
+        # The text ended inside an event.
+        events.append(current)
     return events, zone_lines, is_calendar
 
 
@@ -341,6 +368,7 @@ def _is_a_real_zone(block: List[str]) -> bool:
     minutes on each time converted in it."""
     parts = 0
     dates = 0
+    rules = 0
     for raw in block:
         line = _content_line(raw)
         if line is None:
@@ -349,27 +377,67 @@ def _is_a_real_zone(block: List[str]) -> bool:
             parts += 1
         elif line.name == "RDATE":
             dates += len(line.value.split(","))
-        elif line.name == "RRULE" and not _is_a_zone_rule(line.value):
-            return False
-    return parts <= _MAX_ZONE_PARTS and dates <= _MAX_ZONE_DATES
+        elif line.name == "RRULE":
+            rules += 1
+            if not _is_a_zone_rule(line.value):
+                return False
+        elif line.name == "DTSTART":
+            year = line.value.strip()[:4]
+            if not year.isdigit() or int(year) < _FIRST_ZONE_YEAR:
+                return False
+    return (
+        parts <= _MAX_ZONE_PARTS and dates <= _MAX_ZONE_DATES and rules <= _MAX_ZONE_RULES
+    )
 
 
-def _is_a_zone_rule(value: str) -> bool:
+def _rule_parts(value: str) -> Dict[str, List[str]]:
+    """A rule's parts, by name, each with its values."""
     found: Dict[str, List[str]] = {}
     for part in value.split(";"):
         if not part.strip():
             continue
         key, _, values = part.partition("=")
-        key = key.strip().upper()
-        if key not in _ZONE_RULE_KEYS:
-            return False
-        found[key] = [v for v in values.split(",") if v.strip()]
+        found[key.strip().upper()] = [v.strip().upper() for v in values.split(",") if v.strip()]
+    return found
+
+
+def _moves_forward(found: Dict[str, List[str]]) -> bool:
+    """Whether a rule's `INTERVAL`, if it has one, is a whole number above
+    zero. At zero the recurrence library never steps, and walks for ever
+    when nothing falls on its one day."""
+    interval = found.get("INTERVAL")
+    if interval is None:
+        return True
+    return len(interval) == 1 and interval[0].isdigit() and int(interval[0]) > 0
+
+
+def _is_a_zone_rule(value: str) -> bool:
+    found = _rule_parts(value)
+    # A day of the week or of the month is within one month: with none
+    # named, it would recur all year.
+    months = 1 if ("BYDAY" in found or "BYMONTHDAY" in found) else len(found.get("BYMONTH", []))
     return (
-        [v.strip().upper() for v in found.get("FREQ", [])] == ["YEARLY"]
-        and len(found.get("BYMONTH", [])) <= 1
+        set(found) <= _ZONE_RULE_KEYS
+        and found.get("FREQ") == ["YEARLY"]
+        and _moves_forward(found)
+        and len(found.get("BYMONTH", [])) == months <= 1
         and len(found.get("BYDAY", [])) <= 1
         and len(found.get("BYMONTHDAY", [])) <= 7
     )
+
+
+def _falls_on_no_day(found: Dict[str, List[str]]) -> bool:
+    """Whether a rule's `BYMONTHDAY` names no day any of its months has
+    (the 30th of February): the library would walk to the year 9999 to
+    find nothing."""
+    try:
+        days = [int(v) for v in found.get("BYMONTHDAY", [])]
+        months = [int(v) for v in found.get("BYMONTH", [])] or list(range(1, 13))
+        if not days or not all(1 <= m <= 12 for m in months):
+            return False
+    except ValueError:
+        return False
+    return not any(0 < abs(d) <= _MONTH_DAYS[m - 1] for d in days for m in months)
 
 
 # ── When ──────────────────────────────────────────────────────────────
@@ -600,7 +668,10 @@ def _rule_starts(event: _Event, zones: _Zones, not_before: datetime, before: dat
             parts.append("UNTIL=" + until.strftime("%Y%m%dT%H%M%S"))
         else:
             parts.append(part.strip())
-    if until is not None and until < not_before:
+    found = _rule_parts(event.rule)
+    if not _moves_forward(found):
+        raise _Unreadable("a rule that does not move forward")
+    if _falls_on_no_day(found) or (until is not None and until < not_before):
         return
     first = event.start.naive
     if named.get("FREQ") in ("DAILY", "WEEKLY") and "COUNT" not in named and "BYSETPOS" not in named:
@@ -682,9 +753,12 @@ def _occurrences(
     return found
 
 
-def read_events(text: str, first: date, last: date, zone: tzinfo) -> Reading:
+def read_events(
+    text: str, first: date, last: date, zone: tzinfo, keep: Optional[int] = None,
+) -> Reading:
     """The events of `text` that touch the days `first` to `last`
-    (included), with their times in `zone`, in the order of the days.
+    (included), with their times in `zone`, in the order of the days:
+    the first `keep` of them when it is given.
 
     Raises `NotACalendar` when the text holds no calendar: an empty list
     would read as a free day. Raises `TooLong` past the time limit.
@@ -729,5 +803,11 @@ def read_events(text: str, first: date, last: date, zone: tzinfo) -> Reading:
             found.extend(_occurrences(event, zones, opens, closes, replaced))
         except _UNPLACED:
             unreadable += 1
-    found.sort(key=lambda o: (o.start, 0 if o.all_day else 1, o.title, o.place))
+    def order(o: Occurrence):
+        return (o.start, 0 if o.all_day else 1, o.title, o.place)
+
+    if keep is not None and len(found) > keep:
+        found = heapq.nsmallest(keep, found, key=order)
+    else:
+        found.sort(key=order)
     return Reading(found, unreadable)

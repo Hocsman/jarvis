@@ -651,6 +651,118 @@ def test_components_opened_and_never_closed_do_not_hold_the_reading():
     assert time.monotonic() - began < 2
 
 
+def _read_within(seconds, text, first=THURSDAY):
+    """The reading, run where a hang cannot hold the test run: past
+    `seconds` the test fails and the thread is left to the process."""
+    import threading
+
+    outcome = {}
+
+    def read():
+        try:
+            outcome["reading"] = _read(text, first)
+        except BaseException as e:
+            outcome["failure"] = e
+
+    worker = threading.Thread(target=read, daemon=True)
+    worker.start()
+    worker.join(seconds)
+    assert not worker.is_alive(), f"the reading took more than {seconds} s"
+    if "failure" in outcome:
+        raise outcome["failure"]
+    return outcome["reading"]
+
+
+@pytest.mark.parametrize("rule", [
+    "FREQ=DAILY;INTERVAL=0;BYMONTH=2",
+    "FREQ=WEEKLY;INTERVAL=0;BYMONTH=2",
+    "FREQ=MONTHLY;INTERVAL=0;BYMONTH=2",
+    "FREQ=YEARLY;INTERVAL=0;BYMONTH=2;BYMONTHDAY=30",
+    "FREQ=DAILY;INTERVAL=-1",
+])
+def test_a_rule_that_does_not_move_forward_is_counted_and_holds_nothing(rule):
+    text = _calendar(
+        ["UID:x@invented", "DTSTART:20261001T090000", f"RRULE:{rule}", "SUMMARY:Immobile"],
+        GOOD,
+    )
+    reading = _read_within(3, text)
+
+    assert reading.unreadable == 1
+    assert [e.title for e in reading.occurrences] == ["Lisible"]
+
+
+@pytest.mark.parametrize("rule", [
+    "FREQ=MINUTELY;BYMONTH=2;BYMONTHDAY=30",
+    "FREQ=SECONDLY;BYMONTH=4,6;BYMONTHDAY=31",
+    "FREQ=DAILY;BYMONTH=2;BYMONTHDAY=-30",
+])
+def test_a_rule_on_a_day_no_month_has_costs_nothing(rule):
+    """The 30th of February every minute: the library would walk to the
+    year 9999 to find nothing. The start still counts."""
+    text = _calendar(
+        ["UID:x@invented", "DTSTART:20261126T090000", f"RRULE:{rule}", "SUMMARY:Une fois"],
+        GOOD,
+    )
+    began = time.monotonic()
+    reading = _read(text)
+
+    assert time.monotonic() - began < 1
+    assert reading.unreadable == 0
+    assert sorted(e.title for e in reading.occurrences) == ["Lisible", "Une fois"]
+
+
+def test_a_zone_whose_rule_does_not_move_forward_is_not_read():
+    text = _calendar(
+        ["UID:x@invented", 'DTSTART;TZID="Heure figée":20261126T090000', "SUMMARY:Piège"],
+        GOOD,
+        before=_zone_with_rule("Heure figée", "FREQ=YEARLY;INTERVAL=0;BYMONTH=2;BYMONTHDAY=30"),
+    )
+    reading = _read_within(3, text)
+
+    assert reading.unreadable == 1
+    assert [e.title for e in reading.occurrences] == ["Lisible"]
+
+
+def test_a_zone_of_many_rules_from_the_year_one_is_not_read():
+    """Each rule is walked from its own start on every conversion: a
+    hundred of them from the year one cost half a minute on one event."""
+    parts = []
+    for n in range(100):
+        parts += [
+            "BEGIN:STANDARD", "DTSTART:00010101T000000",
+            "RRULE:FREQ=YEARLY;BYMONTHDAY=1,2,3,4,5,6,7",
+            "TZOFFSETFROM:+0100", "TZOFFSETTO:+0100", "END:STANDARD",
+        ]
+    zone = ["BEGIN:VTIMEZONE", "TZID:Heure antique", *parts, "END:VTIMEZONE"]
+    text = _calendar(
+        ["UID:x@invented", "DTSTART;TZID=Heure antique:20261126T090000", "SUMMARY:Piège"],
+        GOOD,
+        before=zone,
+    )
+    reading = _read_within(3, text)
+
+    assert reading.unreadable == 1
+    assert [e.title for e in reading.occurrences] == ["Lisible"]
+
+
+def test_a_zone_never_closed_does_not_swallow_the_events_after_it():
+    text = _calendar(
+        GOOD,
+        before=["BEGIN:VTIMEZONE", "TZID:Heure ouverte", "BEGIN:STANDARD",
+                "DTSTART:19700101T000000", "TZOFFSETFROM:+0100", "TZOFFSETTO:+0100"],
+    )
+
+    assert [e.title for e in _read(text).occurrences] == ["Lisible"]
+
+
+def test_an_event_cut_off_by_the_end_of_the_calendar_is_still_read():
+    text = "\r\n".join([
+        "BEGIN:VCALENDAR", "VERSION:2.0", "BEGIN:VEVENT", *GOOD, "END:VCALENDAR",
+    ]) + "\r\n"
+
+    assert [e.title for e in _read(text).occurrences] == ["Lisible"]
+
+
 def test_an_event_whose_alarm_is_never_closed_is_still_read():
     reading = _read(_calendar([
         "UID:a@invented", "DTSTART:20261126T090000", "DTEND:20261126T100000",

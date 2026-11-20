@@ -43,6 +43,10 @@ _HEADERS = {
 
 NOT_CONFIGURED = "No agenda is configured: the `agenda_source` setting is empty."
 
+# The thread of the last fetch, which may outlive a fetch given up.
+_last_fetch: "threading.Thread | None" = None
+_fetch_lock = threading.Lock()
+
 
 class AgendaUnreadable(Exception):
     """The source gave no calendar text. The message says why, in words
@@ -117,10 +121,14 @@ def _fetch(address: str) -> bytes:
     """The body the address answers with, over HTTPS and nothing else,
     within `_FETCH_WALL_CLOCK_SEC`.
 
-    The thread left behind by a fetch given up ends at its next read: it
-    looks at the same clock between two reads, and holds nothing anyone
-    waits for.
+    The thread left behind by a fetch given up ends at its next read of
+    the body: it looks at the same clock between two reads. While the
+    server is still trickling its headers it looks at nothing, and lives
+    as long as the server keeps it alive; so a new fetch is not started
+    beside it, and the reading says why.
     """
+    global _last_fetch
+
     outcome: dict = {}
 
     def fetch() -> None:
@@ -129,8 +137,16 @@ def _fetch(address: str) -> bytes:
         except BaseException as e:  # handed to the caller, raised there
             outcome["failure"] = e
 
-    worker = threading.Thread(target=fetch, name="agenda-fetch", daemon=True)
-    worker.start()
+    with _fetch_lock:
+        if _last_fetch is not None and _last_fetch.is_alive():
+            debug_log("agenda: the previous fetch is still running, none started", "agenda")
+            raise AgendaUnreadable(
+                "The previous reading of the agenda address is still waiting on its "
+                "server; nothing was asked again."
+            )
+        worker = threading.Thread(target=fetch, name="agenda-fetch", daemon=True)
+        _last_fetch = worker
+        worker.start()
     worker.join(_FETCH_WALL_CLOCK_SEC)
     if worker.is_alive():
         raise _too_long()

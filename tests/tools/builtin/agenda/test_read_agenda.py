@@ -510,6 +510,10 @@ def test_a_title_of_a_megabyte_is_cut_in_time(an_agenda):
 
 @pytest.mark.parametrize("hidden", [
     "‮", "⁦", "​", "﻿", "\U000e0041\U000e0042", "",
+    # Variation selectors: what text hidden in an emoji is written with.
+    "️", "\U000e0100\U000e0101\U000e01ef",
+    # Fillers and blanks that are letters or symbols, and show nothing.
+    "ㅤ", "⠀", "ᅟ", "ﾠ", "͏", "᠋",
 ])
 def test_characters_that_show_nothing_are_taken_out_of_a_title(an_agenda, hidden):
     """A title can carry text the calendar app shows nobody but a model
@@ -522,6 +526,29 @@ def test_characters_that_show_nothing_are_taken_out_of_a_title(an_agenda, hidden
 
     assert "\n- 14:00 to 15:00: Réunion [place: Salle Cassiopée]\n" in text
     assert hidden not in text
+
+
+def test_tens_of_thousands_of_occurrences_are_written_in_time_and_cut(an_agenda):
+    """A rule firing every second through the day, with a long title: the
+    reading is quick, and what is written of it must be too."""
+    import time
+
+    events = [
+        [f"UID:{n}@invented", "DTSTART;TZID=Europe/Paris:20261126T000000", "DURATION:PT1S",
+         "RRULE:FREQ=SECONDLY;UNTIL=20261126T134000", f"SUMMARY:{n} " + "t" * 1_000]
+        for n in range(3)
+    ]
+    an_agenda["text"] = _calendar(*events)
+    began = time.monotonic()
+    result = _run()
+
+    assert time.monotonic() - began < 5
+    assert result.success
+    assert len(_inside_fence(result.reply_text)) <= agenda.MAX_AGENDA_CHARS + 2
+    assert result.reply_text.endswith(
+        f"[The agenda held more text than this: it was cut at {agenda.MAX_AGENDA_CHARS} characters.]"
+    )
+    assert "\n- 00:00 to 00:00: 0 " in result.reply_text
 
 
 def test_a_very_full_range_is_cut_and_says_so(an_agenda, monkeypatch):
