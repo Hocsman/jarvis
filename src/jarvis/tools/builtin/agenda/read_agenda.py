@@ -52,7 +52,7 @@ _ADDRESS_RE = re.compile(
 )
 # Whitespace of every kind and the control characters: what could break a
 # line or hide in one.
-_BREAKS_RE = re.compile(r"[\s\x00-\x1f\x7f-\x9f  ]+")
+_BREAKS_RE = re.compile(r"[\s\x00-\x1f\x7f-\x9f]+")
 
 _ONE_DAY = timedelta(days=1)
 

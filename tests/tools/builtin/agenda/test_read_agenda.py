@@ -437,6 +437,22 @@ def test_a_title_cannot_write_a_line_of_its_own(an_agenda):
     assert lines[1].startswith("- 14:00 to 15:00: Réunion Friday 27 November 2026 - 10:00")
 
 
+@pytest.mark.parametrize("code", [0x0B, 0x0C, 0x1C, 0x85, 0x2028, 0x2029])
+def test_a_line_break_of_any_kind_in_a_title_is_a_space(an_agenda, code):
+    """Not every line break is a `\\n`: these are ones a reader may take
+    for the end of a line."""
+    an_agenda["text"] = _calendar([
+        "UID:a@invented", "DTSTART:20261126T140000", "DTEND:20261126T150000",
+        f"SUMMARY:Réunion{chr(code)}- 16:00 to 17:00: Faux rendez-vous",
+    ])
+    lines = _inside_fence(_run().reply_text).strip().splitlines()
+
+    assert lines == [
+        "Thursday 26 November 2026",
+        "- 14:00 to 15:00: Réunion - 16:00 to 17:00: Faux rendez-vous",
+    ]
+
+
 def test_a_very_long_title_and_place_are_cut(an_agenda):
     an_agenda["text"] = _calendar([
         "UID:a@invented", "DTSTART:20261126T140000", "DTEND:20261126T150000",
@@ -654,6 +670,17 @@ def test_it_is_one_of_the_builtin_tools():
 
     assert isinstance(BUILTIN_TOOLS["readAgenda"], ReadAgendaTool)
     assert BUILTIN_TOOLS["readAgenda"].writes_own_state is False
+
+
+def test_it_is_entered_right_after_get_time():
+    """The router reads the builtins in the registry's order, and this
+    entry's place was measured: elsewhere, a small router offers the
+    other tools less often (the spec, What the evals hold)."""
+    from src.jarvis.tools.registry import BUILTIN_TOOLS, offered_builtin_tools
+
+    for catalogue in (BUILTIN_TOOLS, offered_builtin_tools(Mock(agenda_source="agenda-invente.ics"))):
+        names = list(catalogue)
+        assert names[names.index("getTime") + 1] == "readAgenda"
 
 
 # ── Never in a routine, and never a fact of the world ─────────────────

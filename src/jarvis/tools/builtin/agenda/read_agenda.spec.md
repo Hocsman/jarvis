@@ -134,7 +134,33 @@ Thursday 26 November 2026
 
 ## What the evals hold
 
-`evals/test_she_reads_the_agenda_when_asked.py`, on the real engine (planner, router, chat model) with an invented calendar in a temporary file:
+The description is read in three lengths: the router reads its first sentence, the planner its first 120 characters, the chat model all of it (`docs/llm_contexts.md`, #7, #12, #1). So the first sentence says what the tool is for in the words he asks with, and the sentences that hold it back and name its arguments are ones only the chat model reads.
+
+`evals/test_she_reads_the_agenda_when_asked.py`, on the real engine (planner, router, chat model) with an invented calendar in a temporary `.ics` file that the real tool reads:
 
 - `TestSheAsksThenReads` runs the real gate and the real tool: a question about his day ends the first turn on her question with nothing read, a yes has the agenda read once and her reply name what the day holds, a no reads nothing.
-- The rest counts the calls the model makes before the gate, in both directions: a question about his agenda reaches the tool **with the right day**, and a sentence that only mentions a calendar or a meeting, or is about something else, does not. A call made for nothing costs him a question he did not expect.
+- The rest counts the calls the model makes before the gate, in both directions: a question about his agenda, in French, English or German, reaches the tool **with the day he asked about** in its first call (the one the gate would ask about), and a sentence that only mentions a calendar or a meeting, or is about something else, does not reach it. A call made for nothing costs him a question he did not expect; a call with a day the tool cannot read costs him the yes he gave.
+
+Measured on 2026-11-20 with the router on `qwen2.5:3b` and Claude Haiku 5.5 as the chat model. No small chat model on the text protocol was measured.
+
+**A listed day against a free one.** The arguments above against a single free-text `day` taking the word or the date (and a description that says nothing of `date`), the two interleaved call by call, 5 rounds: 30 calls an arm on six questions about his agenda, 20 on four sentences elsewhere.
+
+| | these arguments | one free-text `day` | Fisher, two-sided |
+|---|---|---|---|
+| a question about his agenda reaches the tool | 30 of 30 | 30 of 30 | p = 1 |
+| its first call names the day he asked about | 30 of 30 | 21 of 30 | p = 0.0019 |
+| a sentence about something else leaves it alone | 20 of 20 | 20 of 20 | p = 1 |
+
+Every miss of the free-text arm is the user's own word handed to the tool (`mardi`, `mercredi`, `demain`), which it refuses: nine calls that would each have cost him a yes.
+
+**The other tools, with it in the catalogue.** The descriptions are read together, so a new one can move requests meant for another (`../../selection.spec.md`). The router alone, on the catalogue the settings offer with `readAgenda` in it against the same catalogue without, interleaved call by call, 14 rounds:
+
+| | with `readAgenda` | without | Fisher, two-sided |
+|---|---|---|---|
+| the router evals' 15 cases reach their tool | 203 of 210 | 197 of 210 | p = 0.25 |
+| five sentences about a day or an hour that belong to another tool reach it | 61 of 70 | 60 of 70 | p = 1 |
+| a question about his agenda is offered `readAgenda` | 84 of 84 | | |
+
+The misses are the same sentences on both arms: the three requests for something to recur, which lose `setRoutine` to `getWeather` or the web tools, and, without the tool only, one question about food.
+
+**Where the tool sits in the catalogue counts.** The router reads the builtins in the order of `BUILTIN_TOOLS`, and `readAgenda` is entered right after `getTime`. With the same description entered second, after `screenshot`, the other tools were offered less often: 175 of 200 against 189 of 200 without it (Fisher p = 0.022), and entered last, 170 of 200 (p = 0.0026), where the entry after `getTime` measured 187 of 200 (p = 0.83) and 120 of 120 on twelve questions about his agenda. Those are four of the six arms of one loop, 10 rounds, interleaved call by call; the other two carried a shorter first sentence, which lost the questions about his agenda (83 and 99 of 120). That loop is not in the eval file: its arms move the entry and rewrite the sentence by hand.

@@ -46,7 +46,6 @@ from ..debug import debug_log
 # Registry of all builtin tools
 BUILTIN_TOOLS = {
     "screenshot": ScreenshotTool(),
-    "readAgenda": ReadAgendaTool(),
     "webSearch": WebSearchTool(),
     "localFiles": LocalFilesTool(),
     "fetchWebPage": FetchWebPageTool(),
@@ -56,6 +55,11 @@ BUILTIN_TOOLS = {
     "refreshMCPTools": RefreshMCPToolsTool(),
     "getWeather": WeatherTool(),
     "getTime": TimeTool(),
+    # Here and not elsewhere: the router reads the catalogue in this order,
+    # and where this entry sits moves what a small router offers for the
+    # other tools (`builtin/agenda/read_agenda.spec.md`, What the evals
+    # hold).
+    "readAgenda": ReadAgendaTool(),
     "remember": RememberTool(),
     "forget": ForgetTool(),
     "setReminder": SetReminderTool(),
