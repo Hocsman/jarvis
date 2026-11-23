@@ -313,7 +313,7 @@ After TTS finishes, allow wake-word-free follow-up.
 
 **Mixed echo+speech handling:** When Whisper merges TTS echo and user speech into one chunk (e.g. mic picks up TTS then user speaks), the word-count guard detects the extra content and lets it through to the intent judge. The judge extracts the user's actual query from the mixed transcript. Post-judge echo checks also use the word-count guard and verify the judge's extracted query isn't itself echo before rejecting.
 
-**Early salvage for echo-prefixed follow-ups:** Before the early fuzzy check rejects a chunk as pure echo, the listener calls `cleanup_leading_echo` to strip any TTS-tail prefix. If exact-word cleanup fails (for example because Whisper mis-transcribed the first echo word — *"explores"* → *"laws"* — breaking the word-level comparison), the listener falls back to `salvage_after_echo_tail`, which scans heard-text word boundaries right-to-left looking for the rightmost 5-word window that fuzzy-matches the TTS tail (`partial_ratio >= 85`) and keeps everything after it. This preserves short follow-ups (*"Who made it?"*) that the existing fuzzy-prefix salvage would otherwise truncate by one word because it prefers the shortest suffix. If the surviving remainder has at least `EchoDetector.min_salvage_words` words (default 3), carries words she did not say in a voice (the two proofs of "Overriding an echo verdict takes positive evidence"), and its voice went on after hers (see "During TTS"), it replaces the transcript segment text and is treated as the user's follow-up. The same minimum-word threshold is shared by the during-TTS and post-TTS merged-chunk salvage paths. The during-TTS one keeps a remainder on that count alone. So does the post-TTS one, unless the utterance's voice stopped with hers (see "During TTS"): from such an utterance it keeps nothing, and the utterance stays whole, and flagged. In the hot window the overrides still set a remainder aside when it could be hers.
+**Early salvage for echo-prefixed follow-ups:** Before the early fuzzy check rejects a chunk as pure echo, the listener calls `cleanup_leading_echo` to strip any TTS-tail prefix. If exact-word cleanup fails (for example because Whisper mis-transcribed the first echo word — *"explores"* → *"laws"* — breaking the word-level comparison), the listener falls back to `salvage_after_echo_tail`, which scans heard-text word boundaries right-to-left looking for the rightmost 5-word window that fuzzy-matches the TTS tail (`partial_ratio >= 85`) and keeps everything after it. This preserves short follow-ups (*"Who made it?"*) that the existing fuzzy-prefix salvage would otherwise truncate by one word because it prefers the shortest suffix. If the surviving remainder has at least `EchoDetector.min_salvage_words` words (default 3), carries words she did not say in a voice (the two proofs of "Overriding an echo verdict takes positive evidence", one word of his being enough for his answer to the question she asked before acting), and its voice went on after hers (see "During TTS"), it replaces the transcript segment text and is treated as the user's follow-up. The same minimum-word threshold is shared by the during-TTS and post-TTS merged-chunk salvage paths. The during-TTS one keeps a remainder on that count alone. So does the post-TTS one, unless the utterance's voice stopped with hers (see "During TTS"): from such an utterance it keeps nothing, and the utterance stays whole, and flagged. In the hot window the overrides still set a remainder aside when it could be hers.
 
 **Timestamp-based detection:** `was_speech_during_hot_window(utterance_start_time, utterance_end_time)` compares the utterance's time range against the hot window's time span (from schedule to expiry). This eliminates race conditions between slow Whisper transcription and the expiry timer — if the user started speaking during the window, it counts as hot window input regardless of when the transcript arrives. Also handles **overlapping utterances** where VAD triggered during TTS (mic picking up echo) but the utterance extended into the hot window period.
 
@@ -374,6 +374,34 @@ While TTS is playing, echo rejection and stop commands are handled with fast tex
   whose end is not known, the flag rests on the two proofs. Her own voice
   clears the energy bar, so for her voice coming back they come down to its
   words.
+- His answer to the question she asked before acting is made of its words.
+  A spoken question waiting for his answer (`tools/policy.spec.md`) supplies
+  the words of that answer: "I'm about to empty the recycle bin. Do you
+  approve?" is answered "yes, I approve", one word of his and the rest hers,
+  and the share of words she did not say, measured on barge-in over her
+  replies, reads it as her echo. So while a question his voice can settle
+  waits (spoken, asked by voice, and not past its deadline), an utterance
+  whose voice went on after her last word plus `echo_tolerance` carries words
+  she did not say as soon as one of its words has no close match in her reply
+  (the word test of "Overriding an echo verdict takes positive evidence"); the
+  voice proof is unchanged. Her words count there as she says them and as
+  Whisper writes them heard: the parts of a compound name she says
+  ("archivePhotos" heard "archive photos", "sort_old_scans" heard "sort old
+  scans") are hers. Her voice coming back never goes on after hers, so her
+  question passes this way only merged with another sound that outlasts her
+  voice, and with a word of it bent into one she did not say. Kept on
+  purpose: an answer of his made only of her question's words ("je valide,
+  lance" after "Je m'apprête à lancer archivePhotos. Tu valides ?") cannot be
+  told from her question coming back bent, and is flagged. While she speaks,
+  for an utterance whose end is not known, and with no question his voice can
+  settle (none, one only a click can settle, one asked in the chat window, one
+  past its deadline), the share decides as above. Each place that weighs the
+  words reads the question waiting and the voice's end once, and decides on
+  that reading: the flag as the utterance joins the transcript, what the early
+  salvage keeps after her question, and, read before the judge is asked, every
+  path its verdict takes in the hot window (an echo verdict, another
+  rejection, a sure aside, a directed verdict with no query, and a missing
+  one; see "Hot Window Mode").
 - Intent judge uses this context to identify echo
 - All of this is read on the utterance once the sentences of her reply that
   open and close it are out (see "Her sentences at the edges of what he
@@ -527,7 +555,7 @@ Echo detection uses a layered approach for reliability:
 
 The fuzzy check acts as a fast, reliable safety net. The intent judge provides deeper understanding but may be unreliable with smaller models (e.g. gemma4).
 
-3. **Overriding an echo verdict takes positive evidence.** When the judge says an utterance is her own echo, that verdict stands unless the utterance carries words she did not say: the share of heard words with no close match in her reply must exceed 40%. Her reply is the one the judge was shown: a reply that starts while the judge is thinking does not change what its verdict is weighed against. The override exists for barge-in, and barge-in is what that measures.
+3. **Overriding an echo verdict takes positive evidence.** When the judge says an utterance is her own echo, that verdict stands unless the utterance carries words she did not say: the share of heard words with no close match in her reply must exceed 40%. Her reply is the one the judge was shown: a reply that starts while the judge is thinking does not change what its verdict is weighed against. The override exists for barge-in, and barge-in is what that measures. His answer to the question she asked before acting is not barge-in: it is made of its question's words, and one word with no close match is enough for it when its voice went on after hers (see "During TTS").
 
    Absence of a fuzzy match is not evidence of speech. `partial_ratio` looks for a contiguous window, so an echo Whisper decimated — words dropped from the middle, others corrupted — stops matching and used to read as new content, which had her run a full turn on her own voice. Per word nothing separates the two: `même` against `semaine` scores what a genuinely new word scores. Over the whole utterance it separates cleanly, and stably — measured on real transcripts, the two echoes sat at 0% and 18% and barge-in at 62% and 100%, unchanged whether the per-word bar is 70, 80 or 90.
 

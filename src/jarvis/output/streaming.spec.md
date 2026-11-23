@@ -36,6 +36,9 @@ only the last sentence, and every guard downstream reads it:
   which no hot-window override takes, with a verdict or without one. Its
   word test also tells which words of a hot-window utterance are hers when
   the listener asks whether a wake word in it can only be his,
+- `_carries_a_word_she_did_not_say`, which stands in for it, through
+  `_not_her_echo`, while a question she asked before acting waits for his
+  spoken answer (`listening.spec.md`, "During TTS"),
 - the cut of her sentences at the edges of an utterance heard in her time
   (`listening.spec.md`, "Her sentences at the edges of what he said"): a
   sentence coming back while a later one plays is found in the reply.
