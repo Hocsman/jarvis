@@ -147,7 +147,7 @@ The description is read in three lengths: the router reads its first sentence, t
 - `TestSheAsksThenReads` runs the real gate and the real tool: a question about his day ends the first turn on her question with nothing read, a yes has the agenda read once and her reply name what the day holds, a no reads nothing.
 - The rest counts the calls the model makes before the gate, in both directions: a question about his agenda, in French, English or German, reaches the tool **with the day he asked about** in its first call (the one the gate would ask about), and a sentence that only mentions a calendar or a meeting, or is about something else, does not reach it. A call made for nothing costs him a question he did not expect; a call with a day the tool cannot read costs him the yes he gave.
 
-Measured on 2026-11-20 with the router on `qwen2.5:3b` and Claude Haiku 5.5 as the chat model. No small chat model on the text protocol was measured.
+Measured on 2026-11-20 with the router on `qwen2.5:3b` and Claude Haiku 5.5 as the chat model. No small chat model on the text protocol was measured. The eval pins no MCP server, so the router reads the builtins alone. With a catalogue of about a hundred tools the same router writes the name `readagenda` in most answers to a French question about the agenda, which reaches the tool because the router's answer is matched without regard to case (`../../selection.spec.md`, LLM Strategy step 3, with the counts).
 
 **A listed day against a free one.** The arguments above against a single free-text `day` taking the word or the date (and a description that says nothing of `date`), the two interleaved call by call, 5 rounds: 30 calls an arm on six questions about his agenda, 20 on four sentences elsewhere.
 
