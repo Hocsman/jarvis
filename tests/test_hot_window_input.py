@@ -2290,6 +2290,18 @@ def _his_voice_goes_on_after_hers(listener, last_word: float) -> float:
     return voice_ended
 
 
+def _she_asks_before_acting(question, channel=CHANNEL_PAROLE, **waiting):
+    """A listener in the hot window after she says *question*, with a
+    question she asked before acting waiting on *channel* (none when
+    None). Returns the listener and the moment of her last word."""
+    listener, _ = _create_listener(echo_tolerance=0.1, hot_window_seconds=0.5)
+    if channel is not None:
+        _her_question_waits(listener, channel, **waiting)
+    last_word = _she_says(listener, question)
+    assert _wait_for_hot_window_active(listener)
+    return listener, last_word
+
+
 @pytest.mark.unit
 class TestHisAnswerToTheQuestionSheAskedBeforeActing:
     """She asks before acting and he answers the moment she stops, taking up
@@ -2303,13 +2315,7 @@ class TestHisAnswerToTheQuestionSheAskedBeforeActing:
     "(during TTS)", set aside as her echo, and his next question was read as
     the answer to the question still waiting."""
 
-    def _she_asks(self, question, channel=CHANNEL_PAROLE, **waiting):
-        listener, _ = _create_listener(echo_tolerance=0.1, hot_window_seconds=0.5)
-        if channel is not None:
-            _her_question_waits(listener, channel, **waiting)
-        last_word = _she_says(listener, question)
-        assert _wait_for_hot_window_active(listener)
-        return listener, last_word
+    _she_asks = staticmethod(_she_asks_before_acting)
 
     @pytest.mark.parametrize("question, answer", _SHE_ASKS_BEFORE_ACTING, ids=_ASKED_IDS)
     @patch("builtins.print")
@@ -2522,9 +2528,9 @@ class TestHisAnswerToTheQuestionSheAskedBeforeActing:
 
 
 # His shortest answers take up her question's verb, with a word of his: a
-# yes, a no, a go-ahead. Each scores as her question coming back whole, so
-# the early text check, which reads no timing, deleted them before anything
-# read them. The refusals count most: a no dropped leaves the question open.
+# yes, a no, a go-ahead. Each scores as her question coming back whole by its
+# text, and is his by when it is said. The refusals count most: a no dropped
+# leaves the question open.
 _HIS_ANSWER_TAKING_UP_HER_VERB = [
     (describe_action("archivePhotos", {}, "action").spoken, "Ok lance"),
     (describe_action("archivePhotos", {}, "action").spoken, "Lance pas."),
@@ -2546,22 +2552,16 @@ _TAIL_IDS = ["french-gate-wording", "english"]
 @pytest.mark.unit
 class TestHisShortAnswerTakingUpHerQuestion:
     """His shortest answers to the question she asked before acting take up
-    its verb ("Ok lance", "Lance pas."), so they score as her question coming
-    back whole, and the early text check, which reads no timing, deleted them
-    before the judge or the reader of answers saw them.
+    its verb ("Ok lance", "Lance pas."), so by their text they score as her
+    question coming back whole.
 
     While a question his voice can settle waits, and the voice went on after
     hers, her reply coming back whole is read as the other checks read his
-    answer: one word she did not say, in a voice, makes it his. An answer
-    made only of her words is still hers."""
+    answer: one word she did not say, in a voice, makes it his, at the early
+    check and at every check after the verdict. An answer made only of her
+    words is still hers."""
 
-    def _she_asks(self, question, channel=CHANNEL_PAROLE, **waiting):
-        listener, _ = _create_listener(echo_tolerance=0.1, hot_window_seconds=0.5)
-        if channel is not None:
-            _her_question_waits(listener, channel, **waiting)
-        last_word = _she_says(listener, question)
-        assert _wait_for_hot_window_active(listener)
-        return listener, last_word
+    _she_asks = staticmethod(_she_asks_before_acting)
 
     @pytest.mark.parametrize("question, answer", _HIS_ANSWER_TAKING_UP_HER_VERB,
                              ids=_HIS_ANSWER_IDS)
@@ -2627,6 +2627,70 @@ class TestHisShortAnswerTakingUpHerQuestion:
                        voice_ended=_his_voice_goes_on_after_hers(listener, last_word))
 
         assert _accepted_query(listener) == answer
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("judgment", [
+        _make_judgment(directed=True, query="", confidence="medium", reasoning="unclear"),
+        _make_judgment(directed=False, reasoning="background conversation"),
+    ], ids=["directed-nothing-extracted", "rejected-in-other-words"])
+    @pytest.mark.parametrize("question, answer", _HIS_ANSWER_TAKING_UP_HER_VERB[:2],
+                             ids=_HIS_ANSWER_IDS[:2])
+    @patch("builtins.print")
+    def test_any_other_verdict_takes_his_words(self, _print, question, answer, judgment):
+        """Each verdict path weighs her reply coming back whole again, and
+        reads his answer there as the early check reads it."""
+        listener, last_word = self._she_asks(question)
+        _install_intent_judge(listener, judgment)
+
+        _whisper_hears(listener, answer, started=_just_after(listener, last_word),
+                       level=_level(listener, _HIS_VOICE),
+                       voice_ended=_his_voice_goes_on_after_hers(listener, last_word))
+
+        assert _accepted_query(listener) == answer.lower()
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_his_answer_naming_her_is_left_to_the_wake_word(self, _print):
+        """Her name after her verb still scores as her question coming back.
+        The wake word in it is his, and the wake-word check answers what he
+        said, her name taken out."""
+        question = describe_action("archivePhotos", {}, "action").spoken
+        answer = "Lance Jarvis"
+        assert fuzz.partial_ratio(answer.lower(), question.lower()) >= EchoDetector.PURE_ECHO_THRESHOLD
+        listener, last_word = self._she_asks(question)
+        _install_intent_judge(listener, _make_judgment(
+            directed=True, query="", confidence="medium", reasoning="unclear"))
+
+        _whisper_hears(listener, answer, started=_just_after(listener, last_word),
+                       level=_level(listener, _HIS_VOICE),
+                       voice_ended=_his_voice_goes_on_after_hers(listener, last_word))
+
+        answered = _accepted_query(listener)
+        assert "lance" in answered and "jarvis" not in answered
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("judgment", [
+        _make_judgment(directed=False, reasoning="an echo of the assistant's own question"),
+        _make_judgment(directed=True, query="", confidence="medium", reasoning="unclear"),
+        _make_judgment(directed=False, reasoning="background conversation"),
+    ], ids=["echo-verdict", "directed-nothing-extracted", "rejected-in-other-words"])
+    @patch("builtins.print")
+    def test_while_the_tune_plays_words_all_hers_are_still_hers_after_the_verdict(
+            self, mock_print, judgment):
+        """The early check stands aside while the thinking tune plays, and
+        the verdict paths decide: an answer made only of her words is her
+        question coming back there too."""
+        question = describe_action("archivePhotos", {}, "action").spoken
+        listener, last_word = self._she_asks(question)
+        _install_intent_judge(listener, judgment)
+
+        with patch.object(listener, "_is_thinking_tune_active", return_value=True):
+            _whisper_hears(listener, "Lance.", started=_just_after(listener, last_word),
+                           level=_level(listener, _HIS_VOICE),
+                           voice_ended=_his_voice_goes_on_after_hers(listener, last_word))
+
+        assert _accepted_query(listener) == ""
+        assert _console_says_heard_as_her_echo(mock_print, "Lance.")
         listener.state_manager.stop()
 
     @pytest.mark.parametrize("question, answer", _HIS_ANSWER_TAKING_UP_HER_VERB[:2],
@@ -2731,8 +2795,7 @@ class TestHisShortAnswerTakingUpHerQuestion:
     def test_without_her_spoken_question_the_early_check_still_reads_the_text(
             self, mock_print, channel, waiting):
         """With no question his voice can settle, words that score as her
-        reply coming back whole are set aside as before, whatever their
-        timing."""
+        reply coming back whole are set aside, whatever their timing."""
         question, answer = _HIS_ANSWER_TAKING_UP_HER_VERB[0]
         listener, last_word = self._she_asks(question, channel=channel, **waiting)
         judge = _judge_that_reads_the_marker(listener)

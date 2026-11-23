@@ -390,8 +390,8 @@ While TTS is playing, echo rejection and stop commands are handled with fast tex
   scans") are hers. Her voice coming back never goes on after hers, so her
   question passes this way only merged with another sound that outlasts her
   voice, and with a word of it bent into one she did not say. Kept on
-  purpose: an answer of his made only of her question's words ("je valide,
-  lance" after "Je m'apprête à lancer archivePhotos. Tu valides ?") cannot be
+  purpose: an answer of his made only of her question's words ("lance archive
+  photos" after "Je m'apprête à lancer archivePhotos. Tu valides ?") cannot be
   told from her question coming back bent, and is flagged; the shortest of
   them ("lance.", "je lance.") score as her question coming back whole, and the
   early text check sets them aside before the judge is asked. While she speaks,
@@ -401,11 +401,14 @@ While TTS is playing, echo rejection and stop commands are handled with fast tex
   reads the text alone. Each place that weighs the words reads the question
   waiting and the voice's end once, and decides on that reading: the flag as
   the utterance joins the transcript, the early text check of her reply coming
-  back whole and what its salvage keeps after her question, and, read before
-  the judge is asked, every path its verdict takes in the hot window (an echo
-  verdict, another rejection, a sure aside, a directed verdict with no query,
-  and a missing one, each with its own check of her reply coming back whole;
-  see "Hot Window Mode").
+  back whole and what its salvage keeps after her question (nothing, while he
+  answers it: an utterance carrying a word of his in a voice is not set aside
+  there, and one set aside holds no remainder that could pass), and, read
+  before the judge is asked, every path its verdict takes in the hot window: a
+  sure aside, which reads only the flag, and the paths that each check again
+  for her reply coming back whole (an echo verdict, another rejection, a
+  directed verdict with or without a query, a missing one, and the hand-off to
+  the wake-word check; see "Hot Window Mode").
 - Intent judge uses this context to identify echo
 - All of this is read on the utterance once the sentences of her reply that
   open and close it are out (see "Her sentences at the edges of what he
@@ -554,7 +557,7 @@ Current state: wake_word_mode
 
 Echo detection uses a layered approach for reliability:
 
-1. **Fuzzy text matching (safety net):** `rapidfuzz.fuzz.partial_ratio` compares transcript against last TTS text. Score ≥ 70 = echo. This runs before the intent judge and catches obvious echoes quickly, including in the hot window directed path.
+1. **Fuzzy text matching (safety net):** `rapidfuzz.fuzz.partial_ratio` compares transcript against last TTS text. Score ≥ 70 = echo. This runs before the intent judge and catches obvious echoes quickly, including in the hot window directed path. One exception: while a question his voice can settle waits and the voice went on after hers, words carrying one she did not say in a voice are not echo, whatever they score (see "Hot Window Mode").
 2. **Intent judge (contextual):** Receives `last_tts_text` and timing context. Can identify echo even when fuzzy matching misses subtle cases, and can extract real user speech from mixed echo+speech chunks.
 
 The fuzzy check acts as a fast, reliable safety net. The intent judge provides deeper understanding but may be unreliable with smaller models (e.g. gemma4).
@@ -1025,10 +1028,10 @@ Whisper makes several segments of one utterance. When he speaks over her, or the
 
 So an utterance heard in her time (see "During TTS") that Whisper made of more than one segment loses the sentences of her reply that open and close it. The transcript buffer, the "(during TTS)" mark, the echo checks and strippers, the judge and the wake-word check all read what is left. The copy kept of the utterance (see "Keeping a Copy of an Utterance"), the repetition filter and the `📝 Heard` line read it as Whisper heard it; the console then says `✂️ Left out her own words, kept: "…"`.
 
-**A segment is a sentence of hers when it is one run of her reply**, the reply the echo detector holds, whole (`output/streaming.spec.md`): `partial_ratio` of 85 or more (`HER_SENTENCE_MATCH`, in `echo_detection.py`). Measured segment by segment on two days of real transcripts, hers scored 87 and above and his 65 and below; corrections of his written in her own wording for the measure scored 70 to 81.
+**A segment is a sentence of hers when it is one run of her reply**, the reply the echo detector holds, whole (`output/streaming.spec.md`): `partial_ratio` of 85 or more (`_HER_SENTENCE_MATCH`). Measured segment by segment on two days of real transcripts, hers scored 87 and above and his 65 and below; corrections of his written in her own wording for the measure scored 70 to 81.
 
 - The run is read in one direction. A segment longer than her whole reply is weighed whole against it (`ratio`): `partial_ratio` lays the shorter text along the longer, so it would ask whether her reply is a run of the segment, and a segment holding her short reply and then the start of his question would be taken out, his question with it.
-- A segment under four words (`HER_SENTENCE_MIN_WORDS`) is never hers. Three words in a row are few enough for him to say after a long reply of hers, and what is taken out cannot be recovered; her words left at the edge of his are noise the judge reads past.
+- A segment under four words (`_HER_SENTENCE_MIN_WORDS`) is never hers. Three words in a row are few enough for him to say after a long reply of hers, and what is taken out cannot be recovered; her words left at the edge of his are noise the judge reads past.
 
 **Only the edges, and only when words of his are left.** A sentence of hers between two of his stays where it is. Nothing is taken out when what would be left is under `EchoDetector.min_salvage_words` words, counted as every salvage counts them, or carries no words she did not say (the share of "Overriding an echo verdict takes positive evidence"): a word or two after her sentences is what Whisper makes of the quiet after her voice ("Merci."), and split from them it would stand alone as words she never said, in the hot window, where such words are answered.
 

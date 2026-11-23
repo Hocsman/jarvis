@@ -680,13 +680,15 @@ class EchoDetector:
 # Shared by the listener, which weighs what it hears against her reply, and
 # by the reader of answers to the question she asks before acting, which
 # takes her question back out of what was heard (`tools/confirmation.py`).
+# The share of words she did not say, which only the listener weighs, stays
+# with it (`_SPEECH_SHARE` in `listener.py`).
 
 # A heard word counts as one she said when it matches any word of her
 # reply this closely. Deliberately loose, because ASR mangles echo:
 # 'perlet' for 'perplexe' scores 71, 'sahas' for 'saas' 89. Measured on
-# the day's real transcripts, the share of words she did not say came out
-# the same whether this sits at 70, 80 or 90: the design does not rest on
-# the number.
+# the day's real transcripts, the share of words she did not say
+# (`_SPEECH_SHARE` in `listener.py`) came out the same whether this sits at
+# 70, 80 or 90: the design does not rest on the number.
 ECHO_WORD_MATCH = 80
 
 
@@ -731,40 +733,33 @@ def carries_a_word_she_did_not_say(heard: str, spoken: str) -> bool:
     Fails open: with nothing of hers to compare against, everything is the
     user's.
     """
-    mots = re.findall(r"\w+", (heard or "").lower(), re.UNICODE)
-    if not mots:
-        return False
-    siens = her_words_and_name_parts(spoken)
-    if not siens:
-        return True
-    return any(not her_word(m, siens) for m in mots)
+    return any(not hers for _, hers in _words_marked_hers(heard, spoken))
 
 
-# A piece of an utterance is a sentence of her reply coming back when it is
-# one run of that reply this closely. Measured piece by piece on two days of
-# real transcripts, hers scored 87 and above and his 65 and below;
-# corrections of his written in her own wording for the measure, 70 to 81.
-HER_SENTENCE_MATCH = 85
+def without_her_words_at_the_edges(heard: str, spoken: str) -> str:
+    """*heard* from its first word she did not say to its last, as written:
+    her words before and after them taken off, those between two of his
+    kept. Empty when every word is hers.
 
-# Under this many words a piece is never hers: three words in a row are few
-# enough for him to say by chance after a long reply of hers ("à la
-# maison"), and what is taken out cannot be recovered.
-HER_SENTENCE_MIN_WORDS = 4
+    What the reader of answers keeps of a fragment that scores as her
+    question coming back. Neither whole nor nothing will do there: taken out
+    whole, his answer taking up her verb would leave nothing, where this
+    keeps the "pas" of his "lance pas"; kept whole, her question coming back
+    with one word bent ("lancer archive fotos") would hand the reader her own
+    "lancer" as though he had said it, where this keeps "fotos".
 
-
-def her_sentence(piece: str, spoken: str) -> bool:
-    """Whether *piece*, one of the segments Whisper made of an utterance, is
-    a sentence of her reply *spoken* coming back: long enough to tell, and
-    one run of her reply.
-
-    The run is read in one direction only. `partial_ratio` lays the shorter
-    text along the longer, so against a reply shorter than the piece it
-    would ask whether her reply is a run of the piece, and a segment
-    holding her whole reply and then words of his would pass. Such a piece
-    is weighed whole against her reply (`ratio`).
+    Fails open, as the word test does: with nothing of hers to compare
+    against, all of *heard* is kept.
     """
-    if len(piece.split()) < HER_SENTENCE_MIN_WORDS:
-        return False
-    heard, said = piece.strip().lower(), spoken.strip().lower()
-    run = fuzz.partial_ratio if len(heard) <= len(said) else fuzz.ratio
-    return run(heard, said) >= HER_SENTENCE_MATCH
+    his = [word for word, hers in _words_marked_hers(heard, spoken) if not hers]
+    if not his:
+        return ""
+    return heard[his[0].start():his[-1].end()]
+
+
+def _words_marked_hers(heard: str, spoken: str) -> list:
+    """Each word of *heard*, as a match on it, with whether it is a word of
+    her reply *spoken* (`her_word`, against `her_words_and_name_parts`)."""
+    siens = her_words_and_name_parts(spoken)
+    return [(word, bool(siens) and her_word(word.group().lower(), siens))
+            for word in re.finditer(r"\w+", heard or "", re.UNICODE)]

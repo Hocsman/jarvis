@@ -21,8 +21,7 @@ from datetime import datetime
 
 from rapidfuzz import fuzz
 from .audio_capture import UtteranceCapture
-from .echo_detection import (EchoDetector, carries_a_word_she_did_not_say, her_sentence,
-                             her_word)
+from .echo_detection import EchoDetector, carries_a_word_she_did_not_say, her_word
 from .room_floor import FALLBACK_FLOOR, ROOM_FLOOR_MIN_SECONDS, RoomFloor
 from .state_manager import StateManager, ListeningState
 from ..utils.audio_lock import open_stream_count, portaudio_lock, unguarded_open
@@ -472,6 +471,36 @@ def _tokens_she_did_not_say(heard: str, spoken: str) -> list:
             if not all(her_word(m, siens) for m in re.findall(r"\w+", t, re.UNICODE))]
 
 
+# A piece of an utterance is a sentence of her reply coming back when it is
+# one run of that reply this closely. Measured piece by piece on two days of
+# real transcripts, hers scored 87 and above and his 65 and below;
+# corrections of his written in her own wording for the measure, 70 to 81.
+_HER_SENTENCE_MATCH = 85
+
+# Under this many words a piece is never hers: three words in a row are few
+# enough for him to say by chance after a long reply of hers ("à la
+# maison"), and what is taken out cannot be recovered.
+_HER_SENTENCE_MIN_WORDS = 4
+
+
+def _her_sentence(piece: str, spoken: str) -> bool:
+    """Whether *piece*, one of the segments Whisper made of an utterance, is
+    a sentence of her reply *spoken* coming back: long enough to tell, and
+    one run of her reply.
+
+    The run is read in one direction only. `partial_ratio` lays the shorter
+    text along the longer, so against a reply shorter than the piece it
+    would ask whether her reply is a run of the piece, and a segment
+    holding her whole reply and then words of his would pass. Such a piece
+    is weighed whole against her reply (`ratio`).
+    """
+    if len(piece.split()) < _HER_SENTENCE_MIN_WORDS:
+        return False
+    heard, said = piece.strip().lower(), spoken.strip().lower()
+    run = fuzz.partial_ratio if len(heard) <= len(said) else fuzz.ratio
+    return run(heard, said) >= _HER_SENTENCE_MATCH
+
+
 def _without_her_sentences_at_the_edges(pieces: list, spoken: str, min_words: int) -> tuple:
     """*pieces*, the segments Whisper made of one utterance heard in her
     time, without the sentences of her reply *spoken* that open and close
@@ -487,9 +516,9 @@ def _without_her_sentences_at_the_edges(pieces: list, spoken: str, min_words: in
     if len(pieces) < 2 or not (spoken or "").strip():
         return pieces, []
     first, last = 0, len(pieces)
-    while first < last and her_sentence(pieces[first], spoken):
+    while first < last and _her_sentence(pieces[first], spoken):
         first += 1
-    while last > first and her_sentence(pieces[last - 1], spoken):
+    while last > first and _her_sentence(pieces[last - 1], spoken):
         last -= 1
     his, hers = pieces[first:last], pieces[:first] + pieces[last:]
     left = " ".join(his)
@@ -1047,11 +1076,13 @@ class VoiceListener(threading.Thread):
                     stopped_with_hers = self._voice_stopped_with_hers(
                         utterance_end_time, trailing_silence)
                     answering = self._answers_her_question(stopped_with_hers)
-                    is_pure_echo, echo_score = self._is_pure_echo(
+                    # `_is_pure_echo`, its two readings kept apart so the
+                    # log can say when his answer outweighed the text.
+                    whole, echo_score = self._comes_back_whole(text_lower, last_tts_text)
+                    his_answer = whole and self._his_answer_laid_along_hers(
                         text_lower, last_tts_text, utterance_energy, answering=answering)
-                    if (answering and not is_pure_echo
-                            and self._is_pure_echo(text_lower, last_tts_text, utterance_energy,
-                                                   answering=False)[0]):
+                    is_pure_echo = whole and not his_answer
+                    if his_answer:
                         debug_log(
                             f"not her reply coming back (score={echo_score}): "
                             f"{self._not_hers_because(stopped_with_hers, answering=True)}: "
@@ -1959,29 +1990,43 @@ class VoiceListener(threading.Thread):
 
     def _is_pure_echo(self, heard: str, spoken: str, utterance_energy: float,
                       *, answering: bool) -> tuple:
-        """Whether *heard* is her reply *spoken* coming back whole: one
-        contiguous match (`partial_ratio`) at the detector's pure-echo
-        threshold, and not so much longer than her reply that words of his
-        must follow it. Returns the verdict and the score.
+        """Whether *heard* is her reply *spoken* coming back whole: its text
+        says so (`_comes_back_whole`), and it is not his answer to the
+        question she asked before acting laid along that question
+        (`_his_answer_laid_along_hers`, which alone reads *answering* and
+        the utterance's voice level *utterance_energy*). Returns the verdict
+        and the score."""
+        whole, score = self._comes_back_whole(heard, spoken)
+        return (whole and not self._his_answer_laid_along_hers(
+            heard, spoken, utterance_energy, answering=answering)), score
 
-        *answering* is true for his answer to the question she asked before
-        acting (`_answers_her_question`). His shortest answers take up her
-        question's verb with a word of his ("ok lance", "lance pas" after
-        "Je m'apprête à lancer …"), and a short text laid along her question
-        matches it whatever was said. So then the text alone does not make
-        it hers: words carrying one she did not say, in a voice
-        (`_not_her_echo`), are not her reply coming back. Words that are all
-        hers still are, whatever their voice."""
+    def _comes_back_whole(self, heard: str, spoken: str) -> tuple:
+        """Whether the text of *heard* is her reply *spoken* coming back
+        whole: one contiguous match (`partial_ratio`) at the detector's
+        pure-echo threshold, and not so much longer than her reply that words
+        of his must follow it. Returns the verdict and the score."""
         if not spoken:
             return False, 0
         score = fuzz.partial_ratio(heard, spoken.lower())
         her_words = len(spoken.split())
         whole = (score >= self.echo_detector.PURE_ECHO_THRESHOLD
                  and len(heard.split()) <= max(her_words * 1.3, her_words + 3))
-        if whole and answering and self._not_her_echo(heard, utterance_energy, spoken=spoken,
-                                                      answering=True):
-            return False, score
         return whole, score
+
+    def _his_answer_laid_along_hers(self, heard: str, spoken: str, utterance_energy: float,
+                                    *, answering: bool) -> bool:
+        """Whether *heard*, whose text reads as her reply *spoken* coming
+        back whole, is his answer to the question she asked before acting.
+
+        *answering* is true for that answer (`_answers_her_question`). His
+        shortest answers take up her question's verb with a word of his ("ok
+        lance", "lance pas" after "Je m'apprête à lancer …"), and a short
+        text laid along her question matches it whatever was said. So then
+        the text alone does not make it hers: words carrying one she did not
+        say, in a voice (`_not_her_echo`, at *utterance_energy*), are his.
+        Words that are all hers are not, whatever their voice."""
+        return answering and self._not_her_echo(heard, utterance_energy, spoken=spoken,
+                                                answering=True)
 
     def _carries_the_wake_word(self, text_lower: str) -> bool:
         """Whether the wake word or one of its aliases is in *text_lower*,
