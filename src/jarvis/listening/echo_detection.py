@@ -671,3 +671,95 @@ class EchoDetector:
         # --- Default Case ---
         debug_log("NOT echo - outside of all detection windows.", "echo")
         return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Words she did not say
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Shared by the listener, which weighs what it hears against her reply, and
+# by the reader of answers to the question she asks before acting, which
+# takes her question back out of what was heard (`tools/confirmation.py`).
+# The share of words she did not say, which only the listener weighs, stays
+# with it (`_SPEECH_SHARE` in `listener.py`).
+
+# A heard word counts as one she said when it matches any word of her
+# reply this closely. Deliberately loose, because ASR mangles echo:
+# 'perlet' for 'perplexe' scores 71, 'sahas' for 'saas' 89. Measured on
+# the day's real transcripts, the share of words she did not say
+# (`_SPEECH_SHARE` in `listener.py`) came out the same whether this sits at
+# 70, 80 or 90: the design does not rest on the number.
+ECHO_WORD_MATCH = 80
+
+
+def her_word(word: str, her_words: list) -> bool:
+    """Whether *word* matches a word of her reply as closely as
+    `ECHO_WORD_MATCH` asks."""
+    return max((fuzz.ratio(word, s) for s in her_words), default=0) >= ECHO_WORD_MATCH
+
+
+def her_words_and_name_parts(spoken: str) -> list:
+    """The words of *spoken*, lower-cased, with the parts of each compound
+    name among them as Whisper writes them heard: split where a lower-case
+    letter meets an upper-case one, and at underscores ("archivePhotos":
+    "archive", "photos"; "sort_old_scans": "sort", "old", "scans")."""
+    words = []
+    for token in re.findall(r"\w+", spoken or "", re.UNICODE):
+        words.append(token.lower())
+        spaced = "".join(
+            f" {c}" if i and token[i - 1].islower() and c.isupper() else c
+            for i, c in enumerate(token))
+        parts = [p.lower() for p in re.split(r"[\s_]+", spaced) if p]
+        if len(parts) > 1:
+            words.extend(parts)
+    return words
+
+
+def carries_a_word_she_did_not_say(heard: str, spoken: str) -> bool:
+    """True when at least one word of *heard* has no counterpart in her
+    reply *spoken*.
+
+    The words-she-did-not-say proof for his answer to the question she
+    asked before acting. The share of words she did not say that a barge-in
+    over her replies clears was measured where his words are his own; an
+    answer is made of its question ("I'm about to empty the recycle bin. Do
+    you approve?", "yes, I approve"), so most of its words are hers by
+    construction and one word is all of his it may carry.
+
+    With one word deciding, the name of the tool she asks about counts as
+    she says it and as Whisper writes it heard (`her_words_and_name_parts`):
+    the parts of a compound name are hers, not words of his.
+
+    Fails open: with nothing of hers to compare against, everything is the
+    user's.
+    """
+    return any(not hers for _, hers in _words_marked_hers(heard, spoken))
+
+
+def without_her_words_at_the_edges(heard: str, spoken: str) -> str:
+    """*heard* from its first word she did not say to its last, as written:
+    her words before and after them taken off, those between two of his
+    kept. Empty when every word is hers.
+
+    What the reader of answers keeps of a fragment that scores as her
+    question coming back. Neither whole nor nothing will do there: taken out
+    whole, his answer taking up her verb would leave nothing, where this
+    keeps the "pas" of his "lance pas"; kept whole, her question coming back
+    with one word bent ("lancer archive fotos") would hand the reader her own
+    "lancer" as though he had said it, where this keeps "fotos".
+
+    Fails open, as the word test does: with nothing of hers to compare
+    against, all of *heard* is kept.
+    """
+    his = [word for word, hers in _words_marked_hers(heard, spoken) if not hers]
+    if not his:
+        return ""
+    return heard[his[0].start():his[-1].end()]
+
+
+def _words_marked_hers(heard: str, spoken: str) -> list:
+    """Each word of *heard*, as a match on it, with whether it is a word of
+    her reply *spoken* (`her_word`, against `her_words_and_name_parts`)."""
+    siens = her_words_and_name_parts(spoken)
+    return [(word, bool(siens) and her_word(word.group().lower(), siens))
+            for word in re.finditer(r"\w+", heard or "", re.UNICODE)]

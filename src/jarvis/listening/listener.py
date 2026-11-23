@@ -21,7 +21,7 @@ from datetime import datetime
 
 from rapidfuzz import fuzz
 from .audio_capture import UtteranceCapture
-from .echo_detection import EchoDetector
+from .echo_detection import EchoDetector, carries_a_word_she_did_not_say, her_word
 from .room_floor import FALLBACK_FLOOR, ROOM_FLOOR_MIN_SECONDS, RoomFloor
 from .state_manager import StateManager, ListeningState
 from ..utils.audio_lock import open_stream_count, portaudio_lock, unguarded_open
@@ -421,13 +421,6 @@ except Exception:
     WhisperModel = None
 
 
-# A heard word counts as one she said when it matches any word of her
-# reply this closely. Deliberately loose, because ASR mangles echo:
-# 'perlet' for 'perplexe' scores 71, 'sahas' for 'saas' 89. Measured on
-# the day's real transcripts, the aggregate below is unchanged whether
-# this sits at 70, 80 or 90 — the design does not rest on the number.
-_ECHO_WORD_MATCH = 80
-
 # Above this share of unmatched words, the utterance carries something
 # she did not say. The two real echoes measured 0% and 18%; barge-in
 # measured 62% and 100%. This sits in the gap.
@@ -460,62 +453,8 @@ def _carries_speech_she_did_not_say(heard: str, spoken: str) -> bool:
     if not siens:
         return True
 
-    neufs = sum(1 for m in mots if not _her_word(m, siens))
+    neufs = sum(1 for m in mots if not her_word(m, siens))
     return (neufs / len(mots)) > _SPEECH_SHARE
-
-
-def _carries_a_word_she_did_not_say(heard: str, spoken: str) -> bool:
-    """True when at least one word of the utterance has no counterpart in
-    her reply.
-
-    The words-she-did-not-say proof for his answer to the question she
-    asked before acting (`VoiceListener._answers_her_question`). The share
-    above was measured on barge-in over her replies, where his words are his
-    own; an answer is made of its question ("I'm about to empty the recycle
-    bin. Do you approve?", "yes, I approve"), so most of its words are hers
-    by construction and one word is all of his it may carry.
-
-    With one word deciding, the name of the tool she asks about counts as
-    she says it and as Whisper writes it heard (`_her_words_and_name_parts`):
-    the parts of a compound name are hers, not words of his.
-
-    Fails open as the share does: with nothing of hers to compare against,
-    everything is the user's.
-    """
-    import re
-
-    mots = re.findall(r"\w+", (heard or "").lower(), re.UNICODE)
-    if not mots:
-        return False
-    siens = _her_words_and_name_parts(spoken)
-    if not siens:
-        return True
-    return any(not _her_word(m, siens) for m in mots)
-
-
-def _her_words_and_name_parts(spoken: str) -> list:
-    """The words of *spoken*, lower-cased, with the parts of each compound
-    name among them as Whisper writes them heard: split where a lower-case
-    letter meets an upper-case one, and at underscores ("archivePhotos":
-    "archive", "photos"; "sort_old_scans": "sort", "old", "scans")."""
-    import re
-
-    words = []
-    for token in re.findall(r"\w+", spoken or "", re.UNICODE):
-        words.append(token.lower())
-        spaced = "".join(
-            f" {c}" if i and token[i - 1].islower() and c.isupper() else c
-            for i, c in enumerate(token))
-        parts = [p.lower() for p in re.split(r"[\s_]+", spaced) if p]
-        if len(parts) > 1:
-            words.extend(parts)
-    return words
-
-
-def _her_word(word: str, her_words: list) -> bool:
-    """Whether *word* matches a word of her reply as closely as
-    `_ECHO_WORD_MATCH` asks."""
-    return max((fuzz.ratio(word, s) for s in her_words), default=0) >= _ECHO_WORD_MATCH
 
 
 def _tokens_she_did_not_say(heard: str, spoken: str) -> list:
@@ -529,7 +468,7 @@ def _tokens_she_did_not_say(heard: str, spoken: str) -> list:
     if not siens:
         return tokens
     return [t for t in tokens
-            if not all(_her_word(m, siens) for m in re.findall(r"\w+", t, re.UNICODE))]
+            if not all(her_word(m, siens) for m in re.findall(r"\w+", t, re.UNICODE))]
 
 
 # A piece of an utterance is a sentence of her reply coming back when it is
@@ -1128,9 +1067,26 @@ class VoiceListener(threading.Thread):
                 # Only catches pure echo (transcript ≈ TTS text). Mixed
                 # echo+speech chunks (user spoke over echo) go to the
                 # intent judge which can extract the user's speech.
+                # While her question waits for his answer, the text alone
+                # does not make it hers (`_is_pure_echo`): her voice's end
+                # and the question are read once, for the check and for
+                # what its salvage keeps.
                 last_tts_text = self.echo_detector._last_tts_text or ""
                 if last_tts_text:
-                    is_pure_echo, echo_score = self._is_pure_echo(text_lower, last_tts_text)
+                    stopped_with_hers = self._voice_stopped_with_hers(
+                        utterance_end_time, trailing_silence)
+                    answering = self._answers_her_question(stopped_with_hers)
+                    # `_is_pure_echo`, its two readings kept apart so the
+                    # log can say when his answer outweighed the text.
+                    whole, echo_score = self._comes_back_whole(text_lower, last_tts_text)
+                    his_answer = whole and self._his_answer_laid_along_hers(
+                        text_lower, last_tts_text, utterance_energy, answering=answering)
+                    is_pure_echo = whole and not his_answer
+                    if his_answer:
+                        debug_log(
+                            f"not her reply coming back (score={echo_score}): "
+                            f"{self._not_hers_because(stopped_with_hers, answering=True)}: "
+                            f"\"{text_lower}\"", "voice")
                     if is_pure_echo:
                         # Before rejecting, try to salvage user speech appended
                         # after the echo prefix. Whisper commonly merges the tail
@@ -1159,14 +1115,11 @@ class VoiceListener(threading.Thread):
                         # own sentence, or one Whisper rewrote, rides through
                         # as a query.
                         min_words = self.echo_detector.min_salvage_words
-                        stopped_with_hers = self._voice_stopped_with_hers(
-                            utterance_end_time, trailing_silence)
                         if (salvaged != text_lower
                                 and len(salvaged.split()) >= min_words
                                 and not stopped_with_hers
-                                and self._not_her_echo(
-                                    salvaged, utterance_energy,
-                                    answering=self._answers_her_question(stopped_with_hers))):
+                                and self._not_her_echo(salvaged, utterance_energy,
+                                                       answering=answering)):
                             debug_log(
                                 f"salvaged user speech from hot-window echo+speech "
                                 f"chunk: '{salvaged}'",
@@ -1405,7 +1358,8 @@ class VoiceListener(threading.Thread):
                 # can only be his: that one leaves the decision to the
                 # wake-word check, as it does behind a verdict.
                 if could_be_hot_window:
-                    is_pure_echo, echo_score = self._is_pure_echo(text_lower, last_tts_text)
+                    is_pure_echo, echo_score = self._is_pure_echo(
+                        text_lower, last_tts_text, utterance_energy, answering=answering)
                     his_wake_word = (could_be_hers and not is_pure_echo
                                      and self._carries_his_wake_word(text_lower, last_tts_text))
                     if is_pure_echo or (could_be_hers and not his_wake_word):
@@ -1504,7 +1458,8 @@ class VoiceListener(threading.Thread):
                 # overrides decide.
                 if (could_be_hot_window
                         and not (intent_judgment.directed and intent_judgment.query)
-                        and not self._is_pure_echo(text_lower, last_tts_text)[0]
+                        and not self._is_pure_echo(
+                            text_lower, last_tts_text, utterance_energy, answering=answering)[0]
                         and self._carries_his_wake_word(text_lower, last_tts_text)):
                     debug_log(f"🔔 wake word in the hot window, the wake-word check decides: "
                               f"\"{text_lower}\"", "voice")
@@ -1558,7 +1513,8 @@ class VoiceListener(threading.Thread):
                         # Only reject PURE echo — if the heard text is significantly
                         # longer than TTS, it contains user speech mixed with echo
                         # and the intent judge's extraction should be used instead.
-                        is_pure_echo, echo_score = self._is_pure_echo(text_lower, last_tts_text)
+                        is_pure_echo, echo_score = self._is_pure_echo(
+                            text_lower, last_tts_text, utterance_energy, answering=answering)
                         if is_pure_echo:
                             # Also check judge's extracted query — if it matches
                             # TTS too, it's genuinely pure echo. If the query is
@@ -1654,7 +1610,8 @@ class VoiceListener(threading.Thread):
                         # whole or words that could be hers. Shown those
                         # "(during TTS)", a judge saying directed and
                         # extracting nothing is leaving them out.
-                        is_pure_echo, echo_score = self._is_pure_echo(text_lower, last_tts_text)
+                        is_pure_echo, echo_score = self._is_pure_echo(
+                            text_lower, last_tts_text, utterance_energy, answering=answering)
                         if is_pure_echo or could_be_hers:
                             self._heard_as_her_echo(
                                 text_lower, f"directed/no-query, score={echo_score}, "
@@ -1729,7 +1686,8 @@ class VoiceListener(threading.Thread):
                             # their voice stopping with hers among them,
                             # are never his.
                             is_pure_echo, echo_score = self._is_pure_echo(
-                                text_lower, last_tts_text)
+                                text_lower, last_tts_text, utterance_energy,
+                                answering=answering)
                             proofs = self._not_her_echo(
                                 text_lower, utterance_energy, spoken=last_tts_text,
                                 answering=answering)
@@ -1763,7 +1721,8 @@ class VoiceListener(threading.Thread):
                         debug_log(f"⏭️ Not near hot window ({time_after_hot_window:.2f}s after), falling through to wake word check", "voice")
                         # Continue to wake word detection below
                     else:
-                        is_pure_echo, echo_score = self._is_pure_echo(text_lower, last_tts_text)
+                        is_pure_echo, echo_score = self._is_pure_echo(
+                            text_lower, last_tts_text, utterance_energy, answering=answering)
 
                         # Her reply coming back whole, which the early check
                         # should have caught, or words that could be hers,
@@ -1911,7 +1870,7 @@ class VoiceListener(threading.Thread):
 
         *answering* is true for his answer to the question she asked before
         acting (`_answers_her_question`): one word she did not say is then
-        enough (`_carries_a_word_she_did_not_say`), since an answer is made
+        enough (`carries_a_word_she_did_not_say`), since an answer is made
         of its question's words. The voice is weighed as ever.
 
         Two proofs, because either alone is fooled. Text alone takes a
@@ -1926,7 +1885,7 @@ class VoiceListener(threading.Thread):
         """
         if spoken is None:
             spoken = self.echo_detector._last_tts_text or ""
-        carries_his_words = (_carries_a_word_she_did_not_say if answering
+        carries_his_words = (carries_a_word_she_did_not_say if answering
                              else _carries_speech_she_did_not_say)
         return (carries_his_words(heard, spoken)
                 and self.echo_detector.utterance_carries_a_voice(utterance_energy))
@@ -2029,17 +1988,45 @@ class VoiceListener(threading.Thread):
             return "words she did not say, in a voice that went on after hers"
         return "words she did not say, in a voice"
 
-    def _is_pure_echo(self, heard: str, spoken: str) -> tuple:
-        """Whether *heard* is her reply *spoken* coming back whole: one
-        contiguous match (`partial_ratio`) at the detector's pure-echo
-        threshold, and not so much longer than her reply that words of his
-        must follow it. Returns the verdict and the score."""
+    def _is_pure_echo(self, heard: str, spoken: str, utterance_energy: float,
+                      *, answering: bool) -> tuple:
+        """Whether *heard* is her reply *spoken* coming back whole: its text
+        says so (`_comes_back_whole`), and it is not his answer to the
+        question she asked before acting laid along that question
+        (`_his_answer_laid_along_hers`, which alone reads *answering* and
+        the utterance's voice level *utterance_energy*). Returns the verdict
+        and the score."""
+        whole, score = self._comes_back_whole(heard, spoken)
+        return (whole and not self._his_answer_laid_along_hers(
+            heard, spoken, utterance_energy, answering=answering)), score
+
+    def _comes_back_whole(self, heard: str, spoken: str) -> tuple:
+        """Whether the text of *heard* is her reply *spoken* coming back
+        whole: one contiguous match (`partial_ratio`) at the detector's
+        pure-echo threshold, and not so much longer than her reply that words
+        of his must follow it. Returns the verdict and the score."""
         if not spoken:
             return False, 0
         score = fuzz.partial_ratio(heard, spoken.lower())
         her_words = len(spoken.split())
-        return (score >= self.echo_detector.PURE_ECHO_THRESHOLD
-                and len(heard.split()) <= max(her_words * 1.3, her_words + 3)), score
+        whole = (score >= self.echo_detector.PURE_ECHO_THRESHOLD
+                 and len(heard.split()) <= max(her_words * 1.3, her_words + 3))
+        return whole, score
+
+    def _his_answer_laid_along_hers(self, heard: str, spoken: str, utterance_energy: float,
+                                    *, answering: bool) -> bool:
+        """Whether *heard*, whose text reads as her reply *spoken* coming
+        back whole, is his answer to the question she asked before acting.
+
+        *answering* is true for that answer (`_answers_her_question`). His
+        shortest answers take up her question's verb with a word of his ("ok
+        lance", "lance pas" after "Je m'apprête à lancer …"), and a short
+        text laid along her question matches it whatever was said. So then
+        the text alone does not make it hers: words carrying one she did not
+        say, in a voice (`_not_her_echo`, at *utterance_energy*), are his.
+        Words that are all hers are not, whatever their voice."""
+        return answering and self._not_her_echo(heard, utterance_energy, spoken=spoken,
+                                                answering=True)
 
     def _carries_the_wake_word(self, text_lower: str) -> bool:
         """Whether the wake word or one of its aliases is in *text_lower*,
@@ -2078,7 +2065,7 @@ class VoiceListener(threading.Thread):
         spelling Whisper gives her name, so after such a reply no wake word
         heard can be told from hers. Whisper can also bend a word of hers
         into one ("servi" heard "servis", close to "jervis"): that token is
-        still hers as far as `_her_word` reaches, which is word by word, so
+        still hers as far as `her_word` reaches, which is word by word, so
         two of her words merged into one ("dave is" heard "davis") pass for
         his."""
         if not self._carries_the_wake_word(text_lower):

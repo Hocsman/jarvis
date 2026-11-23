@@ -556,22 +556,42 @@ def strip_own_question(utterance: str, spoken: str) -> str:
     said in the room. Handing all of that to the judge asks it to read a
     yes out of a passage that contains the question the yes answers.
 
-    Fragments matching what she just said are dropped. What remains may
-    be empty, and empty is right: it means nothing was said but the echo,
-    and the judge fails closed on it.
+    A fragment that scores as her question coming back, at the echo
+    detector's own threshold, keeps only what lies from its first word she
+    did not say to its last (`without_her_words_at_the_edges`). Text alone
+    cannot tell her echo from his answer there: his shortest answers take up
+    her question's verb ("ok lance", "lance pas" after "Je m'apprête à
+    lancer …"), and the tool name she reads aloud rarely comes back as it is
+    written ("archive fotos"). Dropped whole, his answer would leave an
+    empty transcript, read as a no he never gave; kept whole, her own
+    "lancer …" would be read as though he had said it. A fragment made only
+    of her words goes, his answer made only of them with it: it cannot be
+    told from her echo.
+
+    What remains may be empty, and empty is right: it means nothing was
+    said but the echo, and the judge fails closed on it.
     """
     from rapidfuzz import fuzz
 
-    from ..listening.echo_detection import EchoDetector
+    from ..debug import debug_log
+    from ..listening.echo_detection import EchoDetector, without_her_words_at_the_edges
 
     if not utterance or not spoken:
         return utterance or ""
     seuil = EchoDetector.PURE_ECHO_THRESHOLD
     bas = spoken.lower()
-    garde = [
-        m for m in _MORCEAU.split(utterance)
-        if m.strip() and fuzz.partial_ratio(m.lower(), bas) < seuil
-    ]
+
+    def _his(m: str) -> str:
+        if fuzz.partial_ratio(m.lower(), bas) < seuil:
+            return m.strip()
+        kept = without_her_words_at_the_edges(m, spoken)
+        if kept:
+            debug_log(f"    🙋 a fragment scoring as her question kept {len(kept.split())} "
+                      f"of its {len(m.split())} words, from the first she did not say "
+                      f"to the last", "tools")
+        return kept
+
+    garde = [g for g in (_his(m) for m in _MORCEAU.split(utterance) if m.strip()) if g]
     return " ".join(garde).strip()
 
 

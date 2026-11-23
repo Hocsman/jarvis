@@ -49,6 +49,7 @@ GRANTS = [
 
 REFUSALS = [
     pytest.param(AnswerCase("Non, surtout pas.", False), id="FR: refus"),
+    pytest.param(AnswerCase("Lance pas.", False), id="FR: refus qui reprend son verbe"),
     pytest.param(AnswerCase("No, don't.", False), id="EN: refusal"),
     pytest.param(AnswerCase("Hayır, yapma.", False), id="TR: ret"),
     pytest.param(AnswerCase("いいえ、やめてください。", False), id="JA: 拒否"),

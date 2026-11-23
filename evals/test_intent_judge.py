@@ -70,8 +70,8 @@ from typing import Optional, List, Union
 
 from helpers import (JUDGE_MODEL, JUDGE_BASE_URL, MockConfig, fisher_two_sided,
                      is_judge_llm_available, rate, to_terminal)
-from jarvis.listening.listener import (_carries_a_word_she_did_not_say,
-                                       _carries_speech_she_did_not_say)
+from jarvis.listening.echo_detection import carries_a_word_she_did_not_say
+from jarvis.listening.listener import _carries_speech_she_did_not_say
 from jarvis.tools.confirmation import describe_action
 
 JUDGE_MODELS = [a.strip() for a in os.environ.get("EVAL_INTENT_JUDGE_ARMS", "").split(",") if a.strip()]
@@ -862,6 +862,31 @@ HIS_YES_TO_HER_QUESTION_CASES = [
                   _EN_GATE_RENAME, expected_noise=False),
 ]
 
+# His shortest answers take up her question's verb with one word of his, a
+# yes or a no. By their text they score as her question coming back whole;
+# while her question waits and his voice goes on after hers, the listener
+# shows them to the judge as his, and a noise verdict would still drop them.
+HIS_SHORT_ANSWER_TAKING_UP_HER_VERB_CASES = [
+    NotSpeechCase("french_go_ahead_taking_up_her_verb",
+                  _after("Range les photos de vacances dans l'archive.",
+                         _she_asks_before_acting("archivePhotos"), "Ok lance"),
+                  _she_asks_before_acting("archivePhotos"), expected_noise=False),
+    NotSpeechCase("french_refusal_taking_up_her_verb",
+                  _after("Range les photos de vacances dans l'archive.",
+                         _she_asks_before_acting("archivePhotos"), "Lance pas."),
+                  _she_asks_before_acting("archivePhotos"), expected_noise=False),
+    NotSpeechCase("french_refusal_of_her_question",
+                  _after("Trie les vieux scans.",
+                         _she_asks_before_acting("sortOldScans"), "Valide pas."),
+                  _she_asks_before_acting("sortOldScans"), expected_noise=False),
+    NotSpeechCase("english_yes_taking_up_her_verb",
+                  _after("Empty the recycle bin.", _EN_GATE, "Sure, approve."),
+                  _EN_GATE, expected_noise=False),
+    NotSpeechCase("english_go_ahead_taking_up_her_verb",
+                  _after("Empty the recycle bin.", _EN_GATE, "Empty it."),
+                  _EN_GATE, expected_noise=False),
+]
+
 # Her reply ends on a reading, and her last sentence comes back as words she
 # never said: Whisper hears the figure as an hour and the unit as a name.
 # Through the speakers her voice clears the energy bar, so both proofs hold
@@ -1645,7 +1670,7 @@ def _as_his_answer_to_her_question(case, verdict) -> bool:
     """`_answered_in_the_hot_window` while a question she asked before
     acting waits for his spoken answer."""
     return _answered_in_the_hot_window(
-        case, verdict, words_she_did_not_say=_carries_a_word_she_did_not_say)
+        case, verdict, words_she_did_not_say=carries_a_word_she_did_not_say)
 
 
 def _answered_when_marked(case, verdict) -> bool:
@@ -2025,6 +2050,16 @@ class TestIntentJudgeNotSpeechArms:
         no question waiting."""
         _his_answer_unmarked_against_marked(capsys, HIS_YES_TO_HER_QUESTION_CASES,
                                             "his yes", _as_his_answer_to_her_question)
+
+    def test_his_short_answer_taking_up_her_verb_unmarked_against_marked_call_by_call(
+            self, capsys):
+        """His shortest answer to the question she asked before acting, her
+        verb and one word of his. Read as the test above reads his yes:
+        unmarked, as the listener shows it while her question waits and his
+        voice goes on after hers, and marked "(during TTS)", as it shows the
+        same words with no question waiting. A noise verdict drops it."""
+        _his_answer_unmarked_against_marked(capsys, HIS_SHORT_ANSWER_TAKING_UP_HER_VERB_CASES,
+                                            "his short answer", _as_his_answer_to_her_question)
 
     def test_her_voice_rewritten_unmarked_against_marked_call_by_call(self, capsys):
         """Her last sentence coming back as words she never said, its voice

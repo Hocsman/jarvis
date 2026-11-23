@@ -65,6 +65,109 @@ def test_nothing_is_stripped_when_she_said_nothing():
     assert strip_own_question("Oui", "") == "Oui"
 
 
+# ── His answer taking up her question's words ─────────────────────────
+
+_EN_QUESTION = "I'm about to empty the recycle bin. Do you approve?"
+
+
+def _scores_as_her_question(heard: str, dit: str) -> bool:
+    from rapidfuzz import fuzz
+
+    from src.jarvis.listening.echo_detection import EchoDetector
+
+    return fuzz.partial_ratio(heard.lower(), dit.lower()) >= EchoDetector.PURE_ECHO_THRESHOLD
+
+
+# His shortest answers take up her verb with a word of his, and score as her
+# question coming back. Taken out whole, what is left is empty and read as a
+# no he never gave; kept whole, her own words would be read with them. The
+# reader is given his words: from the first word she did not say to the last.
+_HIS_ANSWERS_TAKING_UP_HER_VERB = [
+    ("archivePhotos", "Ok lance", "Ok"),
+    ("archivePhotos", "Lance pas.", "pas"),
+    ("sortOldScans", "Valide pas.", "pas"),
+    ("archivePhotos", "Tu valides, ouais.", "ouais"),
+]
+
+
+@pytest.mark.parametrize("outil, answer, his", _HIS_ANSWERS_TAKING_UP_HER_VERB)
+def test_his_answer_taking_up_her_verb_keeps_his_words(outil, answer, his):
+    dit = describe_action(outil, {}, RISK_ACTION).spoken
+    assert _scores_as_her_question(answer, dit)
+
+    assert strip_own_question(answer, dit) == his
+
+
+def test_his_answer_in_another_language_keeps_his_words():
+    assert _scores_as_her_question("Sure, approve.", _EN_QUESTION)
+
+    assert strip_own_question("Sure, approve.", _EN_QUESTION) == "Sure"
+
+
+def test_her_question_then_his_answer_keeps_only_his_words():
+    dit = describe_action("archivePhotos", {}, RISK_ACTION).spoken
+
+    assert strip_own_question(f"{dit} Lance pas.", dit) == "pas"
+
+
+@pytest.mark.parametrize("entendu", [
+    # Her question and his answer with no sentence mark between them.
+    describe_action("archivePhotos", {}, RISK_ACTION).spoken.rstrip(" ?").replace(".", ",")
+    + ", ouais.",
+    # Her tool name as Whisper writes it heard, then his word.
+    "archive photos tu valides ouais",
+], ids=["commas-between", "no-marks"])
+def test_her_question_and_his_answer_in_one_fragment_keep_his_answer(entendu):
+    """Taken out as a sentence of hers, the fragment would leave nothing,
+    read as a no he did not give."""
+    dit = describe_action("archivePhotos", {}, RISK_ACTION).spoken
+    assert _scores_as_her_question(entendu, dit)
+
+    assert strip_own_question(entendu, dit) == "ouais"
+
+
+@pytest.mark.parametrize("entendu, left", [
+    ("Lancer archive fotos. Tu valides ? Hmm.", "fotos Hmm."),
+    ("Je m'apprête à lancer archive fotos tu valides", "fotos"),
+], ids=["her-verb-and-name", "her-whole-question"])
+def test_her_question_coming_back_bent_leaves_none_of_her_words(entendu, left):
+    """Whisper bends a word of hers into one she did not say ("fotos" for
+    "photos"). Her words around it are not his and never reach the reader,
+    where her own "lancer …" could read as a go-ahead."""
+    dit = describe_action("archivePhotos", {}, RISK_ACTION).spoken
+    assert _scores_as_her_question(entendu.split(".")[0], dit)
+
+    assert strip_own_question(entendu, dit) == left
+
+
+def test_his_refusal_in_front_of_her_words_keeps_his_refusal():
+    """His no before her words, then a word of assent: the no stays, rather
+    than leaving the assent alone to be read."""
+    dit = describe_action("sortOldScans", {}, RISK_ACTION).spoken
+    assert _scores_as_her_question("Pas à lancer sortOldScans.", dit)
+
+    assert strip_own_question("Pas à lancer sortOldScans. Ok.", dit) == "Pas Ok."
+
+
+@pytest.mark.parametrize("entendu, dit", [
+    ("Lance.", describe_action("archivePhotos", {}, RISK_ACTION).spoken),
+    ("Je m'apprête à lancer archive photos, tu valides ?",
+     describe_action("archivePhotos", {}, RISK_ACTION).spoken),
+    (describe_action("archivePhotos", {}, RISK_ACTION).spoken.lower(),
+     describe_action("archivePhotos", {}, RISK_ACTION).spoken),
+    ("Approve.", _EN_QUESTION),
+], ids=["her-verb-alone", "as-whisper-writes-it-heard", "lower-case", "english-verb-alone"])
+def test_words_that_are_all_hers_still_come_out(entendu, dit):
+    """Not one word of his: her question coming back, whole or in part, as
+    Whisper writes it heard. A short answer made only of her words is taken
+    out with it, the cost the listener keeps too."""
+    from src.jarvis.listening.echo_detection import carries_a_word_she_did_not_say
+
+    assert not carries_a_word_she_did_not_say(entendu, dit)
+
+    assert strip_own_question(entendu, dit) == ""
+
+
 # ── Against the sentence she actually says ────────────────────────────
 
 
@@ -124,3 +227,38 @@ def test_the_answer_is_read_from_what_was_heard_not_from_the_query():
     assert "Oui, je valide" in lu["utterance"]
     assert "m'apprête" not in lu["utterance"]
     assert settled.approval is not None
+
+
+def test_his_refusal_taking_up_her_verb_reaches_the_reader():
+    """Taken out as her echo, his refusal would leave nothing, and nothing is
+    read as a no he did not give in those words. It is his words the reader
+    is given."""
+    from unittest.mock import MagicMock, patch
+
+    from src.jarvis.memory.conversation import DialogueMemory
+    from src.jarvis.reply.engine import settle_pending_confirmation
+    from src.jarvis.tools.confirmation import DENIED, PendingAction
+
+    memory = DialogueMemory()
+    pose = memory.begin_turn("voix")
+    memory.raise_pending(PendingAction.create(
+        tool="archivePhotos", args={}, risk=RISK_ACTION, channel="parole",
+        origin="voix", query_redacted="range les photos", raised_at_turn=pose,
+        ttl_sec=180.0,
+    ))
+    memory.begin_turn("voix")
+    lu = {}
+
+    def _judge(cfg, utterance):
+        lu["utterance"] = utterance
+        return DENIED
+
+    with patch("src.jarvis.reply.engine.read_approval", side_effect=_judge), \
+         patch("src.jarvis.reply.engine.utterance_channel_available",
+               return_value=True):
+        settle_pending_confirmation(
+            cfg=MagicMock(), dialogue_memory=memory, origin="voix",
+            utterance="Lance pas.",
+        )
+
+    assert lu["utterance"] == "pas"
