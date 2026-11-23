@@ -393,7 +393,7 @@ While TTS is playing, echo rejection and stop commands are handled with fast tex
   purpose: an answer of his made only of her question's words ("je valide,
   lance" after "Je m'apprête à lancer archivePhotos. Tu valides ?") cannot be
   told from her question coming back bent, and is flagged; the shortest of
-  them ("lance.", "valide.") score as her question coming back whole, and the
+  them ("lance.", "je lance.") score as her question coming back whole, and the
   early text check sets them aside before the judge is asked. While she speaks,
   for an utterance whose end is not known, and with no question his voice can
   settle (none, one only a click can settle, one asked in the chat window, one
