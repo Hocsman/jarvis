@@ -671,3 +671,100 @@ class EchoDetector:
         # --- Default Case ---
         debug_log("NOT echo - outside of all detection windows.", "echo")
         return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Words she did not say
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Shared by the listener, which weighs what it hears against her reply, and
+# by the reader of answers to the question she asks before acting, which
+# takes her question back out of what was heard (`tools/confirmation.py`).
+
+# A heard word counts as one she said when it matches any word of her
+# reply this closely. Deliberately loose, because ASR mangles echo:
+# 'perlet' for 'perplexe' scores 71, 'sahas' for 'saas' 89. Measured on
+# the day's real transcripts, the share of words she did not say came out
+# the same whether this sits at 70, 80 or 90: the design does not rest on
+# the number.
+ECHO_WORD_MATCH = 80
+
+
+def her_word(word: str, her_words: list) -> bool:
+    """Whether *word* matches a word of her reply as closely as
+    `ECHO_WORD_MATCH` asks."""
+    return max((fuzz.ratio(word, s) for s in her_words), default=0) >= ECHO_WORD_MATCH
+
+
+def her_words_and_name_parts(spoken: str) -> list:
+    """The words of *spoken*, lower-cased, with the parts of each compound
+    name among them as Whisper writes them heard: split where a lower-case
+    letter meets an upper-case one, and at underscores ("archivePhotos":
+    "archive", "photos"; "sort_old_scans": "sort", "old", "scans")."""
+    words = []
+    for token in re.findall(r"\w+", spoken or "", re.UNICODE):
+        words.append(token.lower())
+        spaced = "".join(
+            f" {c}" if i and token[i - 1].islower() and c.isupper() else c
+            for i, c in enumerate(token))
+        parts = [p.lower() for p in re.split(r"[\s_]+", spaced) if p]
+        if len(parts) > 1:
+            words.extend(parts)
+    return words
+
+
+def carries_a_word_she_did_not_say(heard: str, spoken: str) -> bool:
+    """True when at least one word of *heard* has no counterpart in her
+    reply *spoken*.
+
+    The words-she-did-not-say proof for his answer to the question she
+    asked before acting. The share of words she did not say that a barge-in
+    over her replies clears was measured where his words are his own; an
+    answer is made of its question ("I'm about to empty the recycle bin. Do
+    you approve?", "yes, I approve"), so most of its words are hers by
+    construction and one word is all of his it may carry.
+
+    With one word deciding, the name of the tool she asks about counts as
+    she says it and as Whisper writes it heard (`her_words_and_name_parts`):
+    the parts of a compound name are hers, not words of his.
+
+    Fails open: with nothing of hers to compare against, everything is the
+    user's.
+    """
+    mots = re.findall(r"\w+", (heard or "").lower(), re.UNICODE)
+    if not mots:
+        return False
+    siens = her_words_and_name_parts(spoken)
+    if not siens:
+        return True
+    return any(not her_word(m, siens) for m in mots)
+
+
+# A piece of an utterance is a sentence of her reply coming back when it is
+# one run of that reply this closely. Measured piece by piece on two days of
+# real transcripts, hers scored 87 and above and his 65 and below;
+# corrections of his written in her own wording for the measure, 70 to 81.
+HER_SENTENCE_MATCH = 85
+
+# Under this many words a piece is never hers: three words in a row are few
+# enough for him to say by chance after a long reply of hers ("à la
+# maison"), and what is taken out cannot be recovered.
+HER_SENTENCE_MIN_WORDS = 4
+
+
+def her_sentence(piece: str, spoken: str) -> bool:
+    """Whether *piece*, one of the segments Whisper made of an utterance, is
+    a sentence of her reply *spoken* coming back: long enough to tell, and
+    one run of her reply.
+
+    The run is read in one direction only. `partial_ratio` lays the shorter
+    text along the longer, so against a reply shorter than the piece it
+    would ask whether her reply is a run of the piece, and a segment
+    holding her whole reply and then words of his would pass. Such a piece
+    is weighed whole against her reply (`ratio`).
+    """
+    if len(piece.split()) < HER_SENTENCE_MIN_WORDS:
+        return False
+    heard, said = piece.strip().lower(), spoken.strip().lower()
+    run = fuzz.partial_ratio if len(heard) <= len(said) else fuzz.ratio
+    return run(heard, said) >= HER_SENTENCE_MATCH

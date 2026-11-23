@@ -70,8 +70,8 @@ from typing import Optional, List, Union
 
 from helpers import (JUDGE_MODEL, JUDGE_BASE_URL, MockConfig, fisher_two_sided,
                      is_judge_llm_available, rate, to_terminal)
-from jarvis.listening.listener import (_carries_a_word_she_did_not_say,
-                                       _carries_speech_she_did_not_say)
+from jarvis.listening.echo_detection import carries_a_word_she_did_not_say
+from jarvis.listening.listener import _carries_speech_she_did_not_say
 from jarvis.tools.confirmation import describe_action
 
 JUDGE_MODELS = [a.strip() for a in os.environ.get("EVAL_INTENT_JUDGE_ARMS", "").split(",") if a.strip()]
@@ -1645,7 +1645,7 @@ def _as_his_answer_to_her_question(case, verdict) -> bool:
     """`_answered_in_the_hot_window` while a question she asked before
     acting waits for his spoken answer."""
     return _answered_in_the_hot_window(
-        case, verdict, words_she_did_not_say=_carries_a_word_she_did_not_say)
+        case, verdict, words_she_did_not_say=carries_a_word_she_did_not_say)
 
 
 def _answered_when_marked(case, verdict) -> bool:

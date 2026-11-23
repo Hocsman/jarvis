@@ -23,11 +23,11 @@ import pytest
 from rapidfuzz import fuzz
 
 from conftest import _created_listeners
-from jarvis.listening.echo_detection import EchoDetector
+from jarvis.listening.echo_detection import EchoDetector, carries_a_word_she_did_not_say
 from jarvis.listening.state_manager import StateManager, ListeningState
 from jarvis.listening.intent_judge import IntentJudge, IntentJudgment
 from jarvis.listening.listener import (
-    _Turn, _carries_a_word_she_did_not_say, _carries_speech_she_did_not_say,
+    _Turn, _carries_speech_she_did_not_say,
 )
 from jarvis.listening.wake_detection import is_wake_word_detected
 from jarvis.config import get_default_config
@@ -2409,7 +2409,7 @@ class TestHisAnswerToTheQuestionSheAskedBeforeActing:
         judge = _judge_that_reads_the_marker(listener)
         bent = "lancer archive fotos tu valides"
         assert not _carries_speech_she_did_not_say(bent, question)
-        assert _carries_a_word_she_did_not_say(bent, question)
+        assert carries_a_word_she_did_not_say(bent, question)
         _whisper_hears(listener, bent, started=time.time() - 1.0,
                        level=_level(listener, _HER_VOICE))
 
@@ -2499,7 +2499,7 @@ class TestHisAnswerToTheQuestionSheAskedBeforeActing:
         whole carries none of his."""
         question = describe_action(name, {}, "action").spoken
         assert name in question
-        assert not _carries_a_word_she_did_not_say(heard, question)
+        assert not carries_a_word_she_did_not_say(heard, question)
 
     @patch("builtins.print")
     def test_the_log_says_he_answered_her_question(self, _print):
@@ -2518,6 +2518,247 @@ class TestHisAnswerToTheQuestionSheAskedBeforeActing:
                    for line in lines)
         assert any("Overriding the echo verdict" in line and "her question" in line
                    for line in lines)
+        listener.state_manager.stop()
+
+
+# His shortest answers take up her question's verb, with a word of his: a
+# yes, a no, a go-ahead. Each scores as her question coming back whole, so
+# the early text check, which reads no timing, deleted them before anything
+# read them. The refusals count most: a no dropped leaves the question open.
+_HIS_ANSWER_TAKING_UP_HER_VERB = [
+    (describe_action("archivePhotos", {}, "action").spoken, "Ok lance"),
+    (describe_action("archivePhotos", {}, "action").spoken, "Lance pas."),
+    (describe_action("sortOldScans", {}, "action").spoken, "Valide pas."),
+    ("I'm about to empty the recycle bin. Do you approve?", "Sure, approve."),
+    ("I'm about to empty the recycle bin. Do you approve?", "Empty it."),
+]
+_HIS_ANSWER_IDS = ["go-ahead", "refusal", "refusal-of-her-verb", "english-yes", "english-go-ahead"]
+
+# Whisper hears the end of her question and his answer as one utterance: her
+# last words, then one word of his.
+_HER_QUESTION_TAIL_THEN_HIS_WORD = [
+    (describe_action("archivePhotos", {}, "action").spoken, "tu valides ? ouais", "ouais"),
+    ("I'm about to empty the recycle bin. Do you approve?", "Do you approve? Sure.", "sure"),
+]
+_TAIL_IDS = ["french-gate-wording", "english"]
+
+
+@pytest.mark.unit
+class TestHisShortAnswerTakingUpHerQuestion:
+    """His shortest answers to the question she asked before acting take up
+    its verb ("Ok lance", "Lance pas."), so they score as her question coming
+    back whole, and the early text check, which reads no timing, deleted them
+    before the judge or the reader of answers saw them.
+
+    While a question his voice can settle waits, and the voice went on after
+    hers, her reply coming back whole is read as the other checks read his
+    answer: one word she did not say, in a voice, makes it his. An answer
+    made only of her words is still hers."""
+
+    def _she_asks(self, question, channel=CHANNEL_PAROLE, **waiting):
+        listener, _ = _create_listener(echo_tolerance=0.1, hot_window_seconds=0.5)
+        if channel is not None:
+            _her_question_waits(listener, channel, **waiting)
+        last_word = _she_says(listener, question)
+        assert _wait_for_hot_window_active(listener)
+        return listener, last_word
+
+    @pytest.mark.parametrize("question, answer", _HIS_ANSWER_TAKING_UP_HER_VERB,
+                             ids=_HIS_ANSWER_IDS)
+    @patch("builtins.print")
+    def test_his_answer_begun_in_her_time_is_answered(self, mock_print, question, answer):
+        listener, last_word = self._she_asks(question)
+        judge = _judge_that_reads_the_marker(listener)
+        assert fuzz.partial_ratio(answer.lower(), question.lower()) >= EchoDetector.PURE_ECHO_THRESHOLD
+
+        _whisper_hears(listener, answer, started=_just_after(listener, last_word),
+                       level=_level(listener, _HIS_VOICE),
+                       voice_ended=_his_voice_goes_on_after_hers(listener, last_word))
+
+        assert judge.judge.called
+        assert "during TTS" not in _current_line_shown_to(judge)
+        assert _accepted_query(listener) == answer.lower()
+        assert not _console_says_heard_as_her_echo(mock_print, answer)
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("question, answer", _HIS_ANSWER_TAKING_UP_HER_VERB,
+                             ids=_HIS_ANSWER_IDS)
+    @patch("builtins.print")
+    def test_his_answer_begun_after_her_time_is_answered(self, _print, question, answer):
+        listener, last_word = self._she_asks(question)
+        _judge_that_reads_the_marker(listener)
+
+        _whisper_hears(listener, answer,
+                       started=last_word + 1.5 * listener.echo_detector.echo_tolerance,
+                       level=_level(listener, _HIS_VOICE),
+                       voice_ended=_his_voice_goes_on_after_hers(listener, last_word))
+
+        assert _accepted_query(listener) == answer.lower()
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("confidence", ["high", "medium"])
+    @pytest.mark.parametrize("question, answer", _HIS_ANSWER_TAKING_UP_HER_VERB[:2],
+                             ids=_HIS_ANSWER_IDS[:2])
+    @patch("builtins.print")
+    def test_an_echo_verdict_on_it_is_overridden(self, _print, question, answer, confidence):
+        listener, last_word = self._she_asks(question)
+        _install_intent_judge(listener, _make_judgment(
+            directed=False, confidence=confidence,
+            reasoning="an echo of the assistant's own question"))
+
+        _whisper_hears(listener, answer, started=_just_after(listener, last_word),
+                       level=_level(listener, _HIS_VOICE),
+                       voice_ended=_his_voice_goes_on_after_hers(listener, last_word))
+
+        assert _accepted_query(listener) == answer.lower()
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("question, answer", _HIS_ANSWER_TAKING_UP_HER_VERB[:2],
+                             ids=_HIS_ANSWER_IDS[:2])
+    @patch("builtins.print")
+    def test_a_directed_verdict_extracting_it_is_answered(self, _print, question, answer):
+        """The judge hands back his words as its query: they score as her
+        question too, and are still his."""
+        listener, last_word = self._she_asks(question)
+        _install_intent_judge(listener, _make_judgment(directed=True, query=answer))
+
+        _whisper_hears(listener, answer, started=_just_after(listener, last_word),
+                       level=_level(listener, _HIS_VOICE),
+                       voice_ended=_his_voice_goes_on_after_hers(listener, last_word))
+
+        assert _accepted_query(listener) == answer
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("question, answer", _HIS_ANSWER_TAKING_UP_HER_VERB[:2],
+                             ids=_HIS_ANSWER_IDS[:2])
+    @patch("builtins.print")
+    def test_with_no_verdict_it_is_answered(self, _print, question, answer):
+        listener, last_word = self._she_asks(question)
+        _install_intent_judge(listener, None)
+
+        _whisper_hears(listener, answer, started=_just_after(listener, last_word),
+                       level=_level(listener, _HIS_VOICE),
+                       voice_ended=_his_voice_goes_on_after_hers(listener, last_word))
+
+        assert _accepted_query(listener) == answer.lower()
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("question, heard, his_word", _HER_QUESTION_TAIL_THEN_HIS_WORD,
+                             ids=_TAIL_IDS)
+    @patch("builtins.print")
+    def test_her_question_tail_and_his_one_word_heard_as_one_keep_his_word(
+            self, mock_print, question, heard, his_word):
+        """Under the three words a salvaged remainder needs, and under the
+        share of words she did not say a barge-in clears: one word of his
+        after her last words is his answer."""
+        listener, last_word = self._she_asks(question)
+        judge = _judge_that_reads_the_marker(listener)
+        assert not _carries_speech_she_did_not_say(heard, question)
+
+        _whisper_hears(listener, heard, started=last_word - 1.0,
+                       level=_level(listener, _HIS_VOICE),
+                       voice_ended=_his_voice_goes_on_after_hers(listener, last_word))
+
+        assert "during TTS" not in _current_line_shown_to(judge)
+        assert his_word in _accepted_query(listener)
+        assert not _console_says_heard_as_her_echo(mock_print, heard)
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("question, answer", [
+        (describe_action("archivePhotos", {}, "action").spoken, "Lance."),
+        ("I'm about to empty the recycle bin. Do you approve?", "Approve."),
+    ], ids=["french-gate-wording", "english"])
+    @patch("builtins.print")
+    def test_an_answer_made_only_of_her_words_is_still_hers(self, mock_print, question, answer):
+        """The cost, kept: with not one word of his, it cannot be told from
+        her question coming back bent. The early check sets it aside before
+        the judge is asked."""
+        listener, last_word = self._she_asks(question)
+        judge = _judge_that_reads_the_marker(listener)
+        assert not carries_a_word_she_did_not_say(answer, question)
+
+        _whisper_hears(listener, answer, started=_just_after(listener, last_word),
+                       level=_level(listener, _HIS_VOICE),
+                       voice_ended=_his_voice_goes_on_after_hers(listener, last_word))
+
+        assert not judge.judge.called
+        assert _accepted_query(listener) == ""
+        assert _console_says_heard_as_her_echo(mock_print, answer)
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("question, heard, his_word", _HER_QUESTION_TAIL_THEN_HIS_WORD,
+                             ids=_TAIL_IDS)
+    @patch("builtins.print")
+    def test_her_question_coming_back_with_a_word_bent_stops_with_hers(
+            self, mock_print, question, heard, his_word):
+        """Her voice coming back, a word of it bent into one she did not say:
+        its voice stops with hers, so it answers nothing."""
+        listener, last_word = self._she_asks(question)
+        judge = _judge_that_reads_the_marker(listener)
+
+        _whisper_hears(listener, heard, started=last_word - 1.0,
+                       level=_level(listener, _HER_VOICE),
+                       voice_ended=_as_her_voice_dies(listener, last_word))
+
+        assert not judge.judge.called
+        assert _accepted_query(listener) == ""
+        assert _console_says_heard_as_her_echo(mock_print, heard)
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("question, answer", _HIS_ANSWER_TAKING_UP_HER_VERB[:2],
+                             ids=_HIS_ANSWER_IDS[:2])
+    @patch("builtins.print")
+    def test_the_same_words_with_no_voice_in_them_answer_nothing(self, mock_print, question,
+                                                                answer):
+        listener, last_word = self._she_asks(question)
+        _judge_that_reads_the_marker(listener)
+
+        _whisper_hears(listener, answer, started=_just_after(listener, last_word),
+                       level=_level(listener, _ROOM_NOISE),
+                       voice_ended=_his_voice_goes_on_after_hers(listener, last_word))
+
+        assert _accepted_query(listener) == ""
+        assert _console_says_heard_as_her_echo(mock_print, answer)
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("channel, waiting", [
+        (None, {}),
+        (CHANNEL_GESTE, {}),
+        (CHANNEL_PAROLE, {"origin": "chat"}),
+        (CHANNEL_PAROLE, {"expired": True}),
+    ], ids=["no-question", "click-only", "asked-in-the-chat", "expired"])
+    @patch("builtins.print")
+    def test_without_her_spoken_question_the_early_check_still_reads_the_text(
+            self, mock_print, channel, waiting):
+        """With no question his voice can settle, words that score as her
+        reply coming back whole are set aside as before, whatever their
+        timing."""
+        question, answer = _HIS_ANSWER_TAKING_UP_HER_VERB[0]
+        listener, last_word = self._she_asks(question, channel=channel, **waiting)
+        judge = _judge_that_reads_the_marker(listener)
+
+        _whisper_hears(listener, answer, started=_just_after(listener, last_word),
+                       level=_level(listener, _HIS_VOICE),
+                       voice_ended=_his_voice_goes_on_after_hers(listener, last_word))
+
+        assert not judge.judge.called
+        assert _accepted_query(listener) == ""
+        assert _console_says_heard_as_her_echo(mock_print, answer)
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_the_log_says_why_the_early_check_let_it_through(self, _print):
+        question, answer = _HIS_ANSWER_TAKING_UP_HER_VERB[0]
+        listener, last_word = self._she_asks(question)
+        _judge_that_reads_the_marker(listener)
+
+        with patch("jarvis.listening.listener.debug_log") as log:
+            _whisper_hears(listener, answer, started=_just_after(listener, last_word),
+                           level=_level(listener, _HIS_VOICE),
+                           voice_ended=_his_voice_goes_on_after_hers(listener, last_word))
+
+        assert any("not her reply coming back" in line and "her question" in line
+                   for line in _voice_log(log))
         listener.state_manager.stop()
 
 

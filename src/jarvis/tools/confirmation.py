@@ -556,22 +556,38 @@ def strip_own_question(utterance: str, spoken: str) -> str:
     said in the room. Handing all of that to the judge asks it to read a
     yes out of a passage that contains the question the yes answers.
 
-    Fragments matching what she just said are dropped. What remains may
-    be empty, and empty is right: it means nothing was said but the echo,
-    and the judge fails closed on it.
+    Fragments matching what she just said are dropped. A sentence of hers
+    coming back is dropped whatever Whisper bent in it (`her_sentence`): the
+    tool name she reads aloud rarely comes back as it is written. A shorter
+    fragment is dropped when it is made only of her words: his shortest
+    answers take up her question's verb with a word of his ("ok lance",
+    "lance pas" after "Je m'apprête à lancer …"), and a short fragment laid
+    along her question matches it whatever was said, so the match alone
+    would take his answer for her echo and leave an empty transcript, read
+    as a no he never gave. A short answer of his made only of her words
+    goes with her echo: it cannot be told from it.
+
+    What remains may be empty, and empty is right: it means nothing was
+    said but the echo, and the judge fails closed on it.
     """
     from rapidfuzz import fuzz
 
-    from ..listening.echo_detection import EchoDetector
+    from ..listening.echo_detection import (
+        EchoDetector, carries_a_word_she_did_not_say, her_sentence,
+    )
 
     if not utterance or not spoken:
         return utterance or ""
     seuil = EchoDetector.PURE_ECHO_THRESHOLD
     bas = spoken.lower()
-    garde = [
-        m for m in _MORCEAU.split(utterance)
-        if m.strip() and fuzz.partial_ratio(m.lower(), bas) < seuil
-    ]
+
+    def _hers(m: str) -> bool:
+        if her_sentence(m, spoken):
+            return True
+        return (fuzz.partial_ratio(m.lower(), bas) >= seuil
+                and not carries_a_word_she_did_not_say(m, spoken))
+
+    garde = [m for m in _MORCEAU.split(utterance) if m.strip() and not _hers(m)]
     return " ".join(garde).strip()
 
 

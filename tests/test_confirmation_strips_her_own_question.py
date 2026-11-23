@@ -65,6 +65,57 @@ def test_nothing_is_stripped_when_she_said_nothing():
     assert strip_own_question("Oui", "") == "Oui"
 
 
+# ── His answer taking up her question's words ─────────────────────────
+
+# His shortest answers take up her verb with a word of his, and score as her
+# question coming back. The listener lets them through as his answer; taken
+# out here, what is left is empty and read as a no he never gave.
+_HIS_ANSWERS_TAKING_UP_HER_VERB = [
+    ("archivePhotos", "Ok lance"),
+    ("archivePhotos", "Lance pas."),
+    ("sortOldScans", "Valide pas."),
+    ("archivePhotos", "Tu valides, ouais."),
+]
+
+
+@pytest.mark.parametrize("outil, answer", _HIS_ANSWERS_TAKING_UP_HER_VERB)
+def test_his_answer_taking_up_her_verb_is_left_whole(outil, answer):
+    from rapidfuzz import fuzz
+
+    from src.jarvis.listening.echo_detection import EchoDetector
+
+    dit = describe_action(outil, {}, RISK_ACTION).spoken
+    assert fuzz.partial_ratio(answer.lower(), dit.lower()) >= EchoDetector.PURE_ECHO_THRESHOLD
+
+    assert strip_own_question(answer, dit) == answer
+
+
+def test_his_answer_in_another_language_is_left_whole():
+    question = "I'm about to empty the recycle bin. Do you approve?"
+
+    assert strip_own_question("Sure, approve.", question) == "Sure, approve."
+
+
+def test_her_question_then_his_answer_keeps_only_his_answer():
+    dit = describe_action("archivePhotos", {}, RISK_ACTION).spoken
+
+    assert strip_own_question(f"{dit} Lance pas.", dit) == "Lance pas."
+
+
+@pytest.mark.parametrize("entendu", [
+    "Lance.",
+    "Je m'apprête à lancer archive photos, tu valides ?",
+    "je m'apprête à lancer archivePhotos. tu valides ?",
+], ids=["her-verb-alone", "as-whisper-writes-it-heard", "lower-case"])
+def test_words_that_are_all_hers_still_come_out(entendu):
+    """Not one word of his: her question coming back, whole or in part, as
+    Whisper writes it heard. A short answer made only of her words is taken
+    out with it, the cost the listener keeps too."""
+    dit = describe_action("archivePhotos", {}, RISK_ACTION).spoken
+
+    assert strip_own_question(entendu, dit) == ""
+
+
 # ── Against the sentence she actually says ────────────────────────────
 
 
@@ -124,3 +175,38 @@ def test_the_answer_is_read_from_what_was_heard_not_from_the_query():
     assert "Oui, je valide" in lu["utterance"]
     assert "m'apprête" not in lu["utterance"]
     assert settled.approval is not None
+
+
+def test_his_refusal_taking_up_her_verb_reaches_the_reader():
+    """Taken out as her echo, his refusal would leave nothing, and nothing is
+    read as a no he did not give in those words. It is his words the reader
+    must be given."""
+    from unittest.mock import MagicMock, patch
+
+    from src.jarvis.memory.conversation import DialogueMemory
+    from src.jarvis.reply.engine import settle_pending_confirmation
+    from src.jarvis.tools.confirmation import DENIED, PendingAction
+
+    memory = DialogueMemory()
+    pose = memory.begin_turn("voix")
+    memory.raise_pending(PendingAction.create(
+        tool="archivePhotos", args={}, risk=RISK_ACTION, channel="parole",
+        origin="voix", query_redacted="range les photos", raised_at_turn=pose,
+        ttl_sec=180.0,
+    ))
+    memory.begin_turn("voix")
+    lu = {}
+
+    def _judge(cfg, utterance):
+        lu["utterance"] = utterance
+        return DENIED
+
+    with patch("src.jarvis.reply.engine.read_approval", side_effect=_judge), \
+         patch("src.jarvis.reply.engine.utterance_channel_available",
+               return_value=True):
+        settle_pending_confirmation(
+            cfg=MagicMock(), dialogue_memory=memory, origin="voix",
+            utterance="Lance pas.",
+        )
+
+    assert lu["utterance"] == "Lance pas."
