@@ -607,6 +607,140 @@ class TestLLMStrategy:
         assert "logMeal" in result
 
     @pytest.mark.unit
+    def test_a_name_written_in_another_case_reaches_its_tool(self):
+        """A small router reading a long catalogue writes camelCase names in
+        lower case ("readagenda"). The answer names the right tool: it is
+        offered under its own name, and the turn is not handed to the
+        keyword strategy."""
+        backend = _llm_backend(return_value="getweather, LOGMEAL")
+        result = select_tools(
+            "a question the router understood",
+            _builtin(), {},
+            strategy=ToolSelectionStrategy.LLM,
+            llm_backend=backend,
+            llm_model="test",
+        )
+        assert result[:2] == ["getWeather", "logMeal"]
+        assert not result.degraded
+        assert "getweather" not in result and "LOGMEAL" not in result
+
+    @pytest.mark.unit
+    def test_one_tool_named_in_two_cases_is_offered_once(self):
+        backend = _llm_backend(return_value="getweather, getWeather")
+        result = select_tools(
+            "weather",
+            _builtin(), {},
+            strategy=ToolSelectionStrategy.LLM,
+            llm_backend=backend,
+            llm_model="test",
+        )
+        assert result.count("getWeather") == 1
+
+    @pytest.mark.unit
+    def test_an_mcp_tool_named_in_another_case_reaches_its_tool(self):
+        backend = _llm_backend(return_value="HomeAssistant__Turn_On")
+        result = select_tools(
+            "turn the lamp on",
+            _builtin(), _mcp(),
+            strategy=ToolSelectionStrategy.LLM,
+            llm_backend=backend,
+            llm_model="test",
+        )
+        assert result[0] == "homeassistant__turn_on"
+        assert not result.degraded
+
+    @pytest.mark.unit
+    def test_a_name_two_tools_share_apart_from_case_reaches_neither_unless_exact(self):
+        """Two tools of one server whose names differ only in case: a token
+        in a third casing cannot say which one the router meant, so it names
+        neither. A token written exactly as one of them still names that one."""
+        builtin = _builtin()
+        mcp = {
+            "homeassistant__turn_on": FakeToolSpec("homeassistant__turn_on", "Turn on a smart home device."),
+            "homeassistant__Turn_On": FakeToolSpec("homeassistant__Turn_On", "Turn on a smart home scene."),
+        }
+
+        # A query no description shares a word with, so a router answer
+        # thrown away cannot be rescued by the keyword strategy.
+        ambiguous = select_tools(
+            "plugh",
+            builtin, mcp,
+            strategy=ToolSelectionStrategy.LLM,
+            llm_backend=_llm_backend(return_value="HOMEASSISTANT__TURN_ON"),
+            llm_model="test",
+        )
+        assert not set(mcp) & set(ambiguous)
+        assert ambiguous.degraded
+
+        exact = select_tools(
+            "plugh",
+            builtin, mcp,
+            strategy=ToolSelectionStrategy.LLM,
+            llm_backend=_llm_backend(return_value="homeassistant__Turn_On"),
+            llm_model="test",
+        )
+        assert exact[0] == "homeassistant__Turn_On"
+        assert "homeassistant__turn_on" not in exact
+        assert not exact.degraded
+
+    @pytest.mark.unit
+    def test_the_log_pairs_each_offered_name_with_how_the_router_wrote_it(self, monkeypatch):
+        """The debug line shows what the router wrote beside the tool it
+        reached, for the tools offered only: a name the cap drops is not
+        reported as matched."""
+        from jarvis.tools import selection
+        from jarvis.tools.selection import _LLM_MAX_SELECTED
+
+        lines = []
+        monkeypatch.setattr(selection, "debug_log", lambda message, *a, **k: lines.append(message))
+        builtin = _builtin()
+        others = [n for n in builtin if n not in ("getWeather", "logMeal")]
+        assert len(others) >= _LLM_MAX_SELECTED - 1
+        answer = ["getweather"] + others[: _LLM_MAX_SELECTED - 1] + ["LOGMEAL"]
+
+        result = select_tools(
+            "a question the router understood",
+            builtin, {},
+            strategy=ToolSelectionStrategy.LLM,
+            llm_backend=_llm_backend(return_value=", ".join(answer)),
+            llm_model="test",
+        )
+
+        assert "getWeather" in result and "logMeal" not in result
+        recased = [line for line in lines if "another case" in line]
+        assert len(recased) == 1
+        assert "getweather -> getWeather" in recased[0]
+        assert "logMeal" not in recased[0] and "LOGMEAL" not in recased[0]
+
+    @pytest.mark.unit
+    def test_an_exact_answer_logs_no_name_in_another_case(self, monkeypatch):
+        from jarvis.tools import selection
+
+        lines = []
+        monkeypatch.setattr(selection, "debug_log", lambda message, *a, **k: lines.append(message))
+        select_tools(
+            "weather",
+            _builtin(), {},
+            strategy=ToolSelectionStrategy.LLM,
+            llm_backend=_llm_backend(return_value="getWeather"),
+            llm_model="test",
+        )
+        assert not [line for line in lines if "another case" in line]
+
+    @pytest.mark.unit
+    def test_a_mandatory_tool_named_in_another_case_is_trusted(self):
+        backend = _llm_backend(return_value="STOP")
+        result = select_tools(
+            "stop talking",
+            _builtin(), {},
+            strategy=ToolSelectionStrategy.LLM,
+            llm_backend=backend,
+            llm_model="test",
+        )
+        assert not result.degraded
+        assert "stop" in result
+
+    @pytest.mark.unit
     def test_caps_chatty_router_output_at_max(self):
         """A router that echoes the whole catalogue must still produce a
         compact selection — the hard cap guarantees downstream prompt size."""

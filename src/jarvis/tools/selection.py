@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 import time
 from enum import Enum
-from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Dict, Iterable, List, Optional, Tuple, TYPE_CHECKING
 
 from ..debug import debug_log
 from ..llm import LLMBackend
@@ -436,6 +436,21 @@ def _router_prompts(
     return sys_prompt, user_prompt
 
 
+def _by_folded_name(names: Iterable[str]) -> Dict[str, str]:
+    """Each tool name keyed by its case-folded spelling, for a router that
+    writes names in another case than the catalogue's.
+
+    qwen2.5:3b reading a catalogue of a hundred tools often answers
+    "readagenda" for ``readAgenda`` on a French question, and the answer
+    names the right tool. A spelling two names share apart from case is left
+    out: the token cannot say which of them the router meant.
+    """
+    folded: Dict[str, List[str]] = {}
+    for name in names:
+        folded.setdefault(name.casefold(), []).append(name)
+    return {key: spelled[0] for key, spelled in folded.items() if len(spelled) == 1}
+
+
 def _select_llm(
     query: str,
     builtin_tools: Dict[str, "Tool"],
@@ -480,20 +495,34 @@ def _select_llm(
         return ToolSelection(t for t in _ALWAYS_INCLUDED if t in builtin_tools or t in mcp_tools)
 
     known = set(builtin_tools.keys()) | set(mcp_tools.keys())
+    by_folded = _by_folded_name(known)
     selected: List[str] = []
+    written_as: Dict[str, str] = {}
     # Chatty routers wrap names in backticks, bullet them, or emit bracketed
     # JSON-ish lists. Strip every punctuation char that can't appear in a tool
     # name before matching, so the extraction is robust to formatting drift.
     _STRIP_CHARS = "'\"`*-_[](){}<>,.:;!?\\ "
     for token in re.split(r"[,\s]+", resp):
         clean = token.strip(_STRIP_CHARS)
-        if clean in known and clean not in selected:
-            selected.append(clean)
+        name = clean if clean in known else by_folded.get(clean.casefold())
+        if name is None or name in selected:
+            continue
+        if name != clean:
+            written_as[name] = clean
+        selected.append(name)
 
     # Hard cap — a chatty router that ignores the prompt cap must not bloat
     # the downstream tool list. Preserve order (model's ranking).
     if len(selected) > _LLM_MAX_SELECTED:
         selected = selected[:_LLM_MAX_SELECTED]
+
+    recased = [f"{written_as[name]} -> {name}" for name in selected if name in written_as]
+    if recased:
+        debug_log(
+            f"LLM tool selection: {len(recased)} name(s) written in another case: "
+            f"{', '.join(recased)}",
+            "planning",
+        )
 
     # The check runs before the mandatory tools are added, so it asks
     # whether the router named anything at all. A router that answers
