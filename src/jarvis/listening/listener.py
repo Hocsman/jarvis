@@ -471,9 +471,13 @@ def _carries_a_word_she_did_not_say(heard: str, spoken: str) -> bool:
     The words-she-did-not-say proof for his answer to the question she
     asked before acting (`VoiceListener._answers_her_question`). The share
     above was measured on barge-in over her replies, where his words are his
-    own; an answer is made of its question ("do you approve?", "yes, I
-    approve"), so most of its words are hers by construction and one word
-    is all of his it may carry.
+    own; an answer is made of its question ("I'm about to empty the recycle
+    bin. Do you approve?", "yes, I approve"), so most of its words are hers
+    by construction and one word is all of his it may carry.
+
+    With one word deciding, the name of the tool she asks about counts as
+    she says it and as Whisper writes it heard (`_her_words_and_name_parts`):
+    the parts of a compound name are hers, not words of his.
 
     Fails open as the share does: with nothing of hers to compare against,
     everything is the user's.
@@ -483,10 +487,29 @@ def _carries_a_word_she_did_not_say(heard: str, spoken: str) -> bool:
     mots = re.findall(r"\w+", (heard or "").lower(), re.UNICODE)
     if not mots:
         return False
-    siens = re.findall(r"\w+", (spoken or "").lower(), re.UNICODE)
+    siens = _her_words_and_name_parts(spoken)
     if not siens:
         return True
     return any(not _her_word(m, siens) for m in mots)
+
+
+def _her_words_and_name_parts(spoken: str) -> list:
+    """The words of *spoken*, lower-cased, with the parts of each compound
+    name among them as Whisper writes them heard: split where a lower-case
+    letter meets an upper-case one, and at underscores ("archivePhotos":
+    "archive", "photos"; "sort_old_scans": "sort", "old", "scans")."""
+    import re
+
+    words = []
+    for token in re.findall(r"\w+", spoken or "", re.UNICODE):
+        words.append(token.lower())
+        spaced = "".join(
+            f" {c}" if i and token[i - 1].islower() and c.isupper() else c
+            for i, c in enumerate(token))
+        parts = [p.lower() for p in re.split(r"[\s_]+", spaced) if p]
+        if len(parts) > 1:
+            words.extend(parts)
+    return words
 
 
 def _her_word(word: str, her_words: list) -> bool:
@@ -1721,7 +1744,7 @@ class VoiceListener(threading.Thread):
                             debug_log(
                                 f"⚡ Overriding the echo verdict in hot window "
                                 f"(echo_score={echo_score}, "
-                                f"{self._not_hers_because(stopped_with_hers, answering)}): "
+                                f"{self._not_hers_because(stopped_with_hers, answering=answering)}): "
                                 f"\"{text_lower}\"",
                                 "voice"
                             )
@@ -1878,7 +1901,7 @@ class VoiceListener(threading.Thread):
             debug_log(f"input ignored (no wake word{intent_info}): {text_lower}", "voice")
 
     def _not_her_echo(self, heard: str, utterance_energy: float,
-                      spoken: Optional[str] = None, answering: bool = False) -> bool:
+                      spoken: Optional[str] = None, *, answering: bool) -> bool:
         """True when *heard* cannot be only her own voice coming back: it
         carries words she did not say, loud enough to have been spoken.
 
@@ -1903,22 +1926,27 @@ class VoiceListener(threading.Thread):
         """
         if spoken is None:
             spoken = self.echo_detector._last_tts_text or ""
-        her_words_left_out = (_carries_a_word_she_did_not_say if answering
-                              else _carries_speech_she_did_not_say)
-        return (her_words_left_out(heard, spoken)
+        carries_his_words = (_carries_a_word_she_did_not_say if answering
+                             else _carries_speech_she_did_not_say)
+        return (carries_his_words(heard, spoken)
                 and self.echo_detector.utterance_carries_a_voice(utterance_energy))
 
     def _answers_her_question(self, stopped_with_hers: Optional[bool]) -> bool:
         """Whether an utterance can be his answer to the question she asked
-        before acting: a spoken one waits for it (`awaiting_spoken_answer`),
+        before acting: one his voice can settle waits for it (spoken, asked
+        by voice, `_waiting_spoken_question`, and not past its deadline),
         and its voice went on after her last word plus the echo tolerance
         (*stopped_with_hers* read False by `_voice_stopped_with_hers`), which
         her voice coming back never does. While she speaks, or with its end
         unknown (None), it is not.
 
-        The caller reads it once, with her voice's end, and weighs the
-        utterance's words on that one reading wherever it weighs them."""
-        return stopped_with_hers is False and self.awaiting_spoken_answer()
+        Each place that weighs the utterance's words reads it once, with
+        her voice's end, and its decision and log line rest on that one
+        reading."""
+        if stopped_with_hers is not False:
+            return False
+        waiting = self._waiting_spoken_question()
+        return waiting is not None and not waiting.has_expired()
 
     def _his_words_among_her_sentences(self, text: str, pieces: list) -> str:
         """*text*, an utterance heard in her time that Whisper made of
@@ -1969,7 +1997,7 @@ class VoiceListener(threading.Thread):
 
     def _could_be_hers(self, heard: str, utterance_energy: float, in_her_time: bool,
                        stopped_with_hers: Optional[bool],
-                       spoken: Optional[str] = None, answering: bool = False) -> bool:
+                       spoken: Optional[str] = None, *, answering: bool) -> bool:
         """Whether an utterance could be her own voice coming back, as the
         "(during TTS)" mark has it: heard in her time (*in_her_time*, as
         `_in_her_time` read it), and either its voice stopped with hers
@@ -1988,7 +2016,7 @@ class VoiceListener(threading.Thread):
                                           answering=answering))
 
     @staticmethod
-    def _not_hers_because(stopped_with_hers: Optional[bool], answering: bool = False) -> str:
+    def _not_hers_because(stopped_with_hers: Optional[bool], *, answering: bool) -> str:
         """Why words heard in her time were taken for his, as the log gives
         it: words she did not say, in a voice, and that voice going on after
         hers when its end was read (`_voice_stopped_with_hers`), with a word
@@ -4387,7 +4415,7 @@ class VoiceListener(threading.Thread):
                           f"its words): \"{text[:60]}\"", "voice")
             elif not is_during_tts:
                 debug_log(f"🗣️ not marked as her echo "
-                          f"({self._not_hers_because(stopped_with_hers, answering)}): "
+                          f"({self._not_hers_because(stopped_with_hers, answering=answering)}): "
                           f"\"{text[:60]}\"", "voice")
         self._transcript_buffer.add(
             text=text,

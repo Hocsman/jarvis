@@ -26,10 +26,12 @@ from conftest import _created_listeners
 from jarvis.listening.echo_detection import EchoDetector
 from jarvis.listening.state_manager import StateManager, ListeningState
 from jarvis.listening.intent_judge import IntentJudge, IntentJudgment
-from jarvis.listening.listener import _Turn, _carries_speech_she_did_not_say
+from jarvis.listening.listener import (
+    _Turn, _carries_a_word_she_did_not_say, _carries_speech_she_did_not_say,
+)
 from jarvis.listening.wake_detection import is_wake_word_detected
 from jarvis.config import get_default_config
-from jarvis.tools.confirmation import CHANNEL_GESTE, CHANNEL_PAROLE, SPOKEN_TEMPLATE
+from jarvis.tools.confirmation import CHANNEL_GESTE, CHANNEL_PAROLE, describe_action
 
 
 # ---------------------------------------------------------------------------
@@ -2258,22 +2260,24 @@ class TestTheLogSaysWhyAnUtteranceIsMarked:
 # Tests: His answer to the question she asked before acting
 # ---------------------------------------------------------------------------
 
-# She asks before acting, in the gate's own words (an invented tool), or in
-# another language, and he answers by taking up the word she asked with: one
-# word of his and the rest hers, so the share of words she did not say stays
-# under the bar a barge-in clears. None of these scores as her question
-# coming back whole.
+# She asks before acting, in the words the gate says for an invented tool
+# whose name it keeps, or in another language, and he answers by taking up the
+# words she asked with: one word of his and the rest hers, so the share of
+# words she did not say stays under the bar a barge-in clears. None of these
+# scores as her question coming back whole.
 _SHE_ASKS_BEFORE_ACTING = [
-    (SPOKEN_TEMPLATE.format(tool="tidyDownloads"), "Ok, je valide."),
+    (describe_action("archivePhotos", {}, "action").spoken, "Valide, tu peux lancer."),
     ("I'm about to empty the recycle bin. Do you approve?", "Yes, I approve."),
 ]
 _ASKED_IDS = ["french-gate-wording", "english"]
 
 
-def _her_question_waits(listener, channel=CHANNEL_PAROLE):
+def _her_question_waits(listener, channel=CHANNEL_PAROLE, origin="voix", expired=False):
     """A question she asked before acting waits for his answer, on
-    *channel*: words settle a spoken one, only a click a gesture one."""
-    asked = SimpleNamespace(channel=channel, origin="voix", request_id="q-answer")
+    *channel*: words settle a spoken one, only a click a gesture one. Asked
+    from *origin*, and past its deadline when *expired*."""
+    asked = SimpleNamespace(channel=channel, origin=origin, request_id="q-answer",
+                            has_expired=lambda: expired)
     listener.dialogue_memory = SimpleNamespace(peek_pending=lambda: asked)
 
 
@@ -2299,10 +2303,10 @@ class TestHisAnswerToTheQuestionSheAskedBeforeActing:
     "(during TTS)", set aside as her echo, and his next question was read as
     the answer to the question still waiting."""
 
-    def _she_asks(self, question, channel=CHANNEL_PAROLE):
+    def _she_asks(self, question, channel=CHANNEL_PAROLE, **waiting):
         listener, _ = _create_listener(echo_tolerance=0.1, hot_window_seconds=0.5)
         if channel is not None:
-            _her_question_waits(listener, channel)
+            _her_question_waits(listener, channel, **waiting)
         last_word = _she_says(listener, question)
         assert _wait_for_hot_window_active(listener)
         return listener, last_word
@@ -2403,8 +2407,9 @@ class TestHisAnswerToTheQuestionSheAskedBeforeActing:
         _her_question_waits(listener)
         listener.echo_detector.track_tts_start(question, baseline_energy=_FLOOR)
         judge = _judge_that_reads_the_marker(listener)
-        bent = "lancer tidy downloads tu valides"
+        bent = "lancer archive fotos tu valides"
         assert not _carries_speech_she_did_not_say(bent, question)
+        assert _carries_a_word_she_did_not_say(bent, question)
         _whisper_hears(listener, bent, started=time.time() - 1.0,
                        level=_level(listener, _HER_VOICE))
 
@@ -2417,7 +2422,7 @@ class TestHisAnswerToTheQuestionSheAskedBeforeActing:
                        voice_ended=_his_voice_goes_on_after_hers(listener, last_word))
 
         her_line = next(line for line in _prompt_shown_to(judge).splitlines()
-                        if "tidy downloads" in line)
+                        if "archive fotos" in line)
         assert "during TTS" in her_line
         listener.state_manager.stop()
 
@@ -2459,14 +2464,21 @@ class TestHisAnswerToTheQuestionSheAskedBeforeActing:
         assert _console_says_heard_as_her_echo(mock_print, answer)
         listener.state_manager.stop()
 
-    @pytest.mark.parametrize("channel", [None, CHANNEL_GESTE], ids=["no-question", "click-only"])
+    @pytest.mark.parametrize("channel, waiting", [
+        (None, {}),
+        (CHANNEL_GESTE, {}),
+        (CHANNEL_PAROLE, {"origin": "chat"}),
+        (CHANNEL_PAROLE, {"expired": True}),
+    ], ids=["no-question", "click-only", "asked-in-the-chat", "expired"])
     @patch("builtins.print")
-    def test_without_her_spoken_question_the_share_still_decides(self, mock_print, channel):
-        """With no question waiting for his words, the same words in the same
-        voice are weighed as any heard in her time: mostly hers, they could
-        be hers."""
+    def test_without_her_spoken_question_the_share_still_decides(self, mock_print, channel,
+                                                                 waiting):
+        """With no question his voice can settle (none, one only a click
+        settles, one asked in the chat window, one past its deadline), the
+        same words in the same voice are weighed as any heard in her time:
+        mostly hers, they could be hers."""
         question, answer = _SHE_ASKS_BEFORE_ACTING[0]
-        listener, last_word = self._she_asks(question, channel=channel)
+        listener, last_word = self._she_asks(question, channel=channel, **waiting)
         judge = _judge_that_reads_the_marker(listener)
 
         _whisper_hears(listener, answer, started=_just_after(listener, last_word),
@@ -2476,6 +2488,18 @@ class TestHisAnswerToTheQuestionSheAskedBeforeActing:
         assert "during TTS" in _current_line_shown_to(judge)
         assert _accepted_query(listener) == ""
         listener.state_manager.stop()
+
+    @pytest.mark.parametrize("name, heard", [
+        ("archivePhotos", "je m'apprête à lancer archive photos. tu valides ?"),
+        ("sort_old_scans", "je m'apprête à lancer sort old scans. tu valides ?"),
+    ], ids=["camel-case", "snake-case"])
+    def test_the_parts_of_a_name_she_says_are_her_words(self, name, heard):
+        """The gate says a tool's name as it is written, and Whisper writes it
+        heard as words: those words are hers, so her question coming back
+        whole carries none of his."""
+        question = describe_action(name, {}, "action").spoken
+        assert name in question
+        assert not _carries_a_word_she_did_not_say(heard, question)
 
     @patch("builtins.print")
     def test_the_log_says_he_answered_her_question(self, _print):

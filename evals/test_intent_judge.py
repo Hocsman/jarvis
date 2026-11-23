@@ -20,7 +20,9 @@ begun the moment she stops, unmarked, as the listener shows it when he is
 heard in a voice that goes on after hers, and marked "(during TTS)", as it
 shows an answer too quiet to prove he spoke, which it answers only on a
 directed verdict with a query, alternating the same way (`-k his_answer`
-runs it alone). A fourth reads her last sentence coming back as words she
+runs it alone). It reads the same way his answer to the question she asks
+before acting, made of that question's words (`-k his_yes` runs it alone).
+A fourth reads her last sentence coming back as words she
 never said, its voice stopping with hers, unmarked, as the judge is shown
 it when the two proofs alone decide, and marked, as the listener shows an
 utterance whose voice stops with hers (`-k rewritten` runs it alone, after
@@ -68,7 +70,9 @@ from typing import Optional, List, Union
 
 from helpers import (JUDGE_MODEL, JUDGE_BASE_URL, MockConfig, fisher_two_sided,
                      is_judge_llm_available, rate, to_terminal)
-from jarvis.listening.listener import _carries_speech_she_did_not_say
+from jarvis.listening.listener import (_carries_a_word_she_did_not_say,
+                                       _carries_speech_she_did_not_say)
+from jarvis.tools.confirmation import describe_action
 
 JUDGE_MODELS = [a.strip() for a in os.environ.get("EVAL_INTENT_JUDGE_ARMS", "").split(",") if a.strip()]
 NOT_SPEECH_ROUNDS = int(os.environ.get("EVAL_INTENT_JUDGE_ROUNDS", "4") or 4)
@@ -822,6 +826,41 @@ ANSWER_TO_HER_QUESTION_CASES = [
                   _EN_ASKS_BACK, expected_noise=False),
 ]
 
+
+# She asks before acting, in the words the gate says (invented tools whose
+# name it keeps) or in another language, and he answers at once by taking up
+# her question's words: one word of his and the rest hers, under the share a
+# barge-in clears. While her question waits, the listener shows such an
+# answer unmarked when its voice goes on after hers, and an echo verdict on
+# it is overridden on that one word; with no question waiting, the same
+# words are marked "(during TTS)".
+def _she_asks_before_acting(tool):
+    return describe_action(tool, {}, "action").spoken
+
+
+_EN_GATE = "I'm about to empty the recycle bin. Do you approve?"
+_EN_GATE_RENAME = "I'm about to rename the scanned files. Do you approve?"
+
+HIS_YES_TO_HER_QUESTION_CASES = [
+    NotSpeechCase("french_yes_to_archive",
+                  _after("Range les photos de vacances dans l'archive.",
+                         _she_asks_before_acting("archivePhotos"), "Valide, tu peux lancer."),
+                  _she_asks_before_acting("archivePhotos"), expected_noise=False),
+    NotSpeechCase("french_yes_to_clean",
+                  _after("Vide le cache du navigateur.",
+                         _she_asks_before_acting("cleanCache"), "Valide, lance-le."),
+                  _she_asks_before_acting("cleanCache"), expected_noise=False),
+    NotSpeechCase("french_yes_to_rename",
+                  _after("Renomme les scans du dossier.",
+                         _she_asks_before_acting("renameScans"), "Tu peux lancer, valide."),
+                  _she_asks_before_acting("renameScans"), expected_noise=False),
+    NotSpeechCase("english_yes_to_empty",
+                  _after("Empty the recycle bin.", _EN_GATE, "Yes, I approve."),
+                  _EN_GATE, expected_noise=False),
+    NotSpeechCase("english_yes_to_rename",
+                  _after("Rename the scanned files.", _EN_GATE_RENAME, "Yes, do it, I approve."),
+                  _EN_GATE_RENAME, expected_noise=False),
+]
 
 # Her reply ends on a reading, and her last sentence comes back as words she
 # never said: Whisper hears the figure as an hour and the unit as a name.
@@ -1580,23 +1619,33 @@ class TestIntentJudgeMultiSegment:
                 )
 
 
-def _answered_in_the_hot_window(case, verdict) -> bool:
+def _answered_in_the_hot_window(case, verdict, *,
+                                words_she_did_not_say=_carries_speech_she_did_not_say) -> bool:
     """What the listener does in the hot window with a verdict on a segment
     it did not mark as possibly hers: it dispatches a directed one, and its
     overrides take a rejection at any confidence, unless it says noise, or
     says aside with high confidence. A rejection whose reasoning says echo
     is overridden only on words she did not say, spoken in a voice: the words are weighed here as
-    the listener weighs them, and his words carry a voice where text Whisper
-    makes of silence carries none. The cases carry no wake word, so the
-    wake-word check never takes the decision."""
+    the listener weighs them (*words_she_did_not_say*: one word is enough
+    for his answer to the question she asked before acting), and his words
+    carry a voice where text Whisper makes of silence carries none. The
+    cases carry no wake word, so the wake-word check never takes the
+    decision."""
     if verdict.directed:
         return True
     if verdict.noise or (verdict.aside and verdict.confidence == "high"):
         return False
     if "echo" in (verdict.reasoning or "").lower():
         return (not case.expected_noise
-                and _carries_speech_she_did_not_say(case.segments[-1][0], case.last_tts_text))
+                and words_she_did_not_say(case.segments[-1][0], case.last_tts_text))
     return True
+
+
+def _as_his_answer_to_her_question(case, verdict) -> bool:
+    """`_answered_in_the_hot_window` while a question she asked before
+    acting waits for his spoken answer."""
+    return _answered_in_the_hot_window(
+        case, verdict, words_she_did_not_say=_carries_a_word_she_did_not_say)
 
 
 def _answered_when_marked(case, verdict) -> bool:
@@ -1829,6 +1878,49 @@ class TestIntentJudgeHearsARemarkToHer:
             pytest.fail(msg)
 
 
+def _his_answer_unmarked_against_marked(capsys, cases, label, answered_unmarked):
+    """Each arm reads every case unmarked and marked "(during TTS)", the two
+    alternating call by call, and prints how often the judge took it as
+    directed, how often the listener then answers it in the hot window
+    (*answered_unmarked* unmarked; marked, only a directed verdict with a
+    query), and how often it was called noise."""
+    judges = _warm_judges()
+    variants = {"unmarked": lambda case: case, "marked": _marked_as_hers}
+    answered_when = {"unmarked": answered_unmarked, "marked": _answered_when_marked}
+    arms = [(arm, variant) for arm in JUDGE_ARMS for variant in variants]
+    tally = {arm: [0, 0, 0, 0, 0] for arm in arms}   # directed, answered, noise, calls, no verdict
+    misses = {}   # (arm, case) -> not directed
+    for case, arm in _interleaved(arms, cases):
+        judge_arm, variant = arm
+        judges[judge_arm]._last_error_time = 0.0
+        shown = variants[variant](case)
+        verdict = run_intent_judge_multi_segment(
+            shown, judge=judges[judge_arm], current_text=shown.segments[-1][0])
+        row = tally[arm]
+        row[3] += 1
+        if verdict is None:
+            row[4] += 1
+            continue
+        row[0] += int(verdict.directed)
+        row[1] += int(answered_when[variant](shown, verdict))
+        row[2] += int(verdict.noise)
+        if not verdict.directed:
+            misses[(arm, case.name)] = misses.get((arm, case.name), 0) + 1
+
+    lines = [""]
+    for (judge_arm, variant), (directed, answered, noise, calls, silent) in tally.items():
+        scored = calls - silent
+        lines.append(f"🧪 {judge_arm:{_ARM_WIDTH}} {label} {variant:8}  directed "
+                     f"{rate(directed, scored)}, answered "
+                     f"{answered}/{scored}, noise {noise}/{scored}, no verdict {silent}")
+    for ((judge_arm, variant), name), count in sorted(misses.items()):
+        lines.append(f"   ↳ {judge_arm} {variant}: {name} not directed {count}/{NOT_SPEECH_ROUNDS}")
+    to_terminal(capsys, lines)
+
+    mute = [arm for arm in arms if tally[arm][3] == tally[arm][4]]
+    assert not mute, f"no answer at all from {mute}: check the model names and the provider"
+
+
 @pytest.mark.skipif(not JUDGE_MODELS, reason="name one or more judge models in EVAL_INTENT_JUDGE_ARMS")
 class TestIntentJudgeNotSpeechArms:
 
@@ -1921,42 +2013,18 @@ class TestIntentJudgeNotSpeechArms:
         call by call. Directed is the judge taking it as his; answered is
         what the listener then does in the hot window, where a marked one
         is answered only on a directed verdict with a query."""
-        judges = _warm_judges()
-        variants = {"unmarked": lambda case: case, "marked": _marked_as_hers}
-        answered_when = {"unmarked": _answered_in_the_hot_window,
-                         "marked": _answered_when_marked}
-        arms = [(arm, variant) for arm in JUDGE_ARMS for variant in variants]
-        tally = {arm: [0, 0, 0, 0, 0] for arm in arms}   # directed, answered, noise, calls, no verdict
-        misses = {}   # (arm, case) -> not directed
-        for case, arm in _interleaved(arms, ANSWER_TO_HER_QUESTION_CASES):
-            judge_arm, variant = arm
-            judges[judge_arm]._last_error_time = 0.0
-            shown = variants[variant](case)
-            verdict = run_intent_judge_multi_segment(
-                shown, judge=judges[judge_arm], current_text=shown.segments[-1][0])
-            row = tally[arm]
-            row[3] += 1
-            if verdict is None:
-                row[4] += 1
-                continue
-            row[0] += int(verdict.directed)
-            row[1] += int(answered_when[variant](shown, verdict))
-            row[2] += int(verdict.noise)
-            if not verdict.directed:
-                misses[(arm, case.name)] = misses.get((arm, case.name), 0) + 1
+        _his_answer_unmarked_against_marked(capsys, ANSWER_TO_HER_QUESTION_CASES,
+                                            "his answer", _answered_in_the_hot_window)
 
-        lines = [""]
-        for (judge_arm, variant), (directed, answered, noise, calls, silent) in tally.items():
-            scored = calls - silent
-            lines.append(f"🧪 {judge_arm:{_ARM_WIDTH}} his answer {variant:8}  directed "
-                         f"{rate(directed, scored)}, answered "
-                         f"{answered}/{scored}, noise {noise}/{scored}, no verdict {silent}")
-        for ((judge_arm, variant), name), count in sorted(misses.items()):
-            lines.append(f"   ↳ {judge_arm} {variant}: {name} not directed {count}/{NOT_SPEECH_ROUNDS}")
-        to_terminal(capsys, lines)
-
-        mute = [arm for arm in arms if tally[arm][3] == tally[arm][4]]
-        assert not mute, f"no answer at all from {mute}: check the model names and the provider"
+    def test_his_yes_to_her_question_unmarked_against_marked_call_by_call(self, capsys):
+        """His answer to the question she asked before acting, made of its
+        words. Read as the third test reads his answer: unmarked, as the
+        listener shows it while her question waits and his voice goes on
+        after hers, where an echo verdict is overridden on one word she did
+        not say, and marked "(during TTS)", as it shows the same words with
+        no question waiting."""
+        _his_answer_unmarked_against_marked(capsys, HIS_YES_TO_HER_QUESTION_CASES,
+                                            "his yes", _as_his_answer_to_her_question)
 
     def test_her_voice_rewritten_unmarked_against_marked_call_by_call(self, capsys):
         """Her last sentence coming back as words she never said, its voice

@@ -376,24 +376,32 @@ While TTS is playing, echo rejection and stop commands are handled with fast tex
   words.
 - His answer to the question she asked before acting is made of its words.
   A spoken question waiting for his answer (`tools/policy.spec.md`) supplies
-  the words of that answer: "do you approve?" is answered "yes, I approve",
-  one word of his and the rest hers, and the share of words she did not say,
-  measured on barge-in over her replies, reads it as her echo. So while such
-  a question waits, an utterance whose voice went on after her last word plus
-  `echo_tolerance` carries words she did not say as soon as one of its words
-  has no close match in her reply (the word test of "Overriding an echo
-  verdict takes positive evidence"); the voice proof is unchanged. Her voice
-  coming back never goes on after hers, so her question passes this way only
-  merged with another sound that outlasts her voice and with a word Whisper
-  made of it. Kept on purpose: an answer of his made only of her question's
-  words ("je valide, lance" after "Tu valides ?") cannot be told from her
-  question coming back bent, and is flagged. While she speaks, for an
-  utterance whose end is not known, and with no spoken question waiting (none,
-  or one only a click can settle), the share decides as above. The question
-  waiting and the voice's end are read once, before the judge is asked, and
-  that reading decides wherever the words are weighed: the flag, an echo
-  verdict and a missing one (see "Hot Window Mode"), and what the early
-  salvage keeps after her question.
+  the words of that answer: "I'm about to empty the recycle bin. Do you
+  approve?" is answered "yes, I approve", one word of his and the rest hers,
+  and the share of words she did not say, measured on barge-in over her
+  replies, reads it as her echo. So while a question his voice can settle
+  waits (spoken, asked by voice, and not past its deadline), an utterance
+  whose voice went on after her last word plus `echo_tolerance` carries words
+  she did not say as soon as one of its words has no close match in her reply
+  (the word test of "Overriding an echo verdict takes positive evidence"); the
+  voice proof is unchanged. Her words count there as she says them and as
+  Whisper writes them heard: the parts of a compound name she says
+  ("archivePhotos" heard "archive photos", "sort_old_scans" heard "sort old
+  scans") are hers. Her voice coming back never goes on after hers, so her
+  question passes this way only merged with another sound that outlasts her
+  voice, and with a word of it bent into one she did not say. Kept on
+  purpose: an answer of his made only of her question's words ("je valide,
+  lance" after "Je m'apprête à lancer archivePhotos. Tu valides ?") cannot be
+  told from her question coming back bent, and is flagged. While she speaks,
+  for an utterance whose end is not known, and with no question his voice can
+  settle (none, one only a click can settle, one asked in the chat window, one
+  past its deadline), the share decides as above. Each place that weighs the
+  words reads the question waiting and the voice's end once, and decides on
+  that reading: the flag as the utterance joins the transcript, what the early
+  salvage keeps after her question, and, read before the judge is asked, every
+  path its verdict takes in the hot window (an echo verdict, another
+  rejection, a sure aside, a directed verdict with no query, and a missing
+  one; see "Hot Window Mode").
 - Intent judge uses this context to identify echo
 - All of this is read on the utterance once the sentences of her reply that
   open and close it are out (see "Her sentences at the edges of what he
