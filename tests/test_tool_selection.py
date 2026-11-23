@@ -651,11 +651,14 @@ class TestLLMStrategy:
 
     @pytest.mark.unit
     def test_a_name_two_tools_share_apart_from_case_reaches_neither_unless_exact(self):
-        """Two tools whose names differ only in case: a token in a third
-        casing cannot say which one the router meant, so it names neither.
-        A token written exactly as one of them still names that one."""
+        """Two tools of one server whose names differ only in case: a token
+        in a third casing cannot say which one the router meant, so it names
+        neither. A token written exactly as one of them still names that one."""
         builtin = _builtin()
-        mcp = {"getweather": FakeToolSpec("getweather", "Another server's weather tool.")}
+        mcp = {
+            "homeassistant__turn_on": FakeToolSpec("homeassistant__turn_on", "Turn on a smart home device."),
+            "homeassistant__Turn_On": FakeToolSpec("homeassistant__Turn_On", "Turn on a smart home scene."),
+        }
 
         # A query no description shares a word with, so a router answer
         # thrown away cannot be rescued by the keyword strategy.
@@ -663,20 +666,66 @@ class TestLLMStrategy:
             "plugh",
             builtin, mcp,
             strategy=ToolSelectionStrategy.LLM,
-            llm_backend=_llm_backend(return_value="GETWEATHER"),
+            llm_backend=_llm_backend(return_value="HOMEASSISTANT__TURN_ON"),
             llm_model="test",
         )
-        assert "getWeather" not in ambiguous and "getweather" not in ambiguous
+        assert not set(mcp) & set(ambiguous)
+        assert ambiguous.degraded
 
         exact = select_tools(
             "plugh",
             builtin, mcp,
             strategy=ToolSelectionStrategy.LLM,
-            llm_backend=_llm_backend(return_value="getweather"),
+            llm_backend=_llm_backend(return_value="homeassistant__Turn_On"),
             llm_model="test",
         )
-        assert exact[0] == "getweather"
-        assert "getWeather" not in exact
+        assert exact[0] == "homeassistant__Turn_On"
+        assert "homeassistant__turn_on" not in exact
+        assert not exact.degraded
+
+    @pytest.mark.unit
+    def test_the_log_pairs_each_offered_name_with_how_the_router_wrote_it(self, monkeypatch):
+        """The debug line shows what the router wrote beside the tool it
+        reached, for the tools offered only: a name the cap drops is not
+        reported as matched."""
+        from jarvis.tools import selection
+        from jarvis.tools.selection import _LLM_MAX_SELECTED
+
+        lines = []
+        monkeypatch.setattr(selection, "debug_log", lambda message, *a, **k: lines.append(message))
+        builtin = _builtin()
+        others = [n for n in builtin if n not in ("getWeather", "logMeal")]
+        assert len(others) >= _LLM_MAX_SELECTED - 1
+        answer = ["getweather"] + others[: _LLM_MAX_SELECTED - 1] + ["LOGMEAL"]
+
+        result = select_tools(
+            "a question the router understood",
+            builtin, {},
+            strategy=ToolSelectionStrategy.LLM,
+            llm_backend=_llm_backend(return_value=", ".join(answer)),
+            llm_model="test",
+        )
+
+        assert "getWeather" in result and "logMeal" not in result
+        recased = [line for line in lines if "another case" in line]
+        assert len(recased) == 1
+        assert "getweather -> getWeather" in recased[0]
+        assert "logMeal" not in recased[0] and "LOGMEAL" not in recased[0]
+
+    @pytest.mark.unit
+    def test_an_exact_answer_logs_no_name_in_another_case(self, monkeypatch):
+        from jarvis.tools import selection
+
+        lines = []
+        monkeypatch.setattr(selection, "debug_log", lambda message, *a, **k: lines.append(message))
+        select_tools(
+            "weather",
+            _builtin(), {},
+            strategy=ToolSelectionStrategy.LLM,
+            llm_backend=_llm_backend(return_value="getWeather"),
+            llm_model="test",
+        )
+        assert not [line for line in lines if "another case" in line]
 
     @pytest.mark.unit
     def test_a_mandatory_tool_named_in_another_case_is_trusted(self):
