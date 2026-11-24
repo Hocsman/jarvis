@@ -229,7 +229,7 @@ The intent judge receives full context and makes intelligent decisions:
 
 ### 4. The Microphone Is Always Read
 
-The capture callback stamps each block with the time it was captured and queues it. The listening loop reads the queue frame by frame, and an utterance's start and end are read from those stamps, so audio the loop reaches late still says when it was spoken: the echo detector, the hot window and the latency journal compare these times with when she spoke, and the silence that ends a question being collected is counted in them.
+The capture callback takes her sound out of each block (see "Acoustic Echo Cancellation"), stamps it with the time it was captured and queues it. The listening loop reads the queue frame by frame, and an utterance's start and end are read from those stamps, so audio the loop reaches late still says when it was spoken: the echo detector, the hot window and the latency journal compare these times with when she spoke, and the silence that ends a question being collected is counted in them.
 
 **Replies run on a thread of their own.** Once a query is collected, the loop hands it over (`_hand_over`) and goes back to listening; the reply thread runs the queries one after the other, each through the reply engine and then out loud. While she prepares an answer and while she says it, what he says is still heard.
 
@@ -728,6 +728,7 @@ The listener feeds the latency journal (`src/jarvis/latency.py`, see `latency.sp
 | `whisper_min_confidence` | 0.3 | Minimum `avg_logprob`-derived confidence score for a transcribed segment. Segments below this are discarded before the intent judge sees them. |
 | `whisper_no_speech_threshold` | 0.5 | Hard cutoff on Whisper's `no_speech_prob` field. Any segment at or above this value is discarded **regardless of `avg_logprob`** — Whisper can be confident about a hallucinated phrase even when no real speech is present (e.g. the "MBC 뉴스" hallucination on background noise). This filter runs before the `avg_logprob` check so it catches high-confidence hallucinations that would otherwise survive. Applies to both the faster-whisper and MLX backends. |
 | `whisper_vocabulary` | `[]` | Names Whisper is given as a hint, after `weather_city`. See "The names he uses". |
+| `voice_echo_cancellation` | `true` | Whether what she plays is taken out of the microphone before anything reads it. See "Acoustic Echo Cancellation". |
 
 **Repetition guard.** Past the confidence filters, a transcript is
 discarded when it loops: one word over half the tokens, the same word
@@ -773,7 +774,7 @@ stateDiagram-v2
 ```
 Microphone Audio
     ↓
-Sounddevice Callback → _audio_q
+Sounddevice Callback → her sound taken out (Acoustic Echo Cancellation) → _audio_q
     ↓
 Main Loop: Get Frames → VAD Check
     ↓
@@ -914,14 +915,23 @@ If the HuggingFace model cache is corrupted (e.g. from an interrupted download),
 
 When HuggingFace returns HTTP 429 (Too Many Requests), both faster-whisper and MLX Whisper backends retry up to 4 times with exponential backoff (2s, 4s, 8s, 16s). Progress messages inform the user of each retry attempt. If all retries are exhausted, the user is advised to wait and restart.
 
-## Future: Acoustic Echo Cancellation
+## Acoustic Echo Cancellation
 
-Currently, echo is handled at the transcript level via fuzzy text matching and the intent judge. True acoustic echo cancellation (AEC) would:
-- Require the audio output signal (reference)
-- Process in real-time with adaptive filtering
-- Add 10-50ms latency
+Her voice reaches the microphone through the room, on a desk microphone near desk speakers almost as loud as his. Every check above works on what Whisper wrote of it, after the fact. The canceller works on the sound, before any of them: what she plays is taken out of each block the microphone delivers, so most of her reply never becomes text.
 
-**Current recommendation:** The transcript-level echo detection (fuzzy matching + intent judge) is sufficient and simpler. Consider AEC only if transcript-level detection proves inadequate in practice.
+**What it is.** WebRTC's echo canceller (AEC3), through the `livekit` package's `AudioProcessingModule`, held by `jarvis.utils.echo_cancellation` (`ECHO_CANCELLER`, one per process). It runs on the machine and nothing it is given leaves it. Echo cancellation only: noise suppression, gain control and the high-pass filter stay off. Whisper is trained on speech as microphones capture it, a gain that moved between utterances would move the room's level (see "The floor is the room, never her nor him"), and the high-pass filter, measured, took out nothing more.
+
+**The reference is what she plays, as it is played.** Each output stream opened through `open_output_stream` with a callback hands every block the callback fills to the canceller before PortAudio plays it (`tts.spec.md`, "Audio output"): her voice from Piper, Kokoro and Kyutai, and the thinking tune. A block is made mono and brought to the capture rate on the way in. Chatterbox, played by the pygame mixer, is not seen: with that engine the canceller has no reference and takes nothing out.
+
+**The microphone is cleaned where it is read.** The capture callback (`_on_audio`) passes each block through the canceller before queueing it, so the voice detector, the room's level, the energy tests and Whisper all read the cleaned sound. It happens in the callback and not in the listening loop because the canceller pairs what was heard with what was played around the same moment, and the loop falls behind while Whisper or the judge holds it. The canceller works in 10 ms frames: it cleans a capture in one channel at 8, 16, 32 or 48 kHz, whose blocks of 10, 20 or 30 ms are whole frames. Any other capture (a format fallback, see "Capture format and health") is read as captured, and the debug log says so once.
+
+**The delay is found, not set.** Between a block handed over and its sound in the microphone lie the output stream's latency, the air and the input stream's latency, about 300 ms on the desk set-up it was measured on. AEC3 estimates it; told the measured value, it took out 1.4 dB more than it did alone, so no delay is configured.
+
+**It fails open.** Without the package, or when the canceller cannot be created, the microphone is read as captured and start-up says `⚠️  Echo cancellation unavailable: <reason>`. An error while it runs, on either side, turns it off for the rest of the session with the same line: a canceller that has failed once is not trusted with his voice. Her voice never waits on it: the hand-over in her stream's callback never raises into the callback.
+
+**What it does not do.** When he talks over her it takes out her voice and keeps his, though not whole: while both voices are in a frame, its suppression lowers his words too, the more the louder she plays. The transcript-level checks above are unchanged and run on every utterance; they see far less of her, and still catch what gets through, a reply played by Chatterbox included.
+
+`voice_echo_cancellation` (default `true`) turns it on at start-up, with `🧹 Echo cancellation: her voice is taken out of the microphone`; off, the microphone is read as captured and nothing is said. The debug log says how much it took out once her sound has been silent for a second: `🧹 Echo cancelled: N dB while she played`, the microphone's level against the cleaned level over the frames heard while she played.
 
 ## The word that wakes her
 

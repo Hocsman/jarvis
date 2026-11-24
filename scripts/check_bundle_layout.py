@@ -55,7 +55,10 @@ NOT_DATA_ENDINGS = (".spec.md",)
 # package, and the folders of it that hold those files. faster-whisper reads
 # its voice detector's model (Silero, used when ``whisper_vad`` is on) from
 # ``assets``; without it every transcription that asks for the detector fails.
-PACKAGE_DATA = {"faster_whisper": ("assets",)}
+# livekit opens its native library (the echo canceller) from
+# ``rtc/resources``; without it the canceller is unavailable and the
+# microphone is read as captured.
+PACKAGE_DATA = {"faster_whisper": ("assets",), "livekit": ("rtc/resources",)}
 
 
 def _skipped(relative: PurePosixPath) -> bool:

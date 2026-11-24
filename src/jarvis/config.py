@@ -299,6 +299,7 @@ class Settings:
     # Echo Detection
     echo_energy_threshold: float
     echo_tolerance: float
+    voice_echo_cancellation: bool  # What she plays is taken out of the microphone
 
     # Reminders — the first thing she does while nobody is watching
     reminders_enabled: bool
@@ -954,6 +955,7 @@ def get_default_config() -> Dict[str, Any]:
         "update_check_enabled": True,
         "echo_energy_threshold": 2.0,
         "echo_tolerance": 0.3,  # Time tolerance for echo detection timing
+        "voice_echo_cancellation": True,  # Her sound taken out of the microphone (WebRTC, on the machine)
 
         # Reminders. The grace window is what separates "she is late"
         # from "she was never going to say it": past it she still speaks,
@@ -1339,6 +1341,7 @@ def load_settings() -> Settings:
     update_check_enabled = _as_bool(merged.get("update_check_enabled", True))
     echo_energy_threshold = float(merged.get("echo_energy_threshold", 2.0))
     echo_tolerance = float(merged.get("echo_tolerance", 0.3))
+    voice_echo_cancellation = _as_bool(merged.get("voice_echo_cancellation", True))
 
     # Reminders. Clamped rather than trusted: a tick of zero spins a core
     # and a timeout of zero makes every reminder unreadable, and both
@@ -1623,6 +1626,7 @@ def load_settings() -> Settings:
         update_check_enabled=update_check_enabled,
         echo_energy_threshold=echo_energy_threshold,
         echo_tolerance=echo_tolerance,
+        voice_echo_cancellation=voice_echo_cancellation,
         # Reminders
         reminders_enabled=reminders_enabled,
         reminder_model=reminder_model,

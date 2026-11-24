@@ -181,6 +181,7 @@ Jarvis starts listening automatically — just say "Jarvis" and talk!
 - **A Record of What It Did** - One line per tool call: what ran, what it cost, what you allowed and what you refused. Deliberately no record of what it *saw* — no page contents, no file contents, no tool output
 - **Knowledge Graph Memory** - Self-organising memory of what it has looked up for you, which auto-splits by topic and surfaces relevant knowledge automatically
 - **Natural Voice** - Say "Jarvis" anywhere in your sentence, interrupt with "stop" (while it thinks as well as while it speaks), follow up without repeating the wake word. It keeps listening while it thinks: a question asked meanwhile is answered next
+- **Hears You Over Its Own Speakers** - What Jarvis plays is taken out of the microphone before anything listens to it (WebRTC's echo canceller, run on your machine; no sound leaves it), so its own voice rarely reaches the speech recogniser and you can use speakers rather than headphones. While you talk over it your words come through, a little quieter. Switch it off under **⚙️ Settings → 🎤 Voice Input → Echo Cancellation**. It does not see the Chatterbox voice
 - **Fast Stop** - Use the tray action `⚡ Stop Now (Skip Diary)` to release local model resources quickly when you need your machine back immediately.
 - **Dictation Mode** - Free, offline alternative to WisprFlow — hold a hotkey, speak, release to paste text into any app
 - **MCP Integration** - Connect to thousands of external tools (Home Assistant, GitHub, Slack, etc.)

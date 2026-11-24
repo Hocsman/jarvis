@@ -510,6 +510,9 @@ def _config(voice_device, **settings):
     cfg.voice_debug = False
     cfg.tune_enabled = False
     cfg.llm_chat_model = ""
+    # These tests follow his words by their exact samples, and the echo
+    # canceller rounds each one to 16 bits on its way through.
+    cfg.voice_echo_cancellation = False
     for name, value in settings.items():
         setattr(cfg, name, value)
     return cfg

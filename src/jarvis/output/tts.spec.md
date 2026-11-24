@@ -325,6 +325,14 @@ of the lock, and counted open until it is closed, so the device list is
 never read afresh while she speaks or the tune plays: reading it terminates
 PortAudio, which would close the stream under her voice.
 
+`open_output_stream` also hands what a stream plays to the echo canceller
+(`listening.spec.md`, "Acoustic Echo Cancellation"), from inside the
+stream's callback, once the engine's callback has filled the block: a block
+filled and then ended on (`CallbackStop`) is played and handed over, a
+block aborted on (`CallbackAbort`) is neither. The hand-over never raises
+into the callback, so a canceller that fails is turned off and her voice
+plays on. Chatterbox's pygame mixer is not seen by it.
+
 ## Piper voices
 
 ### Which language wins

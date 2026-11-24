@@ -1,8 +1,8 @@
 """Audio input selection and stream negotiation across voice listener and dictation engine.
 
 Resolves the configured ``voice_device`` to one input, re-reads PortAudio's
-device list when no stream is open, opens output streams counted as open,
-and provides format negotiation (mono first, then bounded native-rate /
+device list when no stream is open, opens output streams counted as open
+that hand what they play to the echo canceller, and provides format negotiation (mono first, then bounded native-rate /
 multi-channel alternatives) for audio hardware that rejects 1-channel mono
 or 16 kHz capture.
 """
@@ -18,6 +18,7 @@ except (ImportError, OSError):
 
 from ..debug import debug_log
 from .audio_lock import open_stream_count, portaudio_lock, track_stream, unguarded_open
+from .echo_cancellation import ECHO_CANCELLER, EchoCanceller
 
 
 class InputDeviceNotFound(LookupError):
@@ -201,15 +202,64 @@ def open_input_stream(
     raise OSError("No valid audio input format found")
 
 
-def open_output_stream(sd_backend: Any, **kwargs: Any) -> Any:
+def open_output_stream(
+    sd_backend: Any,
+    *,
+    echo_canceller: Optional[EchoCanceller] = ECHO_CANCELLER,
+    **kwargs: Any,
+) -> Any:
     """``sd_backend.OutputStream(**kwargs)``, counted as open from its
     construction until it is closed (``audio_lock.track_stream``).
 
     Both happen in one hold of ``portaudio_lock``, so no reading of the device
     list can fall between them and terminate PortAudio under the new stream.
     The caller may already hold the lock, to start the stream in the same hold.
+
+    A stream with a callback hands each block it plays to ``echo_canceller``,
+    the reference the microphone is cleaned against (listening.spec.md,
+    "Acoustic Echo Cancellation").
     """
+    stream_rate: dict = {}
+    callback = kwargs.get("callback")
+    if callback is not None and echo_canceller is not None:
+        kwargs["callback"] = _handing_over_what_plays(callback, echo_canceller, sd_backend, stream_rate)
     with portaudio_lock:
         stream = sd_backend.OutputStream(**kwargs)
         track_stream(stream)
+    stream_rate["rate"] = kwargs.get("samplerate") or getattr(stream, "samplerate", None)
     return stream
+
+
+def _handing_over_what_plays(
+    callback: Callable, canceller: EchoCanceller, sd_backend: Any, stream_rate: dict,
+) -> Callable:
+    """``callback``, then the block it filled handed to ``canceller``.
+
+    A block the callback ends the stream on (``CallbackStop``) is still
+    played, so it is handed over; one it aborts on is not played and is not.
+    Nothing raised here reaches PortAudio but what ``callback`` raised.
+    """
+    stop = getattr(sd_backend, "CallbackStop", None)
+    tap: list = []
+
+    def hand_over(outdata) -> None:
+        try:
+            if not tap:
+                rate = stream_rate.get("rate")
+                if not rate:
+                    return
+                tap.append(canceller.reference_tap(int(rate)))
+            tap[0](outdata)
+        except Exception as exc:
+            debug_log(f"echo canceller: a played block was not handed over: {exc}", "voice")
+
+    def played(outdata, frames, time_info, status):
+        try:
+            callback(outdata, frames, time_info, status)
+        except Exception as exc:
+            if stop is not None and isinstance(exc, stop):
+                hand_over(outdata)
+            raise
+        hand_over(outdata)
+
+    return played

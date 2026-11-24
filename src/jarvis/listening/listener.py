@@ -61,6 +61,7 @@ from ..utils.audio_stream import (
     refresh_input_devices,
     resolve_input_device,
 )
+from ..utils.echo_cancellation import ECHO_CANCELLER
 
 def _open_input_stream(
     sample_rate: int,
@@ -3051,6 +3052,9 @@ class VoiceListener(threading.Thread):
             if self._should_stop or self._dictation_active:
                 return
             chunk = (indata.copy() if hasattr(indata, "copy") else indata)
+            # Here and not in the loop: the canceller pairs what is heard with
+            # what she played around the same moment, and the loop falls behind.
+            chunk = ECHO_CANCELLER.clean(chunk)
             try:
                 self._audio_q.put_nowait((time.time(), chunk))
             except queue.Full:
@@ -3706,6 +3710,7 @@ class VoiceListener(threading.Thread):
         # Audio parameters
         self._configure_frames()
         frame_ms = self._frame_ms
+        self._start_echo_cancellation()
 
         debug_log(f"audio params: sample_rate={self._samplerate}, frame_ms={frame_ms}, frame_samples={self._frame_samples}", "voice")
         debug_log(f"VAD: enabled={bool(self._vad is not None)}, aggressiveness={getattr(self.cfg, 'vad_aggressiveness', 2)}", "voice")
@@ -4013,6 +4018,19 @@ class VoiceListener(threading.Thread):
         self._next_rescan_at = min(self._next_rescan_at, now + MICROPHONE_RESCAN_SECONDS)
         debug_log("dictation missed the microphone: frequent readings again", "voice")
 
+    def _start_echo_cancellation(self) -> None:
+        """Take what she plays out of the microphone, when the setting asks
+        for it, and say so (listening.spec.md, "Acoustic Echo Cancellation")."""
+        if not getattr(self.cfg, "voice_echo_cancellation", True):
+            ECHO_CANCELLER.stop()
+            debug_log("echo cancellation off by setting", "voice")
+            return
+        reason = ECHO_CANCELLER.start(self._samplerate)
+        if reason is None:
+            print("     🧹 Echo cancellation: her voice is taken out of the microphone", flush=True)
+        else:
+            print(f"     ⚠️  Echo cancellation unavailable: {reason}", flush=True)
+
     def _open_capture(self, frame_ms: int, announce: bool):
         """Open the selected microphone, or None when the device list as it is
         now holds no such input. The input is resolved in the hold of
@@ -4026,6 +4044,7 @@ class VoiceListener(threading.Thread):
             stream, self._stream_samplerate, channels = _open_input_stream(
                 self._samplerate, frame_ms, stream_kwargs, callback=self._on_audio,
             )
+        ECHO_CANCELLER.capture_opened(self._stream_samplerate, channels)
         self._frame_samples = max(1, int(self._stream_samplerate * frame_ms / 1000))
         if announce and (self._stream_samplerate != self._samplerate or channels != 1):
             print(f"  🎤 Using {self._stream_samplerate} Hz, {channels} input channel(s); "
