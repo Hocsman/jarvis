@@ -193,6 +193,8 @@ class TunePlayer:
             try:
                 stream = open_output_stream(
                     sd,
+                    # Taken out of the microphone, but not her voice.
+                    her_voice=False,
                     samplerate=sample_rate,
                     channels=1,
                     dtype='int16',

@@ -241,6 +241,20 @@ class TestPackageData:
 
         assert folder in real.PACKAGE_DATA["faster_whisper"]
 
+    def test_livekit_s_native_library_folder_is_listed(self):
+        """The folder is the one livekit loads the echo canceller's native
+        library from, so the list follows the library, not a guess."""
+        pytest.importorskip("livekit.rtc")
+        import importlib.resources
+
+        real = _load_checker()
+        root = real.installed_package_root("livekit")
+        resources = Path(str(importlib.resources.files("livekit.rtc.resources")))
+
+        folder = resources.resolve().relative_to(root.resolve()).as_posix()
+
+        assert folder in real.PACKAGE_DATA["livekit"]
+
 
 class TestWhereTheFrozenAppLooks:
     def test_windows_and_linux_data_lives_under_the_internal_folder(self, tmp_path):

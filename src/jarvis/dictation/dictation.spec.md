@@ -99,7 +99,9 @@ After transcription, text passes through these stages in order:
   until the listener next starts (`listening.spec.md`, "Text Whisper
   Makes Out of Silence").
 - **Separate `sounddevice.InputStream`** for dictation audio — avoids
-  modifying the complex listener code.
+  modifying the complex listener code. The echo canceller does not clean it
+  (`listening.spec.md`, "Acoustic Echo Cancellation"): what she plays while
+  he dictates reaches the dictation as captured.
 - **Pause flag** on the main listener to prevent dictation speech being
   interpreted as commands.
 - **No PortAudio work on the pynput hook thread.** The hotkey callbacks only

@@ -61,7 +61,7 @@ from ..utils.audio_stream import (
     refresh_input_devices,
     resolve_input_device,
 )
-from ..utils.echo_cancellation import ECHO_CANCELLER
+from ..utils.echo_cancellation import ECHO_CANCELLER, say_unavailable
 
 def _open_input_stream(
     sample_rate: int,
@@ -744,6 +744,9 @@ class VoiceListener(threading.Thread):
         # When the frame being read was captured: the clock an utterance's
         # start and end are read from, however late the loop reads it.
         self._frame_captured_at = 0.0
+        # The utterance whose voice stopping with hers was last weighed
+        # against her reply's figure, by its end: the log says it once.
+        self._her_reply_read_for: Optional[float] = None
 
         # The reply thread: runs one handed-over query at a time, and is the
         # only thread that speaks.
@@ -985,6 +988,9 @@ class VoiceListener(threading.Thread):
                               f"quiet heard, under {ROOM_FLOOR_MIN_SECONDS:g}s, so the "
                               f"default {FALLBACK_FLOOR:.4f}", "echo")
 
+            if not continues:
+                # Her reply's figure is read from what is heard from here.
+                ECHO_CANCELLER.reply_started()
             # A talking face holds her voice back: her words come that much later.
             self.echo_detector.track_tts_start(tts_text, floor, continues=continues,
                                                start_delay=self.tts.voice_delay())
@@ -999,8 +1005,10 @@ class VoiceListener(threading.Thread):
             debug_log("hot window disabled in config, skipping", "voice")
             return
 
-        # Track TTS finish time for echo detection
+        # Track TTS finish time for echo detection, and how much of her
+        # reply the echo canceller took out of the microphone.
         self.echo_detector.track_tts_finish(quiet_tail=quiet_tail)
+        ECHO_CANCELLER.reply_finished()
 
         # While the microphone is waited for nothing can hear a follow-up: no
         # window opens, so LISTENING is never shown while nothing listens,
@@ -1125,8 +1133,8 @@ class VoiceListener(threading.Thread):
                         # The stripper removes the part it recognised; the
                         # remainder is only speech if it is not her echo
                         # (`_not_her_echo`, as his answer to her question
-                        # when it can be one) and its voice went on after
-                        # hers (`_voice_stopped_with_hers`). Left as
+                        # when it can be one) and its voice did not stop
+                        # with hers (`_voice_stopped_with_hers`). Left as
                         # "whatever is left over", a decimated tail of her
                         # own sentence, or one Whisper rewrote, rides through
                         # as a query.
@@ -1918,8 +1926,9 @@ class VoiceListener(threading.Thread):
         (*waiting*, as `_question_his_voice_can_settle` read it), and its
         voice went on after her last word plus the echo tolerance
         (*stopped_with_hers* read False by `_voice_stopped_with_hers`), which
-        her voice coming back never does. While she speaks, or with its end
-        unknown (None), it cannot.
+        her voice coming back never does. While she speaks, with its end
+        unknown, or with her reply taken out of the microphone (None), it
+        cannot.
 
         Each place that weighs the utterance's words reads whether her
         question waits once, then her time and her voice's end against it,
@@ -2000,9 +2009,11 @@ class VoiceListener(threading.Thread):
         None when it cannot be told: while she speaks her last word is not
         known yet, an utterance whose end is not known says nothing, and a
         voice ending with hers says nothing of whose it was once the echo
-        canceller took her reply out of the microphone
-        (`EchoCanceller.took_out`): her voice is not there to end. None
-        counts as no, and the two proofs decide (`_not_her_echo`)."""
+        canceller took her reply out of the microphone, at least
+        `MIN_REMOVED_DB` of it as it finished
+        (`EchoCanceller.took_her_reply_out`): her voice is not there to
+        end. None counts as no, and the two proofs decide
+        (`_not_her_echo`)."""
         if self.tts is not None and self.tts.is_speaking():
             return None
         finish = self._her_last_word(waiting)
@@ -2011,9 +2022,15 @@ class VoiceListener(threading.Thread):
         voice_ended = utterance_end_time - max(0.0, trailing_silence)
         if voice_ended >= finish + self.echo_detector.echo_tolerance:
             return False
-        if ECHO_CANCELLER.took_out(self.echo_detector._last_tts_finish_time):
-            return None
-        return True
+        taken_out = ECHO_CANCELLER.took_her_reply_out()
+        removed = ECHO_CANCELLER.reply_removed_db
+        # Read up to four times for one utterance; said once.
+        if ECHO_CANCELLER.active and self._her_reply_read_for != utterance_end_time:
+            self._her_reply_read_for = utterance_end_time
+            figure = "not measured" if removed is None else f"{removed:.1f} dB taken out"
+            debug_log(f"voice stopped with hers, her reply {figure}: "
+                      f"{'the words decide' if taken_out else 'hers'}", "voice")
+        return None if taken_out else True
 
     def _could_be_hers(self, heard: str, utterance_energy: float, in_her_time: bool,
                        stopped_with_hers: Optional[bool],
@@ -2043,8 +2060,9 @@ class VoiceListener(threading.Thread):
         after hers when its end was read (`_voice_stopped_with_hers`). When
         they answer her question (*answering*, `_answers_her_question`), the
         proof that decided: a word she did not say, or her words picked out
-        of her order (`picks_her_words_out`). While she speaks, or with its
-        end unknown, the two proofs alone decided."""
+        of her order (`picks_her_words_out`). While she speaks, with its end
+        unknown, or with her reply taken out of the microphone, the two
+        proofs alone decided."""
         if answering is not None:
             proof = ("a word she did not say" if carries_a_word_she_did_not_say(heard, spoken)
                      else "her words picked out of her order")
@@ -3059,15 +3077,20 @@ class VoiceListener(threading.Thread):
             if self._should_stop or self._dictation_active:
                 return
             chunk = (indata.copy() if hasattr(indata, "copy") else indata)
-            # Here and not in the loop: the canceller pairs what is heard with
-            # what she played around the same moment, and the loop falls behind.
-            chunk = ECHO_CANCELLER.clean(chunk)
-            try:
-                self._audio_q.put_nowait((time.time(), chunk))
-            except queue.Full:
-                self._audio_dropped += 1
+            # Stamped here, as captured. The echo canceller's thread takes
+            # her sound out and queues it, in the order heard.
+            ECHO_CANCELLER.hear(time.time(), chunk, self._queue_captured)
         except Exception as exc:
             self._audio_callback_error = str(exc)
+
+    def _queue_captured(self, captured_at: float, block) -> None:
+        """A microphone block for the audio loop, with the moment it was
+        captured: from the echo canceller's thread, cleaned of her sound,
+        or from the capture callback while the canceller has not started."""
+        try:
+            self._audio_q.put_nowait((captured_at, block))
+        except queue.Full:
+            self._audio_dropped += 1
 
     def _determine_whisper_backend(self) -> str:
         """Determine which Whisper backend to use based on config and availability."""
@@ -4036,7 +4059,7 @@ class VoiceListener(threading.Thread):
         if reason is None:
             print("     🧹 Echo cancellation: her voice is taken out of the microphone", flush=True)
         else:
-            print(f"     ⚠️  Echo cancellation unavailable: {reason}", flush=True)
+            say_unavailable(reason)
 
     def _open_capture(self, frame_ms: int, announce: bool):
         """Open the selected microphone, or None when the device list as it is

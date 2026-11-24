@@ -32,7 +32,7 @@ from jarvis.listening.listener import (
 from jarvis.listening.wake_detection import is_wake_word_detected
 from jarvis.config import get_default_config
 from jarvis.tools.confirmation import CHANNEL_GESTE, CHANNEL_PAROLE, describe_action
-from jarvis.utils.echo_cancellation import EchoCanceller
+from jarvis.utils.echo_cancellation import MIN_REMOVED_DB, EchoCanceller
 
 
 # ---------------------------------------------------------------------------
@@ -2041,7 +2041,9 @@ class TestHerVoiceWhisperRewrote:
 
 class _WebRtcStandIn:
     """Stands in for WebRTC in the echo canceller: handed her sound, it
-    gives the microphone back as heard."""
+    gives the microphone back at ``gain`` of what was heard."""
+
+    gain = 0.01  # 40 dB taken out
 
     def __init__(self, rate):
         self.rate = rate
@@ -2050,7 +2052,7 @@ class _WebRtcStandIn:
         pass
 
     def capture(self, pcm):
-        return pcm
+        return (pcm.astype(np.float32) * self.gain).astype(np.int16)
 
 
 @pytest.fixture
@@ -2059,32 +2061,43 @@ def canceller():
     canceller = EchoCanceller(processor_factory=_WebRtcStandIn)
     with patch("jarvis.listening.listener.ECHO_CANCELLER", canceller):
         yield canceller
+    canceller.close()
 
 
 def _she_says_past_the_canceller(listener, canceller, reply: str, *, handed_over=True,
-                                 capture=(16000, 1)) -> float:
+                                 capture=(16000, 1), taken_out=40.0) -> float:
     """She says *reply* with the echo canceller cleaning a capture of
     *capture* (rate, channels): her stream hands it her sound as it plays,
     unless *handed_over* is False (an engine that plays where it does not
-    see). Returns when her voice stopped."""
+    see), and half a second of it heard by the microphone comes out
+    *taken_out* dB lower. Her reply ends as the listener ends it. Returns
+    when her voice stopped."""
     assert canceller.start(16000) is None
     canceller.capture_opened(*capture)
     listener.echo_detector.track_tts_start(reply, baseline_energy=_FLOOR)
-    if handed_over:
-        canceller.reference_tap(16000)(np.full(1600, 0.1, dtype=np.float32))
+    canceller.reply_started()
+    rate, channels = capture
+    with patch.object(_WebRtcStandIn, "gain", 10 ** (-taken_out / 20)):
+        tap = canceller.reference_tap(16000)
+        for _ in range(25):
+            if handed_over:
+                tap(np.full(320, 0.1, dtype=np.float32))
+            canceller.hear(time.time(), np.full((rate // 50, channels), 0.1, dtype=np.float32),
+                           lambda captured_at, block: None)
+        assert canceller.settle()
     last_word = time.time()
-    _simulate_tts_finish(listener)
+    listener.activate_hot_window(quiet_tail=0.0)
     return last_word
 
 
 @pytest.mark.unit
 class TestHerVoiceTakenOutOfTheMicrophone:
-    """With the echo canceller taking her reply out of the microphone,
-    Whisper has next to nothing of her voice to rewrite: a voice ending
-    with hers says nothing of whose it was, and the words decide, as for
-    any utterance heard in her time. Field trace: his question, begun over
-    her last words and ending in the quiet she plays after them, set aside
-    as her echo."""
+    """With the echo canceller taking her reply out of the microphone, at
+    least `MIN_REMOVED_DB` of it as it finished, Whisper has next to
+    nothing of her voice to rewrite: a voice ending with hers says nothing
+    of whose it was, and the words decide, as for any utterance heard in
+    her time. Field trace: his question, begun over her last words and
+    ending in the quiet she plays after them, set aside as her echo."""
 
     def _her_reply_ends(self, canceller, **how):
         listener, _ = _create_listener(echo_tolerance=0.1, hot_window_seconds=0.2)
@@ -2108,8 +2121,8 @@ class TestHerVoiceTakenOutOfTheMicrophone:
 
     @patch("builtins.print")
     def test_his_short_word_stopping_with_hers_is_his(self, mock_print, canceller):
-        """The cost the timing rule kept on purpose is lifted: her voice is
-        no longer there to be mistaken for his."""
+        """The cost the timing rule keeps on purpose does not apply: her
+        voice is not in the microphone to be mistaken for his."""
         listener, last_word = self._her_reply_ends(canceller)
         _judge_that_reads_the_marker(listener)
         heard = "Très bien, merci."
@@ -2141,14 +2154,16 @@ class TestHerVoiceTakenOutOfTheMicrophone:
         {"handed_over": False},
         {"capture": (44100, 1)},
         {"capture": (16000, 2)},
+        {"taken_out": MIN_REMOVED_DB - 4},
     ], ids=["reply-it-was-not-handed", "capture-at-a-rate-it-cannot-clean",
-            "capture-in-two-channels"])
+            "capture-in-two-channels", "too-little-taken-out"])
     @patch("builtins.print")
     def test_her_voice_left_in_the_microphone_still_stops_with_hers(
             self, mock_print, canceller, how):
-        """A reply played where the canceller does not see it, or a capture
-        it does not clean, leaves her voice in the microphone: a voice
-        ending with hers is hers, whatever its words."""
+        """A reply played where the canceller does not see it, a capture it
+        does not clean, or a reply it took too little out of, leaves her
+        voice in the microphone: a voice ending with hers is hers, whatever
+        its words."""
         listener, last_word = self._her_reply_ends(canceller, **how)
         judge = _judge_that_reads_the_marker(listener)
 
@@ -2176,6 +2191,81 @@ class TestHerVoiceTakenOutOfTheMicrophone:
 
         accepted = _accepted_query(listener)
         assert "lyon" in accepted and "parapluie" not in accepted
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("taken_out, kept", [(40.0, True), (MIN_REMOVED_DB - 4, False)],
+                             ids=["taken-out", "too-little-taken-out"])
+    @patch("builtins.print")
+    def test_his_words_after_her_reply_coming_back_are_kept_by_the_first_check(
+            self, _print, canceller, taken_out, kept):
+        """The hot window's first check knows her reply coming back whole
+        and strips it; his words follow, his voice ending with hers. They
+        are kept once her reply was taken out of the microphone, and set
+        aside with it when too little was."""
+        listener, last_word = self._her_reply_ends(canceller, taken_out=taken_out)
+        _judge_that_reads_the_marker(listener)
+        heard = "prenez un parapluie demain monsieur il fera 7,4 degrés et pour lyon"
+        assert listener._comes_back_whole(heard, listener.echo_detector.her_reply_as_said)[0]
+
+        with patch("jarvis.listening.listener.debug_log") as log:
+            _whisper_hears(listener, heard, started=last_word - 2.5,
+                           level=_level(listener, _HIS_VOICE),
+                           voice_ended=_as_her_voice_dies(listener, last_word))
+
+        salvaged = any("salvaged user speech from hot-window" in line for line in _voice_log(log))
+        assert salvaged is kept
+        assert ("lyon" in _accepted_query(listener)) is kept
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_his_answer_to_her_question_ending_with_her_voice_is_weighed_on_its_words(
+            self, _print, canceller):
+        """Her spoken question waits and he answers at once, his voice
+        ending with hers. Her question taken out of the microphone, words
+        she did not say, in a voice, are his: the answer is heard."""
+        question = _SHE_ASKS_BEFORE_ACTING[0][0]
+        listener, _ = _create_listener(echo_tolerance=0.1, hot_window_seconds=0.5)
+        _her_question_waits(listener)
+        last_word = _she_says_past_the_canceller(listener, canceller, question)
+        assert _wait_for_hot_window_active(listener)
+        judge = _judge_that_reads_the_marker(listener)
+        answer = "Oui, vas-y."
+        assert _carries_speech_she_did_not_say(answer.lower(), question)
+
+        _whisper_hears(listener, answer, started=_just_after(listener, last_word),
+                       level=_level(listener, _HIS_VOICE),
+                       voice_ended=_as_her_voice_dies(listener, last_word))
+
+        assert "during TTS" not in _current_line_shown_to(judge)
+        assert _accepted_query(listener) == answer.lower()
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_the_log_says_once_how_much_of_her_reply_was_taken_out(self, _print, canceller):
+        listener, last_word = self._her_reply_ends(canceller)
+        _judge_that_reads_the_marker(listener)
+
+        with patch("jarvis.listening.listener.debug_log") as log:
+            _whisper_hears(listener, _HIS_QUESTION, started=last_word - 1.5,
+                           level=_level(listener, _HIS_VOICE),
+                           voice_ended=_as_her_voice_dies(listener, last_word))
+
+        lines = [line for line in _voice_log(log) if "voice stopped with hers" in line]
+        assert len(lines) == 1
+        assert f"{canceller.reply_removed_db:.1f} dB" in lines[0] and "the words decide" in lines[0]
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_her_next_reply_is_not_taken_out_until_it_finishes(self, _print, canceller):
+        """The figure is her last finished reply's: as the next one starts,
+        a voice ending with it is not weighed against the one before."""
+        listener, _ = self._her_reply_ends(canceller)
+        assert canceller.took_her_reply_out()
+        listener.tts.voice_delay.return_value = 0.0
+
+        listener.track_tts_start(_HER_NEXT_REPLY)
+
+        assert not canceller.took_her_reply_out()
         listener.state_manager.stop()
 
 
