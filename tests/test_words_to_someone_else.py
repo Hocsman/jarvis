@@ -213,7 +213,8 @@ class TestHisWordsToSomeoneElse:
         then is his answer, whoever he names in it: it goes to the reader of
         answers, which closes the question, and is never left behind."""
         listener = _in_the_window("Voulez-vous que j'envoie le message à Hugo ?")
-        asked = SimpleNamespace(channel=CHANNEL_PAROLE, origin="voix", request_id="q1")
+        asked = SimpleNamespace(channel=CHANNEL_PAROLE, origin="voix", request_id="q1",
+                                has_expired=lambda: False)
         listener.dialogue_memory = SimpleNamespace(peek_pending=lambda: asked)
         assert listener.awaiting_spoken_answer()
         _install_intent_judge(listener, _to_someone_else())

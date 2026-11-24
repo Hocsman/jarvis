@@ -45,11 +45,16 @@ class _Pcm:
 class _Mimi:
     sample_rate = SAMPLE_RATE
 
+    def __init__(self, stage):
+        self._stage = stage
+
     def streaming(self, batch_size):
         return contextlib.nullcontext()
 
     def decode(self, codes):
-        return _Pcm(np.full((1, 1, SAMPLES_PER_FRAME), 0.25, dtype=np.float32))
+        levels = self._stage.levels
+        level = levels.pop(0) if levels else 0.25
+        return _Pcm(np.full((1, 1, SAMPLES_PER_FRAME), level, dtype=np.float32))
 
 
 class Stage:
@@ -65,6 +70,7 @@ class Stage:
         self.conditioned = []     # voices a synthesis was conditioned on
         self.scripts = []         # texts the model was asked to speak
         self.frames = 25          # audible frames per synthesis
+        self.levels = None        # each audible frame's level, in order; 0.25 once none is left
         self.delay = 2            # frames carrying -1 before the audio
         self.emitted = 0          # audible frames produced, all syntheses
         self.fail_with = None
@@ -116,7 +122,7 @@ def _install_fake_moshi(monkeypatch, stage):
 
     class TTSModel:
         def __init__(self):
-            self.mimi = _Mimi()
+            self.mimi = _Mimi(stage)
             self.delay_steps = stage.delay
 
         @classmethod
@@ -313,7 +319,7 @@ class TestKyutaiInterface:
     def test_has_same_interface_as_other_engines(self):
         tts = tts_module.KyutaiTTS(enabled=False)
         for name in ("start", "stop", "speak", "interrupt", "is_speaking",
-                     "get_last_spoken_text", "voice_delay", "wait_until_ready"):
+                     "get_last_spoken_text", "voice_delay", "quiet_tail", "wait_until_ready"):
             assert callable(getattr(tts, name)), f"missing {name}"
 
     def test_disabled_is_a_no_op(self, stage):
@@ -660,6 +666,40 @@ class TestPlayback:
         assert done.wait(5)
         assert order == ["une", "deux", "fin"]
         assert stage.scripts[-2:] == ["Une.", "Deux."]
+
+    def test_the_quiet_after_her_last_sound_is_reported_when_she_is_done(
+            self, stage, make_engine):
+        # The warm-up's frames first, then hers: her voice, then quiet.
+        stage.levels = [0.25] * stage.frames + [0.25] * 15 + [0.0] * 10
+        tts = make_engine()
+        reported = []
+        done = threading.Event()
+
+        tts.speak("Bonjour.", completion_callback=lambda: (reported.append(tts.quiet_tail()),
+                                                           done.set()))
+
+        assert done.wait(5)
+        assert reported == [pytest.approx(10 * SAMPLES_PER_FRAME / SAMPLE_RATE,
+                                          abs=tts_module.QUIET_WINDOW_S)]
+
+    def test_the_end_of_reply_marker_reports_the_quiet_of_her_last_sentence(
+            self, stage, make_engine):
+        # The warm-up's frames, a first sentence ending on quiet, then a
+        # second ending on less.
+        stage.levels = ([0.25] * stage.frames + [0.25] * 20 + [0.0] * 5
+                        + [0.25] * 22 + [0.0] * 3)
+        tts = make_engine()
+        reported = []
+        done = threading.Event()
+
+        tts.speak("Une.")
+        tts.speak("Deux.")
+        tts.speak("", completion_callback=lambda: (reported.append(tts.quiet_tail()),
+                                                    done.set()))
+
+        assert done.wait(5)
+        assert reported == [pytest.approx(3 * SAMPLES_PER_FRAME / SAMPLE_RATE,
+                                          abs=tts_module.QUIET_WINDOW_S)]
 
 
 class TestFailures:

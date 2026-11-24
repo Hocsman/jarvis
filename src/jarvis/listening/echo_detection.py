@@ -34,6 +34,9 @@ class EchoDetector:
         # TTS tracking
         self._tts_start_time: float = 0.0
         self._last_tts_finish_time: float = 0.0
+        # When her last sound ended: her reply's end less the quiet her
+        # engine played after it (`track_tts_finish`).
+        self._last_sound_time: float = 0.0
         self._last_tts_text: str = ""
         self._tts_energy_baseline: float = 0.0
         self._tts_exact_duration: Optional[float] = None  # Exact audio duration from Piper
@@ -134,10 +137,15 @@ class EchoDetector:
             return True
         return utterance_energy > self._tts_energy_baseline * self.energy_spike_threshold
 
-    def track_tts_finish(self) -> None:
-        """Track when TTS finishes speaking."""
+    def track_tts_finish(self, *, quiet_tail: float) -> None:
+        """Track when her reply finished playing, and when its last sound
+        ended: *quiet_tail* seconds before, the quiet her engine reported
+        playing after it (`quiet_tail` on each engine), 0 when it cannot
+        tell."""
+        quiet = max(0.0, quiet_tail)
         self._last_tts_finish_time = time.time()
-        debug_log("TTS finished", "echo")
+        self._last_sound_time = self._last_tts_finish_time - quiet
+        debug_log(f"TTS finished, her last sound {quiet:.2f}s before", "echo")
     
     def track_utterance_timing(self, start_time: float, end_time: float) -> None:
         """
@@ -703,15 +711,20 @@ def her_words_and_name_parts(spoken: str) -> list:
     name among them as Whisper writes them heard: split where a lower-case
     letter meets an upper-case one, and at underscores ("archivePhotos":
     "archive", "photos"; "sort_old_scans": "sort", "old", "scans")."""
+    return [form for forms in _her_words_in_order(spoken) for form in forms]
+
+
+def _her_words_in_order(spoken: str) -> list:
+    """Each word of *spoken* in her order, as the forms it can be heard in:
+    itself lower-cased, then the parts of a compound name, which stand where
+    the name stands (`her_words_and_name_parts`)."""
     words = []
     for token in re.findall(r"\w+", spoken or "", re.UNICODE):
-        words.append(token.lower())
         spaced = "".join(
             f" {c}" if i and token[i - 1].islower() and c.isupper() else c
             for i, c in enumerate(token))
         parts = [p.lower() for p in re.split(r"[\s_]+", spaced) if p]
-        if len(parts) > 1:
-            words.extend(parts)
+        words.append([token.lower()] + (parts if len(parts) > 1 else []))
     return words
 
 
@@ -736,24 +749,70 @@ def carries_a_word_she_did_not_say(heard: str, spoken: str) -> bool:
     return any(not hers for _, hers in _words_marked_hers(heard, spoken))
 
 
+# Words of her reply Whisper may drop between two it kept when her voice
+# comes back ("je m'apprête lancer" for "je m'apprête à lancer"). Her order
+# is read with this many of her words missing between two heard ones, and no
+# more: his answer picking her words out of her question skips more ("je
+# valide" leaves out all she said between "je" and "valides" in "Je m'apprête
+# à lancer archivePhotos. Tu valides ?").
+ORDER_GAP = 1
+
+
+def comes_back_in_her_order(heard: str, spoken: str) -> bool:
+    """True when *heard* could be her reply *spoken* coming back as she said
+    it: every word of it hers (`carries_a_word_she_did_not_say` finds none),
+    and in her order, each one at most `ORDER_GAP` of her words after the
+    one before. The parts of a compound name she says stand where the name
+    stands, so "archive photos" is her "archivePhotos" in her order.
+
+    The words proof for his answer to the question she asked before acting.
+    An answer is made of its question's words, and a short one can be made
+    of nothing else: "je valide" after "Je m'apprête à lancer archivePhotos.
+    Tu valides ?" has no word she did not say, but it is not her question
+    coming back, which keeps her order. A single word of hers is always in
+    her order, so her verb alone ("lance") is still her echo.
+
+    Nothing heard comes back as nothing she said. Fails open, as the word
+    test does: with nothing of hers to compare against, nothing heard comes
+    back as hers.
+    """
+    if carries_a_word_she_did_not_say(heard, spoken):
+        return False
+    hers = _her_words_in_order(spoken)
+    reachable = None
+    for word in re.findall(r"\w+", (heard or "").lower(), re.UNICODE):
+        here = {i for i, forms in enumerate(hers) if her_word(word, forms)}
+        if reachable is not None:
+            here = {i for i in here
+                    if any(0 <= i - j <= ORDER_GAP + 1 for j in reachable)}
+        if not here:
+            return False
+        reachable = here
+    return True
+
+
 def without_her_words_at_the_edges(heard: str, spoken: str) -> str:
     """*heard* from its first word she did not say to its last, as written:
     her words before and after them taken off, those between two of his
-    kept. Empty when every word is hers.
+    kept. When every word is hers: empty if they come back in her order
+    (`comes_back_in_her_order`), and all of *heard*, trimmed, if they do not.
 
     What the reader of answers keeps of a fragment that scores as her
     question coming back. Neither whole nor nothing will do there: taken out
     whole, his answer taking up her verb would leave nothing, where this
     keeps the "pas" of his "lance pas"; kept whole, her question coming back
     with one word bent ("lancer archive fotos") would hand the reader her own
-    "lancer" as though he had said it, where this keeps "fotos".
+    "lancer" as though he had said it, where this keeps "fotos". His answer
+    made only of her words picks them out of her order ("je valide" after
+    "Je m'apprête à lancer archivePhotos. Tu valides ?"), where her voice
+    coming back keeps it, so it is kept as he said it.
 
     Fails open, as the word test does: with nothing of hers to compare
     against, all of *heard* is kept.
     """
     his = [word for word, hers in _words_marked_hers(heard, spoken) if not hers]
     if not his:
-        return ""
+        return "" if comes_back_in_her_order(heard, spoken) else (heard or "").strip()
     return heard[his[0].start():his[-1].end()]
 
 

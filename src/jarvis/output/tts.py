@@ -35,6 +35,92 @@ def _sound_started() -> None:
     get_latency_journal().mark_first_sound()
 
 
+# Her audio is read in windows this long, and her last sound is where it last
+# came within this many decibels of its loudest window. Speech's soft endings
+# (a breath, a final consonant) sit well inside the margin, so the quiet is
+# measured short rather than long.
+QUIET_WINDOW_S = 0.02
+QUIET_BELOW_LOUDEST_DB = 40.0
+
+
+class TrailingQuiet:
+    """How long a stretch of audio ends on quiet: the time after its last
+    window of `QUIET_WINDOW_S` whose level comes within
+    `QUIET_BELOW_LOUDEST_DB` of its loudest window.
+
+    Fed piece by piece as the audio is produced (`add`), so a reply streamed
+    as it is synthesised is read without being kept: a window read before the
+    loudest one is weighed against the loudest so far, and any window after
+    the loudest one against the loudest itself, so the last loud window is
+    the same as on the whole. Audio with no sound at all is quiet throughout;
+    no audio has no quiet.
+
+    Never raises: it is read on the way to her speakers, and audio it cannot
+    read has no quiet, so her last sound is when her reply was done.
+    """
+
+    def __init__(self, rate: int) -> None:
+        self._rate = rate
+        self._window = max(1, int(round(rate * QUIET_WINDOW_S)))
+        self._ratio = 10 ** (-QUIET_BELOW_LOUDEST_DB / 20)
+        self._samples = 0       # fed so far
+        self._loudest = 0.0     # the loudest window's RMS
+        self._loud_until = 0    # where the last loud window ends, in samples
+        self._carry = None      # fed samples short of a whole window
+        self._unread = False    # a piece could not be read
+
+    def add(self, audio) -> None:
+        if self._unread:
+            return
+        try:
+            self._add(audio)
+        except Exception as e:
+            self._unread = True
+            debug_log(f"quiet after her last sound not read: {e}", "tts")
+
+    def _add(self, audio) -> None:
+        import numpy as np
+
+        audio = np.asarray(audio, dtype=np.float64).reshape(-1)
+        if not len(audio):
+            return
+        start = self._samples - (0 if self._carry is None else len(self._carry))
+        if self._carry is not None:
+            audio = np.concatenate([self._carry, audio])
+        self._samples = start + len(audio)
+        whole = len(audio) // self._window
+        if whole:
+            windows = audio[:whole * self._window].reshape(whole, self._window)
+            rms = np.sqrt(np.mean(windows ** 2, axis=1))
+            loudest = np.maximum.accumulate(np.maximum(rms, self._loudest))
+            loud = np.flatnonzero((rms > 0) & (rms >= loudest * self._ratio))
+            if len(loud):
+                self._loud_until = start + (int(loud[-1]) + 1) * self._window
+            self._loudest = float(loudest[-1])
+        self._carry = audio[whole * self._window:]
+
+    def seconds(self) -> float:
+        """The quiet at the end of what was fed, in seconds. Samples short of
+        a whole window at the end count as sound when they are loud."""
+        import numpy as np
+
+        if self._unread:
+            return 0.0
+        loud_until = self._loud_until
+        if self._carry is not None and len(self._carry):
+            rms = float(np.sqrt(np.mean(self._carry ** 2)))
+            if rms > 0 and rms >= max(rms, self._loudest) * self._ratio:
+                loud_until = self._samples
+        return (self._samples - loud_until) / self._rate
+
+
+def _quiet_after_her_last_sound(audio, rate: int) -> float:
+    """`TrailingQuiet` over all of *audio* at once."""
+    quiet = TrailingQuiet(rate)
+    quiet.add(audio)
+    return quiet.seconds()
+
+
 # ============================================================================
 # Piper TTS Model Configuration
 # ============================================================================
@@ -517,6 +603,8 @@ class ChatterboxTTS:
         # Chatterbox model (eagerly loaded during initialization)
         self._model = None
         self._model_error = None
+        # The quiet after her last sound in the item she last finished saying.
+        self._quiet_tail = 0.0
         # Lazy initialization flags
         self._initialized = False
         self._init_lock = threading.Lock()
@@ -756,6 +844,12 @@ class ChatterboxTTS:
                     pygame.time.wait(100)  # Check every 100ms
 
                 spoken = not (interrupted or cancelled())
+                if spoken:
+                    samples = (wav.detach().cpu().numpy() if hasattr(wav, "detach")
+                               else wav)
+                    self._quiet_tail = _quiet_after_her_last_sound(samples, self._model.sr)
+                    debug_log(f"Chatterbox TTS played {exact_duration:.2f}s, quiet after "
+                              f"her last sound {self._quiet_tail:.2f}s", "tts")
 
             finally:
                 # Cleanup
@@ -810,6 +904,11 @@ class ChatterboxTTS:
         """No face follows this engine, so nothing holds her voice back."""
         return 0.0
 
+    def quiet_tail(self) -> float:
+        """The quiet after her last sound, in seconds, in the item she last
+        finished saying (`TrailingQuiet`); 0 before she has said one."""
+        return self._quiet_tail
+
     def get_last_spoken_text(self) -> str:
         return self._last_spoken_text
 
@@ -862,6 +961,9 @@ class PiperTTS:
         # queued under; an item whose count is no longer current was queued
         # before an interrupt and is not spoken (`tts.spec.md`, "Interrupting").
         self._epoch = 0
+
+        # The quiet after her last sound in the item she last finished saying.
+        self._quiet_tail = 0.0
 
         # Piper voice (lazy loaded)
         self._voice = None
@@ -1336,7 +1438,10 @@ class PiperTTS:
             interrupted = interrupted or cancelled()
             spoken = not interrupted
             actual_duration = time.time() - start_time
-            debug_log(f"Piper TTS complete: actual={actual_duration:.2f}s (audio={exact_duration:.2f}s)", "tts")
+            if spoken:
+                self._quiet_tail = _quiet_after_her_last_sound(full_audio, sample_rate)
+            debug_log(f"Piper TTS complete: actual={actual_duration:.2f}s (audio={exact_duration:.2f}s), "
+                      f"quiet after her last sound {self._quiet_tail:.2f}s", "tts")
 
         except Exception as e:
             debug_log(f"Piper TTS error: {e}", "tts")
@@ -1377,6 +1482,11 @@ class PiperTTS:
     def voice_delay(self) -> float:
         """No face follows this engine, so nothing holds her voice back."""
         return 0.0
+
+    def quiet_tail(self) -> float:
+        """The quiet after her last sound, in seconds, in the item she last
+        finished saying (`TrailingQuiet`); 0 before she has said one."""
+        return self._quiet_tail
 
     def get_last_spoken_text(self) -> str:
         return self._last_spoken_text
@@ -1453,6 +1563,8 @@ class KokoroTTS:
         self._pipe = None
         self._voice_blend = None  # weighted-blend voice, built at init
         self._sample_rate: int = 24000  # Kokoro's fixed output rate
+        # The quiet after her last sound in the item she last finished saying.
+        self._quiet_tail = 0.0
         self._initialized = False
         self._init_lock = threading.Lock()
         self._init_error: Optional[str] = None
@@ -1806,7 +1918,10 @@ class KokoroTTS:
             interrupted = interrupted or cancelled()
             spoken = not interrupted
             actual_duration = time.time() - start_time
-            debug_log(f"Kokoro TTS complete: actual={actual_duration:.2f}s (audio={exact_duration:.2f}s)", "tts")
+            if spoken:
+                self._quiet_tail = _quiet_after_her_last_sound(full_audio, self._sample_rate)
+            debug_log(f"Kokoro TTS complete: actual={actual_duration:.2f}s (audio={exact_duration:.2f}s), "
+                      f"quiet after her last sound {self._quiet_tail:.2f}s", "tts")
 
         except Exception as e:
             debug_log(f"Kokoro TTS error: {e}", "tts")
@@ -1843,6 +1958,11 @@ class KokoroTTS:
     def voice_delay(self) -> float:
         """No face follows this engine, so nothing holds her voice back."""
         return 0.0
+
+    def quiet_tail(self) -> float:
+        """The quiet after her last sound, in seconds, in the item she last
+        finished saying (`TrailingQuiet`); 0 before she has said one."""
+        return self._quiet_tail
 
     def get_last_spoken_text(self) -> str:
         return self._last_spoken_text
@@ -1903,9 +2023,10 @@ class _Utterance:
     """
 
     def __init__(self, text: str, completion: Optional[Callable[[], None]],
-                 epoch: int, prebuffer_samples: int,
+                 epoch: int, prebuffer_samples: int, rate: int,
                  on_ready: Optional[Callable[["_Utterance"], Optional[Callable[[Any, int], None]]]] = None) -> None:
         self.text = text
+        self.quiet = TrailingQuiet(rate)   # read as the audio is produced
         self.completion = completion
         self.epoch = epoch
         self.chunks: queue.Queue = queue.Queue()  # float32 arrays, then None
@@ -1926,6 +2047,7 @@ class _Utterance:
 
     def add(self, chunk) -> None:
         offset = self.samples
+        self.quiet.add(chunk)
         self.chunks.put(chunk)
         self.samples += len(chunk)
         if self._before_ready is not None:
@@ -2034,6 +2156,8 @@ class KyutaiTTS:
         self._model = None
         self._voice_path: Optional[str] = None
         self._sample_rate: int = 24000
+        # The quiet after her last sound in the item she last finished saying.
+        self._quiet_tail = 0.0
         self._initialized = False
         self._init_lock = threading.Lock()
         self._init_error: Optional[str] = None
@@ -2317,6 +2441,13 @@ class KyutaiTTS:
             return float(face.delay)
         return 0.0
 
+    def quiet_tail(self) -> float:
+        """The quiet after her last sound, in seconds, in the item she last
+        finished saying (`TrailingQuiet`, read as it was synthesised); 0
+        before she has said one. An end-of-reply marker leaves it as the last
+        sentence played it."""
+        return self._quiet_tail
+
     def face_gap(self) -> float:
         """The silence between two sentences drawn on the face."""
         return max(self._FACE_GAP_SECONDS, self._FACE_RESTART_SECONDS + self._output_latency) + self._face_gap_learnt
@@ -2425,7 +2556,7 @@ class KyutaiTTS:
             debug_log(f"Kyutai TTS starting synthesis: {len(text.split())} words", "tts")
             utterance = _Utterance(text, completion, epoch,
                                    int(self._PREBUFFER_SECONDS * self._sample_rate),
-                                   on_ready=self._draw_on_face)
+                                   self._sample_rate, on_ready=self._draw_on_face)
             self._ensure_player()
             self._play_q.put(utterance)
             handed_over = True
@@ -2615,12 +2746,17 @@ class KyutaiTTS:
 
             spoken = utterance.consumed and not (
                 interrupted or cancelled() or utterance.failed)
+            if spoken:
+                # Kept for the end-of-reply marker too, which rides behind
+                # the last sentence of a streamed reply.
+                self._quiet_tail = utterance.quiet.seconds()
             if late[0] > 0:
                 # The gap did not cover this machine's restart: widen it for good.
                 self._face_gap_learnt = min(0.3, self._face_gap_learnt + late[0] + 0.02)
             debug_log(
                 f"Kyutai TTS played: {time.time() - started:.2f}s, spoken={spoken}, "
                 f"underruns={underruns[0]}"
+                + (f", quiet after her last sound {self._quiet_tail:.2f}s" if spoken else "")
                 + (f", started {late[0]:.2f}s late for the face" if late[0] else "")
                 + (f", voice behind its face moment by {utterance.lag:.2f}s" if utterance.lag else ""),
                 "tts",

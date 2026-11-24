@@ -86,6 +86,7 @@ class _HeldTurns:
 def _listener_with(engine, **kwargs):
     listener, tts = _create_listener(**kwargs)
     tts.voice_delay.return_value = 0.0
+    tts.quiet_tail.return_value = 0.0
     patcher = patch("jarvis.reply.engine.run_reply_engine", side_effect=engine)
     patcher.start()
     listener._start_replies()

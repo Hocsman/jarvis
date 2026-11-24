@@ -562,19 +562,25 @@ def strip_own_question(utterance: str, spoken: str) -> str:
     cannot tell her echo from his answer there: his shortest answers take up
     her question's verb ("ok lance", "lance pas" after "Je m'apprête à
     lancer …"), and the tool name she reads aloud rarely comes back as it is
-    written ("archive fotos"). Dropped whole, his answer would leave an
-    empty transcript, read as a no he never gave; kept whole, her own
-    "lancer …" would be read as though he had said it. A fragment made only
-    of her words goes, his answer made only of them with it: it cannot be
-    told from her echo.
+    written ("archive fotos"). Dropped whole, his answer would leave
+    nothing of his to read; kept whole, her own "lancer …" would be read as
+    though he had said it. A fragment made only of her words in her order
+    goes, his answer made only of them in her order with it ("lance"): it
+    cannot be told from her echo. Made only of her words out of her order
+    ("je valide" after "… Tu valides ?"), it is his answer picking them out
+    of her question, which her voice coming back never does, and it is kept
+    whole.
 
-    What remains may be empty, and empty is right: it means nothing was
-    said but the echo, and the judge fails closed on it.
+    What remains may be empty: nothing that could be told from her echo
+    was said. The reader grants nothing on it and refuses nothing either
+    (`read_approval`).
     """
     from rapidfuzz import fuzz
 
     from ..debug import debug_log
-    from ..listening.echo_detection import EchoDetector, without_her_words_at_the_edges
+    from ..listening.echo_detection import (
+        EchoDetector, carries_a_word_she_did_not_say, without_her_words_at_the_edges,
+    )
 
     if not utterance or not spoken:
         return utterance or ""
@@ -585,7 +591,10 @@ def strip_own_question(utterance: str, spoken: str) -> str:
         if fuzz.partial_ratio(m.lower(), bas) < seuil:
             return m.strip()
         kept = without_her_words_at_the_edges(m, spoken)
-        if kept:
+        if kept and not carries_a_word_she_did_not_say(m, spoken):
+            debug_log(f"    🙋 a fragment scoring as her question kept whole, its "
+                      f"{len(m.split())} words all hers but out of her order", "tools")
+        elif kept:
             debug_log(f"    🙋 a fragment scoring as her question kept {len(kept.split())} "
                       f"of its {len(m.split())} words, from the first she did not say "
                       f"to the last", "tools")
@@ -610,12 +619,19 @@ def read_approval(cfg, utterance: str) -> str:
     name on a decision they never made. "I could not read the answer" and
     "they said no" are different facts, and the ledger keeps them apart
     on purpose.
+
+    An empty ``utterance`` is UNCLEAR for the same reason, without a model
+    call: it is what is left once her own question came back out of what
+    was heard (`strip_own_question`), so nothing he said is in it, a no
+    least of all.
     """
     from ..debug import debug_log
 
     text = (utterance or "").strip()
     if not text:
-        return DENIED
+        debug_log("approval: nothing left to read once her question came out, "
+                  "treating as unclear", "tools")
+        return UNCLEAR
 
     try:
         raw = _ask_model(

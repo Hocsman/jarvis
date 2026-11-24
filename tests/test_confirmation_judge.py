@@ -158,10 +158,14 @@ def test_a_no_with_a_full_stop_is_still_a_no():
         assert read_approval(_Cfg(), "surtout pas") == DENIED
 
 
-def test_an_empty_utterance_does_not_grant():
-    """Nothing to read is not a yes, and it must not cost a model call."""
+def test_an_empty_utterance_is_unclear_not_a_refusal():
+    """Nothing to read is not a yes, and it must not cost a model call. Nor
+    is it a no: what reaches the reader empty is what was left once her own
+    question came back out, and "understood, I won't" would put a refusal
+    in his mouth that he never said."""
     with patch("src.jarvis.tools.confirmation._ask_model") as asked:
-        assert read_approval(_Cfg(), "   ") == DENIED
+        assert read_approval(_Cfg(), "   ") == UNCLEAR
+        assert read_approval(_Cfg(), "") == UNCLEAR
         assert asked.called is False
 
 

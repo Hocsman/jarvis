@@ -195,7 +195,7 @@ class TestEchoDetectionThreshold:
 
         # Track some TTS text
         detector.track_tts_start("hello world", 0.01)
-        detector.track_tts_finish()
+        detector.track_tts_finish(quiet_tail=0.0)
 
         # With 85% threshold, similar text should be rejected
         result = detector._check_text_similarity("hello world", "hello world", threshold=85)
@@ -207,7 +207,7 @@ class TestEchoDetectionThreshold:
 
         # Track some TTS text
         detector.track_tts_start("hello world", 0.01)
-        detector.track_tts_finish()
+        detector.track_tts_finish(quiet_tail=0.0)
 
         # With 92% threshold, slightly different text should pass
         result = detector._check_text_similarity("hello", "hello world", threshold=92)
@@ -218,7 +218,7 @@ class TestEchoDetectionThreshold:
         detector = self._create_echo_detector()
 
         detector.track_tts_start("test text", 0.01)
-        detector.track_tts_finish()
+        detector.track_tts_finish(quiet_tail=0.0)
 
         # This should not raise - parameter is accepted
         result = detector.should_reject_as_echo(

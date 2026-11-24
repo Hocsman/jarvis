@@ -309,7 +309,7 @@ After TTS finishes, allow wake-word-free follow-up.
 
 **Duration:** Configurable (default: 3 seconds)
 
-**Behaviour:** Speech first passes through an early fuzzy echo check (rapidfuzz `partial_ratio`, threshold 70, with word-count guard to avoid catching mixed echo+speech). Pure echo is rejected with `🔇 Heard (echo)` **without calling the intent judge** — this keeps echo rejection instant and prevents it from blocking the audio loop. While a question his voice can settle waits (see "During TTS") and the utterance's voice went on after her last word plus `echo_tolerance`, the text alone does not make it her reply coming back: his shortest answers take up her question's verb with a word of his ("ok lance", "lance pas" after "Je m'apprête à lancer archivePhotos. Tu valides ?"), and a short text laid along her question matches it whatever was said. Such an utterance, carrying one word she did not say in a voice (the two proofs of "Overriding an echo verdict takes positive evidence", one word being enough), is not rejected here and goes to the judge; one made only of her words ("lance.") still is. Every later check of her reply coming back whole, behind a verdict or without one, reads it the same way. The early check stands aside while she speaks (see "During TTS") and while the thinking tune plays; with the tune playing, pure echo heard in the hot window reaches the judge, and the checks after its verdict set it aside with the same line. The hot window timer is **not** reset on echo rejection. Non-echo speech is sent to the intent judge, and if the judge rejects it, the rejection is overridden: non-echo speech in the hot window is accepted as a follow-up query. An echo verdict is overridden only on positive evidence (see "Overriding an echo verdict takes positive evidence"). Words that could be her own voice coming back, the ones the judge is shown "(during TTS)" (see "During TTS"), are taken by no override: whatever words the judge finds for leaving them out, a rejection that does not say echo or a directed verdict with no query, they are set aside as an echo verdict that stands sets them, with `🔇 Heard (echo)`. The listener decides it on the text as it stands once an echo prefix is stripped. In the hot window the judge's confidence changes none of this (it decides only whether words it calls said to someone else are set aside, see "Words He Says to Someone Else"): a verdict it is unsure of goes through the same overrides as one it is sure of, a directed verdict with no query takes what he said whatever its confidence, and every path a verdict takes there ends in a console line that says what became of the utterance, a stop aside: that one she obeys out loud. The judge's confidence is "low" whenever its answer leaves it out. The wake word is his call in the hot window as outside it, where it can only be his: an utterance carrying such a wake word that the verdict extracts no query from, her reply coming back whole aside, goes to the wake-word check, which answers what was heard with the wake word taken out, so a quiet answer of his that could be hers is still answered when he names her. A wake word can only be his when the wake-word check finds it in the utterance, finds none in her reply, and still finds it once the words of her reply are taken out. Her reply can name her, or say a word the check takes for her name ("avis" for "Jarvis"; with the default aliases, common words such as "jours" or "chairs" too), and coming back that word can take any spelling Whisper gives her name, so after such a reply no wake word heard can be told from hers, his quiet answer naming her included: it is set aside with the other words that could be hers. Whisper can also bend a word of hers into one ("servi" heard "servis", close to the alias "jervis"): that word is still hers as long as it stays as close to hers as the word test of "Overriding an echo verdict takes positive evidence" asks, and so is his wake word when it comes that close to a word of hers ("jarvis" to the "avis" of her "d'avis"). Two of her words merged into one ("Dave is" heard "Davis") or a sound spelled another way ("à vie" heard "avis") go beyond that test and pass for his. With no verdict (a timeout, or the judge's back-off after a connection error) the hot window tells his words from hers as it does behind a verdict: her reply coming back whole is set aside with `🔇 Heard (echo)`, and so are words that could be hers, unless they carry a wake word that can only be his, which leaves the decision to the wake-word check; anything else is his and is answered as he said it, a wake word in it included. Outside the hot window, a verdict below high confidence leaves the decision to the wake-word check. Speech, not text: a segment the judge calls noise is not speech, and nothing overrides that verdict (see "Text Whisper Makes Out of Silence"). And speech to her: words the judge is sure he said to someone else are not answered either (see "Words He Says to Someone Else").
+**Behaviour:** Speech first passes through an early fuzzy echo check (rapidfuzz `partial_ratio`, threshold 70, with word-count guard to avoid catching mixed echo+speech). Pure echo is rejected with `🔇 Heard (echo)` **without calling the intent judge** — this keeps echo rejection instant and prevents it from blocking the audio loop. While a question his voice can settle waits (see "During TTS") and the utterance's voice went on after her last word plus `echo_tolerance`, the text alone does not make it her reply coming back: his shortest answers take up her question's verb with a word of his ("ok lance", "lance pas" after "Je m'apprête à lancer archivePhotos. Tu valides ?"), and a short text laid along her question matches it whatever was said. Such an utterance, in a voice and carrying one word she did not say or her words out of her order ("je valide", see "During TTS"), is not rejected here and goes to the judge; one made only of her words in her order ("lance.") still is. Every later check of her reply coming back whole, behind a verdict or without one, reads it the same way. The early check stands aside while she speaks (see "During TTS") and while the thinking tune plays; with the tune playing, pure echo heard in the hot window reaches the judge, and the checks after its verdict set it aside with the same line. The hot window timer is **not** reset on echo rejection. Non-echo speech is sent to the intent judge, and if the judge rejects it, the rejection is overridden: non-echo speech in the hot window is accepted as a follow-up query. An echo verdict is overridden only on positive evidence (see "Overriding an echo verdict takes positive evidence"). Words that could be her own voice coming back, the ones the judge is shown "(during TTS)" (see "During TTS"), are taken by no override: whatever words the judge finds for leaving them out, a rejection that does not say echo or a directed verdict with no query, they are set aside as an echo verdict that stands sets them, with `🔇 Heard (echo)`. The listener decides it on the text as it stands once an echo prefix is stripped. In the hot window the judge's confidence changes none of this (it decides only whether words it calls said to someone else are set aside, see "Words He Says to Someone Else"): a verdict it is unsure of goes through the same overrides as one it is sure of, a directed verdict with no query takes what he said whatever its confidence, and every path a verdict takes there ends in a console line that says what became of the utterance, a stop aside: that one she obeys out loud. The judge's confidence is "low" whenever its answer leaves it out. The wake word is his call in the hot window as outside it, where it can only be his: an utterance carrying such a wake word that the verdict extracts no query from, her reply coming back whole aside, goes to the wake-word check, which answers what was heard with the wake word taken out, so a quiet answer of his that could be hers is still answered when he names her. A wake word can only be his when the wake-word check finds it in the utterance, finds none in her reply, and still finds it once the words of her reply are taken out. Her reply can name her, or say a word the check takes for her name ("avis" for "Jarvis"; with the default aliases, common words such as "jours" or "chairs" too), and coming back that word can take any spelling Whisper gives her name, so after such a reply no wake word heard can be told from hers, his quiet answer naming her included: it is set aside with the other words that could be hers. Whisper can also bend a word of hers into one ("servi" heard "servis", close to the alias "jervis"): that word is still hers as long as it stays as close to hers as the word test of "Overriding an echo verdict takes positive evidence" asks, and so is his wake word when it comes that close to a word of hers ("jarvis" to the "avis" of her "d'avis"). Two of her words merged into one ("Dave is" heard "Davis") or a sound spelled another way ("à vie" heard "avis") go beyond that test and pass for his. With no verdict (a timeout, or the judge's back-off after a connection error) the hot window tells his words from hers as it does behind a verdict: her reply coming back whole is set aside with `🔇 Heard (echo)`, and so are words that could be hers, unless they carry a wake word that can only be his, which leaves the decision to the wake-word check; anything else is his and is answered as he said it, a wake word in it included. Outside the hot window, a verdict below high confidence leaves the decision to the wake-word check. Speech, not text: a segment the judge calls noise is not speech, and nothing overrides that verdict (see "Text Whisper Makes Out of Silence"). And speech to her: words the judge is sure he said to someone else are not answered either (see "Words He Says to Someone Else").
 
 **Mixed echo+speech handling:** When Whisper merges TTS echo and user speech into one chunk (e.g. mic picks up TTS then user speaks), the word-count guard detects the extra content and lets it through to the intent judge. The judge extracts the user's actual query from the mixed transcript. Post-judge echo checks also use the word-count guard and verify the judge's extracted query isn't itself echo before rejecting.
 
@@ -362,39 +362,60 @@ While TTS is playing, echo rejection and stop commands are handled with fast tex
   (`output/tts.spec.md`, "Speaking state and completion"), so quiet the
   engine plays after her last sound counts as hers: for Kyutai, the pause
   the model leaves after its last word and the time its stream takes to
-  drain. The listener stamps it as it opens the hot window: with
-  `hot_window_enabled` off no last word is stamped, and only her speaking is
-  her time. His answer begun over her last word goes on after it and is not
-  flagged. Kept on purpose: a short word of his said over her last word and
-  stopping with it cannot be told from her voice, and is flagged with it; a
-  wake word in it that can only be his still decides (see "Hot Window
-  Mode"). A short answer said in the quiet after her last sound, whose voice
-  stops before that quiet ends plus the tolerance, is flagged the same way.
-  While she speaks her last word is not known, so there, as for an utterance
-  whose end is not known, the flag rests on the two proofs. Her own voice
-  clears the energy bar, so for her voice coming back they come down to its
-  words.
+  drain. The one exception is the question she asked before acting (next
+  point): while one his voice can settle waits, her last word is her last
+  sound, that stamp less the quiet her engine reports having played after
+  it (`quiet_tail`), and both her time and her voice's end are read against
+  it. The echo detector logs that quiet with each stamp ("TTS finished, her
+  last sound 0.62s before"). The listener stamps her last word as it opens
+  the hot window: with `hot_window_enabled` off no last word is stamped, and
+  only her speaking is her time. His answer begun over her last word goes on
+  after it and is not flagged. Kept on purpose: a short word of his said
+  over her last word and stopping with it cannot be told from her voice, and
+  is flagged with it; a wake word in it that can only be his still decides
+  (see "Hot Window Mode"). With no question his voice can settle, a short
+  answer said in the quiet after her last sound, whose voice stops before
+  that quiet ends plus the tolerance, is flagged the same way: replayed on a
+  day's log, voices of her own sentences coming back were read ending up to
+  0.2 s after her reply was done, the voice detector's reading of an end
+  being that rough, so read against her last sound they would be left to
+  their words, which Whisper bends. While she speaks her last word is not
+  known, so there, as for an utterance whose end is not known, the flag
+  rests on the two proofs. Her own voice clears the energy bar, so for her
+  voice coming back they come down to its words.
 - His answer to the question she asked before acting is made of its words.
   A spoken question waiting for his answer (`tools/policy.spec.md`) supplies
   the words of that answer: "I'm about to empty the recycle bin. Do you
   approve?" is answered "yes, I approve", one word of his and the rest hers,
   and the share of words she did not say, measured on barge-in over her
-  replies, reads it as her echo. So while a question his voice can settle
-  waits (spoken, asked by voice, and not past its deadline), an utterance
-  whose voice went on after her last word plus `echo_tolerance` carries words
-  she did not say as soon as one of its words has no close match in her reply
-  (the word test of "Overriding an echo verdict takes positive evidence"); the
-  voice proof is unchanged. Her words count there as she says them and as
-  Whisper writes them heard: the parts of a compound name she says
-  ("archivePhotos" heard "archive photos", "sort_old_scans" heard "sort old
-  scans") are hers. Her voice coming back never goes on after hers, so her
-  question passes this way only merged with another sound that outlasts her
-  voice, and with a word of it bent into one she did not say. Kept on
-  purpose: an answer of his made only of her question's words ("lance archive
-  photos" after "Je m'apprête à lancer archivePhotos. Tu valides ?") cannot be
-  told from her question coming back bent, and is flagged; the shortest of
-  them ("lance.", "je lance.") score as her question coming back whole, and the
-  early text check sets them aside before the judge is asked. While she speaks,
+  replies, reads it as her echo; a short one can be made of nothing else
+  ("je valide" after "Je m'apprête à lancer archivePhotos. Tu valides ?").
+  So while a question his voice can settle waits (spoken, asked by voice,
+  and not past its deadline), an utterance whose voice went on after her
+  last word plus `echo_tolerance` carries words she did not say as soon as
+  it cannot be her question coming back as she said it
+  (`comes_back_in_her_order`): one of its words has no close match in her
+  reply (the word test of "Overriding an echo verdict takes positive
+  evidence"), or its words, all hers, are not in her order. Her order allows
+  one of her words missing between two heard ones (`ORDER_GAP`), since
+  Whisper drops a short word of hers now and then, and no more: "je valide"
+  leaves out all she said between "je" and "valides". The voice proof is
+  unchanged. Her words count there as she
+  says them and as Whisper writes them heard: the parts of a compound name
+  she says ("archivePhotos" heard "archive photos", "sort_old_scans" heard
+  "sort old scans") are hers, and stand where the name stands. Her voice
+  coming back never goes on after her last sound, so her question passes
+  this way only merged with another sound that outlasts her voice, and with
+  a word of it bent into one she did not say or its words out of her order.
+  Replayed on a day's log, of 119 utterances set aside as her echo and made
+  only of her words, two words or more, 3 came back out of her order, long
+  sentences of ordinary replies where no question waited; the one heard
+  after a question she asked before acting was his answer. Kept on purpose:
+  an answer of his made only of her question's words in her order ("lance",
+  "lancer archive photos") cannot be told from her question coming back,
+  and is flagged; the shortest of them ("lance.") score as her question
+  coming back whole, and the early text check sets them aside before the
+  judge is asked. While she speaks,
   for an utterance whose end is not known, and with no question his voice can
   settle (none, one only a click can settle, one asked in the chat window, one
   past its deadline), the share decides as above, and the early text check

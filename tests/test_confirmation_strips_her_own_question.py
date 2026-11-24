@@ -79,9 +79,10 @@ def _scores_as_her_question(heard: str, dit: str) -> bool:
 
 
 # His shortest answers take up her verb with a word of his, and score as her
-# question coming back. Taken out whole, what is left is empty and read as a
-# no he never gave; kept whole, her own words would be read with them. The
-# reader is given his words: from the first word she did not say to the last.
+# question coming back. Taken out whole, nothing of his would be left to
+# read, his "pas" with the rest; kept whole, her own words would be read with
+# them. The reader is given his words: from the first word she did not say to
+# the last.
 _HIS_ANSWERS_TAKING_UP_HER_VERB = [
     ("archivePhotos", "Ok lance", "Ok"),
     ("archivePhotos", "Lance pas.", "pas"),
@@ -118,8 +119,8 @@ def test_her_question_then_his_answer_keeps_only_his_words():
     "archive photos tu valides ouais",
 ], ids=["commas-between", "no-marks"])
 def test_her_question_and_his_answer_in_one_fragment_keep_his_answer(entendu):
-    """Taken out as a sentence of hers, the fragment would leave nothing,
-    read as a no he did not give."""
+    """Taken out as a sentence of hers, the fragment would leave nothing
+    of his to read."""
     dit = describe_action("archivePhotos", {}, RISK_ACTION).spoken
     assert _scores_as_her_question(entendu, dit)
 
@@ -158,14 +159,41 @@ def test_his_refusal_in_front_of_her_words_keeps_his_refusal():
     ("Approve.", _EN_QUESTION),
 ], ids=["her-verb-alone", "as-whisper-writes-it-heard", "lower-case", "english-verb-alone"])
 def test_words_that_are_all_hers_still_come_out(entendu, dit):
-    """Not one word of his: her question coming back, whole or in part, as
-    Whisper writes it heard. A short answer made only of her words is taken
-    out with it, the cost the listener keeps too."""
-    from src.jarvis.listening.echo_detection import carries_a_word_she_did_not_say
+    """Not one word of his, in her order: her question coming back, whole or
+    in part, as Whisper writes it heard. A short answer made only of her
+    words in her order is taken out with it, the cost the listener keeps
+    too."""
+    from src.jarvis.listening.echo_detection import comes_back_in_her_order
 
-    assert not carries_a_word_she_did_not_say(entendu, dit)
+    assert comes_back_in_her_order(entendu, dit)
 
     assert strip_own_question(entendu, dit) == ""
+
+
+@pytest.mark.parametrize("entendu, dit", [
+    ("Je valide.", describe_action("archivePhotos", {}, RISK_ACTION).spoken),
+    ("Je lance.", describe_action("sortOldScans", {}, RISK_ACTION).spoken),
+    ("I approve.", _EN_QUESTION),
+], ids=["je-valide", "je-lance", "english"])
+def test_his_answer_of_her_words_out_of_her_order_is_kept_whole(entendu, dit):
+    """Every word hers, and not in her order: his answer picking her words
+    out of her question, which her voice coming back never does. It reaches
+    the reader as he said it."""
+    from src.jarvis.listening.echo_detection import (
+        carries_a_word_she_did_not_say, comes_back_in_her_order,
+    )
+
+    assert _scores_as_her_question(entendu, dit)
+    assert not carries_a_word_she_did_not_say(entendu, dit)
+    assert not comes_back_in_her_order(entendu, dit)
+
+    assert strip_own_question(entendu, dit) == entendu
+
+
+def test_her_question_then_his_answer_of_her_words_keeps_his_answer():
+    dit = describe_action("archivePhotos", {}, RISK_ACTION).spoken
+
+    assert strip_own_question(f"{dit} Je valide.", dit) == "Je valide."
 
 
 # ── Against the sentence she actually says ────────────────────────────
@@ -262,3 +290,49 @@ def test_his_refusal_taking_up_her_verb_reaches_the_reader():
         )
 
     assert lu["utterance"] == "pas"
+
+
+def test_an_answer_left_empty_by_the_cut_is_not_a_refusal():
+    """Her verb alone cannot be told from her echo, so the cut leaves nothing.
+    Nothing is not a no: the question is over and the turn is answered as an
+    ordinary one, rather than spoken back as "understood, I won't" and kept
+    as `décliné` in his name."""
+    from unittest.mock import MagicMock, patch
+
+    from src.jarvis.memory.conversation import DialogueMemory
+    from src.jarvis.reply.engine import DECLINED_REPLY, settle_pending_confirmation
+    from src.jarvis.tools.confirmation import PendingAction
+
+    memory = DialogueMemory()
+    pose = memory.begin_turn("voix")
+    memory.raise_pending(PendingAction.create(
+        tool="archivePhotos", args={}, risk=RISK_ACTION, channel="parole",
+        origin="voix", query_redacted="range les photos", raised_at_turn=pose,
+        ttl_sec=180.0,
+    ))
+    memory.begin_turn("voix")
+
+    with patch("src.jarvis.tools.confirmation._ask_model") as asked, \
+         patch("src.jarvis.reply.engine.utterance_channel_available",
+               return_value=True):
+        settled = settle_pending_confirmation(
+            cfg=MagicMock(), dialogue_memory=memory, origin="voix",
+            utterance="Lance.",
+        )
+
+    assert asked.called is False
+    assert settled.approval is None
+    assert settled.declined is False
+    assert settled.reply != DECLINED_REPLY
+    assert memory.peek_pending() is None
+
+
+def test_the_log_says_a_fragment_of_her_words_was_kept_for_their_order():
+    from unittest.mock import patch
+
+    dit = describe_action("archivePhotos", {}, RISK_ACTION).spoken
+    with patch("src.jarvis.debug.debug_log") as logged:
+        strip_own_question("Je valide.", dit)
+
+    lines = [str(call.args[0]) for call in logged.call_args_list]
+    assert any("kept whole" in line and "out of her order" in line for line in lines), lines

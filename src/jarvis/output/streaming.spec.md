@@ -36,9 +36,9 @@ only the last sentence, and every guard downstream reads it:
   which no hot-window override takes, with a verdict or without one. Its
   word test also tells which words of a hot-window utterance are hers when
   the listener asks whether a wake word in it can only be his,
-- `carries_a_word_she_did_not_say` (`echo_detection.py`), which stands in
-  for it, through `_not_her_echo`, while a question she asked before acting
-  waits for his spoken answer, and then also tells the fuzzy safety net that
+- `comes_back_in_her_order` (`echo_detection.py`), which stands in for it,
+  through `_not_her_echo`, while a question she asked before acting waits
+  for his spoken answer, and reads her order as well as her words, and then also tells the fuzzy safety net that
   his short answer taking up her question's words is not her reply coming
   back (`listening.spec.md`, "During TTS" and "Hot Window Mode"),
 - the cut of her sentences at the edges of an utterance heard in her time
