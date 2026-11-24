@@ -1441,7 +1441,9 @@ class PiperTTS:
             if spoken:
                 self._quiet_tail = _quiet_after_her_last_sound(full_audio, sample_rate)
             debug_log(f"Piper TTS complete: actual={actual_duration:.2f}s (audio={exact_duration:.2f}s), "
-                      f"quiet after her last sound {self._quiet_tail:.2f}s", "tts")
+                      f"spoken={spoken}"
+                      + (f", quiet after her last sound {self._quiet_tail:.2f}s" if spoken else ""),
+                      "tts")
 
         except Exception as e:
             debug_log(f"Piper TTS error: {e}", "tts")
@@ -1921,7 +1923,9 @@ class KokoroTTS:
             if spoken:
                 self._quiet_tail = _quiet_after_her_last_sound(full_audio, self._sample_rate)
             debug_log(f"Kokoro TTS complete: actual={actual_duration:.2f}s (audio={exact_duration:.2f}s), "
-                      f"quiet after her last sound {self._quiet_tail:.2f}s", "tts")
+                      f"spoken={spoken}"
+                      + (f", quiet after her last sound {self._quiet_tail:.2f}s" if spoken else ""),
+                      "tts")
 
         except Exception as e:
             debug_log(f"Kokoro TTS error: {e}", "tts")

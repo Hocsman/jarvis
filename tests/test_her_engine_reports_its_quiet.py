@@ -206,19 +206,24 @@ def test_kokoro_reports_the_quiet_it_played(speakers):
     assert done == [pytest.approx(0.4, abs=QUIET_WINDOW_S)]
 
 
-def test_chatterbox_reports_the_quiet_it_played(monkeypatch):
-    playing = {"polls": 3}
+@pytest.fixture
+def chatterbox_speakers(monkeypatch):
+    """pygame and torchaudio as Chatterbox plays through them, each item
+    played in a few polls."""
+    def mixer_for_one_item():
+        playing = {"polls": 3}
 
-    def get_busy():
-        playing["polls"] -= 1
-        return playing["polls"] > 0
+        def get_busy():
+            playing["polls"] -= 1
+            return playing["polls"] > 0
 
-    mixer = SimpleNamespace(
-        init=lambda **kw: None, quit=lambda: None,
-        music=SimpleNamespace(load=lambda path: None, play=lambda: None, stop=lambda: None,
-                              get_busy=get_busy))
+        return SimpleNamespace(load=lambda path: None, play=lambda: None, stop=lambda: None,
+                               get_busy=get_busy)
+
     pygame = types.ModuleType("pygame")
-    pygame.mixer = mixer
+    pygame.mixer = SimpleNamespace(init=lambda **kw: setattr(pygame.mixer, "music",
+                                                             mixer_for_one_item()),
+                                   quit=lambda: None, music=mixer_for_one_item())
     pygame.time = SimpleNamespace(wait=lambda ms: None)
     torchaudio = types.ModuleType("torchaudio")
     torchaudio.save = lambda path, wav, sr: None
@@ -226,6 +231,8 @@ def test_chatterbox_reports_the_quiet_it_played(monkeypatch):
     monkeypatch.setitem(sys.modules, "torchaudio", torchaudio)
     monkeypatch.setattr(tts_module, "_sound_started", lambda: None)
 
+
+def test_chatterbox_reports_the_quiet_it_played(chatterbox_speakers):
     tts = ChatterboxTTS(enabled=True)
     tts._initialized = True
     tts._model = SimpleNamespace(sr=RATE, generate=lambda text, **kw: _her_reply_then(0.3)[None, :])
@@ -237,7 +244,14 @@ def test_chatterbox_reports_the_quiet_it_played(monkeypatch):
     assert done == [pytest.approx(0.3, abs=QUIET_WINDOW_S)]
 
 
-def test_a_reply_cut_short_leaves_the_quiet_of_the_last_one_heard(speakers):
+def _cut_short_once_her_sound_starts(monkeypatch, tts):
+    """The next item she says is interrupted once its sound has started:
+    counting the interruption is `interrupt()`'s first step."""
+    monkeypatch.setattr(tts_module, "_sound_started",
+                        lambda: setattr(tts, "_epoch", tts._epoch + 1))
+
+
+def test_a_reply_cut_short_leaves_the_quiet_of_the_last_one_heard(speakers, monkeypatch):
     """Interrupted means unheard: what it would have played says nothing of
     her last sound."""
     tts = PiperTTS(enabled=True)
@@ -248,16 +262,70 @@ def test_a_reply_cut_short_leaves_the_quiet_of_the_last_one_heard(speakers):
     tts._speak_once("Une phrase.")
     heard = tts.quiet_tail()
 
-    def interrupted_as_it_is_made(text, config):
-        # Counting the interruption is `interrupt()`'s first step.
-        tts._epoch += 1
-        return [SimpleNamespace(audio_int16_array=(_her_reply_then(1.5) * 32767).astype(np.int16))]
-
-    voice.synthesize = interrupted_as_it_is_made
+    cut = (_her_reply_then(1.5) * 32767).astype(np.int16)
+    voice.synthesize = lambda text, config: [SimpleNamespace(audio_int16_array=cut)]
+    _cut_short_once_her_sound_starts(monkeypatch, tts)
     tts._speak_once("Une autre.", epoch=tts._epoch)
 
     assert heard == pytest.approx(0.5, abs=QUIET_WINDOW_S)
     assert tts.quiet_tail() == heard
+
+
+def test_kokoro_cut_short_leaves_the_quiet_of_the_last_one_heard(speakers, monkeypatch):
+    tts = KokoroTTS(enabled=True)
+    tts._sample_rate = RATE
+    tts._initialized = True
+    tts._pipe = lambda text, voice=None, speed=None: iter([("g", "p", _her_reply_then(0.4))])
+    tts._speak_once("Une phrase.")
+    heard = tts.quiet_tail()
+
+    tts._pipe = lambda text, voice=None, speed=None: iter([("g", "p", _her_reply_then(1.5))])
+    _cut_short_once_her_sound_starts(monkeypatch, tts)
+    tts._speak_once("Une autre.", epoch=tts._epoch)
+
+    assert heard == pytest.approx(0.4, abs=QUIET_WINDOW_S)
+    assert tts.quiet_tail() == heard
+
+
+def test_chatterbox_cut_short_leaves_the_quiet_of_the_last_one_heard(chatterbox_speakers,
+                                                                      monkeypatch):
+    tts = ChatterboxTTS(enabled=True)
+    tts._initialized = True
+    tts._model = SimpleNamespace(sr=RATE, generate=lambda text, **kw: _her_reply_then(0.3)[None, :])
+    tts._speak_once("Une phrase.")
+    heard = tts.quiet_tail()
+
+    tts._model.generate = lambda text, **kw: _her_reply_then(1.5)[None, :]
+    _cut_short_once_her_sound_starts(monkeypatch, tts)
+    tts._speak_once("Une autre.", epoch=tts._epoch)
+
+    assert heard == pytest.approx(0.3, abs=QUIET_WINDOW_S)
+    assert tts.quiet_tail() == heard
+
+
+@pytest.mark.parametrize("engine", ["piper", "kokoro"])
+def test_the_log_gives_no_quiet_for_a_reply_cut_short(speakers, monkeypatch, engine):
+    """Interrupted once its sound has started: what it would have played is
+    not her last sound, and the log does not give a quiet for it."""
+    lines = []
+    monkeypatch.setattr(tts_module, "debug_log", lambda message, *a, **k: lines.append(message))
+    if engine == "piper":
+        tts = PiperTTS(enabled=True)
+        audio = (_her_reply_then(1.5) * 32767).astype(np.int16)
+        voice = SimpleNamespace(synthesize=lambda text, config: [
+            SimpleNamespace(audio_int16_array=audio)])
+        tts._voice_for = lambda language: (voice, RATE)
+    else:
+        tts = KokoroTTS(enabled=True)
+        tts._sample_rate = RATE
+        tts._initialized = True
+        tts._pipe = lambda text, voice=None, speed=None: iter([("g", "p", _her_reply_then(1.5))])
+    _cut_short_once_her_sound_starts(monkeypatch, tts)
+
+    tts._speak_once("Une autre.", epoch=tts._epoch)
+
+    assert any("TTS complete" in line and "spoken=False" in line for line in lines), lines
+    assert not any("quiet after her last sound" in line for line in lines), lines
 
 
 def test_the_log_says_how_long_the_quiet_was(speakers, monkeypatch):

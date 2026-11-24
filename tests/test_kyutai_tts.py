@@ -701,6 +701,30 @@ class TestPlayback:
         assert reported == [pytest.approx(3 * SAMPLES_PER_FRAME / SAMPLE_RATE,
                                           abs=tts_module.QUIET_WINDOW_S)]
 
+    def test_a_reply_cut_short_leaves_the_quiet_of_the_last_one_heard(
+            self, stage, make_engine):
+        """Interrupted means unheard: the quiet it would have played after
+        its last sound says nothing of hers."""
+        # The warm-up's frames, a first sentence ending on quiet, then a
+        # long one ending on far more.
+        stage.levels = ([0.25] * stage.frames + [0.25] * 15 + [0.0] * 10
+                        + [0.25] * 50 + [0.0] * 150)
+        tts = make_engine()
+        done = threading.Event()
+        tts.speak("Bonjour.", completion_callback=done.set)
+        assert done.wait(5)
+        heard = tts.quiet_tail()
+
+        stage.frames = 200
+        tts.speak("Longue.")
+        assert _until(lambda: len(stage.streams) == 2 and stage.streams[-1].started)
+        tts.interrupt()
+        assert _until(lambda: not tts.is_speaking())
+
+        assert heard == pytest.approx(10 * SAMPLES_PER_FRAME / SAMPLE_RATE,
+                                      abs=tts_module.QUIET_WINDOW_S)
+        assert tts.quiet_tail() == heard
+
 
 class TestFailures:
     def _marker(self, tts):

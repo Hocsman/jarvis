@@ -2272,13 +2272,20 @@ _SHE_ASKS_BEFORE_ACTING = [
 _ASKED_IDS = ["french-gate-wording", "english"]
 
 
-def _her_question_waits(listener, channel=CHANNEL_PAROLE, origin="voix", expired=False):
+_ASKED_ID = "q-answer"
+
+
+def _her_question_waits(listener, channel=CHANNEL_PAROLE, origin="voix", expired=False,
+                        tool="archivePhotos"):
     """A question she asked before acting waits for his answer, on
     *channel*: words settle a spoken one, only a click a gesture one. Asked
-    from *origin*, and past its deadline when *expired*."""
-    asked = SimpleNamespace(channel=channel, origin=origin, request_id="q-answer",
+    from *origin* about *tool*, and past its deadline when *expired*. Her
+    last reply is the one that asked it, as the reply thread records when it
+    speaks it (`_speak_reply`)."""
+    asked = SimpleNamespace(channel=channel, origin=origin, request_id=_ASKED_ID, tool=tool,
                             has_expired=lambda: expired)
     listener.dialogue_memory = SimpleNamespace(peek_pending=lambda: asked)
+    listener._reply_asked = _ASKED_ID
 
 
 def _his_voice_goes_on_after_hers(listener, last_word: float) -> float:
@@ -2435,8 +2442,8 @@ class TestHisAnswerToTheQuestionSheAskedBeforeActing:
     @patch("builtins.print")
     def test_an_answer_of_her_words_out_of_her_order_is_his(self, mock_print):
         """Not one word of his in it, and not her question coming back
-        either: her voice coming back keeps her order, where this picks her
-        words out of it (`comes_back_in_her_order`)."""
+        either: her voice coming back keeps her order, where this picks a few
+        of her words out of it (`picks_her_words_out`)."""
         question, _ = _SHE_ASKS_BEFORE_ACTING[0]
         listener, last_word = self._she_asks(question)
         judge = _judge_that_reads_the_marker(listener)
@@ -2868,15 +2875,16 @@ _HER_QUESTION_TAILS = [
 ]
 
 
-def _she_says_through_her_engine(listener, reply: str, quiet: float) -> float:
-    """She says *reply* the way the reply thread has her say it, and her
-    engine plays *quiet* seconds of quiet after her last sound before the
-    reply is done: the end-of-reply callback fires then, and her engine
+def _she_says_through_her_engine(listener, reply: str, quiet: float, asks=None) -> float:
+    """She says *reply* the way the reply thread has her say it, the reply
+    that asked the question *asks* names (None when it asked nothing), and
+    her engine plays *quiet* seconds of quiet after her last sound before
+    the reply is done: the end-of-reply callback fires then, and her engine
     reports the quiet. Returns when her last sound ended."""
     listener.tts.voice_delay.return_value = 0.0
     listener.tts.quiet_tail.return_value = quiet
     _the_microphone_hears(listener, _FLOOR)
-    listener._speak_reply(reply)
+    listener._speak_reply(reply, asks=asks)
     listener.tts.is_speaking.return_value = False
     last_sound = time.time() - quiet
     listener.tts.speak.call_args.kwargs["completion_callback"]()
@@ -2892,8 +2900,8 @@ class TestHisAnswerInTheQuietAfterHerLastSound:
 
     While a question his voice can settle waits, her last word is her last
     sound, the quiet her engine reports taken off, so his voice going on
-    after it is read as going on after hers; and words all hers, picked out
-    of her order, are his (`comes_back_in_her_order`).
+    after it is read as going on after hers; and a few words all hers,
+    picked out of her order, are his (`picks_her_words_out`).
 
     Field trace (2026-11-23): his "Je valide." ended inside her engine's
     second of quiet, so its voice was read as stopping with hers and it was
@@ -2901,9 +2909,11 @@ class TestHisAnswerInTheQuietAfterHerLastSound:
 
     def _she_asks(self, question, **waiting):
         listener, _ = _create_listener(echo_tolerance=0.1, hot_window_seconds=0.5)
-        if waiting.pop("asked", True):
+        asked = waiting.pop("asked", True)
+        if asked:
             _her_question_waits(listener, **waiting)
-        last_sound = _she_says_through_her_engine(listener, question, _HER_QUIET)
+        last_sound = _she_says_through_her_engine(listener, question, _HER_QUIET,
+                                                  asks=_ASKED_ID if asked else None)
         assert _wait_for_hot_window_active(listener)
         return listener, last_sound
 
@@ -2944,6 +2954,110 @@ class TestHisAnswerInTheQuietAfterHerLastSound:
 
         assert _accepted_query(listener) == ""
         assert _console_says_heard_as_her_echo(mock_print, heard)
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("heard", [
+        "Je m'apprête à lancer archive photos, tu valides ?",
+        "lancer archive photos",
+        "Je lancer archive photos.",
+        "Lancer archive photos lancer.",
+    ], ids=["whole-as-whisper-writes-it", "her-action-in-parts",
+            "words-dropped-out-of-her-order", "repeated-out-of-her-order"])
+    @patch("builtins.print")
+    def test_her_question_coming_back_is_still_hers_in_her_quiet(self, mock_print, heard):
+        """Her question comes back as Whisper writes it heard, the name of
+        what she is about to do in two words, sometimes out of her order,
+        and its voice is read going on past her last sound, inside her
+        engine's quiet, as the voice detector's rough reading of an end
+        allows. It is hers: the parts of the name are her words, and an
+        answer picks out a few of them, never most of her question."""
+        question, _ = _HIS_ANSWERS_IN_HER_WORDS[0]
+        listener, last_sound = self._she_asks(question)
+        judge = _judge_that_reads_the_marker(listener)
+
+        _whisper_hears(listener, heard, started=last_sound - 1.5,
+                       level=_level(listener, _HER_VOICE),
+                       voice_ended=self._his_voice_ends(listener, last_sound))
+
+        assert _accepted_query(listener) == ""
+        assert _console_says_heard_as_her_echo(mock_print, heard)
+        if judge.judge.call_count:
+            assert "during TTS" in _current_line_shown_to(judge)
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_her_next_reply_coming_back_while_her_question_waits_is_hers(self, mock_print):
+        """A reminder comes due while her question waits, and she says it.
+        Its own echo, one word bent, its voice read going on a little past
+        its last sound, is not an answer to her question: it is read against
+        the reply that played, as every echo is, and its quiet is hers."""
+        question, _ = _HIS_ANSWERS_IN_HER_WORDS[0]
+        listener, _ = self._she_asks(question)
+        reminder_sound = _she_says_through_her_engine(listener, _HER_NEXT_REPLY, _HER_QUIET)
+        assert _wait_for_hot_window_active(listener)
+        _judge_that_reads_the_marker(listener)
+        heard = "Petit rappel, Monsieur : la réunion commence dans dix minutes, voilà."
+        assert carries_a_word_she_did_not_say(heard, _HER_NEXT_REPLY)
+        assert not _carries_speech_she_did_not_say(heard, _HER_NEXT_REPLY)
+
+        _whisper_hears(listener, heard, started=reminder_sound - 1.5,
+                       level=_level(listener, _HER_VOICE),
+                       voice_ended=self._his_voice_ends(listener, reminder_sound))
+
+        assert _accepted_query(listener) == ""
+        assert _console_says_heard_as_her_echo(mock_print, heard)
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_her_bent_question_stopping_with_her_last_sound_is_still_hers(self, mock_print):
+        """Her question bent into words she did not say, its voice stopping
+        with her last sound: hers, whatever its words, though her question
+        waits and her engine played quiet after it."""
+        question, _ = _HIS_ANSWERS_IN_HER_WORDS[0]
+        listener, last_sound = self._she_asks(question)
+        judge = _judge_that_reads_the_marker(listener)
+        heard = "s'apprête à l'encens titi d'aune l'ours, tu valides"
+
+        _whisper_hears(listener, heard, started=last_sound - 1.5,
+                       level=_level(listener, _HER_VOICE),
+                       voice_ended=_as_her_voice_dies(listener, last_sound))
+
+        assert "during TTS" in _current_line_shown_to(judge)
+        assert _accepted_query(listener) == ""
+        assert _console_says_heard_as_her_echo(mock_print, heard)
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("confidence", ["high", "medium"])
+    @pytest.mark.parametrize("question, answer", _HIS_ANSWERS_IN_HER_WORDS, ids=_ASKED_IDS)
+    @patch("builtins.print")
+    def test_an_echo_verdict_on_his_answer_in_her_words_is_overridden(
+            self, _print, question, answer, confidence):
+        """The judge takes it for her echo all the same, from its words: his
+        answer picking her words out is weighed as any of his words are."""
+        listener, last_sound = self._she_asks(question)
+        _install_intent_judge(listener, _make_judgment(
+            directed=False, confidence=confidence,
+            reasoning="an echo of the assistant's own question"))
+
+        _whisper_hears(listener, answer, started=_just_after(listener, last_sound),
+                       level=_level(listener, _HIS_VOICE),
+                       voice_ended=self._his_voice_ends(listener, last_sound))
+
+        assert _accepted_query(listener) == answer.lower()
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("question, answer", _HIS_ANSWERS_IN_HER_WORDS, ids=_ASKED_IDS)
+    @patch("builtins.print")
+    def test_with_no_verdict_his_answer_in_her_words_is_answered(self, _print, question,
+                                                                answer):
+        listener, last_sound = self._she_asks(question)
+        _install_intent_judge(listener, None)
+
+        _whisper_hears(listener, answer, started=_just_after(listener, last_sound),
+                       level=_level(listener, _HIS_VOICE),
+                       voice_ended=self._his_voice_ends(listener, last_sound))
+
+        assert _accepted_query(listener) == answer.lower()
         listener.state_manager.stop()
 
     @pytest.mark.parametrize("waiting", [

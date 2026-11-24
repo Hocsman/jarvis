@@ -38,31 +38,31 @@ def test_the_answer_survives_and_the_question_does_not():
         "Pourquoi ?  Et depuis tout à l'heure, y'a pas...  Eh, on lance un délire."
     )
 
-    reste = strip_own_question(entendu, QUESTION)
+    reste = strip_own_question(entendu, QUESTION, action="")
 
     assert "Oui, je valide" in reste
     assert "m'apprête" not in reste
 
 
 def test_a_transcript_of_nothing_but_the_echo_comes_back_empty():
-    """Empty is right: nothing was said but her own voice, and the judge
-    fails closed on it."""
-    assert strip_own_question(QUESTION, QUESTION) == ""
+    """Empty is right: nothing was said but her own voice, and it reads as
+    unclear without the judge being asked."""
+    assert strip_own_question(QUESTION, QUESTION, action="") == ""
 
 
 def test_a_plain_answer_is_left_alone():
-    assert strip_own_question("Oui, je valide.", QUESTION) == "Oui, je valide."
+    assert strip_own_question("Oui, je valide.", QUESTION, action="") == "Oui, je valide."
 
 
 def test_a_refusal_is_left_alone():
     """A no dropped is worse than a yes dropped: the user said no,
     nothing recorded it, and the question expires as though they had
     ignored it."""
-    assert "Non" in strip_own_question("Non, surtout pas.", QUESTION)
+    assert "Non" in strip_own_question("Non, surtout pas.", QUESTION, action="")
 
 
 def test_nothing_is_stripped_when_she_said_nothing():
-    assert strip_own_question("Oui", "") == "Oui"
+    assert strip_own_question("Oui", "", action="") == "Oui"
 
 
 # ── His answer taking up her question's words ─────────────────────────
@@ -96,19 +96,19 @@ def test_his_answer_taking_up_her_verb_keeps_his_words(outil, answer, his):
     dit = describe_action(outil, {}, RISK_ACTION).spoken
     assert _scores_as_her_question(answer, dit)
 
-    assert strip_own_question(answer, dit) == his
+    assert strip_own_question(answer, dit, action=outil) == his
 
 
 def test_his_answer_in_another_language_keeps_his_words():
     assert _scores_as_her_question("Sure, approve.", _EN_QUESTION)
 
-    assert strip_own_question("Sure, approve.", _EN_QUESTION) == "Sure"
+    assert strip_own_question("Sure, approve.", _EN_QUESTION, action="") == "Sure"
 
 
 def test_her_question_then_his_answer_keeps_only_his_words():
     dit = describe_action("archivePhotos", {}, RISK_ACTION).spoken
 
-    assert strip_own_question(f"{dit} Lance pas.", dit) == "pas"
+    assert strip_own_question(f"{dit} Lance pas.", dit, action="archivePhotos") == "pas"
 
 
 @pytest.mark.parametrize("entendu", [
@@ -124,7 +124,7 @@ def test_her_question_and_his_answer_in_one_fragment_keep_his_answer(entendu):
     dit = describe_action("archivePhotos", {}, RISK_ACTION).spoken
     assert _scores_as_her_question(entendu, dit)
 
-    assert strip_own_question(entendu, dit) == "ouais"
+    assert strip_own_question(entendu, dit, action="archivePhotos") == "ouais"
 
 
 @pytest.mark.parametrize("entendu, left", [
@@ -138,7 +138,7 @@ def test_her_question_coming_back_bent_leaves_none_of_her_words(entendu, left):
     dit = describe_action("archivePhotos", {}, RISK_ACTION).spoken
     assert _scores_as_her_question(entendu.split(".")[0], dit)
 
-    assert strip_own_question(entendu, dit) == left
+    assert strip_own_question(entendu, dit, action="archivePhotos") == left
 
 
 def test_his_refusal_in_front_of_her_words_keeps_his_refusal():
@@ -147,18 +147,18 @@ def test_his_refusal_in_front_of_her_words_keeps_his_refusal():
     dit = describe_action("sortOldScans", {}, RISK_ACTION).spoken
     assert _scores_as_her_question("Pas à lancer sortOldScans.", dit)
 
-    assert strip_own_question("Pas à lancer sortOldScans. Ok.", dit) == "Pas Ok."
+    assert strip_own_question("Pas à lancer sortOldScans. Ok.", dit, action="sortOldScans") == "Pas Ok."
 
 
-@pytest.mark.parametrize("entendu, dit", [
-    ("Lance.", describe_action("archivePhotos", {}, RISK_ACTION).spoken),
+@pytest.mark.parametrize("entendu, dit, outil", [
+    ("Lance.", describe_action("archivePhotos", {}, RISK_ACTION).spoken, "archivePhotos"),
     ("Je m'apprête à lancer archive photos, tu valides ?",
-     describe_action("archivePhotos", {}, RISK_ACTION).spoken),
+     describe_action("archivePhotos", {}, RISK_ACTION).spoken, "archivePhotos"),
     (describe_action("archivePhotos", {}, RISK_ACTION).spoken.lower(),
-     describe_action("archivePhotos", {}, RISK_ACTION).spoken),
-    ("Approve.", _EN_QUESTION),
+     describe_action("archivePhotos", {}, RISK_ACTION).spoken, "archivePhotos"),
+    ("Approve.", _EN_QUESTION, ""),
 ], ids=["her-verb-alone", "as-whisper-writes-it-heard", "lower-case", "english-verb-alone"])
-def test_words_that_are_all_hers_still_come_out(entendu, dit):
+def test_words_that_are_all_hers_still_come_out(entendu, dit, outil):
     """Not one word of his, in her order: her question coming back, whole or
     in part, as Whisper writes it heard. A short answer made only of her
     words in her order is taken out with it, the cost the listener keeps
@@ -167,33 +167,54 @@ def test_words_that_are_all_hers_still_come_out(entendu, dit):
 
     assert comes_back_in_her_order(entendu, dit)
 
-    assert strip_own_question(entendu, dit) == ""
+    assert strip_own_question(entendu, dit, action=outil) == ""
 
 
-@pytest.mark.parametrize("entendu, dit", [
-    ("Je valide.", describe_action("archivePhotos", {}, RISK_ACTION).spoken),
-    ("Je lance.", describe_action("sortOldScans", {}, RISK_ACTION).spoken),
-    ("I approve.", _EN_QUESTION),
+@pytest.mark.parametrize("entendu, dit, outil", [
+    ("Je valide.", describe_action("archivePhotos", {}, RISK_ACTION).spoken, "archivePhotos"),
+    ("Je lance.", describe_action("sortOldScans", {}, RISK_ACTION).spoken, "sortOldScans"),
+    ("I approve.", _EN_QUESTION, ""),
 ], ids=["je-valide", "je-lance", "english"])
-def test_his_answer_of_her_words_out_of_her_order_is_kept_whole(entendu, dit):
-    """Every word hers, and not in her order: his answer picking her words
-    out of her question, which her voice coming back never does. It reaches
-    the reader as he said it."""
+def test_his_answer_of_her_words_out_of_her_order_is_kept_whole(entendu, dit, outil):
+    """Every word hers, a few of them picked out of her order, none naming
+    what she is about to do: his answer picking her words out of her
+    question, which her voice coming back never does. It reaches the reader
+    as he said it."""
     from src.jarvis.listening.echo_detection import (
-        carries_a_word_she_did_not_say, comes_back_in_her_order,
+        carries_a_word_she_did_not_say, picks_her_words_out,
     )
 
     assert _scores_as_her_question(entendu, dit)
     assert not carries_a_word_she_did_not_say(entendu, dit)
-    assert not comes_back_in_her_order(entendu, dit)
+    assert picks_her_words_out(entendu, dit, action=outil)
 
-    assert strip_own_question(entendu, dit) == entendu
+    assert strip_own_question(entendu, dit, action=outil) == entendu
 
 
 def test_her_question_then_his_answer_of_her_words_keeps_his_answer():
     dit = describe_action("archivePhotos", {}, RISK_ACTION).spoken
 
-    assert strip_own_question(f"{dit} Je valide.", dit) == "Je valide."
+    assert strip_own_question(f"{dit} Je valide.", dit, action="archivePhotos") == "Je valide."
+
+
+@pytest.mark.parametrize("entendu", [
+    "Je à lancer archive photos.",
+    "Je lancer archive photos.",
+    "Lancer archive photos lancer.",
+    "Je lancer archive.",
+], ids=["her-two-word-verb-dropped", "two-words-dropped", "repeated", "short-naming-her-action"])
+def test_her_question_coming_back_out_of_her_order_still_comes_out(entendu):
+    """Whisper drops or repeats words of her question as it comes back, and
+    her order breaks; most of it is still there, the name of what she is
+    about to do with it. Kept whole, her own "lancer archive photos" would
+    be read as his go-ahead."""
+    from src.jarvis.listening.echo_detection import comes_back_in_her_order
+
+    dit = describe_action("archivePhotos", {}, RISK_ACTION).spoken
+    assert _scores_as_her_question(entendu, dit)
+    assert not comes_back_in_her_order(entendu, dit)
+
+    assert strip_own_question(entendu, dit, action="archivePhotos") == ""
 
 
 # ── Against the sentence she actually says ────────────────────────────
@@ -204,7 +225,7 @@ def test_it_works_against_the_real_spoken_question(outil):
     dit = describe_action(outil, {}, RISK_ACTION).spoken
     entendu = f"{dit} Oui vas-y."
 
-    reste = strip_own_question(entendu, dit)
+    reste = strip_own_question(entendu, dit, action=outil)
 
     assert "Oui vas-y" in reste
     assert "valides" not in reste
@@ -258,9 +279,8 @@ def test_the_answer_is_read_from_what_was_heard_not_from_the_query():
 
 
 def test_his_refusal_taking_up_her_verb_reaches_the_reader():
-    """Taken out as her echo, his refusal would leave nothing, and nothing is
-    read as a no he did not give in those words. It is his words the reader
-    is given."""
+    """Taken out as her echo, his refusal would leave nothing of his for the
+    reader, his "pas" with it. It is his words the reader is given."""
     from unittest.mock import MagicMock, patch
 
     from src.jarvis.memory.conversation import DialogueMemory
@@ -332,7 +352,7 @@ def test_the_log_says_a_fragment_of_her_words_was_kept_for_their_order():
 
     dit = describe_action("archivePhotos", {}, RISK_ACTION).spoken
     with patch("src.jarvis.debug.debug_log") as logged:
-        strip_own_question("Je valide.", dit)
+        strip_own_question("Je valide.", dit, action="archivePhotos")
 
     lines = [str(call.args[0]) for call in logged.call_args_list]
     assert any("kept whole" in line and "out of her order" in line for line in lines), lines

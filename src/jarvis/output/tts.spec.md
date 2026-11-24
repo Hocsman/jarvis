@@ -169,8 +169,8 @@ Kokoro and Chatterbox read it from the item's audio once it has played;
 Kyutai reads it as it synthesises, piece by piece, without keeping the
 audio. An interrupted item leaves it as it was, and the end-of-reply marker,
 which plays nothing, leaves it as the last sentence of the reply played it.
-Each engine logs it with the item it played ("quiet after her last sound
-0.62s").
+Each engine logs it with each item it played to its end ("quiet after her
+last sound 0.62s"), and gives none for an item interrupted.
 
 **The duration callback** receives the exact length of the item's audio
 in seconds, computed from the synthesised samples, once synthesis has

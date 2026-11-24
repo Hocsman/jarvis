@@ -542,13 +542,7 @@ def _ask_model(cfg, system: str, user: str, timeout_sec: float) -> Optional[str]
     return (response.get("message") or {}).get("content")
 
 
-# Sentence-ish boundaries. Splitting is only used to drop her own words
-# back out of a transcript, so a wrong split costs a fragment, never a
-# decision.
-_MORCEAU = re.compile(r"(?<=[.!?])\s+")
-
-
-def strip_own_question(utterance: str, spoken: str) -> str:
+def strip_own_question(utterance: str, spoken: str, *, action: str) -> str:
     """The transcript with her own question taken back out of it.
 
     Whisper merges a whole hot window into one segment, so what comes
@@ -556,20 +550,21 @@ def strip_own_question(utterance: str, spoken: str) -> str:
     said in the room. Handing all of that to the judge asks it to read a
     yes out of a passage that contains the question the yes answers.
 
-    A fragment that scores as her question coming back, at the echo
-    detector's own threshold, keeps only what lies from its first word she
-    did not say to its last (`without_her_words_at_the_edges`). Text alone
-    cannot tell her echo from his answer there: his shortest answers take up
-    her question's verb ("ok lance", "lance pas" after "Je m'apprête à
-    lancer …"), and the tool name she reads aloud rarely comes back as it is
-    written ("archive fotos"). Dropped whole, his answer would leave
-    nothing of his to read; kept whole, her own "lancer …" would be read as
-    though he had said it. A fragment made only of her words in her order
-    goes, his answer made only of them in her order with it ("lance"): it
-    cannot be told from her echo. Made only of her words out of her order
-    ("je valide" after "… Tu valides ?"), it is his answer picking them out
-    of her question, which her voice coming back never does, and it is kept
-    whole.
+    Each sentence (`sentences_heard`) that scores as her question coming
+    back, at the echo detector's own threshold, keeps only what lies from
+    its first word she did not say to its last
+    (`without_her_words_at_the_edges`). Text alone cannot tell her echo
+    from his answer there: his shortest answers take up her question's verb
+    ("ok lance", "lance pas" after "Je m'apprête à lancer …"), and the tool
+    name she reads aloud rarely comes back as it is written ("archive
+    fotos"). Dropped whole, his answer would leave nothing of his to read;
+    kept whole, her own "lancer …" would be read as though he had said it.
+    A sentence made only of her words goes, his answer made only of them in
+    her order with it ("lance"): it cannot be told from her echo. A few of
+    her words picked out of her order that do not name *action*, the tool
+    her question names ("je valide" after "… Tu valides ?"), are his answer
+    picking them out of her question, which her voice coming back never
+    does, and they are kept whole (`picks_her_words_out`).
 
     What remains may be empty: nothing that could be told from her echo
     was said. The reader grants nothing on it and refuses nothing either
@@ -579,7 +574,8 @@ def strip_own_question(utterance: str, spoken: str) -> str:
 
     from ..debug import debug_log
     from ..listening.echo_detection import (
-        EchoDetector, carries_a_word_she_did_not_say, without_her_words_at_the_edges,
+        EchoDetector, carries_a_word_she_did_not_say, sentences_heard,
+        without_her_words_at_the_edges,
     )
 
     if not utterance or not spoken:
@@ -589,18 +585,18 @@ def strip_own_question(utterance: str, spoken: str) -> str:
 
     def _his(m: str) -> str:
         if fuzz.partial_ratio(m.lower(), bas) < seuil:
-            return m.strip()
-        kept = without_her_words_at_the_edges(m, spoken)
+            return m
+        kept = without_her_words_at_the_edges(m, spoken, action=action)
         if kept and not carries_a_word_she_did_not_say(m, spoken):
-            debug_log(f"    🙋 a fragment scoring as her question kept whole, its "
-                      f"{len(m.split())} words all hers but out of her order", "tools")
+            debug_log(f"    🙋 a sentence scoring as her question kept whole, its "
+                      f"{len(m.split())} words all hers but picked out of her order", "tools")
         elif kept:
-            debug_log(f"    🙋 a fragment scoring as her question kept {len(kept.split())} "
+            debug_log(f"    🙋 a sentence scoring as her question kept {len(kept.split())} "
                       f"of its {len(m.split())} words, from the first she did not say "
                       f"to the last", "tools")
         return kept
 
-    garde = [g for g in (_his(m) for m in _MORCEAU.split(utterance) if m.strip()) if g]
+    garde = [g for g in (_his(m) for m in sentences_heard(utterance)) if g]
     return " ".join(garde).strip()
 
 

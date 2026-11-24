@@ -21,7 +21,9 @@ from datetime import datetime
 
 from rapidfuzz import fuzz
 from .audio_capture import UtteranceCapture
-from .echo_detection import EchoDetector, comes_back_in_her_order, her_word
+from .echo_detection import (
+    EchoDetector, carries_a_word_she_did_not_say, her_word, picks_her_words_out,
+)
 from .room_floor import FALLBACK_FLOOR, ROOM_FLOOR_MIN_SECONDS, RoomFloor
 from .state_manager import StateManager, ListeningState
 from ..utils.audio_lock import open_stream_count, portaudio_lock, unguarded_open
@@ -181,14 +183,15 @@ class _Turn:
 
 @dataclass
 class _AskedQuestion:
-    """A spoken question one of her replies ended on, and when he finished
-    hearing it (None until he has)."""
+    """A spoken question one of her replies ended on, and when he heard it:
+    at her last sound, the quiet her engine played after it left out (None
+    until her reply is done)."""
     request_id: str
     turn: _Turn
     heard_at: Optional[float] = None
 
-    def heard(self) -> None:
-        self.heard_at = time.time()
+    def heard(self, *, at: float) -> None:
+        self.heard_at = at
 
 
 def is_whisper_hallucination(no_speech_prob: float, threshold: float) -> bool:
@@ -762,6 +765,9 @@ class VoiceListener(threading.Thread):
         self._hearing: tuple = (None, 0.0)
         # The spoken question her last reply ended on, if it did.
         self._asked: Optional[_AskedQuestion] = None
+        # The request id of the spoken question the reply she said last
+        # asked, None when it asked nothing (`_speak_reply`).
+        self._reply_asked: Optional[str] = None
         # The loop starts the tune and the reply thread stops it: a player
         # replaced between the two would play on with nothing to stop it.
         self._tune_lock = threading.Lock()
@@ -1042,6 +1048,12 @@ class VoiceListener(threading.Thread):
 
         text_lower = text.strip().lower()
 
+        # Whether a question she asked before acting waits for his voice,
+        # read once: her time, her voice's end and whether his words answer
+        # it are read against this one reading wherever they are weighed
+        # below, so no two of them can disagree.
+        waiting = self._question_his_voice_can_settle()
+
         # Reset wake timestamp — it must reflect only the current utterance.
         # If this utterance contains a wake word, the early-beep check below
         # will set it. Without this reset, a prior rejected wake-worded
@@ -1071,23 +1083,24 @@ class VoiceListener(threading.Thread):
                 # intent judge which can extract the user's speech.
                 # While her question waits for his answer, the text alone
                 # does not make it hers (`_is_pure_echo`): her voice's end
-                # and the question are read once, for the check and for
-                # what its salvage keeps.
+                # and her reply as she said it are read once, for the check
+                # and for what its salvage keeps.
                 last_tts_text = self.echo_detector._last_tts_text or ""
                 if last_tts_text:
+                    said = self.echo_detector.her_reply_as_said
                     stopped_with_hers = self._voice_stopped_with_hers(
-                        utterance_end_time, trailing_silence)
-                    answering = self._answers_her_question(stopped_with_hers)
+                        utterance_end_time, trailing_silence, waiting=waiting)
+                    answering = self._answers_her_question(stopped_with_hers, waiting)
                     # `_is_pure_echo`, its two readings kept apart so the
                     # log can say when his answer outweighed the text.
-                    whole, echo_score = self._comes_back_whole(text_lower, last_tts_text)
+                    whole, echo_score = self._comes_back_whole(text_lower, said)
                     his_answer = whole and self._his_answer_laid_along_hers(
-                        text_lower, last_tts_text, utterance_energy, answering=answering)
+                        text_lower, said, utterance_energy, answering=answering)
                     is_pure_echo = whole and not his_answer
                     if his_answer:
                         debug_log(
                             f"not her reply coming back (score={echo_score}): "
-                            f"{self._not_hers_because(stopped_with_hers, answering=True)}: "
+                            f"{self._not_hers_because(stopped_with_hers, answering=answering, heard=text_lower, spoken=said)}: "
                             f"\"{text_lower}\"", "voice")
                     if is_pure_echo:
                         # Before rejecting, try to salvage user speech appended
@@ -1121,7 +1134,7 @@ class VoiceListener(threading.Thread):
                                 and len(salvaged.split()) >= min_words
                                 and not stopped_with_hers
                                 and self._not_her_echo(salvaged, utterance_energy,
-                                                       answering=answering)):
+                                                       spoken=said, answering=answering)):
                             debug_log(
                                 f"salvaged user speech from hot-window echo+speech "
                                 f"chunk: '{salvaged}'",
@@ -1209,13 +1222,14 @@ class VoiceListener(threading.Thread):
         # finishes. Try to strip the leading echo and use just the user's speech.
         # Skip entirely if there's no prior TTS — nothing to match against.
         last_tts_text_for_salvage = self.echo_detector._last_tts_text or ""
-        last_tts_finish = self.echo_detector._last_tts_finish_time or 0.0
+        # Her last word as everything else here reads it (`_her_last_word`).
+        last_word = self._her_last_word(waiting)
         # Use echo_tolerance as buffer — speaker/mic latency means the utterance
-        # may start slightly after TTS finish yet still contain the echo.
+        # may start slightly after her last word yet still contain the echo.
         echo_tol = self.echo_detector.echo_tolerance
-        if (last_tts_text_for_salvage and last_tts_finish > 0
+        if (last_tts_text_for_salvage and last_word > 0
                 and utterance_start_time > 0
-                and utterance_start_time < last_tts_finish + echo_tol):
+                and utterance_start_time < last_word + echo_tol):
             salvaged = self.echo_detector._salvage_suffix_from_echo(
                 text_lower,
                 getattr(self.cfg, 'tts_rate', 200),
@@ -1236,7 +1250,8 @@ class VoiceListener(threading.Thread):
                     and len(salvaged.split()) >= min_words):
                 # A voice that stopped with hers left nothing of his to
                 # salvage: the utterance stays whole, and marked.
-                if self._voice_stopped_with_hers(utterance_end_time, trailing_silence):
+                if self._voice_stopped_with_hers(utterance_end_time, trailing_silence,
+                                                 waiting=waiting):
                     debug_log(f"nothing salvaged, its voice stopped with hers: "
                               f"'{text_lower[:60]}'", "voice")
                 else:
@@ -1313,8 +1328,10 @@ class VoiceListener(threading.Thread):
             # Get recent transcript segments for context (full buffer)
             context_segments = self._transcript_buffer.get_last_seconds(self._buffer_duration)
 
-            # Get TTS context for echo detection
+            # Get TTS context for echo detection: her reply as the judge is
+            # shown it, and as she said it for the word proofs.
             last_tts_text = self.echo_detector._last_tts_text or ""
+            said = self.echo_detector.her_reply_as_said
             last_tts_finish_time = self.echo_detector._last_tts_finish_time or 0.0
 
             # Words that could be her own voice coming back, as the "(during
@@ -1325,14 +1342,14 @@ class VoiceListener(threading.Thread):
             # read before the judge's call, during which her next reply can
             # start or her question be settled, and an override's log line
             # gives that reading.
-            stopped_with_hers = self._voice_stopped_with_hers(utterance_end_time,
-                                                              trailing_silence)
-            answering = self._answers_her_question(stopped_with_hers)
+            stopped_with_hers = self._voice_stopped_with_hers(
+                utterance_end_time, trailing_silence, waiting=waiting)
+            answering = self._answers_her_question(stopped_with_hers, waiting)
             could_be_hers = (could_be_hot_window
-                             and self._could_be_hers(text_lower, utterance_energy,
-                                                     self._in_her_time(utterance_start_time),
-                                                     stopped_with_hers, spoken=last_tts_text,
-                                                     answering=answering))
+                             and self._could_be_hers(
+                                 text_lower, utterance_energy,
+                                 self._in_her_time(utterance_start_time, waiting=waiting),
+                                 stopped_with_hers, spoken=said, answering=answering))
 
             intent_judgment = self._judge_timed(
                 segments=context_segments,
@@ -1361,7 +1378,7 @@ class VoiceListener(threading.Thread):
                 # wake-word check, as it does behind a verdict.
                 if could_be_hot_window:
                     is_pure_echo, echo_score = self._is_pure_echo(
-                        text_lower, last_tts_text, utterance_energy, answering=answering)
+                        text_lower, said, utterance_energy, answering=answering)
                     his_wake_word = (could_be_hers and not is_pure_echo
                                      and self._carries_his_wake_word(text_lower, last_tts_text))
                     if is_pure_echo or (could_be_hers and not his_wake_word):
@@ -1461,7 +1478,7 @@ class VoiceListener(threading.Thread):
                 if (could_be_hot_window
                         and not (intent_judgment.directed and intent_judgment.query)
                         and not self._is_pure_echo(
-                            text_lower, last_tts_text, utterance_energy, answering=answering)[0]
+                            text_lower, said, utterance_energy, answering=answering)[0]
                         and self._carries_his_wake_word(text_lower, last_tts_text)):
                     debug_log(f"🔔 wake word in the hot window, the wake-word check decides: "
                               f"\"{text_lower}\"", "voice")
@@ -1516,7 +1533,7 @@ class VoiceListener(threading.Thread):
                         # longer than TTS, it contains user speech mixed with echo
                         # and the intent judge's extraction should be used instead.
                         is_pure_echo, echo_score = self._is_pure_echo(
-                            text_lower, last_tts_text, utterance_energy, answering=answering)
+                            text_lower, said, utterance_energy, answering=answering)
                         if is_pure_echo:
                             # Also check judge's extracted query — if it matches
                             # TTS too, it's genuinely pure echo. If the query is
@@ -1613,7 +1630,7 @@ class VoiceListener(threading.Thread):
                         # "(during TTS)", a judge saying directed and
                         # extracting nothing is leaving them out.
                         is_pure_echo, echo_score = self._is_pure_echo(
-                            text_lower, last_tts_text, utterance_energy, answering=answering)
+                            text_lower, said, utterance_energy, answering=answering)
                         if is_pure_echo or could_be_hers:
                             self._heard_as_her_echo(
                                 text_lower, f"directed/no-query, score={echo_score}, "
@@ -1688,10 +1705,10 @@ class VoiceListener(threading.Thread):
                             # their voice stopping with hers among them,
                             # are never his.
                             is_pure_echo, echo_score = self._is_pure_echo(
-                                text_lower, last_tts_text, utterance_energy,
+                                text_lower, said, utterance_energy,
                                 answering=answering)
                             proofs = self._not_her_echo(
-                                text_lower, utterance_energy, spoken=last_tts_text,
+                                text_lower, utterance_energy, spoken=said,
                                 answering=answering)
                             if is_pure_echo or could_be_hers or not proofs:
                                 self._heard_as_her_echo(
@@ -1704,7 +1721,7 @@ class VoiceListener(threading.Thread):
                             debug_log(
                                 f"⚡ Overriding the echo verdict in hot window "
                                 f"(echo_score={echo_score}, "
-                                f"{self._not_hers_because(stopped_with_hers, answering=answering)}): "
+                                f"{self._not_hers_because(stopped_with_hers, answering=answering, heard=text_lower, spoken=said)}): "
                                 f"\"{text_lower}\"",
                                 "voice"
                             )
@@ -1724,7 +1741,7 @@ class VoiceListener(threading.Thread):
                         # Continue to wake word detection below
                     else:
                         is_pure_echo, echo_score = self._is_pure_echo(
-                            text_lower, last_tts_text, utterance_energy, answering=answering)
+                            text_lower, said, utterance_energy, answering=answering)
 
                         # Her reply coming back whole, which the early check
                         # should have caught, or words that could be hers,
@@ -1861,21 +1878,21 @@ class VoiceListener(threading.Thread):
         else:
             debug_log(f"input ignored (no wake word{intent_info}): {text_lower}", "voice")
 
-    def _not_her_echo(self, heard: str, utterance_energy: float,
-                      spoken: Optional[str] = None, *, answering: bool) -> bool:
+    def _not_her_echo(self, heard: str, utterance_energy: float, *,
+                      spoken: str, answering) -> bool:
         """True when *heard* cannot be only her own voice coming back: it
         carries words she did not say, loud enough to have been spoken.
 
-        *spoken* is what she said: by default the reply the echo detector
-        holds now. A decision on the judge's verdict passes the reply the
-        judge was shown, which a reply starting during its call replaces.
+        *spoken* is what she said, as she said it (`her_reply_as_said`), read
+        once by the caller: a decision on the judge's verdict reads the reply
+        the judge was shown, which a reply starting during its call replaces.
 
-        *answering* is true for his answer to the question she asked before
-        acting (`_answers_her_question`): words that cannot be her question
-        coming back as she said it are then enough, one word she did not
-        say or her words out of her order (`comes_back_in_her_order`), since
-        an answer is made of its question's words. The voice is weighed as
-        ever.
+        *answering* is the question she asked before acting when the words
+        can answer it (`_answers_her_question`), None when they cannot. An
+        answer is made of its question's words, so then one word she did not
+        say is enough, or a few of her words picked out of her order that do
+        not name what she is about to do (`picks_her_words_out`, against the
+        question's tool). The voice is weighed as ever.
 
         Two proofs, because either alone is fooled. Text alone takes a
         "Thank you." that Whisper makes of the room over her French reply
@@ -1887,42 +1904,48 @@ class VoiceListener(threading.Thread):
         from him; while she speaks nothing does, and an invention of the
         room the judge names noise, which nothing overrides.
         """
-        if spoken is None:
-            spoken = self.echo_detector._last_tts_text or ""
-        if answering:
-            his_words = not comes_back_in_her_order(heard, spoken)
+        if answering is not None:
+            his_words = (carries_a_word_she_did_not_say(heard, spoken)
+                         or picks_her_words_out(heard, spoken, action=answering.tool))
         else:
             his_words = _carries_speech_she_did_not_say(heard, spoken)
         return his_words and self.echo_detector.utterance_carries_a_voice(utterance_energy)
 
-    def _answers_her_question(self, stopped_with_hers: Optional[bool]) -> bool:
-        """Whether an utterance can be his answer to the question she asked
-        before acting: one his voice can settle waits for it (spoken, asked
-        by voice, `_waiting_spoken_question`, and not past its deadline),
-        and its voice went on after her last word plus the echo tolerance
+    def _answers_her_question(self, stopped_with_hers: Optional[bool], waiting):
+        """The question she asked before acting that an utterance can
+        answer, None when it cannot: one his voice can settle waits for it
+        (*waiting*, as `_question_his_voice_can_settle` read it), and its
+        voice went on after her last word plus the echo tolerance
         (*stopped_with_hers* read False by `_voice_stopped_with_hers`), which
         her voice coming back never does. While she speaks, or with its end
-        unknown (None), it is not.
+        unknown (None), it cannot.
 
-        Each place that weighs the utterance's words reads it once, with
-        her voice's end, and its decision and log line rest on that one
-        reading."""
+        Each place that weighs the utterance's words reads whether her
+        question waits once, then her time and her voice's end against it,
+        and its decision and log line rest on that one reading."""
         if stopped_with_hers is not False:
-            return False
-        return self._her_question_waits_for_his_voice()
+            return None
+        return waiting
 
-    def _her_question_waits_for_his_voice(self) -> bool:
-        """Whether a question she asked before acting waits for an answer his
-        voice can settle: spoken, asked by voice (`_waiting_spoken_question`),
-        and not past its deadline."""
+    def _question_his_voice_can_settle(self):
+        """The question she asked before acting that his voice can settle,
+        None when none waits: spoken, asked by voice
+        (`_waiting_spoken_question`), not past its deadline, and asked by the
+        reply she said last (`_speak_reply`). A reminder or a report she said
+        since is not that reply: its echo is read as every echo is, against
+        the reply that played."""
         waiting = self._waiting_spoken_question()
-        return waiting is not None and not waiting.has_expired()
+        if waiting is None or waiting.has_expired():
+            return None
+        if waiting.request_id != self._reply_asked:
+            return None
+        return waiting
 
-    def _her_last_word(self) -> float:
+    def _her_last_word(self, waiting) -> float:
         """When her last word was heard, on the capture clock, 0 before she
         has spoken: her last sound while a question his voice can settle
-        waits (`_her_question_waits_for_his_voice`), and otherwise the moment
-        her reply finished playing.
+        waits (*waiting*, as `_question_his_voice_can_settle` read it), and
+        otherwise the moment her reply finished playing.
 
         Her engine plays quiet after her last sound before her reply is done
         (`track_tts_finish`, from the engine's `quiet_tail`), and his answer
@@ -1931,8 +1954,8 @@ class VoiceListener(threading.Thread):
         were her own sentences coming back, the voice detector's reading of
         an end being that rough, and a question waiting for his voice is
         what makes his words the likelier."""
-        if self._her_question_waits_for_his_voice():
-            return self.echo_detector._last_sound_time
+        if waiting is not None:
+            return self.echo_detector.last_sound_time
         return self.echo_detector._last_tts_finish_time
 
     def _his_words_among_her_sentences(self, text: str, pieces: list) -> str:
@@ -1952,20 +1975,22 @@ class VoiceListener(threading.Thread):
               f"{'...' if len(kept) > 60 else ''}\"", flush=True)
         return kept
 
-    def _in_her_time(self, utterance_start_time: float) -> bool:
+    def _in_her_time(self, utterance_start_time: float, *, waiting) -> bool:
         """Whether an utterance can hold her own voice coming back: she is
         speaking, or it started (the voice detector's pre-roll included)
-        before her last word plus the echo tolerance."""
+        before her last word (`_her_last_word`, as *waiting* has it) plus
+        the echo tolerance."""
         if self.tts is not None and self.tts.is_speaking():
             return True
-        finish = self._her_last_word()
+        finish = self._her_last_word(waiting)
         return (finish > 0 and utterance_start_time > 0
                 and utterance_start_time < finish + self.echo_detector.echo_tolerance)
 
     def _voice_stopped_with_hers(self, utterance_end_time: float,
-                                 trailing_silence: float) -> Optional[bool]:
-        """Whether the utterance's voice stopped before her last word plus
-        the echo tolerance, on the capture clock: the detector closed it at
+                                 trailing_silence: float, *, waiting) -> Optional[bool]:
+        """Whether the utterance's voice stopped before her last word
+        (`_her_last_word`, as *waiting* has it) plus the echo tolerance, on
+        the capture clock: the detector closed it at
         *utterance_end_time* after *trailing_silence* seconds without a
         voice. Her voice coming back cannot outlast her voice, whatever
         Whisper makes of it; his answer begun over her last word goes on
@@ -1976,7 +2001,7 @@ class VoiceListener(threading.Thread):
         None counts as no, and the two proofs decide (`_not_her_echo`)."""
         if self.tts is not None and self.tts.is_speaking():
             return None
-        finish = self._her_last_word()
+        finish = self._her_last_word(waiting)
         if not (finish > 0 and utterance_end_time > 0):
             return None
         voice_ended = utterance_end_time - max(0.0, trailing_silence)
@@ -1984,14 +2009,14 @@ class VoiceListener(threading.Thread):
 
     def _could_be_hers(self, heard: str, utterance_energy: float, in_her_time: bool,
                        stopped_with_hers: Optional[bool],
-                       spoken: Optional[str] = None, *, answering: bool) -> bool:
+                       spoken: Optional[str] = None, *, answering) -> bool:
         """Whether an utterance could be her own voice coming back, as the
         "(during TTS)" mark has it: heard in her time (*in_her_time*, as
         `_in_her_time` read it), and either its voice stopped with hers
         (*stopped_with_hers*, as `_voice_stopped_with_hers` read it),
         whatever its words, or nothing proves he spoke (`_not_her_echo`,
-        against *spoken*, as his answer to her question when *answering*, as
-        `_answers_her_question` read it).
+        against *spoken*, as his answer to the question *answering* names,
+        as `_answers_her_question` read it).
 
         The caller reads her time, her voice's end and whether her question
         waits once, and its log line gives that same reading: her reply can
@@ -2003,24 +2028,29 @@ class VoiceListener(threading.Thread):
                                           answering=answering))
 
     @staticmethod
-    def _not_hers_because(stopped_with_hers: Optional[bool], *, answering: bool) -> str:
-        """Why words heard in her time were taken for his, as the log gives
-        it: words she did not say, in a voice, and that voice going on after
-        hers when its end was read (`_voice_stopped_with_hers`), with a word
-        of his enough when they answer her question (`_answers_her_question`).
-        While she speaks, or with its end unknown, the two proofs alone
-        decided."""
-        if answering:
-            return "a word she did not say, in a voice that went on after hers, answering her question"
+    def _not_hers_because(stopped_with_hers: Optional[bool], *, answering,
+                          heard: str, spoken: str) -> str:
+        """Why *heard*, heard in her time, was taken for his, as the log
+        gives it: words she did not say, in a voice, and that voice going on
+        after hers when its end was read (`_voice_stopped_with_hers`). When
+        they answer her question (*answering*, `_answers_her_question`), the
+        proof that decided: a word she did not say, or her words picked out
+        of her order (`picks_her_words_out`). While she speaks, or with its
+        end unknown, the two proofs alone decided."""
+        if answering is not None:
+            proof = ("a word she did not say" if carries_a_word_she_did_not_say(heard, spoken)
+                     else "her words picked out of her order")
+            return f"{proof}, in a voice that went on after hers, answering her question"
         if stopped_with_hers is False:
             return "words she did not say, in a voice that went on after hers"
         return "words she did not say, in a voice"
 
     def _is_pure_echo(self, heard: str, spoken: str, utterance_energy: float,
-                      *, answering: bool) -> tuple:
-        """Whether *heard* is her reply *spoken* coming back whole: its text
-        says so (`_comes_back_whole`), and it is not his answer to the
-        question she asked before acting laid along that question
+                      *, answering) -> tuple:
+        """Whether *heard* is her reply *spoken* (as she said it,
+        `her_reply_as_said`) coming back whole: its text says so
+        (`_comes_back_whole`), and it is not his answer to the question she
+        asked before acting laid along that question
         (`_his_answer_laid_along_hers`, which alone reads *answering* and
         the utterance's voice level *utterance_energy*). Returns the verdict
         and the score."""
@@ -2042,21 +2072,21 @@ class VoiceListener(threading.Thread):
         return whole, score
 
     def _his_answer_laid_along_hers(self, heard: str, spoken: str, utterance_energy: float,
-                                    *, answering: bool) -> bool:
+                                    *, answering) -> bool:
         """Whether *heard*, whose text reads as her reply *spoken* coming
         back whole, is his answer to the question she asked before acting.
 
-        *answering* is true for that answer (`_answers_her_question`). His
-        shortest answers take up her question's verb with a word of his ("ok
-        lance", "lance pas" after "Je m'apprête à lancer …"), and a short
-        text laid along her question matches it whatever was said. So then
-        the text alone does not make it hers: words that cannot be her
-        question coming back as she said it, one word she did not say or her
-        words out of her order ("je valide"), in a voice (`_not_her_echo`, at
-        *utterance_energy*), are his. Her words in her order are not,
-        whatever their voice."""
-        return answering and self._not_her_echo(heard, utterance_energy, spoken=spoken,
-                                                answering=True)
+        *answering* is that question when the words can answer it
+        (`_answers_her_question`), None when they cannot. His shortest
+        answers take up her question's verb with a word of his ("ok lance",
+        "lance pas" after "Je m'apprête à lancer …"), and a short text laid
+        along her question matches it whatever was said. So then the text
+        alone does not make it hers: one word she did not say, or a few of
+        her words picked out of her order ("je valide"), in a voice
+        (`_not_her_echo`, at *utterance_energy*), are his. Her words in her
+        order, or most of her question, are not, whatever their voice."""
+        return answering is not None and self._not_her_echo(
+            heard, utterance_energy, spoken=spoken, answering=answering)
 
     def _carries_the_wake_word(self, text_lower: str) -> bool:
         """Whether the wake word or one of its aliases is in *text_lower*,
@@ -2385,7 +2415,7 @@ class VoiceListener(threading.Thread):
                     if off:
                         debug_log("turn was stopped: nothing more of it is said", "voice")
                     else:
-                        self._speak_reply(reply, on_spoken=asked.heard if asked else None,
+                        self._speak_reply(reply, asks=asked.request_id if asked else None,
                                           language=turn.language)
                 if off:
                     if self._a_reply_is_on_its_way() or self.state_manager.is_collecting():
@@ -2412,7 +2442,7 @@ class VoiceListener(threading.Thread):
         return self._asked
 
     def _speak_reply(self, reply: Optional[str], on_spoken=None,
-                     language: Optional[str] = None) -> None:
+                     language: Optional[str] = None, asks: Optional[str] = None) -> None:
         """Say one reply, and do the echo bookkeeping that goes with it.
 
         The only place anything is spoken. A sentence said without being
@@ -2423,16 +2453,28 @@ class VoiceListener(threading.Thread):
         started, and not at all when it was interrupted, because
         interrupted means unheard. ``language`` is the one the reply is
         spoken in, each part of it.
+
+        ``asks`` names the spoken question this reply ends on (its request
+        id), None when it asks nothing. Only the reply she said last can be
+        answered as her question (`_question_his_voice_can_settle`), and he
+        heard the question at her last sound: the quiet her engine played
+        after it is taken off the moment the reply finished.
         """
         if reply and self.tts and self.tts.enabled:
             # Stop thinking tune when TTS starts
             self._stop_thinking_tune()
+            self._reply_asked = asks
 
             # TTS completion callback for hot window
             def _on_tts_complete():
                 import time as _time
                 debug_log(f"TTS completion callback triggered at {_time.time():.3f}", "voice")
-                self.activate_hot_window(quiet_tail=self.tts.quiet_tail())
+                quiet = max(0.0, self.tts.quiet_tail())
+                last_sound = _time.time() - quiet
+                self.activate_hot_window(quiet_tail=quiet)
+                asked = self._asked
+                if asks is not None and asked is not None and asked.request_id == asks:
+                    asked.heard(at=last_sound)
                 # After the window, so a slow or raising caller cannot
                 # cost the user their chance to reply. This runs on the
                 # audio thread: whatever it is doing, it is not worth the
@@ -4413,27 +4455,31 @@ class VoiceListener(threading.Thread):
         # echo tolerance. His answer to her question often starts inside
         # that tolerance, so timing does not decide alone: words she did not
         # say, loud enough to have been spoken, are never marked, unless
-        # their voice stopped with hers (`_could_be_hers`); one word of his
-        # is enough when they answer the question she asked before acting
+        # their voice stopped with hers (`_could_be_hers`); one word of his,
+        # or a few of her words picked out of her order, are enough when
+        # they answer the question she asked before acting
         # (`_answers_her_question`). All are read once, so the line logged
         # gives the reading that decided.
-        in_her_time = self._in_her_time(utterance_start_time)
+        waiting = self._question_his_voice_can_settle()
+        said = self.echo_detector.her_reply_as_said
+        in_her_time = self._in_her_time(utterance_start_time, waiting=waiting)
         if in_her_time:
             # Her sentences that open and close it go first, so everything
             # below reads his words alone.
             text = self._his_words_among_her_sentences(text, pieces)
-        stopped_with_hers = self._voice_stopped_with_hers(utterance_end_time, trailing_silence)
-        answering = self._answers_her_question(stopped_with_hers)
+        stopped_with_hers = self._voice_stopped_with_hers(utterance_end_time, trailing_silence,
+                                                          waiting=waiting)
+        answering = self._answers_her_question(stopped_with_hers, waiting)
         is_during_tts = self._could_be_hers(text, utterance_energy, in_her_time,
-                                            stopped_with_hers, answering=answering)
+                                            stopped_with_hers, spoken=said, answering=answering)
         if in_her_time:
             if is_during_tts and stopped_with_hers:
                 debug_log(f"🔇 marked as her echo (its voice stopped with hers, whatever "
                           f"its words): \"{text[:60]}\"", "voice")
             elif not is_during_tts:
-                debug_log(f"🗣️ not marked as her echo "
-                          f"({self._not_hers_because(stopped_with_hers, answering=answering)}): "
-                          f"\"{text[:60]}\"", "voice")
+                because = self._not_hers_because(stopped_with_hers, answering=answering,
+                                                 heard=text, spoken=said)
+                debug_log(f"🗣️ not marked as her echo ({because}): \"{text[:60]}\"", "voice")
         self._transcript_buffer.add(
             text=text,
             start_time=utterance_start_time,

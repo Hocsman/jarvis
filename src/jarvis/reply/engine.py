@@ -353,7 +353,7 @@ def settle_pending_confirmation(*, cfg, dialogue_memory, utterance, origin) -> _
         from ..tools.confirmation import describe_action, strip_own_question
 
         dit = describe_action(action.tool, action.args, action.risk).spoken
-        utterance = strip_own_question(utterance, dit)
+        utterance = strip_own_question(utterance, dit, action=action.tool)
     except Exception as e:
         debug_log(f"echo not stripped from the answer: {e}", "tools")
 
