@@ -373,8 +373,9 @@ While TTS is playing, echo rejection and stop commands are handled with fast tex
   the hot window: with `hot_window_enabled` off no last word is stamped, and
   only her speaking is her time. His answer begun over her last word goes on
   after it and is not flagged. Kept on purpose: a short word of his said
-  over her last word and stopping with it cannot be told from her voice, and
-  is flagged with it; a wake word in it that can only be his still decides
+  over her last word and stopping with it cannot be told from her voice
+  while her voice is in the microphone (next point), and is flagged with
+  it; a wake word in it that can only be his still decides
   (see "Hot Window Mode"). With no question his voice can settle, a short
   answer said in the quiet after her last sound, whose voice stops before
   that quiet ends plus the tolerance, is flagged the same way: replayed on a
@@ -385,6 +386,22 @@ While TTS is playing, echo rejection and stop commands are handled with fast tex
   known, so there, as for an utterance whose end is not known, the flag
   rests on the two proofs. Her own voice clears the energy bar, so for her
   voice coming back they come down to its words.
+- A voice ending with hers is read only while her voice is in the
+  microphone. Once the echo canceller took her reply out of it (see
+  "Acoustic Echo Cancellation"), Whisper has next to nothing of her to
+  rewrite, and a voice stopping with hers says nothing of whose it was: the
+  flag rests on the two proofs, as while she speaks, and the post-TTS
+  salvage keeps its remainder. Her reply was taken out when the canceller
+  cleans the capture and was handed her sound in the second before her reply
+  finished playing (`EchoCanceller.took_out`, `HANDED_OVER_WITHIN_SECONDS`);
+  a reply played by Chatterbox, or a capture it does not clean, keeps the
+  rule above. A voice that went on after hers is still read so: it is what
+  lets one word of his answer the question she asked before acting. Field
+  trace: his question, begun over her last words and ending in the quiet
+  she plays after them, set aside as her echo while the canceller had left
+  none of her words in it. The cost, accepted: what little of her voice gets
+  past the canceller and comes back as words she did not say is weighed on
+  those words, and taken for his.
 - His answer to the question she asked before acting is made of its words.
   A spoken question waiting for his answer (`tools/policy.spec.md`) supplies
   the words of that answer: "I'm about to empty the recycle bin. Do you
@@ -655,7 +672,8 @@ The fuzzy check acts as a fast, reliable safety net. The intent judge provides d
    bar, as she speaks and as she stops. After her last word, when the voice
    stops tells that one from him: her voice coming back stops with hers, so
    an echo verdict on an utterance whose voice stopped before her last word
-   plus `echo_tolerance` stands, whatever its words (see "During TTS").
+   plus `echo_tolerance` stands, whatever its words, unless the echo
+   canceller took her reply out of the microphone (see "During TTS").
    While she speaks nothing does, and a hallucination there the judge names:
    a verdict that calls the utterance noise is never overridden (see "Text
    Whisper Makes Out of Silence").
@@ -929,7 +947,7 @@ Her voice reaches the microphone through the room, on a desk microphone near des
 
 **It fails open.** Without the package, or when the canceller cannot be created, the microphone is read as captured and start-up says `⚠️  Echo cancellation unavailable: <reason>`. An error while it runs, on either side, turns it off for the rest of the session with the same line: a canceller that has failed once is not trusted with his voice. Her voice never waits on it: the hand-over in her stream's callback never raises into the callback.
 
-**What it does not do.** When he talks over her it takes out her voice and keeps his, though not whole: while both voices are in a frame, its suppression lowers his words too, the more the louder she plays. The transcript-level checks above are unchanged and run on every utterance; they see far less of her, and still catch what gets through, a reply played by Chatterbox included.
+**What it does not do.** When he talks over her it takes out her voice and keeps his, though not whole: while both voices are in a frame, its suppression lowers his words too, the more the louder she plays. The transcript-level checks above run on every utterance; they see far less of her, and still catch what gets through, a reply played by Chatterbox included. One reading changes with it: a voice ending with hers no longer makes an utterance hers once her reply was taken out (see "During TTS").
 
 `voice_echo_cancellation` (default `true`) turns it on at start-up, with `🧹 Echo cancellation: her voice is taken out of the microphone`; off, the microphone is read as captured and nothing is said. The debug log says how much it took out once her sound has been silent for a second: `🧹 Echo cancelled: N dB while she played`, the microphone's level against the cleaned level over the frames heard while she played.
 

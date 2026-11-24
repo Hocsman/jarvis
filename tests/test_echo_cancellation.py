@@ -89,14 +89,15 @@ class _RecordingProcessor:
         return np.concatenate(self.reference).astype(np.float32) / 32768
 
 
-def _canceller_with(processor_kwargs=None, rate=CAPTURE_RATE, clock=None):
+def _canceller_with(processor_kwargs=None, rate=CAPTURE_RATE, clock=None, wall_clock=None):
     made = []
 
     def factory(r):
         made.append(_RecordingProcessor(r, **(processor_kwargs or {})))
         return made[-1]
 
-    canceller = EchoCanceller(processor_factory=factory, **({"clock": clock} if clock else {}))
+    clocks = {name: value for name, value in (("clock", clock), ("wall_clock", wall_clock)) if value}
+    canceller = EchoCanceller(processor_factory=factory, **clocks)
     assert canceller.start(rate) is None
     canceller.capture_opened(rate, 1)
     return canceller, made
@@ -331,6 +332,52 @@ def test_the_debug_log_says_how_much_was_taken_out_once_she_is_silent(monkeypatc
     reports = [line for line in lines if "Echo cancelled" in line]
     assert not said_while_she_played
     assert len(reports) == 1 and "6.0 dB" in reports[0]
+
+
+# --- Whether it took her reply out ---------------------------------------------
+
+
+def _handed_her_sound_at(when):
+    """A canceller cleaning the capture, which her stream handed one block
+    of her sound at *when*, on the wall clock."""
+    canceller, _ = _canceller_with(wall_clock=lambda: when)
+    canceller.reference_tap(CAPTURE_RATE)(np.full((320, 1), 0.3, dtype=np.float32))
+    return canceller
+
+
+def test_a_reply_handed_over_as_it_played_was_taken_out():
+    # Her last block is handed over before it is heard, so before the
+    # reply finishes playing.
+    canceller = _handed_her_sound_at(100.0)
+
+    assert canceller.took_out(100.3)
+
+
+def test_a_reply_it_was_never_handed_was_not_taken_out():
+    canceller, _ = _canceller_with()
+
+    assert not canceller.took_out(100.3)
+
+
+def test_a_reply_that_finished_well_after_the_last_sound_handed_over_was_not():
+    # The tune handed over, then a reply played where it does not see it.
+    canceller = _handed_her_sound_at(100.0)
+
+    assert not canceller.took_out(100.0 + echo_module.HANDED_OVER_WITHIN_SECONDS + 1.0)
+
+
+def test_a_capture_it_does_not_clean_had_nothing_taken_out():
+    canceller = _handed_her_sound_at(100.0)
+    canceller.capture_opened(44100, 1)
+
+    assert not canceller.took_out(100.3)
+
+
+def test_a_canceller_turned_off_took_nothing_out():
+    canceller = _handed_her_sound_at(100.0)
+    canceller.stop()
+
+    assert not canceller.took_out(100.3)
 
 
 # --- The listener -------------------------------------------------------------

@@ -1998,15 +1998,22 @@ class VoiceListener(threading.Thread):
         after it.
 
         None when it cannot be told: while she speaks her last word is not
-        known yet, and an utterance whose end is not known says nothing.
-        None counts as no, and the two proofs decide (`_not_her_echo`)."""
+        known yet, an utterance whose end is not known says nothing, and a
+        voice ending with hers says nothing of whose it was once the echo
+        canceller took her reply out of the microphone
+        (`EchoCanceller.took_out`): her voice is not there to end. None
+        counts as no, and the two proofs decide (`_not_her_echo`)."""
         if self.tts is not None and self.tts.is_speaking():
             return None
         finish = self._her_last_word(waiting)
         if not (finish > 0 and utterance_end_time > 0):
             return None
         voice_ended = utterance_end_time - max(0.0, trailing_silence)
-        return voice_ended < finish + self.echo_detector.echo_tolerance
+        if voice_ended >= finish + self.echo_detector.echo_tolerance:
+            return False
+        if ECHO_CANCELLER.took_out(self.echo_detector._last_tts_finish_time):
+            return None
+        return True
 
     def _could_be_hers(self, heard: str, utterance_energy: float, in_her_time: bool,
                        stopped_with_hers: Optional[bool],

@@ -29,6 +29,11 @@ NATIVE_RATES = (8000, 16000, 32000, 48000)
 PLAYING_FOR_SECONDS = 0.3
 # Silence after her sound that closes one report in the debug log.
 REPORT_AFTER_SECONDS = 1.0
+# Her last block is handed over before it is heard: the output stream's
+# latency (a few hundred milliseconds) and one engine block lie between. A
+# reply whose last sound was handed over within this before it finished
+# playing went through the canceller.
+HANDED_OVER_WITHIN_SECONDS = 1.0
 
 
 class _WebRtcProcessor:
@@ -127,9 +132,11 @@ class EchoCanceller:
         self,
         processor_factory: Optional[Callable[[int], Any]] = None,
         clock: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], float] = time.time,
     ):
         self._factory = processor_factory or _WebRtcProcessor
         self._clock = clock
+        self._wall_clock = wall_clock
         self._lock = threading.Lock()
         self._processor = None
         self._rate: Optional[int] = None
@@ -137,6 +144,8 @@ class EchoCanceller:
         self._failed: Optional[str] = None
         self._said_unsupported: set = set()
         self._last_reference = float("-inf")
+        # The same moment on the capture clock the listener stamps with.
+        self._handed_over_at = float("-inf")
         self._heard_energy = 0.0
         self._cleaned_energy = 0.0
 
@@ -168,6 +177,16 @@ class EchoCanceller:
     @property
     def active(self) -> bool:
         return self._processor is not None and self._failed is None
+
+    def took_out(self, finished: float) -> bool:
+        """Whether a reply of hers that finished playing at *finished* (on
+        the capture clock, ``time.time``) was taken out of the microphone:
+        the capture is cleaned, and her sound was handed over in the
+        ``HANDED_OVER_WITHIN_SECONDS`` before that. A reply played where no
+        stream hands it over (Chatterbox) was not."""
+        with self._lock:
+            return (self.active and self._capture_ok
+                    and self._handed_over_at >= finished - HANDED_OVER_WITHIN_SECONDS)
 
     def capture_opened(self, rate: int, channels: int) -> None:
         """The capture the listener opened. One channel at a rate WebRTC
@@ -214,6 +233,7 @@ class EchoCanceller:
                         for start in range(0, whole, frame):
                             self._processor.reverse(_to_pcm(samples[start:start + frame]))
                         self._last_reference = self._clock()
+                        self._handed_over_at = self._wall_clock()
             except Exception as exc:
                 self._fail(f"{type(exc).__name__}: {exc}")
 
