@@ -344,18 +344,21 @@ def settle_pending_confirmation(*, cfg, dialogue_memory, utterance, origin) -> _
     if action is None:
         return _Settled()
 
-    # Her own question comes back out first. Whisper merges a whole hot
-    # window into one segment, so the transcript carries the question
-    # echoed, the answer, and whatever else was said in the room —
-    # reading a yes out of a passage containing the question the yes
-    # answers is not a fair thing to ask of a judge.
-    try:
-        from ..tools.confirmation import describe_action, strip_own_question
+    # Her own question comes back out first, of what was heard. Whisper
+    # merges a whole hot window into one segment, so the transcript carries
+    # the question echoed, the answer, and whatever else was said in the
+    # room — reading a yes out of a passage containing the question the yes
+    # answers is not a fair thing to ask of a judge. Typed words never
+    # carry her voice: they are read as typed, her question's words in
+    # them his ("Lance.").
+    if origin == "voix":
+        try:
+            from ..tools.confirmation import describe_action, strip_own_question
 
-        dit = describe_action(action.tool, action.args, action.risk).spoken
-        utterance = strip_own_question(utterance, dit, action=action.tool)
-    except Exception as e:
-        debug_log(f"echo not stripped from the answer: {e}", "tools")
+            dit = describe_action(action.tool, action.args, action.risk).spoken
+            utterance = strip_own_question(utterance, dit, action=action.tool)
+        except Exception as e:
+            debug_log(f"echo not stripped from the answer: {e}", "tools")
 
     verdict = read_approval(cfg, utterance)
     debug_log(f"    🙋 approval read as {verdict} for {action.tool}", "tools")
