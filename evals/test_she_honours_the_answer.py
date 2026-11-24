@@ -42,6 +42,7 @@ class AnswerCase:
 
 GRANTS = [
     pytest.param(AnswerCase("Oui, vas-y.", True), id="FR: accord"),
+    pytest.param(AnswerCase("Je valide.", True), id="FR: accord dans ses mots à elle"),
     pytest.param(AnswerCase("Yes, go ahead.", True), id="EN: grant"),
     pytest.param(AnswerCase("Evet, devam et.", True), id="TR: onay"),
     pytest.param(AnswerCase("はい、お願いします。", True), id="JA: 承認"),

@@ -52,6 +52,8 @@ def listener():
     obj.state_manager = MagicMock()
     obj._room_floor = RoomFloor(frame_ms=20)
     obj.tts.is_speaking.return_value = False
+    # Her replies end on their last sound: no quiet after it.
+    obj.tts.quiet_tail.return_value = 0.0
     obj._speech_lock = threading.Lock()
     obj._tune_lock = threading.Lock()
     obj._stop_epoch = 0

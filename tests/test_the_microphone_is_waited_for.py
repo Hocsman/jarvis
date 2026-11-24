@@ -971,7 +971,7 @@ def test_no_hot_window_opens_while_the_microphone_is_waited_for(monkeypatch, cap
         get_jarvis_state().set_state(JarvisState.SPEAKING)
 
         # Her speech ends: what the speech engine's completion callback calls.
-        voice.activate_hot_window()
+        voice.activate_hot_window(quiet_tail=0.0)
 
         assert not console.shows("Listening for follow-up", timeout=0.8)
         assert get_jarvis_state().state == JarvisState.IDLE

@@ -86,6 +86,7 @@ class _HeldTurns:
 def _listener_with(engine, **kwargs):
     listener, tts = _create_listener(**kwargs)
     tts.voice_delay.return_value = 0.0
+    tts.quiet_tail.return_value = 0.0
     patcher = patch("jarvis.reply.engine.run_reply_engine", side_effect=engine)
     patcher.start()
     listener._start_replies()
@@ -812,6 +813,32 @@ def test_what_he_says_once_he_heard_her_question_answers_it(_print):
         tts.speak.call_args.kwargs["completion_callback"]()   # he heard it
         time.sleep(0.05)
         listener._last_heard_at = time.time()
+        listener._hand_over("oui")
+
+        assert _wait_for(lambda: answered == ["mets de la musique", "oui"])
+    finally:
+        _stop(listener, patcher)
+
+
+@patch("builtins.print")
+def test_what_he_says_in_her_quiet_once_he_heard_her_question_answers_it(_print):
+    """Her engine plays quiet after her last sound before her reply is done.
+    He heard her question at her last sound, and his answer said in that
+    quiet, before her reply was done, answers it."""
+    quiet = 1.5
+    release = threading.Event()
+    release.set()
+    listener, tts, patcher = _listener_with(_Engine())
+    patcher.stop()
+    dm, engine, answered = _with_a_question(listener, release)
+    patcher = patch("jarvis.reply.engine.run_reply_engine", side_effect=engine)
+    patcher.start()
+    try:
+        tts.quiet_tail.return_value = quiet
+        listener._hand_over("mets de la musique")
+        assert _wait_for(lambda: _spoken(tts) == ["Je regarde la météo ?"])
+        tts.speak.call_args.kwargs["completion_callback"]()   # her reply is done
+        listener._last_heard_at = time.time() - quiet / 2     # said in her quiet
         listener._hand_over("oui")
 
         assert _wait_for(lambda: answered == ["mets de la musique", "oui"])

@@ -21,7 +21,9 @@ heard in a voice that goes on after hers, and marked "(during TTS)", as it
 shows an answer too quiet to prove he spoke, which it answers only on a
 directed verdict with a query, alternating the same way (`-k his_answer`
 runs it alone). It reads the same way his answer to the question she asks
-before acting, made of that question's words (`-k his_yes` runs it alone).
+before acting, made of that question's words (`-k his_yes` runs it alone),
+his short answer taking up her verb (`-k his_short_answer`), and his answer
+made only of her words, picked out of her order (`-k his_answer_in_her_words`).
 A fourth reads her last sentence coming back as words she
 never said, its voice stopping with hers, unmarked, as the judge is shown
 it when the two proofs alone decide, and marked, as the listener shows an
@@ -70,7 +72,9 @@ from typing import Optional, List, Union
 
 from helpers import (JUDGE_MODEL, JUDGE_BASE_URL, MockConfig, fisher_two_sided,
                      is_judge_llm_available, rate, to_terminal)
-from jarvis.listening.echo_detection import carries_a_word_she_did_not_say
+from jarvis.listening.echo_detection import (
+    carries_a_word_she_did_not_say, picks_her_words_out,
+)
 from jarvis.listening.listener import _carries_speech_she_did_not_say
 from jarvis.tools.confirmation import describe_action
 
@@ -832,14 +836,26 @@ ANSWER_TO_HER_QUESTION_CASES = [
 # her question's words: one word of his and the rest hers, under the share a
 # barge-in clears. While her question waits, the listener shows such an
 # answer unmarked when its voice goes on after hers, and an echo verdict on
-# it is overridden on that one word; with no question waiting, the same
-# words are marked "(during TTS)".
+# it is overridden on words that cannot be her question coming back as she
+# said it, here that one word (`carries_a_word_she_did_not_say`); with no
+# question waiting, the same words are marked "(during TTS)".
 def _she_asks_before_acting(tool):
-    return describe_action(tool, {}, "action").spoken
+    spoken = describe_action(tool, {}, "action").spoken
+    _ACTION_SHE_NAMES[spoken] = tool
+    return spoken
+
+
+# The tool each question she asks before acting names, as the listener reads
+# it from the question waiting (`picks_her_words_out`).
+_ACTION_SHE_NAMES = {}
 
 
 _EN_GATE = "I'm about to empty the recycle bin. Do you approve?"
 _EN_GATE_RENAME = "I'm about to rename the scanned files. Do you approve?"
+# These two say in words what the tool does; the listener still reads the
+# tool's own name from the question waiting.
+_ACTION_SHE_NAMES[_EN_GATE] = "emptyRecycleBin"
+_ACTION_SHE_NAMES[_EN_GATE_RENAME] = "renameScans"
 
 HIS_YES_TO_HER_QUESTION_CASES = [
     NotSpeechCase("french_yes_to_archive",
@@ -885,6 +901,32 @@ HIS_SHORT_ANSWER_TAKING_UP_HER_VERB_CASES = [
     NotSpeechCase("english_go_ahead_taking_up_her_verb",
                   _after("Empty the recycle bin.", _EN_GATE, "Empty it."),
                   _EN_GATE, expected_noise=False),
+]
+
+# His answer made only of her question's words, picked out of her order:
+# her verb said back in the first person. Not one word of his, and her voice
+# coming back never skips most of her question between two of its words, so
+# while her question waits and his voice goes on after hers, the listener
+# shows them to the judge as his (`picks_her_words_out`).
+HIS_ANSWER_IN_HER_WORDS_CASES = [
+    NotSpeechCase("french_yes_in_her_words",
+                  _after("Range les photos de vacances dans l'archive.",
+                         _she_asks_before_acting("archivePhotos"), "Je valide."),
+                  _she_asks_before_acting("archivePhotos"), expected_noise=False),
+    NotSpeechCase("french_go_ahead_in_her_words",
+                  _after("Trie les vieux scans.",
+                         _she_asks_before_acting("sortOldScans"), "Je lance."),
+                  _she_asks_before_acting("sortOldScans"), expected_noise=False),
+    NotSpeechCase("french_yes_in_her_words_twice",
+                  _after("Vide le cache du navigateur.",
+                         _she_asks_before_acting("cleanCache"), "Je valide, lance."),
+                  _she_asks_before_acting("cleanCache"), expected_noise=False),
+    NotSpeechCase("english_yes_in_her_words",
+                  _after("Empty the recycle bin.", _EN_GATE, "I approve."),
+                  _EN_GATE, expected_noise=False),
+    NotSpeechCase("english_yes_in_her_words_stressed",
+                  _after("Rename the scanned files.", _EN_GATE_RENAME, "I do approve."),
+                  _EN_GATE_RENAME, expected_noise=False),
 ]
 
 # Her reply ends on a reading, and her last sentence comes back as words she
@@ -1010,7 +1052,7 @@ def _shown_to_the_judge_whole(case, voice_stops_with_hers):
         detector.track_tts_start(reply, baseline_energy=floor,
                                  exact_duration=6.0, start_delay=-6.0)
         last_word = time.time()
-        detector.track_tts_finish()
+        detector.track_tts_finish(quiet_tail=0.0)
         listener.state_manager.schedule_hot_window_activation()
         while (not listener.state_manager.is_hot_window_active()
                and time.time() < last_word + 1.0):
@@ -1645,14 +1687,16 @@ class TestIntentJudgeMultiSegment:
 
 
 def _answered_in_the_hot_window(case, verdict, *,
-                                words_she_did_not_say=_carries_speech_she_did_not_say) -> bool:
+                                his_words=_carries_speech_she_did_not_say) -> bool:
     """What the listener does in the hot window with a verdict on a segment
     it did not mark as possibly hers: it dispatches a directed one, and its
     overrides take a rejection at any confidence, unless it says noise, or
     says aside with high confidence. A rejection whose reasoning says echo
     is overridden only on words she did not say, spoken in a voice: the words are weighed here as
-    the listener weighs them (*words_she_did_not_say*: one word is enough
-    for his answer to the question she asked before acting), and his words
+    the listener weighs them (*his_words*: for his answer to the question she
+    asked before acting, one word she did not say, or a few of her words
+    picked out of her order that do not name what she is about to do), and
+    his words
     carry a voice where text Whisper makes of silence carries none. The
     cases carry no wake word, so the wake-word check never takes the
     decision."""
@@ -1662,15 +1706,19 @@ def _answered_in_the_hot_window(case, verdict, *,
         return False
     if "echo" in (verdict.reasoning or "").lower():
         return (not case.expected_noise
-                and words_she_did_not_say(case.segments[-1][0], case.last_tts_text))
+                and his_words(case.segments[-1][0], case.last_tts_text))
     return True
 
 
 def _as_his_answer_to_her_question(case, verdict) -> bool:
     """`_answered_in_the_hot_window` while a question she asked before
-    acting waits for his spoken answer."""
+    acting waits for his spoken answer: words that cannot be her question
+    coming back as she said it are his."""
     return _answered_in_the_hot_window(
-        case, verdict, words_she_did_not_say=carries_a_word_she_did_not_say)
+        case, verdict,
+        his_words=lambda heard, spoken: (
+            carries_a_word_she_did_not_say(heard, spoken)
+            or picks_her_words_out(heard, spoken, action=_ACTION_SHE_NAMES.get(spoken, ""))))
 
 
 def _answered_when_marked(case, verdict) -> bool:
@@ -2050,6 +2098,16 @@ class TestIntentJudgeNotSpeechArms:
         no question waiting."""
         _his_answer_unmarked_against_marked(capsys, HIS_YES_TO_HER_QUESTION_CASES,
                                             "his yes", _as_his_answer_to_her_question)
+
+    def test_his_answer_in_her_words_unmarked_against_marked_call_by_call(self, capsys):
+        """His answer to the question she asked before acting made only of
+        its words, out of her order. Read as the test above reads his yes:
+        unmarked, as the listener shows it while her question waits and his
+        voice goes on after hers, where an echo verdict is overridden on her
+        words out of her order, and marked "(during TTS)", as it shows the
+        same words with no question waiting."""
+        _his_answer_unmarked_against_marked(capsys, HIS_ANSWER_IN_HER_WORDS_CASES,
+                                            "his words", _as_his_answer_to_her_question)
 
     def test_his_short_answer_taking_up_her_verb_unmarked_against_marked_call_by_call(
             self, capsys):

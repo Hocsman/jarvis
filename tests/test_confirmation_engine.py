@@ -234,6 +234,62 @@ def test_the_question_is_consumed_before_the_answer_is_read(dm, tool):
     assert dm.peek_pending() is None
 
 
+# ── Her question coming back is not his answer ────────────────────────
+
+
+def _answer_to_an_eager_judge(dm, utterance, *, origin="voix"):
+    """What the engine does at the top of the next turn, with a judge that
+    reads a yes in whatever it is handed: only what is left of *utterance*
+    once her question came out of it can approve anything."""
+    from src.jarvis.reply.engine import settle_pending_confirmation
+
+    with patch("src.jarvis.tools.confirmation._ask_model", return_value="oui"):
+        return settle_pending_confirmation(
+            cfg=_Cfg(), dialogue_memory=dm, utterance=utterance, origin=origin,
+        )
+
+
+def test_her_question_coming_back_naming_her_action_approves_nothing(dm, tool):
+    """Her question coming back out of her order, but naming what she is
+    about to do ("Valides sabotage." after "Je m'apprête à lancer sabotage.
+    Tu valides ?"), is hers: nothing of it is his to read."""
+    dm.begin_turn("voix")
+    _gate_call(dm, tool)
+    dm.begin_turn("voix")
+
+    settled = _answer_to_an_eager_judge(dm, "Valides sabotage.")
+
+    assert settled.approval is None
+    assert settled.declined is False
+
+
+def test_his_answer_in_her_words_after_her_question_is_read(dm, tool):
+    """His answer picking a few of her words out of her order ("Je
+    valide."), merged with the tail of her question, is his to read."""
+    dm.begin_turn("voix")
+    _gate_call(dm, tool)
+    dm.begin_turn("voix")
+
+    settled = _answer_to_an_eager_judge(dm, "Tu valides ? Je valide.")
+
+    assert settled.approval is not None
+    assert settled.action.tool == "sabotage"
+
+
+@pytest.mark.parametrize("typed", ["Lance.", "Valide.", "Lance sabotage."])
+def test_a_typed_answer_in_her_words_is_read_as_typed(dm, tool, typed):
+    """Typing never carries her voice: a typed answer made of her question's
+    words is read whole, where heard it could be her question coming back."""
+    dm.begin_turn("chat")
+    _gate_call(dm, tool, origin="chat")
+    dm.begin_turn("chat")
+
+    settled = _answer_to_an_eager_judge(dm, typed, origin="chat")
+
+    assert settled.approval is not None
+    assert settled.action.tool == "sabotage"
+
+
 # ── Doors that must stay shut ─────────────────────────────────────────
 
 

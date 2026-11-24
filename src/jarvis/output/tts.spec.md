@@ -65,6 +65,7 @@ The four engines are interchangeable to the listener. Each exposes:
 | `is_speaking()` | Whether an item is being synthesised or played |
 | `get_last_spoken_text()` | The processed text of the item most recently started |
 | `voice_delay()` | How much later than usual her voice will be heard: the talking face's delay while a face is ready and watched (Kyutai, see "The face"), otherwise 0 |
+| `quiet_tail()` | How long the item she last finished saying ended on quiet after her last sound, in seconds; 0 before she has finished one (see "Speaking state and completion") |
 | `wait_until_ready(timeout)` | Waits up to `timeout` seconds for the load (and warm-up) `start` began. `True` once the engine can speak without paying it, `False` once it settled without a voice (it could not load, or the engine is off), `None` when it is still loading at the deadline, or when `start` has not been called and nothing is loading (then it returns at once). Piper and Chatterbox load inside `start`, so they never wait. The listener calls it before it announces "Listening!" (`listening.spec.md`, "Startup & Model Warmup") |
 
 `speak` starts the worker if nobody has. Calling `start` on Piper loads
@@ -155,6 +156,21 @@ said from this callback (`reminders.spec.md`: delivery settles it, never
 queueing), so a broken voice must leave the reminder owed rather than
 recording that she said it. The end-of-reply marker is the one item that
 fires without playing anything; it has no audio to play.
+
+**The quiet after her last sound.** An engine ends an item on a stretch of
+near silence, so the completion callback fires once that stretch has played,
+not when she stopped making a sound. Each engine reads, from the audio of
+every item it plays to its end, how long that audio ends on quiet: the time
+after its last 20 ms window whose level comes within 40 dB of its loudest
+window (`TrailingQuiet`), so a soft ending (a breath, a final consonant)
+counts as sound and the quiet is measured short rather than long.
+`quiet_tail()` returns it for the item last played to its end. Piper,
+Kokoro and Chatterbox read it from the item's audio once it has played;
+Kyutai reads it as it synthesises, piece by piece, without keeping the
+audio. An interrupted item leaves it as it was, and the end-of-reply marker,
+which plays nothing, leaves it as the last sentence of the reply played it.
+Each engine logs it with each item it played to its end ("quiet after her
+last sound 0.62s"), and gives none for an item interrupted.
 
 **The duration callback** receives the exact length of the item's audio
 in seconds, computed from the synthesised samples, once synthesis has
@@ -250,7 +266,7 @@ voice.
 The engines do not own the echo reference. The listener records what was
 said with `track_tts_start`, accumulating the sentences of one reply
 (`streaming.spec.md`, "The constraint that shapes everything"). The
-engine owes the listener five things:
+engine owes the listener six things:
 
 1. `is_speaking()`, which gates stop-word and echo handling while she
    talks, and keeps what the microphone hears meanwhile out of the room's
@@ -269,7 +285,10 @@ engine owes the listener five things:
    of four words or fewer is judged by that window alone;
 4. the completion callback, which is what opens the hot window;
 5. `voice_delay()`, which the listener adds to the start of her speech it
-   records, because a watched face holds her voice back by its delay.
+   records, because a watched face holds her voice back by its delay;
+6. `quiet_tail()`, read as the completion callback fires, which the
+   listener takes off the moment her reply was done to know when her last
+   sound ended (`listening.spec.md`, "During TTS").
 
 Where no exact duration is known the detector estimates from `tts_rate`
 (words per minute). Piper, Kokoro, Chatterbox and Kyutai ignore `tts_rate`

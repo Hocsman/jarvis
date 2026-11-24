@@ -30,7 +30,7 @@ class TestKokoroInterface:
     def test_has_same_interface_as_other_engines(self):
         tts = KokoroTTS(enabled=False)
         for name in ("start", "stop", "speak", "interrupt", "is_speaking",
-                     "get_last_spoken_text", "voice_delay", "wait_until_ready"):
+                     "get_last_spoken_text", "voice_delay", "quiet_tail", "wait_until_ready"):
             assert callable(getattr(tts, name)), f"missing {name}"
 
     def test_the_voice_is_ready_once_its_warm_up_is_over_and_not_before(self, monkeypatch):

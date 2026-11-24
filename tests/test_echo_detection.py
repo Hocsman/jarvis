@@ -151,7 +151,7 @@ class TestEchoRejection:
         detector = EchoDetector()
         tts_text = "hello world"
         detector.track_tts_start(tts_text, baseline_energy=0.01)
-        detector.track_tts_finish()
+        detector.track_tts_finish(quiet_tail=0.0)
 
         # Simulate utterance starting immediately after TTS
         utterance_start = time.time()
@@ -168,7 +168,7 @@ class TestEchoRejection:
         """Accepts speech with high energy even in cooldown (real user)."""
         detector = EchoDetector(energy_spike_threshold=2.0)
         detector.track_tts_start("hello world", baseline_energy=0.01)
-        detector.track_tts_finish()
+        detector.track_tts_finish(quiet_tail=0.0)
 
         utterance_start = time.time()
 
@@ -184,7 +184,7 @@ class TestEchoRejection:
         """Accepts speech after extended echo window expires."""
         detector = EchoDetector(echo_tolerance=0.3)
         detector.track_tts_start("hello world")
-        detector.track_tts_finish()
+        detector.track_tts_finish(quiet_tail=0.0)
 
         # Simulate utterance starting well after TTS (2 seconds)
         utterance_start = time.time() + 2.0
@@ -319,7 +319,7 @@ class TestHotWindowEchoDetection:
         """Uses stricter matching in hot window to allow more follow-up speech."""
         detector = EchoDetector()
         detector.track_tts_start("tell me about the weather today")
-        detector.track_tts_finish()
+        detector.track_tts_finish(quiet_tail=0.0)
 
         utterance_start = time.time()
 
@@ -352,7 +352,7 @@ class TestHotWindowEchoDetection:
             "activities or provide more weather details?"
         )
         detector.track_tts_start(tts_text)
-        detector.track_tts_finish()
+        detector.track_tts_finish(quiet_tail=0.0)
 
         utterance_start = time.time()
 
@@ -372,7 +372,7 @@ class TestHotWindowEchoDetection:
         detector = EchoDetector()
         tts_text = "the temperature is 8 degrees celsius at 18:48 UTC"
         detector.track_tts_start(tts_text)
-        detector.track_tts_finish()
+        detector.track_tts_finish(quiet_tail=0.0)
 
         # Whisper transcription with errors
         heard_with_errors = "the temperature is around 8 degrees celsius at 1848 UTC"
@@ -393,7 +393,7 @@ class TestHotWindowEchoDetection:
             "any outdoor activities or provide more weather details?"
         )
         detector.track_tts_start(tts_text)
-        detector.track_tts_finish()
+        detector.track_tts_finish(quiet_tail=0.0)
 
         # Echo of the question portion
         echoed_question = "would you like me to suggest any outdoor activities"
@@ -406,7 +406,7 @@ class TestHotWindowEchoDetection:
         detector = EchoDetector()
         tts_text = "The weather in London is currently overcast with rain"
         detector.track_tts_start(tts_text)
-        detector.track_tts_finish()
+        detector.track_tts_finish(quiet_tail=0.0)
 
         utterance_start = time.time()
 

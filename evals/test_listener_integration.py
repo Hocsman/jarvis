@@ -105,7 +105,7 @@ def _create_listener(**kwargs):
 
 def _simulate_tts_finish(listener):
     """Simulate TTS finishing: track finish time and schedule hot window."""
-    listener.echo_detector.track_tts_finish()
+    listener.echo_detector.track_tts_finish(quiet_tail=0.0)
     listener.state_manager.schedule_hot_window_activation()
 
 
@@ -335,7 +335,7 @@ class TestHotWindowHeuristicAccuracy:
         listener, _ = _create_listener(echo_tolerance=0.3, hot_window_seconds=3.0)
 
         listener.echo_detector.track_tts_start("Here is your answer.")
-        listener.echo_detector.track_tts_finish()
+        listener.echo_detector.track_tts_finish(quiet_tail=0.0)
         # Backdate TTS finish to 30 seconds ago
         listener.echo_detector._last_tts_finish_time = time.time() - 30.0
 
@@ -369,7 +369,7 @@ class TestHotWindowHeuristicAccuracy:
 
         listener.echo_detector.track_tts_start("Some response text.")
         tts_finish = time.time()
-        listener.echo_detector.track_tts_finish()
+        listener.echo_detector.track_tts_finish(quiet_tail=0.0)
         listener.state_manager.schedule_hot_window_activation()
         _wait_for_hot_window_active(listener)
 
