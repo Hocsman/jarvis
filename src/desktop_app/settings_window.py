@@ -376,6 +376,10 @@ def _build_field_metadata() -> List[FieldMeta]:
     f("voice_min_energy", "Min Energy",
       "Minimum audio energy to register voice",
       "voice_input", "float", min_val=0.0, max_val=1.0, step=0.005)
+    f("voice_echo_cancellation", "Echo Cancellation",
+      "Take her own voice out of what the microphone hears, on this machine "
+      "(a mono microphone at 8, 16, 32 or 48 kHz)",
+      "voice_input", "bool")
 
     # --- Wake Word ---
     f("wake_word", "Wake Word",

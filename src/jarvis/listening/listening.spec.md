@@ -229,7 +229,7 @@ The intent judge receives full context and makes intelligent decisions:
 
 ### 4. The Microphone Is Always Read
 
-The capture callback stamps each block with the time it was captured and queues it. The listening loop reads the queue frame by frame, and an utterance's start and end are read from those stamps, so audio the loop reaches late still says when it was spoken: the echo detector, the hot window and the latency journal compare these times with when she spoke, and the silence that ends a question being collected is counted in them.
+The capture callback stamps each block with the time it was captured and hands it to the echo canceller, whose own thread takes her sound out of it and queues it, in the order heard (see "Acoustic Echo Cancellation"); before the canceller has started, the callback queues it itself. The listening loop reads the queue frame by frame, and an utterance's start and end are read from those stamps, so audio the loop reaches late still says when it was spoken: the echo detector, the hot window and the latency journal compare these times with when she spoke, and the silence that ends a question being collected is counted in them.
 
 **Replies run on a thread of their own.** Once a query is collected, the loop hands it over (`_hand_over`) and goes back to listening; the reply thread runs the queries one after the other, each through the reply engine and then out loud. While she prepares an answer and while she says it, what he says is still heard.
 
@@ -313,7 +313,7 @@ After TTS finishes, allow wake-word-free follow-up.
 
 **Mixed echo+speech handling:** When Whisper merges TTS echo and user speech into one chunk (e.g. mic picks up TTS then user speaks), the word-count guard detects the extra content and lets it through to the intent judge. The judge extracts the user's actual query from the mixed transcript. Post-judge echo checks also use the word-count guard and verify the judge's extracted query isn't itself echo before rejecting.
 
-**Early salvage for echo-prefixed follow-ups:** Before the early fuzzy check rejects a chunk as pure echo, the listener calls `cleanup_leading_echo` to strip any TTS-tail prefix. If exact-word cleanup fails (for example because Whisper mis-transcribed the first echo word — *"explores"* → *"laws"* — breaking the word-level comparison), the listener falls back to `salvage_after_echo_tail`, which scans heard-text word boundaries right-to-left looking for the rightmost 5-word window that fuzzy-matches the TTS tail (`partial_ratio >= 85`) and keeps everything after it. This preserves short follow-ups (*"Who made it?"*) that the existing fuzzy-prefix salvage would otherwise truncate by one word because it prefers the shortest suffix. If the surviving remainder has at least `EchoDetector.min_salvage_words` words (default 3), carries words she did not say in a voice (the two proofs of "Overriding an echo verdict takes positive evidence", one word of his, or a few of her words picked out of her order, being enough for his answer to the question she asked before acting, see "During TTS"), and its voice went on after hers (see "During TTS"), it replaces the transcript segment text and is treated as the user's follow-up. The same minimum-word threshold is shared by the during-TTS and post-TTS merged-chunk salvage paths. The during-TTS one keeps a remainder on that count alone. So does the post-TTS one, unless the utterance's voice stopped with hers (see "During TTS"): from such an utterance it keeps nothing, and the utterance stays whole, and flagged. In the hot window the overrides still set a remainder aside when it could be hers.
+**Early salvage for echo-prefixed follow-ups:** Before the early fuzzy check rejects a chunk as pure echo, the listener calls `cleanup_leading_echo` to strip any TTS-tail prefix. If exact-word cleanup fails (for example because Whisper mis-transcribed the first echo word — *"explores"* → *"laws"* — breaking the word-level comparison), the listener falls back to `salvage_after_echo_tail`, which scans heard-text word boundaries right-to-left looking for the rightmost 5-word window that fuzzy-matches the TTS tail (`partial_ratio >= 85`) and keeps everything after it. This preserves short follow-ups (*"Who made it?"*) that the existing fuzzy-prefix salvage would otherwise truncate by one word because it prefers the shortest suffix. If the surviving remainder has at least `EchoDetector.min_salvage_words` words (default 3), carries words she did not say in a voice (the two proofs of "Overriding an echo verdict takes positive evidence", one word of his, or a few of her words picked out of her order, being enough for his answer to the question she asked before acting, see "During TTS"), and its voice did not stop with hers (see "During TTS": once the echo canceller took her reply out of the microphone, a voice ending with hers is not read as stopping with it), it replaces the transcript segment text and is treated as the user's follow-up. The same minimum-word threshold is shared by the during-TTS and post-TTS merged-chunk salvage paths. The during-TTS one keeps a remainder on that count alone. So does the post-TTS one, unless the utterance's voice stopped with hers (see "During TTS"): from such an utterance it keeps nothing, and the utterance stays whole, and flagged. In the hot window the overrides still set a remainder aside when it could be hers.
 
 **Timestamp-based detection:** `was_speech_during_hot_window(utterance_start_time, utterance_end_time)` compares the utterance's time range against the hot window's time span (from schedule to expiry). This eliminates race conditions between slow Whisper transcription and the expiry timer — if the user started speaking during the window, it counts as hot window input regardless of when the transcript arrives. Also handles **overlapping utterances** where VAD triggered during TTS (mic picking up echo) but the utterance extended into the hot window period.
 
@@ -373,8 +373,9 @@ While TTS is playing, echo rejection and stop commands are handled with fast tex
   the hot window: with `hot_window_enabled` off no last word is stamped, and
   only her speaking is her time. His answer begun over her last word goes on
   after it and is not flagged. Kept on purpose: a short word of his said
-  over her last word and stopping with it cannot be told from her voice, and
-  is flagged with it; a wake word in it that can only be his still decides
+  over her last word and stopping with it cannot be told from her voice
+  while her voice is in the microphone (next point), and is flagged with
+  it; a wake word in it that can only be his still decides
   (see "Hot Window Mode"). With no question his voice can settle, a short
   answer said in the quiet after her last sound, whose voice stops before
   that quiet ends plus the tolerance, is flagged the same way: replayed on a
@@ -385,6 +386,27 @@ While TTS is playing, echo rejection and stop commands are handled with fast tex
   known, so there, as for an utterance whose end is not known, the flag
   rests on the two proofs. Her own voice clears the energy bar, so for her
   voice coming back they come down to its words.
+- A voice ending with hers is read only while her voice is in the
+  microphone. Once the echo canceller took her reply out of it (see
+  "Acoustic Echo Cancellation"), Whisper has next to nothing of her to
+  rewrite, and a voice stopping with hers says nothing of whose it was: the
+  flag rests on the two proofs, as while she speaks, and the hot window's
+  first check and the post-TTS salvage keep their remainder. Her reply was
+  taken out when, as it finished playing, the canceller had taken at least
+  `MIN_REMOVED_DB` (10 dB) out of it (`EchoCanceller.took_her_reply_out`,
+  "How much of her reply it took out"). A reply played by Chatterbox, a
+  capture it does not clean, a reply it took less out of, and the thinking
+  tune alone keep the rule above. A voice that went on after hers is still
+  read so: it is what lets one word of his answer the question she asked
+  before acting. A voice ending with hers while that question waits cannot
+  answer it that way; it is weighed, as any, on words she did not say, in
+  a voice. The debug log says once per utterance how much of her reply
+  came out and which reading followed. Field
+  trace: his question, begun over her last words and ending in the quiet
+  she plays after them, set aside as her echo while the canceller had left
+  none of her words in it. The cost, accepted: what little of her voice gets
+  past the canceller and comes back as words she did not say is weighed on
+  those words, and taken for his.
 - His answer to the question she asked before acting is made of its words.
   A spoken question waiting for his answer (`tools/policy.spec.md`) supplies
   the words of that answer: "I'm about to empty the recycle bin. Do you
@@ -655,7 +677,8 @@ The fuzzy check acts as a fast, reliable safety net. The intent judge provides d
    bar, as she speaks and as she stops. After her last word, when the voice
    stops tells that one from him: her voice coming back stops with hers, so
    an echo verdict on an utterance whose voice stopped before her last word
-   plus `echo_tolerance` stands, whatever its words (see "During TTS").
+   plus `echo_tolerance` stands, whatever its words, unless the echo
+   canceller took her reply out of the microphone (see "During TTS").
    While she speaks nothing does, and a hallucination there the judge names:
    a verdict that calls the utterance noise is never overridden (see "Text
    Whisper Makes Out of Silence").
@@ -728,6 +751,7 @@ The listener feeds the latency journal (`src/jarvis/latency.py`, see `latency.sp
 | `whisper_min_confidence` | 0.3 | Minimum `avg_logprob`-derived confidence score for a transcribed segment. Segments below this are discarded before the intent judge sees them. |
 | `whisper_no_speech_threshold` | 0.5 | Hard cutoff on Whisper's `no_speech_prob` field. Any segment at or above this value is discarded **regardless of `avg_logprob`** — Whisper can be confident about a hallucinated phrase even when no real speech is present (e.g. the "MBC 뉴스" hallucination on background noise). This filter runs before the `avg_logprob` check so it catches high-confidence hallucinations that would otherwise survive. Applies to both the faster-whisper and MLX backends. |
 | `whisper_vocabulary` | `[]` | Names Whisper is given as a hint, after `weather_city`. See "The names he uses". |
+| `voice_echo_cancellation` | `true` | Whether what she plays is taken out of the microphone before the listener reads it. See "Acoustic Echo Cancellation". |
 
 **Repetition guard.** Past the confidence filters, a transcript is
 discarded when it loops: one word over half the tokens, the same word
@@ -773,7 +797,7 @@ stateDiagram-v2
 ```
 Microphone Audio
     ↓
-Sounddevice Callback → _audio_q
+Sounddevice Callback (stamped) → echo canceller's thread: her sound taken out (Acoustic Echo Cancellation) → _audio_q
     ↓
 Main Loop: Get Frames → VAD Check
     ↓
@@ -808,7 +832,7 @@ If judge.directed and judge.query:
 If no query extracted, in hot window, and a wake word that can only be his (found in the utterance, none in her reply, still found once her words are taken out; not her reply coming back whole):
     → Wake-word check: collect what was heard, the wake word taken out
 If judge.directed without a query, or rejects in any other way, in hot window, at any confidence:
-    → Words that could be hers (heard in her time, and either their voice stopped with hers or they lack words she did not say in a voice): 🔇 Heard (echo)
+    → Words that could be hers (heard in her time, and either their voice stopped with hers, her reply not taken out of the microphone, or they lack words she did not say in a voice): 🔇 Heard (echo)
     → Otherwise, not pure echo: collect what he said as a query
     → An echo verdict: only on words she did not say, in a voice, that could not be hers; otherwise 🔇 Heard (echo)
 If nothing above took it and a question is being collected:
@@ -914,14 +938,27 @@ If the HuggingFace model cache is corrupted (e.g. from an interrupted download),
 
 When HuggingFace returns HTTP 429 (Too Many Requests), both faster-whisper and MLX Whisper backends retry up to 4 times with exponential backoff (2s, 4s, 8s, 16s). Progress messages inform the user of each retry attempt. If all retries are exhausted, the user is advised to wait and restart.
 
-## Future: Acoustic Echo Cancellation
+## Acoustic Echo Cancellation
 
-Currently, echo is handled at the transcript level via fuzzy text matching and the intent judge. True acoustic echo cancellation (AEC) would:
-- Require the audio output signal (reference)
-- Process in real-time with adaptive filtering
-- Add 10-50ms latency
+Her voice reaches the microphone through the room, on a desk microphone near desk speakers almost as loud as his. Every check above works on what Whisper wrote of it, after the fact. The canceller works on the sound, before any of them: what she plays is taken out of each block the microphone delivers, so most of her reply never becomes text.
 
-**Current recommendation:** The transcript-level echo detection (fuzzy matching + intent judge) is sufficient and simpler. Consider AEC only if transcript-level detection proves inadequate in practice.
+**What it is.** WebRTC's echo canceller (AEC3), through the `livekit` package's `AudioProcessingModule`, held by `jarvis.utils.echo_cancellation` (`ECHO_CANCELLER`, one per process). It runs on the machine and nothing it is given leaves it. Echo cancellation only: noise suppression, gain control and the high-pass filter stay off. Whisper is trained on speech as microphones capture it, a gain that moved between utterances would move the room's level (see "The floor is the room, never her nor him"), and the high-pass filter, measured, took out nothing more.
+
+**The reference is what she plays, as it is played.** Each output stream opened through `open_output_stream` with a callback hands every block the callback fills to the canceller before PortAudio plays it (`tts.spec.md`, "Audio output"): her voice from Piper, Kokoro and Kyutai, and the thinking tune. The hand-over is a copy of the block put in the canceller's inbox, nothing more. Each stream says whether it plays her voice: the tune is taken out like her voice, and says nothing of her reply's figure. Chatterbox, played by the pygame mixer, is not seen: with that engine the canceller has no reference and takes nothing out.
+
+**Its work is done on its own thread.** The capture callback (`_on_audio`) stamps each block with the time it was captured and hands it over (`hear`), as her streams hand theirs. A thread of the canceller's own takes the blocks in the order they came: it brings her sound to one channel at the capture rate and gives it to WebRTC, takes her sound out of each microphone block, and queues the block with its capture time, in the order heard, for the voice detector, the room's level, the energy tests and Whisper. No callback waits on WebRTC: each call into it crosses into native code and gives up the interpreter's lock, and done in the callbacks behind one busy Python thread, measured, a 20 ms microphone block took 32 ms and a 46 ms block of her voice 95 ms, so both streams fell behind. The order of the inbox is what pairs what was heard with what was played around the same moment; the listening loop, which falls behind while Whisper or the judge holds it, is not where that happens. The canceller works in 10 ms frames: it cleans a capture in one channel at 8, 16, 32 or 48 kHz, whose blocks of 10, 20 or 30 ms are whole frames. Any other capture (a format fallback, see "Capture format and health") is read as captured, and while the canceller is on the console says so once per format: `⚠️  Echo cancellation: this microphone (R Hz, C channel(s)) is read as captured`. The canceller's own changes (turned on or off, a capture opened at another rate) take their place in the same inbox, so every frame reaches WebRTC at the length its rate expects.
+
+**When its thread falls behind**, a microphone block still waiting `BEHIND_SECONDS` (0.5 s) after it was handed over, what waits is queued as captured and her sound dropped until nothing waits; the debug log says so once each time.
+
+**The delay is found, not set.** Between a block handed over and its sound in the microphone lie the output stream's latency, the air and the input stream's latency, about 300 ms on the desk set-up it was measured on. AEC3 estimates it; told the measured value, it took out 1.4 dB more than it did alone, so no delay is configured.
+
+**How much of her reply it took out.** Each 10 ms frame the microphone delivers while her voice plays (a block of her voice handed over in the last `PLAYING_FOR_SECONDS`, 0.3 s) is weighed: its level heard against its level cleaned. The frames are counted afresh as her reply starts (`reply_started`, from `track_tts_start`) and, as it finishes playing (`reply_finished`, beside the echo detector's `track_tts_finish`), ranked by how much came out of each and read three quarters of the way up (`REMOVAL_PERCENTILE`). Her pauses, the canceller's first second and his voice over part of hers sit low in that ranking, so his question over her last words leaves the figure where her voice put it: on a simulated room, his voice over the last 4.5 s of a 6 s reply left 24 dB, against 29 dB with none. Fewer than `MIN_FRAMES_MEASURED` (20) frames make no figure. The figure stands until her next reply starts; it is what "During TTS" reads, at least `MIN_REMOVED_DB` (10 dB) counting as taken out. The debug log gives it: `🧹 Echo cancelled: N dB of her reply (F frames)`, or `her reply not measured`.
+
+**It fails open.** Without the package, or when the canceller cannot be created, the microphone is read as captured and start-up says `⚠️  Echo cancellation unavailable: <reason>`. An error while it runs, on either side, or a canceller it cannot create at a capture's rate, turns it off for the rest of the session with the same line: a canceller that has failed once is not trusted with his voice. From then on its thread queues the microphone as captured, in the order heard. Her voice never waits on it: the hand-over only copies a block and never raises into the callback. One failure is beyond it: a panic in WebRTC's native code ends the process. The one known to be reachable, a frame of another length than its rate's 10 ms, cannot happen, since frames are cut on the canceller's thread at the rate of the processor that takes them.
+
+**What it does not do.** When he talks over her it takes out her voice and keeps his, though not whole: while both voices are in a frame, its suppression lowers his words too, the more the louder she plays. The transcript-level checks above run on every utterance; they see far less of her, and still catch what gets through, a reply played by Chatterbox included. One reading changes with it: a voice ending with hers does not make an utterance hers once her reply was taken out (see "During TTS"). Dictation reads its own capture, which the canceller does not clean (`dictation.spec.md`).
+
+`voice_echo_cancellation` (default `true`) turns it on at start-up, with `🧹 Echo cancellation: her voice is taken out of the microphone`; off, the microphone is read as captured and nothing is said.
 
 ## The word that wakes her
 

@@ -39,6 +39,11 @@ These packages declare a GPL, LGPL or AGPL licence:
 Full list of components
 -----------------------
 
+aiofiles 25.1.0
+    Licence: Apache-2.0
+    Home: https://github.com/Tinche/aiofiles
+    Required by: livekit
+
 aiohappyeyeballs 2.7.1
     Licence: PSF-2.0
     Home: https://github.com/aio-libs/aiohappyeyeballs
@@ -235,6 +240,11 @@ jsonschema-specifications 2025.9.1
     Home: https://github.com/python-jsonschema/jsonschema-specifications
     Required by: jsonschema
 
+livekit 1.3.0
+    Licence: Apache-2.0
+    Home: https://github.com/livekit/python-sdks/
+    Required by: requirements.txt
+
 lxml 6.1.3
     Licence: BSD-3-Clause
     Home: https://lxml.de/
@@ -272,7 +282,7 @@ multidict 6.7.1
 numpy 1.26.4
     Licence: BSD License
     Home: https://numpy.org
-    Required by: requirements.txt, ctranslate2, faiss-cpu, onnxruntime
+    Required by: requirements.txt, ctranslate2, faiss-cpu, livekit, onnxruntime
 
 onnxruntime 1.29.0
     Licence: MIT License
@@ -313,7 +323,7 @@ propcache 0.5.2
 protobuf 7.36.1
     Licence: 3-Clause BSD License
     Home: https://developers.google.com/protocol-buffers/
-    Required by: onnxruntime
+    Required by: livekit, onnxruntime
 
 psutil 7.2.2
     Licence: BSD-3-Clause
@@ -485,6 +495,11 @@ truststore 0.10.5
     Licence: MIT
     Home: https://github.com/sethmlarson/truststore
     Required by: httpcore2, httpx2
+
+types-protobuf 7.35.1.20261122
+    Licence: Apache-2.0
+    Home: https://github.com/python/typeshed
+    Required by: livekit
 
 typing_extensions 4.16.0
     Licence: PSF-2.0

@@ -52,6 +52,10 @@ datas = [
 # build that lacks one): faster-whisper reads its voice detector's model
 # (Silero, used while whisper_vad is on) from faster_whisper/assets.
 datas += collect_data_files('faster_whisper', subdir='assets')
+# The echo canceller (WebRTC, through livekit) opens its native library from
+# livekit/rtc/resources with importlib.resources; the folder travels whole,
+# its licence texts with it.
+datas += collect_data_files('livekit', subdir='rtc/resources')
 
 # Collect Piper TTS data files (espeak-ng-data is required for phonemization)
 try:
@@ -202,6 +206,10 @@ hiddenimports = [
     '_sounddevice_data',
     '_sounddevice_data.portaudio-binaries',
     'webrtcvad',
+    # Echo cancellation: livekit.rtc is imported inside a function, and its
+    # resources package only by name, through importlib.resources.
+    'livekit.rtc',
+    'livekit.rtc.resources',
     # Speech recognition (faster-whisper backend)
     'faster_whisper',
     'ctranslate2',

@@ -242,6 +242,28 @@ def _voice_detector_not_yet_failed(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _echo_canceller_off(_no_thread_outlives_its_test):
+    """Start and end each test with the echo canceller off and its thread
+    ended, before the thread guard looks for threads left running.
+
+    It is the process's (``ECHO_CANCELLER`` in
+    ``jarvis/utils/echo_cancellation.py``): a listener a test starts turns
+    it on, and every output stream and capture of the tests after it would
+    otherwise go through it. The suite imports modules both as ``jarvis.x``
+    and as ``src.jarvis.x``; each copy loaded is turned off.
+    """
+    def turn_off():
+        for name in ("jarvis.utils.echo_cancellation", "src.jarvis.utils.echo_cancellation"):
+            module = sys.modules.get(name)
+            if module is not None:
+                module.ECHO_CANCELLER.close()
+
+    turn_off()
+    yield
+    turn_off()
+
+
+@pytest.fixture(autouse=True)
 def _no_stream_counted_open(monkeypatch):
     """Start each test with no stream counted open and the device list never
     read afresh.
