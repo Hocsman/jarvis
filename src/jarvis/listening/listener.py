@@ -97,6 +97,12 @@ STOP_WORDS_WHILE_THINKING = 3
 # a video cannot stack up replies that would run minutes later.
 MAX_WAITING_TURNS = 2
 
+# A word of a question he asks again has its counterpart in the first when
+# they score this close (`fuzz.ratio`): Whisper writing the same word twice
+# ("donne-moi", "donne moi") scores 100, one word changed for another
+# ("pommes", "poires"; "marc", "marie"; "lyon", "nyon") 67 to 75.
+SAME_WORD_RATIO = 80
+
 # While the selected microphone is missing, PortAudio's device list is read
 # afresh every MICROPHONE_RESCAN_SECONDS for the first
 # MICROPHONE_RESCAN_FAST_FOR_SECONDS of the wait, then every
@@ -174,12 +180,14 @@ class _Turn:
     """One query handed to the reply thread, with what was true when it was
     handed over: the language he spoke, his exact words, when he stopped
     speaking, and the stop count. A stop counted after it means it is
-    never said."""
+    never said. *answer_said_at* is when the first of its reply went to her
+    voice, None until then."""
     query: str
     language: Optional[str] = None
     heard: Optional[str] = None
     heard_at: float = 0.0
     epoch: int = 0
+    answer_said_at: Optional[float] = None
 
 
 @dataclass
@@ -447,18 +455,50 @@ def _carries_speech_she_did_not_say(heard: str, spoken: str) -> bool:
 
     Fails open: with nothing of hers to compare against, everything is
     the user's.
+
+    A word of one letter is not counted, unless the utterance holds
+    nothing else: an elided article or preposition ("d'accord", "l'heure"),
+    and English "I" and "a", match one in her reply whatever was said, and
+    "d'accord et pour
+    demain" read 2 of 5 against her "d'un", her "et" and her "pour". A
+    digit is a number, and counts.
     """
     import re
 
     mots = re.findall(r"\w+", (heard or "").lower(), re.UNICODE)
     if not mots:
         return False
+    mots = [m for m in mots if len(m) > 1 or m.isdigit()] or mots
     siens = re.findall(r"\w+", (spoken or "").lower(), re.UNICODE)
     if not siens:
         return True
 
     neufs = sum(1 for m in mots if not her_word(m, siens))
     return (neufs / len(mots)) > _SPEECH_SHARE
+
+
+def _the_same_question(first: str, again: str) -> bool:
+    """Whether *again* asks what *first* asks: every word of each, case and
+    punctuation aside, has its counterpart in the other (`SAME_WORD_RATIO`),
+    and both hold the same numbers ("5 minutes" and "10 minutes" are two
+    questions).
+
+    Weighed word by word, not as wholes: "ajoute des pommes" and "ajoute
+    des poires" score 93 as wholes, and a question taken for one already
+    asked is never answered. A question Whisper writes in other words the
+    second time is answered twice."""
+    import re
+
+    words = [re.findall(r"\w+", q.lower(), re.UNICODE) for q in (first, again)]
+    if not all(words):
+        return False
+    numbers = [sorted(w for w in ws if w.isdigit()) for ws in words]
+    if numbers[0] != numbers[1]:
+        return False
+    return all(
+        max(fuzz.ratio(word, other) for other in theirs) >= SAME_WORD_RATIO
+        for mine, theirs in ((words[0], words[1]), (words[1], words[0]))
+        for word in mine)
 
 
 def _tokens_she_did_not_say(heard: str, spoken: str) -> list:
@@ -957,6 +997,8 @@ class VoiceListener(threading.Thread):
                     with self._speech_lock:
                         if self._turn_is_off(turn):
                             return
+                        if turn.answer_said_at is None:
+                            turn.answer_said_at = time.time()
                         self.track_tts_start(phrase, continues=self._streamed_chars > 0)
                         self.tts.speak(phrase, language=turn.language)
                     self._streamed_chars += len(phrase) + 1
@@ -1275,7 +1317,8 @@ class VoiceListener(threading.Thread):
         # Gets full transcript context, last TTS text, and hot window state.
         # Handles: echo detection, wake word queries, hot window follow-ups.
         # During active TTS, this block skips short utterances (<=3 words)
-        # as those are handled by stop command detection above. While his
+        # as those are handled by stop command detection above, unless they
+        # follow her reply taken out of the microphone (below). While his
         # question is collected, Priority 5 still judges them: Whisper's
         # inventions are that short ("Sous-titrage ST' 501").
         is_speaking_now = self.tts and self.tts.is_speaking()
@@ -1292,10 +1335,27 @@ class VoiceListener(threading.Thread):
             utterance_start_time, utterance_end_time
         )
 
+        # His follow-up while she speaks: with her reply taken out of the
+        # microphone, what he says in her time is judged whatever its length,
+        # in the hot window's mode, and only a verdict the judge is sure of
+        # decides it (listening.spec.md, "During TTS"). What he adds to a
+        # question still being collected completes it, as ever (Priority 5).
+        follows_her_reply = (
+            not could_be_hot_window
+            and self._intent_judge is not None
+            and not self.state_manager.is_collecting()
+            and self._in_her_time(utterance_start_time, waiting=waiting)
+            and ECHO_CANCELLER.taking_her_reply_out())
+        judged_in_the_hot_window = could_be_hot_window or follows_her_reply
+        if follows_her_reply:
+            debug_log(f"🗣️ heard over her reply, taken out of the microphone: judged as a "
+                      f"follow-up: \"{text_lower[:60]}\"", "voice")
+
         # Use the upgraded intent judge if available (with full transcript context)
         # Allow during TTS for longer utterances (>3 words) that might be user responses
         word_count = len(text_lower.split())
-        skip_intent_judge_during_tts = is_speaking_now and word_count <= 3
+        skip_intent_judge_during_tts = (is_speaking_now and word_count <= 3
+                                        and not follows_her_reply)
 
         # Gate the intent judge on an engagement signal. Without this check the
         # judge was called on every ambient utterance, blocking the audio loop
@@ -1308,9 +1368,11 @@ class VoiceListener(threading.Thread):
         #      that the fast text-based stop command check missed)
         #   4. His question is still being collected: Priority 5 asks, once
         #      nothing else has taken the utterance
+        #   5. It follows her reply taken out of the microphone, heard while
+        #      she spoke and given once she has stopped
         has_engagement_signal = (
             self._wake_timestamp is not None
-            or could_be_hot_window
+            or judged_in_the_hot_window
             or is_speaking_now
         )
 
@@ -1333,7 +1395,7 @@ class VoiceListener(threading.Thread):
             and has_engagement_signal
             and self._intent_judge is not None
         ):
-            judged_as_a_follow_up = could_be_hot_window
+            judged_as_a_follow_up = judged_in_the_hot_window
             # Get recent transcript segments for context (full buffer)
             context_segments = self._transcript_buffer.get_last_seconds(self._buffer_duration)
 
@@ -1354,7 +1416,7 @@ class VoiceListener(threading.Thread):
             stopped_with_hers = self._voice_stopped_with_hers(
                 utterance_end_time, trailing_silence, waiting=waiting)
             answering = self._answers_her_question(stopped_with_hers, waiting)
-            could_be_hers = (could_be_hot_window
+            could_be_hers = (judged_in_the_hot_window
                              and self._could_be_hers(
                                  text_lower, utterance_energy,
                                  self._in_her_time(utterance_start_time, waiting=waiting),
@@ -1365,13 +1427,14 @@ class VoiceListener(threading.Thread):
                 wake_timestamp=self._wake_timestamp,
                 last_tts_text=last_tts_text,
                 last_tts_finish_time=last_tts_finish_time,
-                in_hot_window=could_be_hot_window,
+                in_hot_window=judged_in_the_hot_window,
                 current_text=text_lower,
             )
 
             if intent_judgment is not None:
                 # Log intent judge decision for user visibility
-                mode_str = "hot window" if could_be_hot_window else "wake word"
+                mode_str = ("while she speaks" if follows_her_reply
+                            else "hot window" if could_be_hot_window else "wake word")
                 if intent_judgment.directed:
                     print(f"  🧠 Intent ({mode_str}): directed → \"{intent_judgment.query or text_lower}\"", flush=True)
                 else:
@@ -1380,6 +1443,9 @@ class VoiceListener(threading.Thread):
                 reason = self._intent_judge.last_failure_reason or "no segments or unavailable"
                 print(f"  🧠 Intent judge: unavailable ({reason})", flush=True)
                 debug_log(f"intent judge returned None — falling back ({reason})", "voice")
+                if follows_her_reply:
+                    debug_log("no verdict on what was said over her reply: the wake word "
+                              "decides", "voice")
                 # Hot window without a verdict: his words are kept as he said
                 # them, and her reply coming back whole is set aside, as are
                 # words that could be hers, unless they carry a wake word that
@@ -1475,6 +1541,23 @@ class VoiceListener(threading.Thread):
                 # whenever its answer leaves it out.
                 decisive = intent_judgment.confidence == "high" or could_be_hot_window
 
+                # Over her reply, only a verdict the judge is sure of
+                # decides. A rejection stands, whatever its reason: none of
+                # the hot window's overrides takes it, an aside and a phrase
+                # Whisper made out of nothing included, since a guest or the
+                # television reaches the judge too. An unsure verdict leaves
+                # it to the wake word, as outside the hot window.
+                if follows_her_reply:
+                    if not decisive:
+                        debug_log(f"⏭️ said over her reply, a {intent_judgment.confidence} "
+                                  f"verdict leaves it to the wake word: \"{text_lower}\"", "voice")
+                        intent_judgment = replace(intent_judgment, query="")
+                    elif not intent_judgment.directed:
+                        debug_log(f"🚫 said over her reply, not for her (judge, no override): "
+                                  f"\"{text_lower}\"", "voice")
+                        self._drop_the_early_beep()
+                        return
+
                 # The wake word is his call, in the hot window as outside it.
                 # A verdict that extracts nothing from an utterance carrying
                 # a wake word that can only be his, her reply coming back
@@ -1484,7 +1567,7 @@ class VoiceListener(threading.Thread):
                 # as words that could be hers. A wake word that could be
                 # hers (see `_carries_his_wake_word`) proves nothing: those
                 # overrides decide.
-                if (could_be_hot_window
+                if (judged_in_the_hot_window
                         and not (intent_judgment.directed and intent_judgment.query)
                         and not self._is_pure_echo(
                             text_lower, said, utterance_energy, answering=answering)[0]
@@ -1499,7 +1582,7 @@ class VoiceListener(threading.Thread):
                 # check does, and waits for his question rather than answer
                 # her name as if it were one. A question the judge reads in
                 # his earlier words is his, and goes on below.
-                if (not could_be_hot_window and intent_judgment.directed
+                if (not judged_in_the_hot_window and intent_judgment.directed
                         and not self._what_follows_her_name(text_lower)
                         and not self._what_follows_her_name((intent_judgment.query or "").lower())):
                     debug_log(f"🔔 her name alone, the wake-word check decides "
@@ -1511,7 +1594,7 @@ class VoiceListener(threading.Thread):
                 if intent_judgment.directed and intent_judgment.query:
                     # In wake word mode, verify the wake word is actually present
                     # The LLM sometimes hallucinates wake words that don't exist
-                    if not could_be_hot_window:
+                    if not judged_in_the_hot_window:
                         has_wake_word = (self._wake_timestamp is not None
                                          or self._carries_the_wake_word(text_lower))
                         if not has_wake_word:
@@ -1610,7 +1693,7 @@ class VoiceListener(threading.Thread):
                 # but fails to extract/synthesize a query (e.g., conversational follow-ups)
                 if intent_judgment.directed and decisive:
                     # In wake word mode, verify the wake word is actually present
-                    if not could_be_hot_window:
+                    if not judged_in_the_hot_window:
                         has_wake_word = (self._wake_timestamp is not None
                                          or self._carries_the_wake_word(text_lower))
                         if not has_wake_word:
@@ -2320,36 +2403,80 @@ class VoiceListener(threading.Thread):
         # The utterance just closed is consumed; what he says next is read
         # from the audio queue as it comes.
         self._clear_audio_buffers()
+        dropped = None
         with self._speech_lock:
-            turn = _Turn(query, self._last_detected_language,
-                         getattr(self, "_last_transcript", None),
-                         heard_at=self._last_heard_at, epoch=self._stop_epoch)
-            self._replies_owed += 1
-            self._latest_turn_epoch = turn.epoch
-            dropped = None
-            if self._turns.qsize() >= MAX_WAITING_TURNS:
-                try:
-                    dropped = self._turns.get_nowait()
-                    self._replies_owed -= 1
-                except queue.Empty:
-                    pass
-            self._turns.put(turn)
+            # A question he asks again before its answer comes is answered
+            # once (listening.spec.md, "The Microphone Is Always Read").
+            asked = self._asked_already(query, heard_at=self._last_heard_at)
+            if asked is None:
+                turn = _Turn(query, self._last_detected_language,
+                             getattr(self, "_last_transcript", None),
+                             heard_at=self._last_heard_at, epoch=self._stop_epoch)
+                self._replies_owed += 1
+                self._latest_turn_epoch = turn.epoch
+                if self._turns.qsize() >= MAX_WAITING_TURNS:
+                    try:
+                        dropped = self._turns.get_nowait()
+                        self._replies_owed -= 1
+                    except queue.Empty:
+                        pass
+                self._turns.put(turn)
+        if asked is not None:
+            shown = query[:50] + ("..." if len(query) > 50 else "")
+            print(f"  🔁 Already asked, answered once: \"{shown}\"", flush=True)
+            debug_log(f"query asked again before its answer, not queued: '{query}' "
+                      f"(as '{asked.query}')", "voice")
+            return
         if dropped is not None:
             shown = dropped.query[:50] + ("..." if len(dropped.query) > 50 else "")
             print(f"  ⏭️ Too many questions waiting, dropped: \"{shown}\"", flush=True)
         debug_log(f"handing query to the reply thread: '{query}'", "voice")
+
+    def _asked_already(self, query: str, *, heard_at: float) -> Optional[_Turn]:
+        """A turn not answered yet that asks what *query* asks
+        (`_the_same_question`): one waiting its turn, or the one in hand if
+        the first of its answer had not gone to her voice when he finished
+        saying *query*, at *heard_at*. A stopped turn is not one. Read under
+        ``_speech_lock``."""
+        with self._turns.mutex:
+            turns = list(self._turns.queue)
+        in_hand = self._turn_in_hand
+        if in_hand is not None and (in_hand.answer_said_at is None
+                                    or in_hand.answer_said_at > heard_at):
+            turns.append(in_hand)
+        return next((turn for turn in turns
+                     if not self._turn_is_off(turn) and _the_same_question(turn.query, query)),
+                    None)
 
     def _collect(self, query: str) -> None:
         """Start collecting his question, or add to the one being collected:
         a second sentence that reaches her before the first was handed over
         completes it, and she answers both. The utterance being handled
         becomes his last words, and the collection's silence is counted from
-        when it ended, so neither Whisper nor the judge adds to it."""
+        when it ended, so neither Whisper nor the judge adds to it. Taken
+        while her voice plays, it is answered by the chime."""
         self._last_transcript, self._last_heard_at = self._hearing
         if self.state_manager.is_collecting():
             self.state_manager.add_to_collection(query, heard_at=self._last_heard_at)
         else:
             self.state_manager.start_collection(query, heard_at=self._last_heard_at)
+        self._chime_while_she_speaks()
+
+    def _chime_while_she_speaks(self) -> None:
+        """While her voice plays the thinking tune does not, so what he
+        says that she takes then is answered by a chime, on a stream of its
+        own (listening.spec.md, "Early Feedback"). LISTENING is not
+        published: she is SPEAKING."""
+        if not (getattr(self.cfg, "tune_enabled", False)
+                and self.tts is not None and self.tts.is_speaking()):
+            return
+        from ..output import tune_player
+
+        debug_log("🔔 taken while she speaks: the chime says so", "voice")
+        try:
+            tune_player.play_heard_chime()
+        except Exception as e:
+            debug_log(f"heard chime not played: {e}", "voice")
 
     def _something_to_stop(self) -> bool:
         """A turn owed, or his question still being collected. A turn a stop
@@ -2441,6 +2568,8 @@ class VoiceListener(threading.Thread):
                     if off:
                         debug_log("turn was stopped: nothing more of it is said", "voice")
                     else:
+                        if will_speak and turn.answer_said_at is None:
+                            turn.answer_said_at = time.time()
                         self._speak_reply(reply, asks=asked.request_id if asked else None,
                                           language=turn.language)
                 if off:

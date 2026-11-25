@@ -81,6 +81,38 @@ def test_an_empty_utterance_carries_nothing():
     assert _carries_speech_she_did_not_say("   ", DITE) is False
 
 
+# ── A word of one letter ───────────────────────────────────────────────
+
+
+DITE_METEO = ("À Lyon, il fait 4,6 degrés avec une légère pluie, et une ressentie de "
+              "2,1 degrés à cause d'un vent de 6 kilomètres par heure, donc un temps "
+              "idéal pour rester au chaud.")
+
+
+def test_an_elided_letter_does_not_make_his_words_hers():
+    """Field trace: "d'accord et pour demain", said over her weather
+    reply, read 2 of 5 words she did not say, her "d'un" making the "d" of
+    "d'accord" one of hers: 40%, not over the bar. A word of one letter
+    is not counted."""
+    assert _carries_speech_she_did_not_say("d'accord et pour demain", DITE_METEO) is True
+
+
+def test_her_own_words_with_an_elided_letter_are_still_hers():
+    assert _carries_speech_she_did_not_say(
+        "d'un vent de six kilomètres par heure", DITE_METEO) is False
+
+
+def test_a_lone_letter_is_counted_when_it_is_all_that_was_said():
+    """With nothing else said, the one word is what was heard: a script
+    that writes a word in one sign answers in one."""
+    assert _carries_speech_she_did_not_say("好", "今天下雨。") is True
+
+
+def test_a_digit_is_a_number_and_counts():
+    assert _carries_speech_she_did_not_say(
+        "le 8 ?", "Le rendez-vous est le 7, à dix heures.") is True
+
+
 def test_it_does_not_key_on_a_language():
     """Same shape in English: her line re-heard, versus a real barge-in."""
     dite = ("I could not retrieve the weather for Bagneux, the service "

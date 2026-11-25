@@ -2492,6 +2492,312 @@ class TestTheLogSaysWhyAnUtteranceIsMarked:
 
 
 # ---------------------------------------------------------------------------
+# Tests: His follow-up while she speaks, her reply taken out of the microphone
+# ---------------------------------------------------------------------------
+
+# Her reply as she speaks it, and his follow-ups heard word for word over it
+# once the canceller took her voice out.
+_HER_WEATHER_REPLY = (
+    "À Lyon, il fait 4,6 degrés avec une légère pluie, et une ressentie de 2,1 degrés "
+    "à cause d'un vent de 6 kilomètres par heure, donc un temps idéal pour rester au chaud.")
+_HIS_FOLLOW_UPS = [
+    "Je peux m'indiquer la météo pour aujourd'hui, s'il te plaît.",
+    "d'accord et pour demain",
+    "Et demain ?",
+]
+_HIS_LONG_FOLLOW_UP = _HIS_FOLLOW_UPS[0]
+
+
+def _she_speaks_past_the_canceller(listener, canceller, reply: str = _HER_WEATHER_REPLY, *,
+                                   handed_over=True, capture=(16000, 1),
+                                   taken_out=40.0) -> None:
+    """She is saying *reply*, with the echo canceller cleaning a capture of
+    *capture* (rate, channels): her stream hands it her sound as it plays,
+    unless *handed_over* is False, and half a second of it heard by the
+    microphone comes out *taken_out* dB lower. Her reply goes on."""
+    assert canceller.start(16000) is None
+    canceller.capture_opened(*capture)
+    listener.tts.is_speaking.return_value = True
+    listener.echo_detector.track_tts_start(reply, baseline_energy=_FLOOR)
+    canceller.reply_started()
+    rate, channels = capture
+    with patch.object(_WebRtcStandIn, "gain", 10 ** (-taken_out / 20)):
+        tap = canceller.reference_tap(16000)
+        for _ in range(25):
+            if handed_over:
+                tap(np.full(320, 0.1, dtype=np.float32))
+            canceller.hear(time.time(), np.full((rate // 50, channels), 0.1, dtype=np.float32),
+                           lambda captured_at, block: None)
+        assert canceller.settle()
+
+
+def _judge_that_reads_the_mode(listener):
+    """A judge that reads the prompt the real judge builds: in the hot
+    window's mode, an utterance not shown "(during TTS)" is his follow-up;
+    anything else, with no wake word in it, is not for her."""
+
+    def judge(**kwargs):
+        prompt = IntentJudge()._build_user_prompt(**kwargs)
+        current = _current_line(prompt)
+        assert current, kwargs
+        if "Mode: HOT WINDOW" in prompt and "during TTS" not in current:
+            return _make_judgment(directed=True, query=kwargs["current_text"],
+                                  reasoning="his follow-up in the hot window")
+        return _make_judgment(directed=False, confidence="high",
+                              reasoning="no wake word, not addressed to the assistant")
+
+    mock_judge = MagicMock()
+    mock_judge.available = True
+    mock_judge.last_failure_reason = ""
+    mock_judge.judge.side_effect = judge
+    listener._intent_judge = mock_judge
+    return mock_judge
+
+
+def _he_says_over_her(listener, text, *, started_ago=1.5) -> None:
+    """He says *text* over her reply, his voice going on to the moment the
+    detector closes it."""
+    _whisper_hears(listener, text, started=time.time() - started_ago,
+                   level=_level(listener, _HIS_VOICE))
+
+
+@pytest.mark.unit
+class TestHisFollowUpWhileSheSpeaks:
+    """With her reply taken out of the microphone, what he says over it is
+    a follow-up, judged in the hot window's mode, and only the judge's
+    verdict decides it. Field trace: "Je peux m'indiquer la météo pour
+    aujourd'hui, s'il te plaît." and "d'accord et pour demain", heard word
+    for word over her reply, left unanswered for want of her name."""
+
+    @pytest.mark.parametrize("heard", _HIS_FOLLOW_UPS,
+                             ids=["a-long-question", "an-elided-letter", "two-words"])
+    @patch("builtins.print")
+    def test_his_follow_up_is_answered_without_her_name(self, _print, canceller, heard):
+        listener, _ = _create_listener()
+        _she_speaks_past_the_canceller(listener, canceller)
+        judge = _judge_that_reads_the_mode(listener)
+
+        _he_says_over_her(listener, heard)
+
+        assert "Mode: HOT WINDOW" in _prompt_shown_to(judge)
+        assert _accepted_query(listener) == heard.lower()
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_the_console_names_the_mode(self, mock_print, canceller):
+        listener, _ = _create_listener()
+        _she_speaks_past_the_canceller(listener, canceller)
+        _judge_that_reads_the_mode(listener)
+
+        _he_says_over_her(listener, _HIS_LONG_FOLLOW_UP)
+
+        assert any("🧠 Intent (while she speaks): directed" in line
+                   for line in _console_lines(mock_print))
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("verdict", [
+        _make_judgment(directed=False, aside=True, reasoning="he is talking to someone else"),
+        _make_judgment(directed=False, noise=True, reasoning="a phrase made out of nothing"),
+        _make_judgment(directed=False, reasoning="an echo of the assistant's own speech"),
+        _make_judgment(directed=False, reasoning="not addressed to the assistant"),
+    ], ids=["an-aside", "noise", "an-echo-verdict", "not-addressed"])
+    @patch("builtins.print")
+    def test_a_rejection_stands(self, mock_print, canceller, verdict):
+        """None of the hot window's overrides takes a rejection while she
+        speaks: whatever is said near her, a guest or the television,
+        reaches the judge, and the judge decides."""
+        listener, _ = _create_listener()
+        _she_speaks_past_the_canceller(listener, canceller)
+        _install_intent_judge(listener, verdict)
+
+        _he_says_over_her(listener, _HIS_LONG_FOLLOW_UP)
+
+        assert _accepted_query(listener) == ""
+        assert not any("Intent override" in line for line in _console_lines(mock_print))
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("verdict", [
+        _make_judgment(directed=True, query=_HIS_LONG_FOLLOW_UP.lower(), confidence="medium"),
+        _make_judgment(directed=True, confidence="low"),
+    ], ids=["directed-unsure", "directed-unsure-no-query"])
+    @patch("builtins.print")
+    def test_an_unsure_verdict_leaves_it_to_the_wake_word(self, _print, canceller, verdict):
+        listener, _ = _create_listener()
+        _she_speaks_past_the_canceller(listener, canceller)
+        _install_intent_judge(listener, verdict)
+
+        _he_says_over_her(listener, _HIS_LONG_FOLLOW_UP)
+
+        assert _accepted_query(listener) == ""
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_with_no_verdict_the_wake_word_decides(self, mock_print, canceller):
+        listener, _ = _create_listener()
+        _she_speaks_past_the_canceller(listener, canceller)
+        judge = _install_intent_judge(listener, None)
+        judge.last_failure_reason = "timed out"
+
+        _he_says_over_her(listener, _HIS_LONG_FOLLOW_UP)
+
+        assert _accepted_query(listener) == ""
+        assert not any("Intent fallback" in line for line in _console_lines(mock_print))
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_with_no_verdict_her_name_still_calls_her(self, _print, canceller):
+        listener, _ = _create_listener()
+        _she_speaks_past_the_canceller(listener, canceller)
+        judge = _install_intent_judge(listener, None)
+        judge.last_failure_reason = "timed out"
+
+        _he_says_over_her(listener, "jarvis, et pour demain à lyon ?")
+
+        assert "demain" in _accepted_query(listener)
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_her_own_words_are_not_a_follow_up(self, _print, canceller):
+        """What little of her voice gets past the canceller and comes back
+        in her words is shown "(during TTS)" and never taken."""
+        listener, _ = _create_listener()
+        _she_speaks_past_the_canceller(listener, canceller)
+        _judge_that_reads_the_mode(listener)
+
+        _he_says_over_her(listener, "une ressentie de 2,1 degrés à cause d'un vent de 6 kilomètres")
+
+        assert _accepted_query(listener) == ""
+        listener.state_manager.stop()
+
+    @pytest.mark.parametrize("how", [
+        {"handed_over": False},
+        {"capture": (44100, 1)},
+        {"taken_out": MIN_REMOVED_DB - 4},
+    ], ids=["reply-it-was-not-handed", "capture-at-a-rate-it-cannot-clean",
+            "too-little-taken-out"])
+    @patch("builtins.print")
+    def test_with_her_voice_left_in_the_microphone_the_wake_word_is_needed(
+            self, _print, canceller, how):
+        listener, _ = _create_listener()
+        _she_speaks_past_the_canceller(listener, canceller, **how)
+        judge = _judge_that_reads_the_mode(listener)
+
+        _he_says_over_her(listener, _HIS_LONG_FOLLOW_UP)
+
+        assert "Mode: WAKE WORD" in _prompt_shown_to(judge)
+        assert _accepted_query(listener) == ""
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_without_the_canceller_his_two_words_are_left_to_the_stop_check(self, _print):
+        """The canceller off: what he says while she speaks needs her name,
+        and three words or fewer are read only for a stop."""
+        listener, tts = _create_listener()
+        tts.is_speaking.return_value = True
+        listener.echo_detector.track_tts_start(_HER_WEATHER_REPLY, baseline_energy=_FLOOR)
+        judge = _judge_that_reads_the_mode(listener)
+
+        _he_says_over_her(listener, "Et demain ?")
+
+        judge.judge.assert_not_called()
+        assert _accepted_query(listener) == ""
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_heard_while_she_spoke_and_decided_once_she_stopped(self, _print, canceller):
+        """His question began over her reply and Whisper gave it once she had
+        stopped, before the hot window opened: it is a follow-up all the
+        same, as her figure says."""
+        listener, tts = _create_listener()
+        _she_speaks_past_the_canceller(listener, canceller)
+        judge = _judge_that_reads_the_mode(listener)
+        started = time.time() - 1.5
+        tts.is_speaking.return_value = False
+        listener.activate_hot_window(quiet_tail=0.0)
+
+        _whisper_hears(listener, _HIS_LONG_FOLLOW_UP, started=started,
+                       level=_level(listener, _HIS_VOICE))
+
+        assert "Mode: HOT WINDOW" in _prompt_shown_to(judge)
+        assert _accepted_query(listener) == _HIS_LONG_FOLLOW_UP.lower()
+        listener.state_manager.stop()
+
+
+@pytest.mark.unit
+class TestAChimeWhenSheTakesHisQuestionWhileSheSpeaks:
+    """The thinking tune never plays over her voice; a question taken while
+    she speaks is answered by a chime. Field trace: asked over her reply
+    with her name, his question waited for her voice to stop with no sign,
+    and he asked again."""
+
+    @staticmethod
+    def _listener(tune_enabled=True):
+        listener, tts = _create_listener()
+        listener.cfg.tune_enabled = tune_enabled
+        return listener, tts
+
+    @patch("builtins.print")
+    def test_his_follow_up_taken_while_she_speaks_chimes(self, _print, canceller):
+        listener, _ = self._listener()
+        _she_speaks_past_the_canceller(listener, canceller)
+        _judge_that_reads_the_mode(listener)
+
+        with patch("jarvis.output.tune_player.TunePlayer", _SilentTune), \
+             patch("jarvis.output.tune_player.play_heard_chime") as chime:
+            _he_says_over_her(listener, _HIS_LONG_FOLLOW_UP)
+
+        assert _accepted_query(listener)
+        assert chime.call_count == 1
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_her_name_while_she_speaks_chimes(self, _print):
+        """Without the canceller, his question with her name is taken while
+        she speaks, and answered by the chime as well."""
+        listener, tts = self._listener()
+        tts.is_speaking.return_value = True
+        listener.echo_detector.track_tts_start(_HER_WEATHER_REPLY, baseline_energy=_FLOOR)
+
+        with patch("jarvis.output.tune_player.TunePlayer", _SilentTune), \
+             patch("jarvis.output.tune_player.play_heard_chime") as chime:
+            _he_says_over_her(listener, "jarvis, quel temps fera-t-il demain à marseille ?")
+
+        assert "marseille" in _accepted_query(listener)
+        assert chime.call_count == 1
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_with_the_tune_turned_off_there_is_no_chime(self, _print, canceller):
+        listener, _ = self._listener(tune_enabled=False)
+        _she_speaks_past_the_canceller(listener, canceller)
+        _judge_that_reads_the_mode(listener)
+
+        with patch("jarvis.output.tune_player.play_heard_chime") as chime:
+            _he_says_over_her(listener, _HIS_LONG_FOLLOW_UP)
+
+        assert _accepted_query(listener)
+        chime.assert_not_called()
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_once_she_has_stopped_the_tune_is_the_sign(self, _print):
+        listener, _ = self._listener()
+        _she_says(listener, _HER_WEATHER_REPLY)
+        assert _wait_for_hot_window_active(listener)
+        _judge_that_reads_the_marker(listener)
+
+        with patch("jarvis.output.tune_player.TunePlayer", _SilentTune), \
+             patch("jarvis.output.tune_player.play_heard_chime") as chime:
+            _whisper_hears(listener, _HIS_QUESTION, started=time.time() - 1.0,
+                           level=_level(listener, _HIS_VOICE))
+
+        assert "lyon" in _accepted_query(listener)
+        chime.assert_not_called()
+        assert listener._tune_player is not None and listener._tune_player.played
+        listener.state_manager.stop()
+
+
+# ---------------------------------------------------------------------------
 # Tests: His answer to the question she asked before acting
 # ---------------------------------------------------------------------------
 
@@ -2502,7 +2808,9 @@ class TestTheLogSaysWhyAnUtteranceIsMarked:
 # scores as her question coming back whole.
 _SHE_ASKS_BEFORE_ACTING = [
     (describe_action("archivePhotos", {}, "action").spoken, "Valide, tu peux lancer."),
-    ("I'm about to empty the recycle bin. Do you approve?", "Yes, I approve."),
+    # One word of his in three counted: "I" is a word of one letter, which
+    # the share does not count.
+    ("I'm about to empty the recycle bin. Do you approve?", "Yes, I do approve."),
 ]
 _ASKED_IDS = ["french-gate-wording", "english"]
 

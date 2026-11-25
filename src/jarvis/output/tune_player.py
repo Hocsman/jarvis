@@ -105,6 +105,92 @@ def _prewarm_cache() -> None:
 threading.Thread(target=_prewarm_cache, daemon=True).start()
 
 
+# --- The chime: his question taken while she speaks -------------------------
+
+def _generate_heard_chime_samples() -> tuple[np.ndarray, int]:
+    """The chime that tells him his question was taken while she speaks
+    (listening.spec.md, "Early Feedback"): two soft notes rising, E5 then
+    A5, about a quarter of a second, as a raw int16 mono buffer.
+
+    Each note rises in 8 ms, fades as a struck bell does and closes on a
+    10 ms ramp, so neither its start nor its end clicks. A second
+    harmonic, quiet, keeps it from sounding like a test tone. Its peak sits
+    at a third of full scale: heard over her voice, not over him.
+    """
+    sample_rate = 44100
+    pieces = []
+    for frequency, seconds in ((659.0, 0.11), (880.0, 0.15)):
+        t = np.arange(int(sample_rate * seconds)) / sample_rate
+        envelope = (np.minimum(1.0, t / 0.008)
+                    * np.exp(-t * 14.0)
+                    * np.minimum(1.0, (seconds - t) / 0.010))
+        tone = np.sin(2 * np.pi * frequency * t) + 0.2 * np.sin(4 * np.pi * frequency * t)
+        pieces.append(tone * envelope)
+    samples = np.concatenate(pieces)
+    samples *= 0.33 / np.abs(samples).max()
+    return (samples * 32767).astype(np.int16), sample_rate
+
+
+_HEARD_CHIME_SAMPLES: Optional[tuple[np.ndarray, int]] = None
+
+
+def _get_heard_chime_samples() -> tuple[np.ndarray, int]:
+    """Get cached raw int16 samples of the chime."""
+    global _HEARD_CHIME_SAMPLES
+    if _HEARD_CHIME_SAMPLES is None:
+        _HEARD_CHIME_SAMPLES = _generate_heard_chime_samples()
+    return _HEARD_CHIME_SAMPLES
+
+
+def play_heard_chime() -> threading.Thread:
+    """Play the chime once, on a stream of its own, and return the thread
+    that plays it: the caller does not wait for it.
+
+    The stream is not handed to the echo canceller: her voice's stream
+    plays at the same time, and two streams handed over at once would be
+    read one after the other, her voice's timing in the canceller with
+    them. Without an audio output it says so in the debug log and plays
+    nothing.
+    """
+    thread = threading.Thread(target=_play_heard_chime, daemon=True, name="heard-chime")
+    thread.start()
+    return thread
+
+
+def _play_heard_chime() -> None:
+    try:
+        import sounddevice as sd
+    except Exception as exc:
+        debug_log(f"heard chime: sounddevice unavailable: {exc!r}", category="tune")
+        return
+    try:
+        samples, sample_rate = _get_heard_chime_samples()
+        stream = open_output_stream(
+            sd,
+            echo_canceller=None,
+            her_voice=False,
+            samplerate=sample_rate,
+            channels=1,
+            dtype="int16",
+        )
+    except Exception as exc:
+        debug_log(f"heard chime: stream open failed: {exc!r}", category="tune")
+        return
+    try:
+        with portaudio_lock:
+            stream.start()
+        stream.write(samples.reshape(-1, 1))
+        stream.stop()
+    except Exception as exc:
+        debug_log(f"heard chime: playback failed: {exc!r}", category="tune")
+    finally:
+        try:
+            with portaudio_lock:
+                stream.close()
+        except Exception as exc:
+            debug_log(f"heard chime: stream close failed: {exc!r}", category="tune")
+
+
 class TunePlayer:
     """Plays a thinking-pad tune in a loop while Jarvis is processing.
 

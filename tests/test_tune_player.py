@@ -236,3 +236,73 @@ def test_stream_callback_wraps_seamlessly(monkeypatch):
         assert seen_wrap
     finally:
         tp.stop_tune()
+
+
+# --- The chime: his question taken while she speaks -------------------------
+
+class _RecordedStream:
+    """An output stream that keeps what it is given and what is written to it."""
+
+    def __init__(self, opened, **kwargs):
+        self.kwargs = kwargs
+        self.written = []
+        self.closed = False
+        opened.append(self)
+
+    def start(self):
+        pass
+
+    def write(self, data):
+        import numpy as np
+
+        self.written.append(np.array(data, copy=True))
+
+    def stop(self):
+        pass
+
+    def close(self):
+        self.closed = True
+
+
+def _streams_recorded(monkeypatch) -> list:
+    opened = []
+    fake_sd = types.ModuleType("sounddevice")
+    fake_sd.OutputStream = lambda **kwargs: _RecordedStream(opened, **kwargs)
+    monkeypatch.setitem(sys.modules, "sounddevice", fake_sd)
+    return opened
+
+
+def test_the_chime_is_short_audible_and_played_once(monkeypatch):
+    import numpy as np
+
+    opened = _streams_recorded(monkeypatch)
+
+    tune_player.play_heard_chime().join(5.0)
+
+    assert len(opened) == 1
+    stream = opened[0]
+    assert stream.closed
+    played = np.concatenate([np.asarray(block).reshape(-1) for block in stream.written])
+    seconds = played.size / stream.kwargs["samplerate"]
+    assert 0.05 < seconds < 0.4
+    assert np.abs(played).max() > 0.1 * 32767
+
+
+def test_the_chime_is_not_handed_to_the_echo_canceller(monkeypatch):
+    """Two streams handed over at once would be read one after the other,
+    her voice's timing in the canceller with them."""
+    import jarvis.utils.audio_stream as audio_stream_module
+
+    _streams_recorded(monkeypatch)
+    canceller = MagicMock()
+    monkeypatch.setattr(audio_stream_module, "ECHO_CANCELLER", canceller)
+
+    tune_player.play_heard_chime().join(5.0)
+
+    canceller.reference_tap.assert_not_called()
+
+
+def test_without_sounddevice_the_chime_is_skipped_quietly(monkeypatch):
+    monkeypatch.setitem(sys.modules, "sounddevice", None)
+
+    tune_player.play_heard_chime().join(5.0)

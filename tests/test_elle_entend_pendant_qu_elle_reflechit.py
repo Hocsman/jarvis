@@ -984,3 +984,130 @@ def test_the_backlog_outlasts_the_intent_judge():
 
     longest = get_default_config()["intent_judge_timeout_sec"] + _PAST_THE_TIMEOUT_SECONDS
     assert AUDIO_BACKLOG_SECONDS > longest
+
+
+# --- A question he repeats before her answer comes --------------------------
+
+def _console(mock_print) -> list:
+    return [" ".join(str(arg) for arg in call.args) for call in mock_print.call_args_list]
+
+
+@patch("builtins.print")
+def test_a_question_asked_again_while_it_waits_is_answered_once(mock_print):
+    """Field trace: asked over her reply, with no sign that she had heard,
+    he asked again as she finished, and she gave the weather twice."""
+    engine = _Engine()
+    listener, _tts, patcher = _listener_with(engine)
+    try:
+        listener._hand_over("quelle heure est-il")
+        assert engine.started.wait(WAIT)
+        listener._hand_over("quel temps fera-t-il demain à Lyon ?")
+        listener._hand_over("Quel temps fera-t-il demain à Lyon")
+        engine.release.set()
+        assert _settled(listener)
+
+        assert engine.queries == ["quelle heure est-il", "quel temps fera-t-il demain à Lyon ?"]
+        assert any(line.lstrip().startswith("🔁 Already asked, answered once")
+                   for line in _console(mock_print))
+    finally:
+        engine.release.set()
+        _stop(listener, patcher)
+
+
+@patch("builtins.print")
+def test_a_question_asked_again_while_its_answer_is_prepared_is_answered_once(_print):
+    engine = _Engine()
+    listener, _tts, patcher = _listener_with(engine)
+    try:
+        listener._hand_over("quel temps fera-t-il demain à Lyon ?")
+        assert engine.started.wait(WAIT)
+        listener._last_heard_at = time.time()
+        listener._hand_over("quel temps fera-t-il demain à lyon")
+        engine.release.set()
+        assert _settled(listener)
+
+        assert engine.queries == ["quel temps fera-t-il demain à Lyon ?"]
+    finally:
+        engine.release.set()
+        _stop(listener, patcher)
+
+
+@patch("builtins.print")
+def test_a_question_asked_again_once_her_answer_began_is_answered_again(_print):
+    """He heard her answer begin and asked again: that is asking twice."""
+    engine = _Engine(before=["Demain à Lyon, il fera beau, Monsieur."],
+                     after=["Et doux l'après-midi."],
+                     reply="Demain à Lyon, il fera beau, Monsieur. Et doux l'après-midi.")
+    listener, tts, patcher = _listener_with(engine)
+    try:
+        listener._hand_over("quel temps fera-t-il demain à Lyon ?")
+        assert engine.started.wait(WAIT)
+        assert _wait_for(lambda: _spoken(tts) == ["Demain à Lyon, il fera beau, Monsieur."])
+        listener._last_heard_at = time.time()
+        listener._hand_over("quel temps fera-t-il demain à Lyon ?")
+        engine.release.set()
+        assert _settled(listener)
+
+        assert len(engine.queries) == 2
+    finally:
+        engine.release.set()
+        _stop(listener, patcher)
+
+
+@patch("builtins.print")
+def test_two_questions_with_other_numbers_are_two_questions(_print):
+    engine = _Engine()
+    listener, _tts, patcher = _listener_with(engine)
+    try:
+        listener._hand_over("quelle heure est-il")
+        assert engine.started.wait(WAIT)
+        listener._hand_over("rappelle-moi dans 5 minutes")
+        listener._hand_over("rappelle-moi dans 10 minutes")
+        engine.release.set()
+        assert _settled(listener)
+
+        assert engine.queries == ["quelle heure est-il", "rappelle-moi dans 5 minutes",
+                                  "rappelle-moi dans 10 minutes"]
+    finally:
+        engine.release.set()
+        _stop(listener, patcher)
+
+
+@patch("builtins.print")
+def test_a_question_asked_again_after_a_stop_is_answered(_print):
+    engine = _Engine()
+    listener, _tts, patcher = _listener_with(engine)
+    try:
+        listener._hand_over("quel temps fera-t-il demain à Lyon ?")
+        assert engine.started.wait(WAIT)
+        listener._process_transcript("stop", utterance_energy=0.01)
+        listener._last_heard_at = time.time()
+        listener._hand_over("quel temps fera-t-il demain à Lyon ?")
+        engine.release.set()
+        assert _settled(listener)
+
+        assert engine.queries == ["quel temps fera-t-il demain à Lyon ?"] * 2
+    finally:
+        engine.release.set()
+        _stop(listener, patcher)
+
+
+@patch("builtins.print")
+def test_a_question_with_one_word_changed_is_another_question(_print):
+    """Said as wholes the two score 93, but a question dropped would never
+    be answered: the words are weighed one by one."""
+    engine = _Engine()
+    listener, _tts, patcher = _listener_with(engine)
+    try:
+        listener._hand_over("quelle heure est-il")
+        assert engine.started.wait(WAIT)
+        listener._hand_over("ajoute des pommes à la liste")
+        listener._hand_over("ajoute des poires à la liste")
+        engine.release.set()
+        assert _settled(listener)
+
+        assert engine.queries == ["quelle heure est-il", "ajoute des pommes à la liste",
+                                  "ajoute des poires à la liste"]
+    finally:
+        engine.release.set()
+        _stop(listener, patcher)

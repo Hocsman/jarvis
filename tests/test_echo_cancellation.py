@@ -684,6 +684,62 @@ def test_a_canceller_turned_off_took_nothing_out():
     assert not canceller.took_her_reply_out()
 
 
+# --- How much of her reply it is taking out, while it plays ----------------------
+
+
+def _her_reply_so_far(canceller, *, blocks, her_voice=True, capture=(CAPTURE_RATE, 1)):
+    """The first *blocks* 20 ms blocks of a reply of hers, heard by the
+    microphone as her stream hands them over; the reply goes on."""
+    canceller.reply_started()
+    tap = canceller.reference_tap(CAPTURE_RATE, her_voice=her_voice)
+    rate, channels = capture
+    for i in range(blocks):
+        tap(np.full((320, 1), 0.3, dtype=np.float32))
+        canceller.hear(i * 0.02, _mic(rate=rate, channels=channels), _Delivered())
+    assert canceller.settle()
+
+
+def test_her_reply_is_being_taken_out_while_it_plays_once_enough_of_it_was():
+    canceller, _ = _canceller_with({"capture_gain": _gain_removing(echo_module.MIN_REMOVED_DB + 4)})
+
+    _her_reply_so_far(canceller, blocks=25)
+
+    assert canceller.taking_her_reply_out()
+
+
+@pytest.mark.parametrize("db, blocks, how", [
+    (echo_module.MIN_REMOVED_DB - 4, 25, {}),
+    (40.0, echo_module.MIN_FRAMES_MEASURED // 2 - 1, {}),
+    (40.0, 25, {"her_voice": False}),
+    (40.0, 25, {"capture": (44100, 1)}),
+], ids=["too-little-taken-out", "too-few-frames-yet", "only-the-tune-plays",
+        "capture-it-does-not-clean"])
+def test_her_reply_is_not_being_taken_out_while_it_plays(db, blocks, how):
+    canceller, _ = _canceller_with({"capture_gain": _gain_removing(db)})
+
+    _her_reply_so_far(canceller, blocks=blocks, **how)
+
+    assert not canceller.taking_her_reply_out()
+
+
+@pytest.mark.parametrize("handed_over", [True, False], ids=["taken-out", "not-handed-over"])
+def test_once_her_reply_has_finished_it_is_being_taken_out_as_its_figure_says(handed_over):
+    canceller, _ = _canceller_with({"capture_gain": _gain_removing(40.0)})
+
+    _her_reply(canceller, handed_over=handed_over)
+
+    assert canceller.taking_her_reply_out() is canceller.took_her_reply_out() is handed_over
+
+
+def test_a_canceller_turned_off_is_taking_nothing_out():
+    canceller, _ = _canceller_with({"capture_gain": _gain_removing(40.0)})
+    _her_reply_so_far(canceller, blocks=25)
+
+    canceller.stop()
+
+    assert not canceller.taking_her_reply_out()
+
+
 def test_the_debug_log_gives_what_was_taken_out_of_her_reply_when_it_finishes(monkeypatch):
     lines = []
     monkeypatch.setattr(echo_module, "debug_log", lambda message, category="debug": lines.append(message))

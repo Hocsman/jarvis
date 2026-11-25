@@ -80,6 +80,15 @@ class _WebRtcProcessor:
         return np.frombuffer(bytes(frame.data), dtype=np.int16)
 
 
+def _removed_db(frames: np.ndarray) -> Optional[float]:
+    """How much came out of her reply, in dB, read from what came out of
+    each of its *frames*: ``REMOVAL_PERCENTILE`` of them, None when there
+    are fewer than ``MIN_FRAMES_MEASURED``."""
+    if len(frames) < MIN_FRAMES_MEASURED:
+        return None
+    return float(np.percentile(frames, REMOVAL_PERCENTILE))
+
+
 def _to_pcm(samples: np.ndarray) -> np.ndarray:
     """Float samples as 16-bit PCM, on the same scale ``_as_mono_float``
     reads PCM with, so an int16 block makes the round trip unchanged."""
@@ -190,6 +199,7 @@ class EchoCanceller:
         self._measure_lock = threading.Lock()
         self._reply_frames: deque = deque(maxlen=MAX_FRAMES_MEASURED)
         self._reply_removed_db: Optional[float] = None
+        self._reply_playing = False
 
     # --- Life cycle -----------------------------------------------------
 
@@ -313,6 +323,7 @@ class EchoCanceller:
         with self._measure_lock:
             self._reply_frames.clear()
             self._reply_removed_db = None
+            self._reply_playing = True
 
     def reply_finished(self) -> Optional[float]:
         """Her reply finished playing: how much was taken out of it, in dB
@@ -322,8 +333,8 @@ class EchoCanceller:
         with self._measure_lock:
             frames = np.fromiter(self._reply_frames, dtype=np.float64)
             self._reply_frames.clear()
-        removed = (float(np.percentile(frames, REMOVAL_PERCENTILE))
-                   if len(frames) >= MIN_FRAMES_MEASURED else None)
+            self._reply_playing = False
+        removed = _removed_db(frames)
         self._reply_removed_db = removed
         if self._on:
             if removed is None:
@@ -344,6 +355,23 @@ class EchoCanceller:
         the canceller is on and at least ``MIN_REMOVED_DB`` came out."""
         removed = self._reply_removed_db
         return self._on and removed is not None and removed >= MIN_REMOVED_DB
+
+    def taking_her_reply_out(self) -> bool:
+        """Whether her reply is being taken out of the microphone: the
+        canceller is on and, while her reply plays, at least
+        ``MIN_REMOVED_DB`` came out of the frames of it heard so far, read
+        as its figure is (``REMOVAL_PERCENTILE`` of at least
+        ``MIN_FRAMES_MEASURED`` frames); once it has finished, its figure
+        decides (``took_her_reply_out``)."""
+        if not self._on:
+            return False
+        with self._measure_lock:
+            playing = self._reply_playing
+            frames = np.fromiter(self._reply_frames, dtype=np.float64) if playing else None
+        if not playing:
+            return self.took_her_reply_out()
+        removed = _removed_db(frames)
+        return removed is not None and removed >= MIN_REMOVED_DB
 
     # --- The canceller's thread -----------------------------------------
 
