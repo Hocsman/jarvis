@@ -227,6 +227,30 @@ def _isolate_face_frames(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_turn_end_model(_bac_a_sable, request, monkeypatch):
+    """Keep the end-of-turn model's folder in the sandbox.
+
+    A listener builds its end-of-turn detector on the user's models folder
+    and starts loading it in ``run()``; a test that does so would hash,
+    replace or fetch into the folder Jarvis itself reads the model from.
+    Each test gets a folder of its own. The suite imports modules both as
+    ``jarvis.x`` and as ``src.jarvis.x``.
+    """
+    import importlib
+
+    folder = _bac_a_sable / f"smart_turn-{abs(hash(request.node.nodeid)):x}"
+    patched = 0
+    for path in ("jarvis.listening.turn_end", "src.jarvis.listening.turn_end"):
+        try:
+            module = importlib.import_module(path)
+        except ImportError:
+            continue
+        monkeypatch.setattr(module, "models_dir", lambda: folder)
+        patched += 1
+    assert patched, "neither end-of-turn model module could be imported"
+
+
+@pytest.fixture(autouse=True)
 def _voice_detector_not_yet_failed(monkeypatch):
     """Start each test with Whisper's voice detector not yet failed.
 

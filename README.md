@@ -453,17 +453,17 @@ Keep the list short: each name also attracts words that sound like it, so a plac
 }
 ```
 
-**Knowing When You Have Finished** - A small model ([Smart Turn](https://github.com/pipecat-ai/smart-turn) v3.2 by Daily, 8.7 MB, BSD 2-Clause) listens to the sound of your question, not its words, and tells whether you have finished, in any of its 23 languages. A finished question is answered without waiting; a sentence that sounds unfinished is waited for a little longer, so a pause to think does not send half a question. It runs on your CPU (about 17 ms each time you stop) and hears nothing beyond your question. It is downloaded once from Hugging Face at the first start (one pinned version, checked against its published fingerprint, no token sent); until it is there, or if it cannot load, a fixed silence ends your questions as before. Settings under **⚙️ Settings → ⏱️ Timing & Windows**:
+**Knowing When You Have Finished** - A small model ([Smart Turn](https://github.com/pipecat-ai/smart-turn) v3.2 by Daily, 8.7 MB, BSD 2-Clause) listens to the sound of your question, not its words, and tells whether you have finished, in any of its 23 languages. A finished question is answered without waiting; a sentence that sounds unfinished is waited for a little longer, so a pause to think does not send half a question. It runs on your CPU (about 17 ms each time you stop) and hears nothing beyond your question. It is downloaded once from Hugging Face at the first start (one pinned version, checked against its published fingerprint, no token sent); until it is there, or if it cannot load, a fixed silence (`voice_collect_seconds`) ends your questions. Settings under **⚙️ Settings → ⏱️ Timing & Windows**:
 
 ```json
 {
   "turn_detector_enabled": true,         // false: the fixed silence below decides every time
-  "turn_unfinished_wait_seconds": 3.0,   // how long an unfinished sentence is waited for
+  "turn_unfinished_wait_seconds": 3.0,   // how long an unfinished sentence is waited for (never less than the fixed silence)
   "voice_collect_seconds": 4.5           // the fixed silence, when the model gives no verdict
 }
 ```
 
-Known limitation: measured so far on synthetic French voices only, it heard about nine finished questions in ten as finished and a pause in the middle of a sentence as unfinished about one time in two. A finished question it misreads waits the unfinished delay.
+Known limitation: measured so far on synthetic French voices only, it heard about nine finished questions in ten as finished, a pause in the middle of a sentence as unfinished about one time in two, and a short answer such as "yes" as unfinished about one time in five. A finished question it misreads waits the unfinished delay.
 
 </details>
 

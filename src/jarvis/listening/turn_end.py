@@ -1,7 +1,7 @@
 """Whether his turn is over, read from his voice.
 
 The model is Smart Turn v3.2 by Daily (BSD 2-Clause, code and weights):
-an 8 MB int8 ONNX classifier that reads the last eight seconds of a turn,
+an 8.7 MB int8 ONNX classifier that reads the last eight seconds of a turn,
 as sound and not as text, and gives the probability that the speaker has
 finished. It knows 23 languages and has no rule for any one of them.
 
@@ -45,11 +45,12 @@ WINDOW_SAMPLES = SAMPLE_RATE * WINDOW_SECONDS
 # authors use.
 FINISHED_ABOVE = 0.5
 # How much of the silence that closed an utterance the model hears, in
-# seconds. Measured on the same synthetic French speech, it tells a pause in
-# the middle of a sentence apart more often than with the 0.4 s or 0.8 s the
-# voice detector waits, for a few more finished sentences heard as unfinished
-# (`scripts/turn_end_trial.py --closing`). A sentence cut short costs more
-# than a longer wait.
+# seconds. Measured on synthetic French speech over room noise
+# (`scripts/turn_end_trial.py --closing`), it tells 55% of pauses in the
+# middle of a sentence apart, against 45% with 0.4 s and 37% with 0.8 s, for
+# 88% of finished sentences heard as finished against 89% and 92%, and 78%
+# of short answers against 72% and 82%. A sentence cut short costs more than
+# a longer wait.
 CLOSING_SILENCE_HEARD = 0.2
 
 # Whisper's log-mel spectrogram, as the model was trained on it.
@@ -57,9 +58,9 @@ _N_FFT = 400
 _HOP = 160
 _N_MELS = 80
 _INPUT = "input_features"
-# Threads the model may use. Two keep a verdict near 15 ms on a desktop CPU
+# Threads the model may use. Two keep a verdict about 17 ms on a desktop CPU
 # without taking cores from speech synthesis.
-_THREADS = 2
+THREADS = 2
 _STAGING = ".staging"
 
 
@@ -82,9 +83,10 @@ def _matches(path: Path) -> bool:
     return path.is_file() and path.stat().st_size == SIZE and _sha256(path) == SHA256
 
 
-def fetch(root: Path, download: Optional[Callable[..., str]] = None) -> Path:
+def fetch(root: Path, download: Optional[Callable[..., str]] = None,
+          on_download: Optional[Callable[[], None]] = None) -> Path:
     """The model file in ``root``, downloaded when it is missing or does not
-    match its published digest.
+    match its published digest; ``on_download`` is called just before.
 
     Raises ``RuntimeError`` when the download fails or the file downloaded
     does not match. ``download`` defaults to ``huggingface_hub``'s, which
@@ -101,6 +103,8 @@ def fetch(root: Path, download: Optional[Callable[..., str]] = None) -> Path:
         from huggingface_hub import hf_hub_download as download
     staging = root / _STAGING
     debug_log(f"end of turn: fetching {FILE} at {REVISION[:12]}", "voice")
+    if on_download is not None:
+        on_download()
     try:
         try:
             path = Path(download(repo_id=REPO, filename=FILE, revision=REVISION,
@@ -187,7 +191,7 @@ def _open_onnx(path: Path):
     options = ort.SessionOptions()
     options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
     options.inter_op_num_threads = 1
-    options.intra_op_num_threads = _THREADS
+    options.intra_op_num_threads = THREADS
     options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     # Idle threads sleep rather than spin between his utterances.
     options.add_session_config_entry("session.intra_op.allow_spinning", "0")
@@ -198,14 +202,20 @@ def _open_onnx(path: Path):
 class TurnEndDetector:
     """Smart Turn on this machine. ``status`` is ``idle`` until loading
     starts, then ``loading``, then ``ready`` or ``unavailable`` (``why``
-    says what went wrong)."""
+    says what went wrong). ``on_download`` is called before the file is
+    downloaded, and ``on_settled`` with the detector once loading has ended,
+    either way; neither may raise into it."""
 
     def __init__(self, root: Optional[Path] = None,
                  download: Optional[Callable[..., str]] = None,
-                 open_session: Optional[Callable[[Path], object]] = None):
+                 open_session: Optional[Callable[[Path], object]] = None,
+                 on_download: Optional[Callable[[], None]] = None,
+                 on_settled: Optional[Callable[["TurnEndDetector"], None]] = None):
         self._root = root if root is not None else models_dir()
         self._download = download
         self._open_session = open_session or _open_onnx
+        self._on_download = on_download
+        self._on_settled = on_settled
         self._session = None
         self.status = "idle"
         self.why = ""
@@ -221,25 +231,34 @@ class TurnEndDetector:
         """Fetch the model if needed and open it. Never raises."""
         self.status = "loading"
         started = time.perf_counter()
-        if not (self._root / FILE).is_file():
-            try:
-                print(f"     ⬇️  Downloading the end-of-turn model ({SIZE / 1e6:.1f} MB, once)",
-                      flush=True)
-            except Exception:
-                pass
         try:
-            session = self._open_session(fetch(self._root, self._download))
+            session = self._open_session(
+                fetch(self._root, self._download, self._announce(self._on_download)))
         except Exception as e:
             self.why = str(e) or type(e).__name__
             self.status = "unavailable"
             debug_log(f"end of turn: model unavailable ({self.why}), "
                       f"the fixed silence decides", "voice")
-            return False
-        self._session = session
-        self.status = "ready"
-        debug_log(f"end of turn: model ready in {(time.perf_counter() - started) * 1000:.0f} ms",
-                  "voice")
-        return True
+        else:
+            self._session = session
+            self.status = "ready"
+            debug_log(f"end of turn: model ready in "
+                      f"{(time.perf_counter() - started) * 1000:.0f} ms", "voice")
+        self._announce(self._on_settled, self)()
+        return self.status == "ready"
+
+    @staticmethod
+    def _announce(callback, *args) -> Callable[[], None]:
+        """*callback* called with *args*, its failures logged and kept from
+        the detector."""
+        def call() -> None:
+            if callback is None:
+                return
+            try:
+                callback(*args)
+            except Exception as e:
+                debug_log(f"end of turn: a listener of the model failed ({e})", "voice")
+        return call
 
     def probability(self, sound: Optional[np.ndarray]) -> Optional[float]:
         """How likely it is that his turn is over once *sound* (16 kHz mono,

@@ -163,12 +163,13 @@ def _detector() -> turn_end.TurnEndDetector:
     return detector
 
 
-def _time(detector: turn_end.TurnEndDetector) -> None:
+def _time() -> turn_end.TurnEndDetector:
+    """Opens the model, times that and its verdicts, and returns it."""
     print("⏱️  Timing")
     started = time.perf_counter()
     fresh = _detector()
     print(f"   🔌 opened in {(time.perf_counter() - started) * 1000:.0f} ms "
-          f"({turn_end._THREADS} threads)")
+          f"({turn_end.THREADS} threads)")
     rng = np.random.default_rng(0)
     for seconds in (3, 8):
         sound = (0.05 * rng.standard_normal(seconds * turn_end.SAMPLE_RATE)).astype(np.float32)
@@ -181,6 +182,7 @@ def _time(detector: turn_end.TurnEndDetector) -> None:
         took.sort()
         print(f"   🧭 verdict on {seconds} s: median {statistics.median(took):.1f} ms, "
               f"p90 {took[int(0.9 * len(took))]:.1f} ms, max {took[-1]:.1f} ms")
+    return fresh
 
 
 def _score(rows: list, label: str) -> None:
@@ -295,8 +297,7 @@ def main(argv=None) -> int:
                         help="closing silences to try, in seconds, comma-separated")
     args = parser.parse_args(argv)
 
-    detector = _detector()
-    _time(detector)
+    detector = _time()
     closings = tuple(float(s) for s in args.closing.split(","))
     _piper(detector, Path(args.voices), Path(args.keep) if args.keep else None, closings)
     if args.wavs:

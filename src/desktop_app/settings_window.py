@@ -448,7 +448,8 @@ def _build_field_metadata() -> List[FieldMeta]:
       "Audio block size for processing",
       "timing", "float", min_val=0.5, max_val=10.0, step=0.5, suffix="s")
     f("voice_collect_seconds", "Collect Window",
-      "Time to collect speech after wake word",
+      "Silence that ends your question when the End-of-Turn Model gives no verdict "
+      "(off, loading or unavailable)",
       "timing", "float", min_val=1.0, max_val=30.0, step=0.5, suffix="s")
     f("voice_max_collect_seconds", "Max Collect Window",
       "Maximum time to collect continuous speech",
@@ -458,7 +459,8 @@ def _build_field_metadata() -> List[FieldMeta]:
       "downloaded once, 8.7 MB). Off, the Collect Window decides",
       "timing", "bool")
     f("turn_unfinished_wait_seconds", "Unfinished Sentence Wait",
-      "How long she waits when your sentence sounds unfinished",
+      "How long she waits when your sentence sounds unfinished (never less than the "
+      "Collect Window)",
       "timing", "float", min_val=0.5, max_val=15.0, step=0.5, suffix="s")
     f("hot_window_enabled", "Hot Window",
       "Enable follow-up window after responses",

@@ -1,16 +1,16 @@
 """She answers when his turn is over, read from his voice.
 
-The silence that ended a question being collected was fixed
-(`voice_collect_seconds`): a question he had finished still waited all of
-it, and a pause in the middle of a sentence longer than it sent half a
-question. The end-of-turn model reads his voice when an utterance joins
-the question, and its verdict sets that wait: none when he has finished,
-`turn_unfinished_wait_seconds` when he has not, and the fixed silence when
-it gives no verdict. Her name alone is never a finished question.
+A fixed silence (`voice_collect_seconds`) would make a question he has
+finished wait all of it, and send half a question when he pauses in the
+middle of a sentence for longer. The end-of-turn model reads his voice when
+an utterance joins the question, and its verdict sets that wait: none when
+he has finished, at least `turn_unfinished_wait_seconds` and never less
+than the fixed silence when he has not, and the fixed silence when it gives
+no verdict. Her name alone is never a finished question.
 
 The utterances below go through the whole path the microphone takes: the
 voice detector closes them, Whisper (stubbed) reads them, and the wake
-word sends them to the question being collected.
+word, or the hot window, sends them to the question being collected.
 """
 
 import time
@@ -21,15 +21,21 @@ import numpy as np
 import pytest
 
 from jarvis.listening import turn_end
-from test_hot_window_input import _create_listener, _lines_for_him, _starts_with_an_emoji
+from test_hot_window_input import (
+    _create_listener, _install_intent_judge, _lines_for_him, _make_judgment,
+    _simulate_tts_finish, _starts_with_an_emoji, _wait_for_hot_window_active,
+)
 
 FIXED = 2.0
 UNFINISHED = 3.0
+SR = turn_end.SAMPLE_RATE
 
 
 class _Ears:
-    """An end-of-turn model that gives the verdict it is told and keeps
-    what it heard."""
+    """An end-of-turn model, loaded, that gives the verdict it is told and
+    keeps what it heard."""
+
+    status, why = "ready", ""
 
     def __init__(self, probability):
         self.verdict = probability
@@ -40,17 +46,17 @@ class _Ears:
         return self.verdict
 
 
-def _listener(ears):
-    listener, _tts = _create_listener()
+def _listener(ears, fixed=FIXED, unfinished=UNFINISHED, **kwargs):
+    listener, _tts = _create_listener(**kwargs)
     cfg = listener.cfg
     cfg.vad_frame_ms, cfg.vad_pre_roll_ms, cfg.endpoint_silence_ms = 20, 240, 400
     cfg.max_utterance_ms, cfg.tts_max_utterance_ms = 12000, 3000
     cfg.whisper_min_audio_duration, cfg.whisper_min_confidence = 0.15, 0.3
     cfg.whisper_no_speech_threshold = 0.5
-    cfg.voice_collect_seconds = FIXED
+    cfg.voice_collect_seconds = fixed
     cfg.turn_detector_enabled = True
-    cfg.turn_unfinished_wait_seconds = UNFINISHED
-    listener.state_manager.voice_collect_seconds = FIXED
+    cfg.turn_unfinished_wait_seconds = unfinished
+    listener.state_manager.voice_collect_seconds = fixed
     listener._configure_frames()
     listener._whisper_backend, listener._whisper_device = "faster-whisper", "cuda"
     listener.model = MagicMock()
@@ -64,10 +70,10 @@ class _Mouth:
     """Says things into the listener, frame by frame, on the clock the
     microphone stamps them with."""
 
-    def __init__(self, listener):
+    def __init__(self, listener, now=None):
         self.listener = listener
         self.step = listener._frame_ms / 1000.0
-        self.now = time.time() - 60.0
+        self.now = time.time() - 60.0 if now is None else now
         self.closed_at = None
         self._voiced = False
         listener._is_speech_frame = lambda frame: self._voiced
@@ -76,7 +82,8 @@ class _Mouth:
         n = self.listener._frame_samples
         if not voiced:
             return np.zeros(n, dtype=np.float32)
-        t = np.arange(n) / self.listener._samplerate
+        rate = getattr(self.listener, "_stream_samplerate", None) or self.listener._samplerate
+        t = np.arange(n) / rate
         return (0.2 * np.sin(2 * np.pi * 180 * t)).astype(np.float32)
 
     def _take(self, voiced):
@@ -275,6 +282,110 @@ def test_whisper_reads_the_same_audio_with_the_model_on_or_off():
     assert np.array_equal(whisper_input(True), whisper_input(False))
 
 
+def test_an_unfinished_sentence_never_waits_less_than_the_fixed_silence():
+    """With a fixed silence longer than the unfinished wait, a sentence
+    heard as unfinished keeps the longer of the two: the model never cuts a
+    pause the fixed silence would have let through."""
+    fixed, unfinished = 5.0, 3.0
+    listener, handed = _listener(_Ears(0.1), fixed=fixed, unfinished=unfinished)
+    mouth = _Mouth(listener)
+
+    mouth.says("jarvis est-ce que tu peux me dire")
+    mouth.keeps_quiet(fixed - 0.3)
+    assert handed == [], "an unfinished sentence was cut before the fixed silence"
+
+    mouth.keeps_quiet(0.5)
+    assert handed == ["est-ce que tu peux me dire"]
+    listener.state_manager.stop()
+
+
+def test_her_name_alone_said_as_unfinished_never_waits_less_than_the_fixed_silence():
+    fixed, unfinished = 5.0, 3.0
+    listener, _handed = _listener(_Ears(0.1), fixed=fixed, unfinished=unfinished)
+    mouth = _Mouth(listener)
+
+    mouth.says("jarvis", seconds=0.6)
+    mouth.keeps_quiet(fixed - 0.3)
+
+    assert listener.state_manager.is_collecting(), "she stopped waiting for his question"
+    listener.state_manager.stop()
+
+
+def _in_the_hot_window(ears, judgment):
+    listener, handed = _listener(ears, echo_tolerance=0.02, hot_window_seconds=3.0)
+    listener.echo_detector.track_tts_start("Il fait beau à Valbrume aujourd'hui.")
+    _simulate_tts_finish(listener)
+    assert _wait_for_hot_window_active(listener)
+    _install_intent_judge(listener, judgment)
+    return listener, handed, _Mouth(listener, now=time.time())
+
+
+def test_a_follow_up_in_the_hot_window_is_read_by_the_model():
+    ears = _Ears(0.9)
+    listener, handed, mouth = _in_the_hot_window(
+        ears, _make_judgment(directed=True, query="et demain"))
+
+    mouth.says("et demain", seconds=0.8)
+    mouth.keeps_quiet(0.1)
+
+    assert len(ears.heard) == 1
+    assert handed == ["et demain"]
+    listener.state_manager.stop()
+
+
+def test_her_name_alone_in_the_hot_window_is_never_a_finished_question():
+    """In the hot window the judge may keep her name as his query. Her name
+    is taken out before the question is weighed, so a finished verdict on it
+    still leaves him time to ask."""
+    listener, handed, mouth = _in_the_hot_window(
+        _Ears(0.9), _make_judgment(directed=True, query="Jarvis ?"))
+
+    mouth.says("jarvis", seconds=0.6)
+    mouth.keeps_quiet(0.1)
+
+    assert handed == [], "her name alone was handed over as a finished question"
+    listener.state_manager.stop()
+
+
+def test_a_new_question_does_not_hear_the_one_before():
+    ears = _Ears(0.9)
+    listener, handed = _listener(ears)
+    mouth = _Mouth(listener)
+
+    mouth.says("jarvis quelle heure est-il", seconds=1.5)
+    mouth.keeps_quiet(0.5)
+    mouth.says("jarvis et demain", seconds=1.0)
+    mouth.keeps_quiet(0.1)
+
+    assert len(handed) == 2
+    pre_roll = listener.cfg.vad_pre_roll_ms / 1000
+    longest_alone = 1.0 + pre_roll + turn_end.CLOSING_SILENCE_HEARD + 0.05
+    assert ears.heard[-1].size / SR <= longest_alone, "the second question heard the first"
+    listener.state_manager.stop()
+
+
+@pytest.mark.parametrize("capture_rate", [44100, 48000])
+def test_at_another_capture_rate_the_model_hears_the_same_sound(capture_rate):
+    """A microphone that refuses 16 kHz is read at its own rate; the model
+    hears the utterance at its own rate, as long and with as much closing
+    silence as at 16 kHz."""
+    def heard_at(rate):
+        ears = _Ears(0.1)
+        listener, _handed = _listener(ears)
+        listener._stream_samplerate = rate
+        listener._frame_samples = int(rate * listener._frame_ms / 1000)
+        _Mouth(listener).says("jarvis est-ce que tu peux", seconds=1.0)
+        listener.state_manager.stop()
+        return ears.heard[-1]
+
+    reference, heard = heard_at(16000), heard_at(capture_rate)
+
+    frame_seconds = 0.02
+    assert abs(heard.size - reference.size) / SR <= frame_seconds
+    trailing = (heard.size - 1 - np.flatnonzero(np.abs(heard) > 1e-3)[-1]) / SR
+    assert trailing == pytest.approx(turn_end.CLOSING_SILENCE_HEARD, abs=frame_seconds + 0.01)
+
+
 # ── What the console says at start-up ─────────────────────────────────
 
 
@@ -294,6 +405,35 @@ def test_the_warm_up_says_how_his_turn_is_read(_quiet, status):
     if status == "unavailable":
         assert "could not download it" in lines[0]
         assert f"{FIXED:g}s" in lines[0]
+    listener.state_manager.stop()
+
+
+@pytest.mark.parametrize("settles_as", ["ready", "unavailable"])
+def test_a_model_that_settles_after_the_warm_up_says_so(_quiet, settles_as):
+    """The warm-up said it was still loading: once loading ends, one more
+    line says how it ended, so a first start without network is not left at
+    "still loading"."""
+    loaded = _Loaded("loading", why="could not download it")
+    listener, _handed = _listener(loaded)
+    listener._say_how_his_turn_is_read()
+
+    loaded.status = settles_as
+    listener._turn_end_settled(loaded)
+
+    lines = _lines_for_him(_quiet)
+    assert len(lines) == 2 and all(_starts_with_an_emoji(line) for line in lines), lines
+    assert lines[1] != lines[0]
+    listener.state_manager.stop()
+
+
+def test_a_model_that_settles_before_the_warm_up_line_is_said_once(_quiet):
+    loaded = _Loaded("ready")
+    listener, _handed = _listener(loaded)
+
+    listener._turn_end_settled(loaded)
+    listener._say_how_his_turn_is_read()
+
+    assert len(_lines_for_him(_quiet)) == 1
     listener.state_manager.stop()
 
 

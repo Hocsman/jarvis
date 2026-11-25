@@ -260,7 +260,7 @@ class Settings:
     voice_max_collect_seconds: float
     # Whether the end-of-turn model reads his voice to tell when he has
     # finished (`listening/turn_end.py`), and how long a sentence it hears
-    # as unfinished is waited for.
+    # as unfinished is waited for at least.
     turn_detector_enabled: bool
     turn_unfinished_wait_seconds: float
 
@@ -923,7 +923,8 @@ def get_default_config() -> Dict[str, Any]:
         "voice_max_collect_seconds": 180.0,
         # The end-of-turn model, downloaded once (8.7 MB) and run on this
         # machine: a finished question goes at once, an unfinished sentence
-        # is waited for this long, and with no verdict the silence above.
+        # is waited for this long or the silence above when that is longer,
+        # and with no verdict the silence above.
         "turn_detector_enabled": True,
         "turn_unfinished_wait_seconds": 3.0,
 
@@ -1321,7 +1322,7 @@ def load_settings() -> Settings:
     voice_max_collect_seconds = float(merged.get("voice_max_collect_seconds", 60.0))
     turn_detector_enabled = _as_bool(merged.get("turn_detector_enabled", True))
     turn_unfinished_wait_seconds = max(0.0, float(merged.get("turn_unfinished_wait_seconds", 3.0)))
-    wake_word =str(merged.get("wake_word", "jarvis")).strip().lower()
+    wake_word = str(merged.get("wake_word", "jarvis")).strip().lower()
     wake_aliases = [a.strip().lower() for a in _ensure_list(merged.get("wake_aliases")) if a.strip()]
     wake_fuzzy_ratio = float(merged.get("wake_fuzzy_ratio", 0.78))
     whisper_model = str(merged.get("whisper_model", "medium"))
