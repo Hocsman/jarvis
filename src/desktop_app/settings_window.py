@@ -453,6 +453,13 @@ def _build_field_metadata() -> List[FieldMeta]:
     f("voice_max_collect_seconds", "Max Collect Window",
       "Maximum time to collect continuous speech",
       "timing", "float", min_val=10.0, max_val=600.0, step=10, suffix="s")
+    f("turn_detector_enabled", "End-of-Turn Model",
+      "Tell from your voice when you have finished speaking (runs on this machine; "
+      "downloaded once, 8.7 MB). Off, the Collect Window decides",
+      "timing", "bool")
+    f("turn_unfinished_wait_seconds", "Unfinished Sentence Wait",
+      "How long she waits when your sentence sounds unfinished",
+      "timing", "float", min_val=0.5, max_val=15.0, step=0.5, suffix="s")
     f("hot_window_enabled", "Hot Window",
       "Enable follow-up window after responses",
       "timing", "bool")

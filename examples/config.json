@@ -61,6 +61,8 @@
   "voice_block_seconds": 4.0,
   "voice_collect_seconds": 4.5,
   "voice_max_collect_seconds": 180.0,
+  "turn_detector_enabled": true,
+  "turn_unfinished_wait_seconds": 3.0,
   "wake_word": "jarvis",
   "wake_aliases": [
     "joris",

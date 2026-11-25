@@ -180,7 +180,7 @@ Jarvis starts listening automatically — just say "Jarvis" and talk!
 - **Destructive Actions Need a Click** - Reads and recoverable changes can be approved by answering out loud, in any language. Anything that may not come back is approved on a card showing the exact call, or not at all — a mis-heard word must never be able to delete a file
 - **A Record of What It Did** - One line per tool call: what ran, what it cost, what you allowed and what you refused. Deliberately no record of what it *saw* — no page contents, no file contents, no tool output
 - **Knowledge Graph Memory** - Self-organising memory of what it has looked up for you, which auto-splits by topic and surfaces relevant knowledge automatically
-- **Natural Voice** - Say "Jarvis" anywhere in your sentence, interrupt with "stop" (while it thinks as well as while it speaks), follow up without repeating the wake word. It keeps listening while it thinks: a question asked meanwhile is answered next
+- **Natural Voice** - Say "Jarvis" anywhere in your sentence, interrupt with "stop" (while it thinks as well as while it speaks), follow up without repeating the wake word. It keeps listening while it thinks: a question asked meanwhile is answered next. It hears from your voice when you have finished: a finished question goes at once, a sentence you pause in the middle of is waited for
 - **Fast Stop** - Use the tray action `⚡ Stop Now (Skip Diary)` to release local model resources quickly when you need your machine back immediately.
 - **Dictation Mode** - Free, offline alternative to WisprFlow — hold a hotkey, speak, release to paste text into any app
 - **MCP Integration** - Connect to thousands of external tools (Home Assistant, GitHub, Slack, etc.)
@@ -452,6 +452,18 @@ Keep the list short: each name also attracts words that sound like it, so a plac
   "planner_timeout_sec": 6.0        // per-call timeout for plan and step-resolver LLM calls
 }
 ```
+
+**Knowing When You Have Finished** - A small model ([Smart Turn](https://github.com/pipecat-ai/smart-turn) v3.2 by Daily, 8.7 MB, BSD 2-Clause) listens to the sound of your question, not its words, and tells whether you have finished, in any of its 23 languages. A finished question is answered without waiting; a sentence that sounds unfinished is waited for a little longer, so a pause to think does not send half a question. It runs on your CPU (about 17 ms each time you stop) and hears nothing beyond your question. It is downloaded once from Hugging Face at the first start (one pinned version, checked against its published fingerprint, no token sent); until it is there, or if it cannot load, a fixed silence ends your questions as before. Settings under **⚙️ Settings → ⏱️ Timing & Windows**:
+
+```json
+{
+  "turn_detector_enabled": true,         // false: the fixed silence below decides every time
+  "turn_unfinished_wait_seconds": 3.0,   // how long an unfinished sentence is waited for
+  "voice_collect_seconds": 4.5           // the fixed silence, when the model gives no verdict
+}
+```
+
+Known limitation: measured so far on synthetic French voices only, it heard about nine finished questions in ten as finished and a pause in the middle of a sentence as unfinished about one time in two. A finished question it misreads waits the unfinished delay.
 
 </details>
 
@@ -874,6 +886,7 @@ provider can't run out the voice-assistant latency budget.
 - **Claude Code, off by default** - Handing a project to Claude Code sends the task and the code it reads to Anthropic. Nothing reaches it until you name a projects folder (`claude_code_projects_dir`)
 - **Your agenda, off by default and read-only** - Nothing reads your calendar until you name a file or a private iCal address (`agenda_source`). Only the time, title and place of the events you ask about reach the chat model, after you say yes; with an address, each reading is one HTTPS request to the host that holds your calendar. An `.ics` file keeps the reading entirely on your machine
 - **No proxy hunt on your network** - The dashboard and the Memory Viewer show pages from your own machine, and the app's windows skip the system's automatic proxy detection, which would otherwise ask your network for a `wpad` proxy the first time the Memory Viewer opens. Behind a corporate proxy nothing changes, since these pages never go through one. The packaged macOS app opens the Memory Viewer in your browser, which follows its own settings
+- **End-of-turn model, on your machine** - The model that hears when you have finished reads only the sound of your question, on your CPU, and sends nothing anywhere. It is downloaded once from Hugging Face, without a token; `"turn_detector_enabled": false` skips that download
 - **Talking face, on your machine** - The portrait you animate is read locally and never sent anywhere, and its frames live only in memory. Turning the face on downloads its model files once from Hugging Face
 - **Permissions are yours to set** - `~/.local/share/jarvis/yuba/outils.md` lists your own tools by name, in three sections you move lines between. Written once, never rewritten. A tool that appears later falls back to the risk it declares, so a read runs and anything else asks
 
