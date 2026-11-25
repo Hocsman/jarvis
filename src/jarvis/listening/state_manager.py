@@ -44,6 +44,9 @@ class StateManager:
         self._pending_query: str = ""
         self._last_voice_time: float = 0.0
         self._collect_start_time: float = 0.0
+        # The silence his last words are given before the question goes, as
+        # the end-of-turn model read them; None waits voice_collect_seconds.
+        self._collect_wait: Optional[float] = None
 
         # Hot window state
         self._hot_window_start_time: float = 0.0
@@ -72,7 +75,8 @@ class StateManager:
         """Check if hot window is currently active."""
         return self.get_state() == ListeningState.HOT_WINDOW
 
-    def start_collection(self, initial_text: str = "", heard_at: Optional[float] = None) -> None:
+    def start_collection(self, initial_text: str = "", heard_at: Optional[float] = None,
+                         wait: Optional[float] = None) -> None:
         """
         Start query collection mode.
 
@@ -81,12 +85,15 @@ class StateManager:
             heard_at: When his words ended, on the clock the audio was
                 captured by; now if not given. The collection's silence is
                 counted from there.
+            wait: How long that silence lasts before the question goes,
+                read from his voice; None for ``voice_collect_seconds``.
         """
         with self._state_lock:
             self._state = ListeningState.COLLECTING
             self._pending_query = initial_text.strip()
             self._last_voice_time = time.time() if heard_at is None else heard_at
             self._collect_start_time = self._last_voice_time
+            self._collect_wait = wait
 
         start_time_str = datetime.fromtimestamp(self._collect_start_time).strftime('%H:%M:%S.%f')[:-3]
         debug_log(f"collection started at {start_time_str}: '{initial_text}'", "state")
@@ -94,13 +101,15 @@ class StateManager:
         get_jarvis_state().set_state(JarvisState.LISTENING)
         debug_log("state set to LISTENING (collection started)", "state")
 
-    def add_to_collection(self, text: str, heard_at: Optional[float] = None) -> None:
+    def add_to_collection(self, text: str, heard_at: Optional[float] = None,
+                          wait: Optional[float] = None) -> None:
         """
         Add text to current collection.
 
         Args:
             text: Text to append to pending query
             heard_at: When his words ended, as for ``start_collection``.
+            wait: The silence after them, as for ``start_collection``.
         """
         if not self.is_collecting():
             return
@@ -108,6 +117,7 @@ class StateManager:
         with self._state_lock:
             self._pending_query = (self._pending_query + " " + text).strip()
             self._last_voice_time = time.time() if heard_at is None else heard_at
+            self._collect_wait = wait
 
         debug_log(f"added to collection: '{text}' -> '{self._pending_query}'", "state")
 
@@ -158,7 +168,8 @@ class StateManager:
             return False
 
         current_time = time.time() if now is None else now
-        silence_timeout = current_time - self._last_voice_time >= self.voice_collect_seconds
+        wait = self.voice_collect_seconds if self._collect_wait is None else self._collect_wait
+        silence_timeout = current_time - self._last_voice_time >= wait
         max_timeout = current_time - self._collect_start_time >= self.max_collect_seconds
 
         if silence_timeout or max_timeout:
@@ -169,7 +180,7 @@ class StateManager:
             start_time_str = datetime.fromtimestamp(self._collect_start_time).strftime('%H:%M:%S.%f')[:-3]
             end_time_str = datetime.fromtimestamp(end_time).strftime('%H:%M:%S.%f')[:-3]
 
-            debug_log(f"collection timeout ({timeout_type}): '{self._pending_query}' (started: {start_time_str}, ended: {end_time_str}, duration: {duration:.2f}s)", "state")
+            debug_log(f"collection timeout ({timeout_type}, silence {wait:.1f}s): '{self._pending_query}' (started: {start_time_str}, ended: {end_time_str}, duration: {duration:.2f}s)", "state")
             return True
 
         return False

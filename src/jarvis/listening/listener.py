@@ -6,6 +6,7 @@ Coordinates audio capture, speech recognition, echo detection, and state managem
 
 from __future__ import annotations
 import functools
+import math
 import os
 import threading
 import time
@@ -30,6 +31,9 @@ from ..utils.audio_lock import open_stream_count, portaudio_lock, unguarded_open
 from .wake_detection import (is_wake_word_detected, extract_query_after_wake,
                              is_stop_command, names_her)
 from .transcript_buffer import TranscriptBuffer, TranscriptSegment
+from .turn_end import CLOSING_SILENCE_HEARD, FINISHED_ABOVE, WINDOW_SAMPLES, TurnEndDetector
+from .turn_end import SAMPLE_RATE as TURN_SAMPLE_RATE
+from .turn_end import SIZE as TURN_MODEL_SIZE
 from .whisper_turbo import is_faster_whisper_turbo_supported
 from .vocabulary import announce_his_names, is_the_hint_repeated, whisper_hint
 from .whisper_vad import (
@@ -760,9 +764,21 @@ class VoiceListener(threading.Thread):
         self._latest_turn_epoch = 0
         # When the last utterance he was heard saying ended.
         self._last_heard_at = 0.0
-        # The utterance being handled, whole, and when it ended. It becomes
-        # his last words only if it is collected.
-        self._hearing: tuple = (None, 0.0)
+        # The utterance being handled, whole, when it ended, and its sound
+        # with its pauses (None when not kept). It becomes his last words
+        # only if it is collected.
+        self._hearing: tuple = (None, 0.0, None)
+        # Whether his turn is over, read from his voice; loaded by `run`
+        # when `turn_detector_enabled` is on. What the console last said of
+        # it (None before the warm-up line), under its own lock: loading
+        # ends on its own thread.
+        self._turn_end_said: Optional[str] = None
+        self._turn_end_lock = threading.Lock()
+        self._turn_end = TurnEndDetector(on_download=self._say_the_turn_model_downloads,
+                                         on_settled=self._turn_end_settled)
+        # The sound of the question being collected, its last window only:
+        # what the end-of-turn model reads.
+        self._question_sound = None
         # The spoken question her last reply ended on, if it did.
         self._asked: Optional[_AskedQuestion] = None
         # The request id of the spoken question the reply she said last
@@ -803,6 +819,10 @@ class VoiceListener(threading.Thread):
         self.is_speech_active = False
         self._silence_frames = 0
         self._utterance_frames: list = []
+        # Every frame of the utterance, the silent ones included, as far
+        # back as the end-of-turn model reads: the sound it hears. None when
+        # it is off or cannot load. Whisper reads `_utterance_frames`.
+        self._utterance_sound: Optional[deque] = None
         self._samplerate = int(getattr(self.cfg, "sample_rate", 16000))
         self._configure_frames()
         self._vad: Optional = None
@@ -1019,7 +1039,7 @@ class VoiceListener(threading.Thread):
         debug_log(f"scheduling hot window activation (echo_tolerance={self.state_manager.echo_tolerance}s, hot_window={self.state_manager.hot_window_seconds}s)", "voice")
         self.state_manager.schedule_hot_window_activation(self.cfg.voice_debug)
 
-    def _process_transcript(self, text: str, utterance_energy: float = 0.0, utterance_start_time: float = 0.0, utterance_end_time: float = 0.0, trailing_silence: float = 0.0) -> None:  # noqa: E501
+    def _process_transcript(self, text: str, utterance_energy: float = 0.0, utterance_start_time: float = 0.0, utterance_end_time: float = 0.0, trailing_silence: float = 0.0, sound=None) -> None:  # noqa: E501
         """
         Process a transcript from speech recognition.
 
@@ -1030,6 +1050,8 @@ class VoiceListener(threading.Thread):
                 through before closing the utterance. ``utterance_end_time``
                 is when it was closed; the user stopped speaking this much
                 earlier, which is where the latency journal starts its clock.
+            sound: The utterance with its pauses, as the end-of-turn model
+                reads it (`_sound_for_the_turn_model`); None when not kept.
         """
         # Kept whole. When a spoken question is waiting, the answer is
         # read from this rather than from the query the intent judge
@@ -1039,7 +1061,7 @@ class VoiceListener(threading.Thread):
         # as a phrase Whisper made out of silence, must not answer for him.
         heard_at = utterance_end_time or time.time()
         if text and text.strip():
-            self._hearing = (text, heard_at)
+            self._hearing = (text, heard_at, sound)
             get_latency_journal().note_heard(utterance_end_time - trailing_silence)
 
         if not text or not text.strip():
@@ -2318,12 +2340,67 @@ class VoiceListener(threading.Thread):
         a second sentence that reaches her before the first was handed over
         completes it, and she answers both. The utterance being handled
         becomes his last words, and the collection's silence is counted from
-        when it ended, so neither Whisper nor the judge adds to it."""
-        self._last_transcript, self._last_heard_at = self._hearing
-        if self.state_manager.is_collecting():
-            self.state_manager.add_to_collection(query, heard_at=self._last_heard_at)
+        when it ended, so neither Whisper nor the judge adds to it. How long
+        that silence lasts is read from his voice (`_wait_after_his_words`)."""
+        self._last_transcript, self._last_heard_at, sound = self._hearing
+        collecting = self.state_manager.is_collecting()
+        question = query.strip()
+        if collecting:
+            question = (self.state_manager.get_pending_query() + " " + question).strip()
+        self._question_sound = self._question_sound_with(sound, collecting)
+        wait = self._wait_after_his_words(
+            question, self._question_sound if sound is not None else None)
+        if collecting:
+            self.state_manager.add_to_collection(query, heard_at=self._last_heard_at, wait=wait)
         else:
-            self.state_manager.start_collection(query, heard_at=self._last_heard_at)
+            self.state_manager.start_collection(query, heard_at=self._last_heard_at, wait=wait)
+
+    def _question_sound_with(self, sound, collecting: bool):
+        """The sound of the question once *sound* joins it: after what was
+        collected before it when a question is being collected, alone when it
+        starts one, and no longer than the window the model reads."""
+        if sound is None:
+            return self._question_sound if collecting else None
+        if collecting and self._question_sound is not None:
+            sound = np.concatenate((self._question_sound, sound))
+        return sound[-WINDOW_SAMPLES:]
+
+    def _wait_after_his_words(self, question: str, question_sound) -> Optional[float]:
+        """The silence *question* is given after the utterance just
+        collected, read from his voice by the end-of-turn model over
+        *question_sound*, the whole question's: none when he has finished,
+        and the longer of `turn_unfinished_wait_seconds` and
+        `voice_collect_seconds` when he has not. None leaves
+        `voice_collect_seconds`: the model is off, not loaded or failing, or
+        this utterance's sound was not kept. Her name alone is never a
+        finished question: a finished verdict on what is left once her name
+        is taken out, nothing, leaves the fixed silence, so the wait never
+        ends before he has had time to ask."""
+        if question_sound is None or not getattr(self.cfg, "turn_detector_enabled", True):
+            return None
+        started = time.perf_counter()
+        probability = self._turn_end.probability(question_sound)
+        if probability is None:
+            debug_log("🧭 end of turn: no verdict, the fixed silence decides", "voice")
+            return None
+        heard = f"p={probability:.2f} in {(time.perf_counter() - started) * 1000:.0f} ms"
+        her_name_alone = not self._what_follows_her_name(question.lower())
+        if probability > FINISHED_ABOVE:
+            if her_name_alone:
+                debug_log(f"🧭 end of turn: finished ({heard}), but her name alone: "
+                          f"the fixed silence decides", "voice")
+                return None
+            debug_log(f"🧭 end of turn: finished ({heard}), the question goes now", "voice")
+            return 0.0
+        wait = max(float(getattr(self.cfg, "turn_unfinished_wait_seconds", 3.0)),
+                   float(self.state_manager.voice_collect_seconds))
+        debug_log(f"🧭 end of turn: unfinished ({heard}), waiting {wait:g}s", "voice")
+        if not her_name_alone:
+            try:
+                print(f"  ⏳ Sentence unfinished, waiting up to {wait:g}s for the rest", flush=True)
+            except Exception:
+                pass
+        return wait
 
     def _something_to_stop(self) -> bool:
         """A turn owed, or his question still being collected. A turn a stop
@@ -2669,6 +2746,7 @@ class VoiceListener(threading.Thread):
         incorrectly concatenated with new input.
         """
         self._utterance_frames = []
+        self._utterance_sound = None
         self._pre_roll.clear()
         self._pending_audio = None
         self.is_speech_active = False
@@ -3161,10 +3239,55 @@ class VoiceListener(threading.Thread):
             else:
                 still_warming = True
 
+        self._say_how_his_turn_is_read()
+
         if still_warming:
             debug_log(f"warm-ups still running after {self._WARM_UP_BUDGET_SECONDS:.0f}s "
                       f"— continuing without", "voice")
             print("     ⏳ Some models still warming — continuing anyway", flush=True)
+
+    def _say_how_his_turn_is_read(self) -> None:
+        """One warm-up line on how she tells he has finished: the model
+        ready, still loading, or unavailable and why, the fixed silence
+        deciding meanwhile. Nothing when it is turned off."""
+        if not getattr(self.cfg, "turn_detector_enabled", True):
+            return
+        with self._turn_end_lock:
+            status = self._turn_end.status
+            debug_log(f"end of turn at warm-up: {status}", "voice")
+            self._say_the_turn_model_is(status, self._turn_end.why)
+
+    def _turn_end_settled(self, detector) -> None:
+        """Loading has ended. When the warm-up said it was still loading,
+        one more line says how it ended; before the warm-up line, that line
+        will."""
+        with self._turn_end_lock:
+            if self._turn_end_said == "loading":
+                self._say_the_turn_model_is(detector.status, detector.why)
+
+    def _say_the_turn_model_is(self, status: str, why: str) -> None:
+        fixed = f"{float(self.state_manager.voice_collect_seconds):g}s"
+        if status == "ready":
+            line = "     🧭 End-of-turn model ready (on this machine)"
+        elif status == "unavailable":
+            line = (f"     ⚠️  End-of-turn model unavailable ({why}): "
+                    f"a fixed {fixed} silence ends your questions")
+        else:
+            status = "loading"
+            line = f"     ⏳ End-of-turn model still loading: a fixed {fixed} silence until then"
+        self._turn_end_said = status
+        try:
+            print(line, flush=True)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _say_the_turn_model_downloads() -> None:
+        try:
+            print(f"     ⬇️  Downloading the end-of-turn model "
+                  f"({TURN_MODEL_SIZE / 1e6:.1f} MB, once)", flush=True)
+        except Exception:
+            pass
 
     def _start_llm_warmup(self) -> list[threading.Thread]:
         """Pre-load the chat, intent judge and tool router models via the
@@ -3439,6 +3562,10 @@ class VoiceListener(threading.Thread):
         print("  🔥 Warming up models...", flush=True)
         self._llm_warmup_started_at = time.time()
         self._llm_warmup_threads = self._start_llm_warmup()
+        # The end-of-turn model loads on its own thread, fetched first if it
+        # is missing; until it is ready the fixed silence decides.
+        if getattr(self.cfg, "turn_detector_enabled", True):
+            self._turn_end.start()
 
         # Determine and initialise Whisper backend
         self._whisper_backend = self._determine_whisper_backend()
@@ -3886,6 +4013,7 @@ class VoiceListener(threading.Thread):
                 self.is_speech_active = False
                 self._silence_frames = 0
                 self._utterance_frames = []
+                self._utterance_sound = None
                 self._pre_roll.clear()
                 self._pending_audio = None
                 continue
@@ -4194,7 +4322,9 @@ class VoiceListener(threading.Thread):
                 # Seed with pre-roll
                 if self._pre_roll:
                     self._utterance_frames.extend(list(self._pre_roll))
-                self._utterance_frames.append(frame.copy())
+                kept = frame.copy()
+                self._utterance_frames.append(kept)
+                self._utterance_sound = self._new_utterance_sound()
                 self._silence_frames = 0
             else:
                 # Maintain pre-roll buffer
@@ -4205,8 +4335,11 @@ class VoiceListener(threading.Thread):
                     except Exception:
                         break
         else:
+            kept = frame.copy()
+            if self._utterance_sound is not None:
+                self._utterance_sound.append(kept)
             if is_voice:
-                self._utterance_frames.append(frame.copy())
+                self._utterance_frames.append(kept)
                 self._silence_frames = 0
             else:
                 self._silence_frames += 1
@@ -4349,6 +4482,7 @@ class VoiceListener(threading.Thread):
             self.is_speech_active = False
             self._silence_frames = 0
             self._utterance_frames = []
+            self._utterance_sound = None
             return
 
         # When the frame that closed it was captured, which is when he
@@ -4372,6 +4506,7 @@ class VoiceListener(threading.Thread):
 
         # Calculate energy before clearing frames for transcript processing
         utterance_energy = self._calculate_audio_energy(self._utterance_frames[-10:] if self._utterance_frames else [])
+        sound = self._sound_for_the_turn_model()
 
         # Reset state before processing
         self.is_speech_active = False
@@ -4491,5 +4626,40 @@ class VoiceListener(threading.Thread):
         # Process the transcript with pre-calculated energy and utterance timing
         self._process_transcript(
             text, utterance_energy, utterance_start_time, utterance_end_time,
-            trailing_silence=trailing_silence,
+            trailing_silence=trailing_silence, sound=sound,
         )
+
+    def _new_utterance_sound(self) -> Optional[deque]:
+        """The sound kept for the end-of-turn model as an utterance starts,
+        seeded with its pre-roll and first frame: as many frames as the model
+        reads, plus the silence that may close the utterance. None when the
+        model is off or cannot load."""
+        if (not getattr(self.cfg, "turn_detector_enabled", True)
+                or self._turn_end.status == "unavailable"):
+            return None
+        window = int(math.ceil(WINDOW_SAMPLES / TURN_SAMPLE_RATE * 1000 / self._frame_ms))
+        return deque(self._utterance_frames, maxlen=window + self._endpoint_silence_frames)
+
+    def _sound_for_the_turn_model(self):
+        """The utterance being closed as the end-of-turn model reads it:
+        every frame kept, its pauses included, and the first
+        `CLOSING_SILENCE_HEARD` of the silence that closed it, at the
+        model's rate. None when none was kept. Empties the frames; reads the
+        silent frames counted, so it runs before they are reset."""
+        kept, self._utterance_sound = self._utterance_sound, None
+        if not kept:
+            return None
+        frames = list(kept)
+        closing_kept = int(round(CLOSING_SILENCE_HEARD * 1000 / self._frame_ms))
+        surplus = max(0, min(self._silence_frames, len(frames)) - closing_kept)
+        if surplus:
+            frames = frames[:-surplus]
+        try:
+            sound = np.concatenate(frames, axis=0).reshape(-1).astype(np.float32, copy=False)
+            stream_rate = getattr(self, "_stream_samplerate", None) or self._samplerate
+            if stream_rate != TURN_SAMPLE_RATE:
+                sound = _resample(sound, stream_rate, TURN_SAMPLE_RATE)
+            return sound
+        except Exception as e:
+            debug_log(f"end of turn: the utterance's sound could not be kept ({e})", "voice")
+            return None
