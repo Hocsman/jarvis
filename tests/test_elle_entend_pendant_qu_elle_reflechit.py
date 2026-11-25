@@ -22,6 +22,7 @@ import pytest
 
 from test_hot_window_input import (
     _SilentTune,
+    _console_lines,
     _create_listener,
     _his_silence_runs_out,
     _install_intent_judge,
@@ -988,10 +989,6 @@ def test_the_backlog_outlasts_the_intent_judge():
 
 # --- A question he repeats before her answer comes --------------------------
 
-def _console(mock_print) -> list:
-    return [" ".join(str(arg) for arg in call.args) for call in mock_print.call_args_list]
-
-
 @patch("builtins.print")
 def test_a_question_asked_again_while_it_waits_is_answered_once(mock_print):
     """Field trace: asked over her reply, with no sign that she had heard,
@@ -1008,7 +1005,7 @@ def test_a_question_asked_again_while_it_waits_is_answered_once(mock_print):
 
         assert engine.queries == ["quelle heure est-il", "quel temps fera-t-il demain à Lyon ?"]
         assert any(line.lstrip().startswith("🔁 Already asked, answered once")
-                   for line in _console(mock_print))
+                   for line in _console_lines(mock_print))
     finally:
         engine.release.set()
         _stop(listener, patcher)
@@ -1092,22 +1089,60 @@ def test_a_question_asked_again_after_a_stop_is_answered(_print):
         _stop(listener, patcher)
 
 
+# Two questions a word apart: a correction said before the first is answered
+# is never dropped as the same question asked again.
+_ANOTHER_QUESTION = [
+    ("ajoute des pommes à la liste", "ajoute des poires à la liste"),
+    ("active le mode avion", "désactive le mode avion"),
+    ("lock the front door", "unlock the front door"),
+    ("rappelle-moi à 14h30", "rappelle-moi à 15h30"),
+    ("convertis 10 euros en dollars", "convertis 10 dollars en euros"),
+    ("appelle Jean", "appelle Jeanne"),
+    ("今天天气怎么样", "明天天气怎么样"),
+]
+
+
+@pytest.mark.parametrize("first, then", _ANOTHER_QUESTION,
+                         ids=["one-word", "opposite-command", "opposite-in-english",
+                              "a-number-in-a-word", "words-swapped", "a-name-a-letter-apart",
+                              "a-script-without-spaces"])
 @patch("builtins.print")
-def test_a_question_with_one_word_changed_is_another_question(_print):
-    """Said as wholes the two score 93, but a question dropped would never
-    be answered: the words are weighed one by one."""
+def test_a_question_a_word_apart_is_another_question(_print, first, then):
     engine = _Engine()
     listener, _tts, patcher = _listener_with(engine)
     try:
         listener._hand_over("quelle heure est-il")
         assert engine.started.wait(WAIT)
-        listener._hand_over("ajoute des pommes à la liste")
-        listener._hand_over("ajoute des poires à la liste")
+        listener._hand_over(first)
+        listener._hand_over(then)
         engine.release.set()
         assert _settled(listener)
 
-        assert engine.queries == ["quelle heure est-il", "ajoute des pommes à la liste",
-                                  "ajoute des poires à la liste"]
+        assert engine.queries == ["quelle heure est-il", first, then]
+    finally:
+        engine.release.set()
+        _stop(listener, patcher)
+
+
+@pytest.mark.parametrize("first, again", [
+    ("Quel temps fera-t-il demain à Lyon ?", "quel temps fera t il demain à lyon"),
+    ("What's the weather like tomorrow?", "what's the weather like tomorrow"),
+], ids=["french", "english"])
+@patch("builtins.print")
+def test_the_same_question_written_otherwise_is_answered_once(_print, first, again):
+    """Case, punctuation and the hyphens between words are Whisper's
+    writing, not his question."""
+    engine = _Engine()
+    listener, _tts, patcher = _listener_with(engine)
+    try:
+        listener._hand_over("quelle heure est-il")
+        assert engine.started.wait(WAIT)
+        listener._hand_over(first)
+        listener._hand_over(again)
+        engine.release.set()
+        assert _settled(listener)
+
+        assert engine.queries == ["quelle heure est-il", first]
     finally:
         engine.release.set()
         _stop(listener, patcher)

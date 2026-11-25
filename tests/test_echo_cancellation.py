@@ -618,19 +618,15 @@ def _gain_removing(db: float) -> float:
     return 10 ** (-db / 20)
 
 
-def _her_reply(canceller, *, her_voice=True, handed_over=True, capture=(CAPTURE_RATE, 1),
-               seconds=0.5):
-    """One reply of hers: her stream hands her sound over (unless
-    *handed_over* is False) while the microphone hears it. Returns the
-    figure taken when it finishes."""
-    canceller.reply_started()
-    tap = canceller.reference_tap(CAPTURE_RATE, her_voice=her_voice)
-    rate, channels = capture
-    for i in range(int(seconds * 50)):
-        if handed_over:
-            tap(np.full((320, 1), 0.3, dtype=np.float32))
-        canceller.hear(i * 0.02, _mic(rate=rate, channels=channels), _Delivered())
-    assert canceller.settle()
+# The 20 ms blocks of her voice in a reply: each holds two of the
+# canceller's frames, so twice the frames her figure needs.
+_ENOUGH_BLOCKS = echo_module.MIN_FRAMES_MEASURED
+
+
+def _her_reply(canceller, **how):
+    """One reply of hers, heard as `_her_reply_so_far` has it (*how*), to
+    its end. Returns the figure taken when it finishes."""
+    _her_reply_so_far(canceller, **how)
     return canceller.reply_finished()
 
 
@@ -687,14 +683,17 @@ def test_a_canceller_turned_off_took_nothing_out():
 # --- How much of her reply it is taking out, while it plays ----------------------
 
 
-def _her_reply_so_far(canceller, *, blocks, her_voice=True, capture=(CAPTURE_RATE, 1)):
+def _her_reply_so_far(canceller, *, blocks=_ENOUGH_BLOCKS, her_voice=True, handed_over=True,
+                      capture=(CAPTURE_RATE, 1)):
     """The first *blocks* 20 ms blocks of a reply of hers, heard by the
-    microphone as her stream hands them over; the reply goes on."""
+    microphone as her stream hands them over (unless *handed_over* is
+    False); the reply goes on."""
     canceller.reply_started()
     tap = canceller.reference_tap(CAPTURE_RATE, her_voice=her_voice)
     rate, channels = capture
     for i in range(blocks):
-        tap(np.full((320, 1), 0.3, dtype=np.float32))
+        if handed_over:
+            tap(np.full((320, 1), 0.3, dtype=np.float32))
         canceller.hear(i * 0.02, _mic(rate=rate, channels=channels), _Delivered())
     assert canceller.settle()
 
@@ -702,16 +701,40 @@ def _her_reply_so_far(canceller, *, blocks, her_voice=True, capture=(CAPTURE_RAT
 def test_her_reply_is_being_taken_out_while_it_plays_once_enough_of_it_was():
     canceller, _ = _canceller_with({"capture_gain": _gain_removing(echo_module.MIN_REMOVED_DB + 4)})
 
-    _her_reply_so_far(canceller, blocks=25)
+    _her_reply_so_far(canceller)
 
     assert canceller.taking_her_reply_out()
 
 
+def test_as_her_reply_finishes_it_is_still_being_taken_out(monkeypatch):
+    """Read while her reply's figure is being taken as it finishes, whether
+    it is being taken out waits for that figure."""
+    canceller, _ = _canceller_with({"capture_gain": _gain_removing(40.0)})
+    _her_reply_so_far(canceller)
+    figuring = threading.Event()
+    figure = echo_module._reply_figure
+
+    def slowly(frames):
+        figuring.set()
+        time.sleep(0.2)
+        return figure(frames)
+
+    monkeypatch.setattr(echo_module, "_reply_figure", slowly)
+    finishing = threading.Thread(target=canceller.reply_finished)
+    finishing.start()
+    assert figuring.wait(5.0)
+
+    taking = canceller.taking_her_reply_out()
+
+    finishing.join(5.0)
+    assert taking
+
+
 @pytest.mark.parametrize("db, blocks, how", [
-    (echo_module.MIN_REMOVED_DB - 4, 25, {}),
+    (echo_module.MIN_REMOVED_DB - 4, _ENOUGH_BLOCKS, {}),
     (40.0, echo_module.MIN_FRAMES_MEASURED // 2 - 1, {}),
-    (40.0, 25, {"her_voice": False}),
-    (40.0, 25, {"capture": (44100, 1)}),
+    (40.0, _ENOUGH_BLOCKS, {"her_voice": False}),
+    (40.0, _ENOUGH_BLOCKS, {"capture": (44100, 1)}),
 ], ids=["too-little-taken-out", "too-few-frames-yet", "only-the-tune-plays",
         "capture-it-does-not-clean"])
 def test_her_reply_is_not_being_taken_out_while_it_plays(db, blocks, how):
@@ -733,7 +756,7 @@ def test_once_her_reply_has_finished_it_is_being_taken_out_as_its_figure_says(ha
 
 def test_a_canceller_turned_off_is_taking_nothing_out():
     canceller, _ = _canceller_with({"capture_gain": _gain_removing(40.0)})
-    _her_reply_so_far(canceller, blocks=25)
+    _her_reply_so_far(canceller)
 
     canceller.stop()
 

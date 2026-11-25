@@ -40,9 +40,10 @@ said, unmarked, and a lone "Thank you." after an English reply
 (`-k a_remark_to_her` runs it alone, with its check that needs no model
 and its per-case reading on the eval model). A sixth reads what he says
 over her reply once her voice is taken out of the microphone, in the hot
-window's mode, where only a directed verdict given with high confidence is
-answered: his follow-ups, and a guest, the television and Whisper's
-inventions (`-k over_her_reply` runs it alone).
+window's mode, where only a directed verdict given with high confidence,
+and not a stop, is answered: his follow-ups, and a guest, the television,
+Whisper's inventions and a little of her own reply that got past the
+canceller, marked "(during TTS)" (`-k over_her_reply` runs it alone).
 `EVAL_INTENT_JUDGE_PROMPT_REF` names a git ref: each model then also runs
 with the system prompt at that ref, as an arm of its own interleaved with
 the others, so a prompt change is measured against the prompt it replaces
@@ -2399,12 +2400,13 @@ class TestProcessedSegmentFiltering:
 #
 # While the echo canceller takes her reply out of the microphone, what he says
 # over it is judged in the hot window's mode, and only a directed verdict
-# given with high confidence is answered: no override takes a rejection, and
-# an unsure verdict leaves it to the wake word, which none of these cases
-# carries. With her voice taken out nothing of hers reaches the transcript,
-# and the judge is shown the reply she is saying as her last words. Field
-# trace 2026-11-25: two follow-ups heard word for word over her weather reply
-# were left unanswered for want of her name.
+# given with high confidence is answered: no override takes a rejection, a
+# stop cuts her reply and answers nothing, and an unsure verdict leaves it to
+# the wake word, which none of these cases carries. The judge is shown the
+# reply she is saying as her last words, and the little of it that gets past
+# the canceller marked "(during TTS)". Field trace 2026-11-25: two follow-ups
+# heard word for word over her weather reply were left unanswered for want of
+# her name.
 
 _FR_SAYING = ("À Lyon, il fait 4,6 degrés avec une légère pluie, et une ressentie de 2,1 "
               "degrés à cause d'un vent de 6 kilomètres par heure, donc un temps idéal pour "
@@ -2413,8 +2415,26 @@ _EN_SAYING = ("In Leeds it's 7 degrees with light rain, feeling like 4 because o
               "kilometre an hour wind, so a good evening to stay in.")
 
 
-def _over(reply: str, current: str, name: str) -> NotSpeechCase:
-    return NotSpeechCase(name, [(current, False)], reply, expected_noise=False)
+@dataclass
+class OverHerReplyCase:
+    """What is heard over her reply, *current*, judged with the reply she is
+    saying as her last words, and marked "(during TTS)" when *hers* (a little
+    of her own reply that got past the canceller)."""
+    name: str
+    last_tts_text: str
+    current: str
+    hers: bool = False
+    in_hot_window: bool = True
+    wake_timestamp: Optional[float] = None
+    aliases: Optional[List[str]] = None
+
+    @property
+    def segments(self) -> list:
+        return [(self.current, self.hers)]
+
+
+def _over(reply: str, current: str, name: str, *, hers: bool = False) -> OverHerReplyCase:
+    return OverHerReplyCase(name, reply, current, hers=hers)
 
 
 OVER_HER_REPLY_GROUPS = {
@@ -2437,6 +2457,10 @@ OVER_HER_REPLY_GROUPS = {
         _over(_FR_SAYING, "Sous-titres réalisés par la communauté d'Amara.org",
               "french_invention"),
         _over(_EN_SAYING, "Thanks for watching!", "english_invention"),
+        _over(_FR_SAYING, "une ressentie de 2,1 degrés à cause du vent", "french_her_words_back",
+              hers=True),
+        _over(_EN_SAYING, "feeling like four because of the wind", "english_her_words_back",
+              hers=True),
     ], "left alone"),
 }
 OVER_HER_REPLY_CASES = [case for cases, _ in OVER_HER_REPLY_GROUPS.values() for case in cases]
@@ -2447,8 +2471,9 @@ _OVER_HER_REPLY_GROUP_OF = {case.name: group for group, (cases, _) in OVER_HER_R
 def _answered_over_her_reply(verdict) -> bool:
     """What the listener does with a verdict on what he says over her reply
     taken out of the microphone: it answers a directed one given with high
-    confidence, and nothing else (the cases carry no wake word)."""
-    return bool(verdict.directed and verdict.confidence == "high")
+    confidence, and nothing else (the cases carry no wake word). A stop
+    cuts her reply and answers nothing."""
+    return bool(verdict.directed and verdict.confidence == "high" and not verdict.stop)
 
 
 @pytest.mark.skipif(not JUDGE_MODELS, reason="name one or more judge models in EVAL_INTENT_JUDGE_ARMS")
@@ -2459,13 +2484,14 @@ class TestIntentJudgeOverHerReply:
 
     def test_over_her_reply_call_by_call(self, capsys):
         judges = _warm_judges()
-        # right, answered, directed, sure, calls, no verdict
-        tally = {(arm, group): [0, 0, 0, 0, 0, 0] for arm in JUDGE_ARMS
+        # right, answered, directed, sure, calls, no verdict, stop
+        tally = {(arm, group): [0, 0, 0, 0, 0, 0, 0] for arm in JUDGE_ARMS
                  for group in OVER_HER_REPLY_GROUPS}
         misses = {}   # (arm, case) -> wrong verdicts
         for case, arm in _interleaved(JUDGE_ARMS, OVER_HER_REPLY_CASES):
             judges[arm]._last_error_time = 0.0
-            verdict = run_intent_judge_multi_segment(case, judge=judges[arm])
+            verdict = run_intent_judge_multi_segment(case, judge=judges[arm],
+                                                     current_text=case.current)
             group = _OVER_HER_REPLY_GROUP_OF[case.name]
             row = tally[(arm, group)]
             row[4] += 1
@@ -2478,15 +2504,17 @@ class TestIntentJudgeOverHerReply:
             row[1] += int(answered)
             row[2] += int(verdict.directed)
             row[3] += int(verdict.confidence == "high")
+            row[6] += int(verdict.stop)
             if not right:
                 misses[(arm, case.name)] = misses.get((arm, case.name), 0) + 1
 
         lines = [""]
-        for (arm, group), (right, answered, directed, sure, calls, silent) in tally.items():
+        for (arm, group), (right, answered, directed, sure, calls, silent, stops) in tally.items():
             scored = calls - silent
             lines.append(f"🧪 {arm:{_ARM_WIDTH}} {group:15}  right {rate(right, scored)}, "
                          f"answered {answered}/{scored}, directed {directed}/{scored}, "
-                         f"high confidence {sure}/{scored}, no verdict {silent}")
+                         f"high confidence {sure}/{scored}, stop {stops}/{scored}, "
+                         f"no verdict {silent}")
         for (arm, name), count in sorted(misses.items()):
             lines.append(f"   ↳ {arm}: {name} wrong {count}/{NOT_SPEECH_ROUNDS}")
         to_terminal(capsys, lines)

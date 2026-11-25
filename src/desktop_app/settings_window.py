@@ -537,8 +537,9 @@ def _build_field_metadata() -> List[FieldMeta]:
     f("low_power_mode", "Low Power Mode",
       "Reduce background LLM residency and skip LLM startup warmup",
       "features", "bool")
-    f("tune_enabled", "Startup Tune",
-      "Play startup sound",
+    f("tune_enabled", "Thinking Tune and Chime",
+      "Play a soft tune while Jarvis thinks, and a short chime when it takes "
+      "your question while it is still speaking",
       "features", "bool")
     f("update_check_enabled", "Check for Updates at Startup",
       "Ask GitHub for a newer release a few seconds after the app opens. "

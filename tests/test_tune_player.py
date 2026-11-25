@@ -14,6 +14,7 @@ injected into sys.modules — works headlessly in CI.
 from __future__ import annotations
 
 import sys
+import threading
 import time
 import types
 from unittest.mock import MagicMock
@@ -240,36 +241,85 @@ def test_stream_callback_wraps_seamlessly(monkeypatch):
 
 # --- The chime: his question taken while she speaks -------------------------
 
-class _RecordedStream:
-    """An output stream that keeps what it is given and what is written to it."""
+def _portaudio_lock_held_elsewhere() -> bool:
+    """Whether another thread holds ``portaudio_lock``: a thread of its own
+    tries to take it."""
+    from jarvis.utils.audio_lock import portaudio_lock
 
-    def __init__(self, opened, **kwargs):
+    taken = []
+
+    def probe():
+        got = portaudio_lock.acquire(blocking=False)
+        taken.append(got)
+        if got:
+            portaudio_lock.release()
+
+    prober = threading.Thread(target=probe)
+    prober.start()
+    prober.join(5.0)
+    return not taken[0]
+
+
+class _RecordedStream:
+    """An output stream that keeps what it is given, what is written to it,
+    and each call made to it with whether ``portaudio_lock`` was held then.
+    *fails* names the call that raises."""
+
+    latency = 0.0
+
+    def __init__(self, opened, fails=None, **kwargs):
         self.kwargs = kwargs
         self.written = []
+        self.calls = []
         self.closed = False
+        self._fails = fails
         opened.append(self)
 
+    def _called(self, name):
+        self.calls.append((name, _portaudio_lock_held_elsewhere()))
+        if name == self._fails:
+            raise OSError(f"{name} failed")
+
     def start(self):
-        pass
+        self._called("start")
 
     def write(self, data):
         import numpy as np
 
+        self._called("write")
         self.written.append(np.array(data, copy=True))
 
     def stop(self):
-        pass
+        self._called("stop")
 
     def close(self):
+        self._called("close")
         self.closed = True
 
 
-def _streams_recorded(monkeypatch) -> list:
+def _streams_recorded(monkeypatch, fails=None) -> list:
     opened = []
     fake_sd = types.ModuleType("sounddevice")
-    fake_sd.OutputStream = lambda **kwargs: _RecordedStream(opened, **kwargs)
+
+    def output_stream(**kwargs):
+        if fails == "open":
+            raise OSError("no output device")
+        return _RecordedStream(opened, fails, **kwargs)
+
+    fake_sd.OutputStream = output_stream
     monkeypatch.setitem(sys.modules, "sounddevice", fake_sd)
     return opened
+
+
+def _chime_played(monkeypatch) -> tuple[list, list]:
+    """Play the chime to its end. Returns the exceptions its thread raised
+    and its debug log lines."""
+    errors, lines = [], []
+    monkeypatch.setattr(threading, "excepthook", lambda args: errors.append(args.exc_value))
+    monkeypatch.setattr(tune_player, "debug_log",
+                        lambda message, category="debug": lines.append(message))
+    tune_player.play_heard_chime().join(5.0)
+    return errors, lines
 
 
 def test_the_chime_is_short_audible_and_played_once(monkeypatch):
@@ -288,21 +338,52 @@ def test_the_chime_is_short_audible_and_played_once(monkeypatch):
     assert np.abs(played).max() > 0.1 * 32767
 
 
-def test_the_chime_is_not_handed_to_the_echo_canceller(monkeypatch):
-    """Two streams handed over at once would be read one after the other,
-    her voice's timing in the canceller with them."""
+def test_the_chime_starts_stops_and_closes_its_stream_under_the_portaudio_lock(monkeypatch):
+    """Her streams open, stop and close while the chime plays, and PortAudio
+    on Windows ends the process on two such calls at once; the lock is not
+    held while the chime is written."""
+    opened = _streams_recorded(monkeypatch)
+
+    tune_player.play_heard_chime().join(5.0)
+
+    calls = opened[0].calls
+    assert [name for name, _ in calls] == ["start", "write", "stop", "close"]
+    assert all(held for name, held in calls if name != "write"), calls
+    assert not any(held for name, held in calls if name == "write"), calls
+
+
+def test_the_chime_plays_through_a_stream_written_whole_not_one_handed_over(monkeypatch):
+    """Only a stream that plays through a callback hands what it plays to
+    the echo canceller: the chime's is written whole, so two streams are
+    never handed over at once."""
     import jarvis.utils.audio_stream as audio_stream_module
 
-    _streams_recorded(monkeypatch)
+    opened = _streams_recorded(monkeypatch)
     canceller = MagicMock()
     monkeypatch.setattr(audio_stream_module, "ECHO_CANCELLER", canceller)
 
     tune_player.play_heard_chime().join(5.0)
 
+    assert "callback" not in opened[0].kwargs
+    assert opened[0].written
     canceller.reference_tap.assert_not_called()
+
+
+@pytest.mark.parametrize("fails", ["open", "start", "write"])
+def test_a_chime_that_cannot_play_says_so_and_raises_nothing(monkeypatch, fails):
+    opened = _streams_recorded(monkeypatch, fails=fails)
+
+    errors, lines = _chime_played(monkeypatch)
+
+    assert errors == []
+    assert any("heard chime" in line and "failed" in line for line in lines), lines
+    assert all(stream.closed for stream in opened)
 
 
 def test_without_sounddevice_the_chime_is_skipped_quietly(monkeypatch):
     monkeypatch.setitem(sys.modules, "sounddevice", None)
 
-    tune_player.play_heard_chime().join(5.0)
+    errors, lines = _chime_played(monkeypatch)
+
+    assert errors == []
+    assert any("sounddevice unavailable" in line for line in lines), lines

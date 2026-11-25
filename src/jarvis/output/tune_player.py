@@ -149,8 +149,11 @@ def play_heard_chime() -> threading.Thread:
     The stream is not handed to the echo canceller: her voice's stream
     plays at the same time, and two streams handed over at once would be
     read one after the other, her voice's timing in the canceller with
-    them. Without an audio output it says so in the debug log and plays
-    nothing.
+    them. It is written whole, and only a stream that plays through a
+    callback is handed over. Its start, stop and close run under
+    ``portaudio_lock`` while her streams open and close; the lock is not
+    held while it plays. Without an audio output it says so in the debug
+    log and plays nothing.
     """
     thread = threading.Thread(target=_play_heard_chime, daemon=True, name="heard-chime")
     thread.start()
@@ -168,7 +171,6 @@ def _play_heard_chime() -> None:
         stream = open_output_stream(
             sd,
             echo_canceller=None,
-            her_voice=False,
             samplerate=sample_rate,
             channels=1,
             dtype="int16",
@@ -180,7 +182,11 @@ def _play_heard_chime() -> None:
         with portaudio_lock:
             stream.start()
         stream.write(samples.reshape(-1, 1))
-        stream.stop()
+        # What the device still holds plays out before the stop, so the
+        # stop under the lock is short.
+        time.sleep(max(0.0, float(getattr(stream, "latency", 0.0) or 0.0)))
+        with portaudio_lock:
+            stream.stop()
     except Exception as exc:
         debug_log(f"heard chime: playback failed: {exc!r}", category="tune")
     finally:
