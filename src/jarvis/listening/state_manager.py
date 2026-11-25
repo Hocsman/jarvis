@@ -44,6 +44,11 @@ class StateManager:
         self._pending_query: str = ""
         self._last_voice_time: float = 0.0
         self._collect_start_time: float = 0.0
+        # When his silence ran out while an utterance was open, until that
+        # utterance joins the question or the collection ends; and whether
+        # this question has been held already: it is held once.
+        self._held_at: Optional[float] = None
+        self._held_once = False
 
         # Hot window state
         self._hot_window_start_time: float = 0.0
@@ -87,6 +92,8 @@ class StateManager:
             self._pending_query = initial_text.strip()
             self._last_voice_time = time.time() if heard_at is None else heard_at
             self._collect_start_time = self._last_voice_time
+            self._held_at = None
+            self._held_once = False
 
         start_time_str = datetime.fromtimestamp(self._collect_start_time).strftime('%H:%M:%S.%f')[:-3]
         debug_log(f"collection started at {start_time_str}: '{initial_text}'", "state")
@@ -108,8 +115,17 @@ class StateManager:
         with self._state_lock:
             self._pending_query = (self._pending_query + " " + text).strip()
             self._last_voice_time = time.time() if heard_at is None else heard_at
+            held_at, self._held_at = self._held_at, None
 
+        if held_at is not None:
+            debug_log(f"the utterance his silence was held for joins the question "
+                      f"(held {self._last_voice_time - held_at:.2f}s)", "state")
         debug_log(f"added to collection: '{text}' -> '{self._pending_query}'", "state")
+
+    def is_held(self) -> bool:
+        """Whether the question is waiting for an utterance that was open
+        when his silence ran out."""
+        return self.is_collecting() and self._held_at is not None
 
     def get_pending_query(self) -> str:
         """Get the current pending query text."""
@@ -127,6 +143,8 @@ class StateManager:
             query = self._pending_query
             collect_start_time = self._collect_start_time
             self._pending_query = ""
+            self._held_at = None
+            self._held_once = False
             if self._state == ListeningState.COLLECTING:
                 self._state = ListeningState.WAKE_WORD
 
@@ -143,13 +161,18 @@ class StateManager:
 
         return query
 
-    def check_collection_timeout(self, now: Optional[float] = None) -> bool:
+    def check_collection_timeout(self, now: Optional[float] = None,
+                                 voice_going_on: bool = False) -> bool:
         """
         Check if collection should timeout due to silence or max duration.
 
         Args:
             now: When the audio being read was captured; the wall clock if
                 not given. Audio read late is measured in its own time.
+            voice_going_on: An utterance is still open that his silence
+                may wait for: the first time it runs out in this question,
+                it is not over until that utterance closes. The longest
+                collection (``max_collect_seconds``) still ends it.
 
         Returns:
             True if collection should be finalized
@@ -161,15 +184,29 @@ class StateManager:
         silence_timeout = current_time - self._last_voice_time >= self.voice_collect_seconds
         max_timeout = current_time - self._collect_start_time >= self.max_collect_seconds
 
+        if silence_timeout and voice_going_on and not max_timeout:
+            if self._held_at is not None:
+                return False
+            if not self._held_once:
+                self._held_at = current_time
+                self._held_once = True
+                debug_log("collection held: his silence ran out while an utterance "
+                          "is open", "state")
+                return False
+            debug_log("collection not held again: his silence was waited for once "
+                      "in this question", "state")
+
         if silence_timeout or max_timeout:
             timeout_type = "silence" if silence_timeout else "max"
+            held = ("" if self._held_at is None
+                    else f", held {current_time - self._held_at:.2f}s for an open utterance")
 
             end_time = time.time()
             duration = end_time - self._collect_start_time
             start_time_str = datetime.fromtimestamp(self._collect_start_time).strftime('%H:%M:%S.%f')[:-3]
             end_time_str = datetime.fromtimestamp(end_time).strftime('%H:%M:%S.%f')[:-3]
 
-            debug_log(f"collection timeout ({timeout_type}): '{self._pending_query}' (started: {start_time_str}, ended: {end_time_str}, duration: {duration:.2f}s)", "state")
+            debug_log(f"collection timeout ({timeout_type}): '{self._pending_query}' (started: {start_time_str}, ended: {end_time_str}, duration: {duration:.2f}s{held})", "state")
             return True
 
         return False

@@ -343,6 +343,29 @@ def test_a_canceller_fallen_behind_delivers_what_waits_as_captured_until_it_catc
     assert sum("fell behind" in line for line in lines) == 1
 
 
+def test_it_does_not_say_it_cleans_the_microphone_while_it_has_fallen_behind():
+    now = [0.0]
+    gate = threading.Event()
+    canceller, made = _canceller_with({"capture_gain": 0.0, "gate": gate}, clock=lambda: now[0])
+    said = []
+
+    def delivered(captured_at, block):
+        said.append(canceller.cleans_the_microphone())
+
+    canceller.hear(0.0, _mic(), delivered)
+    assert made[-1].entered.wait(2.0)
+    for i in range(1, 4):
+        now[0] = i * 0.02
+        canceller.hear(now[0], _mic(), delivered)
+    now[0] = echo_module.BEHIND_SECONDS + 1.0  # they waited that long
+    gate.set()
+    assert canceller.settle()
+    canceller.hear(now[0], _mic(), delivered)  # caught up
+    assert canceller.settle()
+
+    assert said == [True, False, False, False, True]
+
+
 # --- Failing open -------------------------------------------------------------
 
 
@@ -406,6 +429,28 @@ def test_a_capture_it_cannot_clean_says_nothing_while_it_is_off(capsys):
     canceller.capture_opened(44100, 2)
 
     assert "Echo cancellation" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("rate,channels", [(CAPTURE_RATE, 1), (44100, 1), (CAPTURE_RATE, 2)])
+def test_it_says_it_cleans_the_microphone_only_while_it_does(rate, channels):
+    canceller, _ = _canceller_with({"capture_gain": 0.0})
+    canceller.capture_opened(rate, channels)
+    delivered = _Delivered()
+
+    canceller.hear(1.0, _mic(rate=rate, channels=channels), delivered)
+
+    assert canceller.settle()
+    assert canceller.cleans_the_microphone() == delivered.cleaned()[0]
+
+
+def test_it_no_longer_says_it_cleans_the_microphone_once_it_has_failed():
+    canceller, _ = _canceller_with({"fail_on": "capture", "capture_gain": 0.0})
+    assert canceller.cleans_the_microphone()
+
+    canceller.hear(1.0, _mic(), _Delivered())
+
+    assert canceller.settle()
+    assert not canceller.cleans_the_microphone()
 
 
 def test_nothing_is_taken_out_until_it_is_started():

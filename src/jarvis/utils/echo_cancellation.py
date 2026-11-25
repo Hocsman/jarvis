@@ -27,6 +27,12 @@ from ..debug import debug_log
 # other rate is read as captured.
 NATIVE_RATES = (8000, 16000, 32000, 48000)
 
+
+def _cleans(rate: int, channels: int) -> bool:
+    """Whether a capture in this format is one the canceller cleans: one
+    channel at a rate WebRTC works at natively."""
+    return channels == 1 and rate in NATIVE_RATES
+
 # Her voice counts as playing for this long after a block of it was handed
 # over: her voice engines' blocks are 46 ms at most, so a longer gap is a
 # pause in her voice, not the space between two blocks.
@@ -265,12 +271,23 @@ class EchoCanceller:
     def active(self) -> bool:
         return self._on
 
+    def cleans_the_microphone(self) -> bool:
+        """Whether what she plays through the canceller, her voice and the
+        thinking tune, is taken out of what the microphone hears: the
+        canceller is on, the capture opened is one it cleans (one channel at
+        a rate WebRTC works at natively) and its thread has not fallen
+        behind. Chatterbox's voice and the chime played over her voice are
+        not handed to it, and stay in the microphone."""
+        capture = self._capture
+        return (self._on and capture is not None and _cleans(*capture)
+                and not self._behind)
+
     def capture_opened(self, rate: int, channels: int) -> None:
         """The capture the listener opened. One channel at a rate WebRTC
         works at natively is cleaned; any other is read as captured, which
         the console says once per format while it is on."""
         self._capture = (rate, channels)
-        supported = channels == 1 and rate in NATIVE_RATES
+        supported = _cleans(rate, channels)
         if not supported and self._on and (rate, channels) not in self._said_unsupported:
             self._said_unsupported.add((rate, channels))
             print(f"     ⚠️  Echo cancellation: this microphone ({rate} Hz, {channels} "
@@ -426,7 +443,7 @@ class EchoCanceller:
             item[1].set()
 
     def _take_capture(self, rate: int, channels: int) -> None:
-        supported = channels == 1 and rate in NATIVE_RATES
+        supported = _cleans(rate, channels)
         if supported and self._processor is not None and rate != self._rate:
             try:
                 self._processor = self._factory(rate)
