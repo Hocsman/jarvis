@@ -265,6 +265,15 @@ class EchoCanceller:
     def active(self) -> bool:
         return self._on
 
+    def cleans_the_microphone(self) -> bool:
+        """Whether what she plays, her voice and the thinking tune, is taken
+        out of what the microphone hears: the canceller is on and the
+        capture opened is one it cleans (one channel at a rate WebRTC works
+        at natively)."""
+        capture = self._capture
+        return (self._on and capture is not None
+                and capture[1] == 1 and capture[0] in NATIVE_RATES)
+
     def capture_opened(self, rate: int, channels: int) -> None:
         """The capture the listener opened. One channel at a rate WebRTC
         works at natively is cleaned; any other is read as captured, which

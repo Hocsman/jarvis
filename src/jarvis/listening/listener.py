@@ -3137,8 +3137,10 @@ class VoiceListener(threading.Thread):
         window expiry. ``now`` is when the audio being read was captured: the
         collection's silence is counted in that time, so audio the loop
         reads late, after a stall, still has his next words in time to
-        complete the question. With no audio to read, the wall clock."""
-        if self.state_manager.check_collection_timeout(now):
+        complete the question. With no audio to read, the wall clock, and
+        no voice of his goes on (`_his_voice_goes_on`)."""
+        voice_going_on = now is not None and self._his_voice_goes_on()
+        if self.state_manager.check_collection_timeout(now, voice_going_on=voice_going_on):
             query = self.state_manager.clear_collection()
             # No letter or digit, in any script, is nothing to answer: her
             # name alone, and at most the punctuation Whisper made out of the
@@ -3151,6 +3153,19 @@ class VoiceListener(threading.Thread):
         # Also check hot window expiry - this ensures the timeout is enforced
         # even when there's no audio being processed
         self.state_manager.check_hot_window_expiry(self.cfg.voice_debug)
+
+    def _his_voice_goes_on(self) -> bool:
+        """Whether the voice detector holds an utterance open that his
+        silence waits for (listening.spec.md, "A sentence heard while a
+        question is still being collected completes it"): one is open, no
+        longer yet than an utterance may be, and what she plays is taken
+        out of the microphone. Without that, the thinking tune reaches the
+        voice detector and would keep an utterance open after nearly every
+        question. Read on each frame, so an utterance open when his silence
+        runs out began before it did."""
+        return (self.is_speech_active
+                and len(self._utterance_frames) < self._longest_utterance_frames()
+                and ECHO_CANCELLER.cleans_the_microphone())
 
     def _nothing_after_the_wake_word(self) -> None:
         """His silence ran out on a question with nothing in it: her name
@@ -4435,17 +4450,21 @@ class VoiceListener(threading.Thread):
                 self._silence_frames = 0
             else:
                 self._silence_frames += 1
-                # Use shorter timeout during TTS for quick stop command detection
-                current_max_frames = (self._tts_max_utt_frames
-                                      if (self.tts and self.tts.is_speaking())
-                                      else self._normal_max_utt_frames)
                 if (self._silence_frames >= self._endpoint_silence_frames
-                        or len(self._utterance_frames) >= current_max_frames):
+                        or len(self._utterance_frames) >= self._longest_utterance_frames()):
                     self._finalize_utterance()
                     self._pre_roll.clear()
 
         # Check for query timeouts, in the time this frame was captured
         self._check_query_timeout(captured_at)
+
+    def _longest_utterance_frames(self) -> int:
+        """The most frames an utterance may hold: `max_utterance_ms`, or the
+        shorter `tts_max_utterance_ms` while she speaks, so a stop said over
+        her is heard quickly."""
+        if self.tts and self.tts.is_speaking():
+            return self._tts_max_utt_frames
+        return self._normal_max_utt_frames
 
     def _trailing_silence_seconds(self) -> float:
         """The silence at the end of the utterance being closed, in seconds:

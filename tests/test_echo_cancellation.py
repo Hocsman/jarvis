@@ -408,6 +408,28 @@ def test_a_capture_it_cannot_clean_says_nothing_while_it_is_off(capsys):
     assert "Echo cancellation" not in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("rate,channels", [(CAPTURE_RATE, 1), (44100, 1), (CAPTURE_RATE, 2)])
+def test_it_says_it_cleans_the_microphone_only_while_it_does(rate, channels):
+    canceller, _ = _canceller_with({"capture_gain": 0.0})
+    canceller.capture_opened(rate, channels)
+    delivered = _Delivered()
+
+    canceller.hear(1.0, _mic(rate=rate, channels=channels), delivered)
+
+    assert canceller.settle()
+    assert canceller.cleans_the_microphone() == delivered.cleaned()[0]
+
+
+def test_it_no_longer_says_it_cleans_the_microphone_once_it_has_failed():
+    canceller, _ = _canceller_with({"fail_on": "capture", "capture_gain": 0.0})
+    assert canceller.cleans_the_microphone()
+
+    canceller.hear(1.0, _mic(), _Delivered())
+
+    assert canceller.settle()
+    assert not canceller.cleans_the_microphone()
+
+
 def test_nothing_is_taken_out_until_it_is_started():
     canceller = _new(processor_factory=lambda rate: _RecordingProcessor(rate, capture_gain=0.0))
     canceller.capture_opened(CAPTURE_RATE, 1)

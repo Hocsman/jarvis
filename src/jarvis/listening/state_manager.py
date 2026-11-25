@@ -44,6 +44,9 @@ class StateManager:
         self._pending_query: str = ""
         self._last_voice_time: float = 0.0
         self._collect_start_time: float = 0.0
+        # When his silence ran out while his voice went on, until the
+        # collection ends or his words add to it.
+        self._held_at: Optional[float] = None
 
         # Hot window state
         self._hot_window_start_time: float = 0.0
@@ -87,6 +90,7 @@ class StateManager:
             self._pending_query = initial_text.strip()
             self._last_voice_time = time.time() if heard_at is None else heard_at
             self._collect_start_time = self._last_voice_time
+            self._held_at = None
 
         start_time_str = datetime.fromtimestamp(self._collect_start_time).strftime('%H:%M:%S.%f')[:-3]
         debug_log(f"collection started at {start_time_str}: '{initial_text}'", "state")
@@ -108,6 +112,7 @@ class StateManager:
         with self._state_lock:
             self._pending_query = (self._pending_query + " " + text).strip()
             self._last_voice_time = time.time() if heard_at is None else heard_at
+            self._held_at = None
 
         debug_log(f"added to collection: '{text}' -> '{self._pending_query}'", "state")
 
@@ -127,6 +132,7 @@ class StateManager:
             query = self._pending_query
             collect_start_time = self._collect_start_time
             self._pending_query = ""
+            self._held_at = None
             if self._state == ListeningState.COLLECTING:
                 self._state = ListeningState.WAKE_WORD
 
@@ -143,13 +149,17 @@ class StateManager:
 
         return query
 
-    def check_collection_timeout(self, now: Optional[float] = None) -> bool:
+    def check_collection_timeout(self, now: Optional[float] = None,
+                                 voice_going_on: bool = False) -> bool:
         """
         Check if collection should timeout due to silence or max duration.
 
         Args:
             now: When the audio being read was captured; the wall clock if
                 not given. Audio read late is measured in its own time.
+            voice_going_on: An utterance of his is still open: his silence
+                is not over until it closes. The longest collection
+                (``max_collect_seconds``) still ends it.
 
         Returns:
             True if collection should be finalized
@@ -161,15 +171,24 @@ class StateManager:
         silence_timeout = current_time - self._last_voice_time >= self.voice_collect_seconds
         max_timeout = current_time - self._collect_start_time >= self.max_collect_seconds
 
+        if silence_timeout and voice_going_on and not max_timeout:
+            if self._held_at is None:
+                self._held_at = current_time
+                debug_log("collection held: his silence ran out while an utterance "
+                          "of his is open", "state")
+            return False
+
         if silence_timeout or max_timeout:
             timeout_type = "silence" if silence_timeout else "max"
+            held = ("" if self._held_at is None
+                    else f", held {current_time - self._held_at:.2f}s for his voice")
 
             end_time = time.time()
             duration = end_time - self._collect_start_time
             start_time_str = datetime.fromtimestamp(self._collect_start_time).strftime('%H:%M:%S.%f')[:-3]
             end_time_str = datetime.fromtimestamp(end_time).strftime('%H:%M:%S.%f')[:-3]
 
-            debug_log(f"collection timeout ({timeout_type}): '{self._pending_query}' (started: {start_time_str}, ended: {end_time_str}, duration: {duration:.2f}s)", "state")
+            debug_log(f"collection timeout ({timeout_type}): '{self._pending_query}' (started: {start_time_str}, ended: {end_time_str}, duration: {duration:.2f}s{held})", "state")
             return True
 
         return False

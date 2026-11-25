@@ -107,6 +107,20 @@ class TestQueryCollection:
 
         assert sm.check_collection_timeout() is True
 
+    def test_his_silence_is_not_over_while_his_voice_goes_on(self):
+        sm = StateManager(voice_collect_seconds=1.0)
+        sm.start_collection("test", heard_at=100.0)
+
+        assert sm.check_collection_timeout(101.5, voice_going_on=True) is False
+        assert sm.check_collection_timeout(101.6) is True
+
+    def test_the_longest_collection_ends_while_his_voice_goes_on(self):
+        sm = StateManager(voice_collect_seconds=1.0, max_collect_seconds=5.0)
+        sm.start_collection("test", heard_at=100.0)
+        sm.add_to_collection("more", heard_at=104.5)
+
+        assert sm.check_collection_timeout(105.0, voice_going_on=True) is True
+
 
 class TestHotWindowActivation:
     """Tests for hot window activation timer."""
