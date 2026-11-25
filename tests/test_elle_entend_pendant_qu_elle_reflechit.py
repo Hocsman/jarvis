@@ -22,6 +22,7 @@ import pytest
 
 from test_hot_window_input import (
     _SilentTune,
+    _console_lines,
     _create_listener,
     _his_silence_runs_out,
     _install_intent_judge,
@@ -984,3 +985,164 @@ def test_the_backlog_outlasts_the_intent_judge():
 
     longest = get_default_config()["intent_judge_timeout_sec"] + _PAST_THE_TIMEOUT_SECONDS
     assert AUDIO_BACKLOG_SECONDS > longest
+
+
+# --- A question he repeats before her answer comes --------------------------
+
+@patch("builtins.print")
+def test_a_question_asked_again_while_it_waits_is_answered_once(mock_print):
+    """Field trace: asked over her reply, with no sign that she had heard,
+    he asked again as she finished, and she gave the weather twice."""
+    engine = _Engine()
+    listener, _tts, patcher = _listener_with(engine)
+    try:
+        listener._hand_over("quelle heure est-il")
+        assert engine.started.wait(WAIT)
+        listener._hand_over("quel temps fera-t-il demain à Lyon ?")
+        listener._hand_over("Quel temps fera-t-il demain à Lyon")
+        engine.release.set()
+        assert _settled(listener)
+
+        assert engine.queries == ["quelle heure est-il", "quel temps fera-t-il demain à Lyon ?"]
+        assert any(line.lstrip().startswith("🔁 Already asked, answered once")
+                   for line in _console_lines(mock_print))
+    finally:
+        engine.release.set()
+        _stop(listener, patcher)
+
+
+@patch("builtins.print")
+def test_a_question_asked_again_while_its_answer_is_prepared_is_answered_once(_print):
+    engine = _Engine()
+    listener, _tts, patcher = _listener_with(engine)
+    try:
+        listener._hand_over("quel temps fera-t-il demain à Lyon ?")
+        assert engine.started.wait(WAIT)
+        listener._last_heard_at = time.time()
+        listener._hand_over("quel temps fera-t-il demain à lyon")
+        engine.release.set()
+        assert _settled(listener)
+
+        assert engine.queries == ["quel temps fera-t-il demain à Lyon ?"]
+    finally:
+        engine.release.set()
+        _stop(listener, patcher)
+
+
+@patch("builtins.print")
+def test_a_question_asked_again_once_her_answer_began_is_answered_again(_print):
+    """He heard her answer begin and asked again: that is asking twice."""
+    engine = _Engine(before=["Demain à Lyon, il fera beau, Monsieur."],
+                     after=["Et doux l'après-midi."],
+                     reply="Demain à Lyon, il fera beau, Monsieur. Et doux l'après-midi.")
+    listener, tts, patcher = _listener_with(engine)
+    try:
+        listener._hand_over("quel temps fera-t-il demain à Lyon ?")
+        assert engine.started.wait(WAIT)
+        assert _wait_for(lambda: _spoken(tts) == ["Demain à Lyon, il fera beau, Monsieur."])
+        listener._last_heard_at = time.time()
+        listener._hand_over("quel temps fera-t-il demain à Lyon ?")
+        engine.release.set()
+        assert _settled(listener)
+
+        assert len(engine.queries) == 2
+    finally:
+        engine.release.set()
+        _stop(listener, patcher)
+
+
+@patch("builtins.print")
+def test_two_questions_with_other_numbers_are_two_questions(_print):
+    engine = _Engine()
+    listener, _tts, patcher = _listener_with(engine)
+    try:
+        listener._hand_over("quelle heure est-il")
+        assert engine.started.wait(WAIT)
+        listener._hand_over("rappelle-moi dans 5 minutes")
+        listener._hand_over("rappelle-moi dans 10 minutes")
+        engine.release.set()
+        assert _settled(listener)
+
+        assert engine.queries == ["quelle heure est-il", "rappelle-moi dans 5 minutes",
+                                  "rappelle-moi dans 10 minutes"]
+    finally:
+        engine.release.set()
+        _stop(listener, patcher)
+
+
+@patch("builtins.print")
+def test_a_question_asked_again_after_a_stop_is_answered(_print):
+    engine = _Engine()
+    listener, _tts, patcher = _listener_with(engine)
+    try:
+        listener._hand_over("quel temps fera-t-il demain à Lyon ?")
+        assert engine.started.wait(WAIT)
+        listener._process_transcript("stop", utterance_energy=0.01)
+        listener._last_heard_at = time.time()
+        listener._hand_over("quel temps fera-t-il demain à Lyon ?")
+        engine.release.set()
+        assert _settled(listener)
+
+        assert engine.queries == ["quel temps fera-t-il demain à Lyon ?"] * 2
+    finally:
+        engine.release.set()
+        _stop(listener, patcher)
+
+
+# Two questions a word apart: a correction said before the first is answered
+# is never dropped as the same question asked again.
+_ANOTHER_QUESTION = [
+    ("ajoute des pommes à la liste", "ajoute des poires à la liste"),
+    ("active le mode avion", "désactive le mode avion"),
+    ("lock the front door", "unlock the front door"),
+    ("rappelle-moi à 14h30", "rappelle-moi à 15h30"),
+    ("convertis 10 euros en dollars", "convertis 10 dollars en euros"),
+    ("appelle Jean", "appelle Jeanne"),
+    ("今天天气怎么样", "明天天气怎么样"),
+]
+
+
+@pytest.mark.parametrize("first, then", _ANOTHER_QUESTION,
+                         ids=["one-word", "opposite-command", "opposite-in-english",
+                              "a-number-in-a-word", "words-swapped", "a-name-a-letter-apart",
+                              "a-script-without-spaces"])
+@patch("builtins.print")
+def test_a_question_a_word_apart_is_another_question(_print, first, then):
+    engine = _Engine()
+    listener, _tts, patcher = _listener_with(engine)
+    try:
+        listener._hand_over("quelle heure est-il")
+        assert engine.started.wait(WAIT)
+        listener._hand_over(first)
+        listener._hand_over(then)
+        engine.release.set()
+        assert _settled(listener)
+
+        assert engine.queries == ["quelle heure est-il", first, then]
+    finally:
+        engine.release.set()
+        _stop(listener, patcher)
+
+
+@pytest.mark.parametrize("first, again", [
+    ("Quel temps fera-t-il demain à Lyon ?", "quel temps fera t il demain à lyon"),
+    ("What's the weather like tomorrow?", "what's the weather like tomorrow"),
+], ids=["french", "english"])
+@patch("builtins.print")
+def test_the_same_question_written_otherwise_is_answered_once(_print, first, again):
+    """Case, punctuation and the hyphens between words are Whisper's
+    writing, not his question."""
+    engine = _Engine()
+    listener, _tts, patcher = _listener_with(engine)
+    try:
+        listener._hand_over("quelle heure est-il")
+        assert engine.started.wait(WAIT)
+        listener._hand_over(first)
+        listener._hand_over(again)
+        engine.release.set()
+        assert _settled(listener)
+
+        assert engine.queries == ["quelle heure est-il", first]
+    finally:
+        engine.release.set()
+        _stop(listener, patcher)

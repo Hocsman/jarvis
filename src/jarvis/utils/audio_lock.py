@@ -5,7 +5,8 @@ PortAudio explicitly documents opening and closing streams as not thread-safe
 APIs abort the whole process on internal assertion failures.
 Jarvis coordinates PortAudio across independent threads: the voice listener run
 loop, the Windows microphone permission check thread, the dictation engine worker
-threads, the TTS playback thread, and the thinking tune player.
+threads, the TTS playback thread, the thinking tune player, and the thread that
+plays the chime over her voice.
 
 Every stream lifecycle call (constructing an InputStream/OutputStream, calling
 start/stop/close/abort, and blocking sd.play which opens a stream internally)

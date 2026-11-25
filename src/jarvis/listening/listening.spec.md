@@ -148,7 +148,7 @@ the reopened stream delivers its first callback, the console says once
 All stream lifecycle calls (`InputStream`/`OutputStream` construction,
 `start`/`stop`/`close`/`abort`) run under the process-wide
 `jarvis.utils.audio_lock.portaudio_lock`, shared with the dictation engine,
-TTS, and the thinking tune. PortAudio documents stream open/close as not
+TTS, the thinking tune and the chime played over her voice. PortAudio documents stream open/close as not
 thread safe; unserialised calls across threads abort the whole app on
 Windows. The run loop uses `_serialised_stream` instead
 of the raw `with stream:` context manager. Two deliberate exceptions: the
@@ -170,7 +170,8 @@ tries on the next reading. It holds `portaudio_lock` throughout, and the count
 of open streams lives beside the lock (`jarvis.utils.audio_lock`): every
 stream the process opens is constructed and tracked in one hold of the lock,
 through `open_input_stream` (the listener's and dictation's) or
-`open_output_stream` (each speech engine's and the thinking tune's), and
+`open_output_stream` (each speech engine's, the thinking tune's and the
+chime's), and
 counted open until its `closed` is true; a stream whose state cannot be read
 counts as open. The dictation beep's blocking `sd.play` is not tracked: it
 opens and closes its stream inside one hold of the lock, so no reading can
@@ -219,7 +220,7 @@ The intent judge receives full context and makes intelligent decisions:
 - Sees pre-wake-word context → can understand "...what do YOU think, Jarvis?"
 - Extracts clean query → removes filler words, false starts
 
-**Gating:** The judge is called only when there is an engagement signal — (a) a wake word was detected in the current utterance, (b) the utterance falls inside (or pending) a hot window, (c) TTS is currently speaking, or (d) his question is still being collected and nothing else took the utterance, where only its `stop` and `noise` are read (see "Text Whisper Makes Out of Silence"). Pure ambient speech skips the judge entirely. This keeps the synchronous audio loop from blocking up to `intent_judge_timeout_sec` on every background utterance, which would otherwise freeze the UI when Ollama is slow or contended.
+**Gating:** The judge is called only when there is an engagement signal — (a) a wake word was detected in the current utterance, (b) the utterance falls inside (or pending) a hot window, (c) TTS is currently speaking, (d) with the hot window on, the utterance was heard in her time, its voice going on after her reply began, while her reply is taken out of the microphone, whatever its length (see "During TTS", "His follow-up while she speaks"), or (e) his question is still being collected and nothing else took the utterance, where only its `stop` and `noise` are read (see "Text Whisper Makes Out of Silence"). Pure ambient speech skips the judge entirely. This keeps the synchronous audio loop from blocking up to `intent_judge_timeout_sec` on every background utterance, which would otherwise freeze the UI when Ollama is slow or contended.
 
 **Alias normalisation:** Before the transcript is sent to the judge, every configured wake-word alias in each segment is replaced with the primary assistant name (case-insensitive, word-boundary-aware). Aliases are Whisper mishearings of the wake word (e.g. "Jervis", "Jaivis" for "Jarvis"); without this step the small judge model sees the alias, doesn't know it refers to the assistant, and can decide the user is addressing a different person. Normalisation happens at prompt-build time only — the raw transcript buffer is untouched.
 
@@ -234,8 +235,9 @@ The capture callback stamps each block with the time it was captured and hands i
 **Replies run on a thread of their own.** Once a query is collected, the loop hands it over (`_hand_over`) and goes back to listening; the reply thread runs the queries one after the other, each through the reply engine and then out loud. While she prepares an answer and while she says it, what he says is still heard.
 
 - **A question asked while a reply is on its way waits its turn.** It is answered after the one in hand, never alongside it, and only once her voice has stopped: a reply started while the last is still audible would replace the echo detector's record of it, and that one's window would open over the new one. At most `MAX_WAITING_TURNS` (2) wait; past that the oldest is dropped with a console line, so a wake word repeated by a film cannot stack up replies that would run minutes later.
+- **A question he repeats before her answer comes is answered once.** A query handed over that asks what a turn waiting its turn asks, or what the turn in hand asks whose answer had not started when he finished saying it (`_Turn.answer_said_at`, when the first of its reply went to the voice), is not queued. It asks the same when it holds the same words in the same order, case, punctuation and the hyphens Whisper writes between words aside (`_the_same_question`: "Quel temps fera-t-il ?" and "quel temps fera t il"). Nothing looser: a word apart makes another question ("active" and "désactive", "14h30" and "15h30", "Jean" and "Jeanne"), and so do the same words in another order, and a question dropped would never be answered. In a script written without spaces the question is one word, matched whole. A question Whisper writes in other words the second time is answered twice. A stopped turn is not one: a question asked again after a stop is answered. The console says `🔁 Already asked, answered once: "…"`. Field trace: asked over her reply, with no sign that she had heard, he asked again as she finished, and she gave the weather twice, the second time beginning "I have just given you the weather".
 - **A stop silences the reply.** Heard while a reply is being prepared, said or waits to be, a stop says nothing more of the reply in hand (no sentence streamed after it, no tail), drops the questions waiting behind it and a question still being collected, and interrupts the speech engine. Each stop is counted, and a turn handed over before the count moved is never said: one stopped while it waited for the query lock is not run at all. The engine finishes a turn already running on its own, unheard; its tools still run. A stopped turn is no longer a reply on its way, even while the engine finishes it: the thinking tune and THINKING are not kept for it, and when the engine is done with it, what he has started since (a question being collected or handed over) keeps its tune and the published state. Replies other features handed over are kept.
-- **What counts as a stop.** While she speaks, any utterance holding a stop command, as before; while a reply is on its way, or one a stop silenced is still being finished by the engine, or his question is still being collected, an utterance of at most `STOP_WORDS_WHILE_THINKING` (3) words (a stop he repeats, "Jarvis, stop !", is still a stop, never a question), because a stop word inside a longer sentence ("Jarvis, how do I stop the timer?") is a question, and waits its turn. A stop the intent judge reads out of a sentence counts the same.
+- **What counts as a stop.** While she speaks, any utterance holding a stop command; while a reply is on its way, or one a stop silenced is still being finished by the engine, or his question is still being collected, an utterance of at most `STOP_WORDS_WHILE_THINKING` (3) words (a stop he repeats, "Jarvis, stop !", is still a stop, never a question), because a stop word inside a longer sentence ("Jarvis, how do I stop the timer?") is a question, and waits its turn. A stop the intent judge reads out of a sentence counts the same.
 - **Her spoken question is answered by what he says to it.** A spoken question is settled by the next voice turn (`tools/policy.spec.md`), so a turn whose words he said before he heard it is set aside, with a console line, and the question waits for his answer. He heard it at her last sound: the reply's end less the quiet her engine played after it (`quiet_tail`), so an answer said in that quiet, before her reply was done, answers it. A question he never heard, its reply having been stopped, is withdrawn as `expiré` before the next turn runs.
 - **Speech ignored while a reply is on its way leaves her thinking.** The thinking tune is that reply's: an utterance that is not for her does not stop it, and the published state stays THINKING.
 - **The reply thread is the only one that speaks.** Her answers and the replies other features hand over (`enqueue_reply`, "Speaking Something Produced Elsewhere") leave from it, so the echo detector's record of what she last said has one writer.
@@ -303,7 +305,7 @@ System is waiting for wake word activation.
 
 ### 2. Hot Window Mode
 
-After TTS finishes, allow wake-word-free follow-up.
+After TTS finishes, allow wake-word-free follow-up. With this mode on, what he says over her reply while it is taken out of the microphone is judged in this mode too, and answered without her name only when the judge is sure it was said to her; none of the overrides below serves it (see "During TTS", "His follow-up while she speaks").
 
 **Activation:** `echo_tolerance` seconds after TTS ends (allows echo to settle)
 
@@ -323,7 +325,7 @@ After TTS finishes, allow wake-word-free follow-up.
 
 ### 3. During TTS
 
-While TTS is playing, echo rejection and stop commands are handled with fast text-based checks (no LLM). This prevents self-loops where the mic picks up TTS output. After TTS finishes, the intent judge takes over.
+While TTS is playing, echo rejection and stop commands are handled first with fast text-based checks (no LLM). This prevents self-loops where the mic picks up TTS output. The intent judge is asked on utterances of more than three words, and, while her reply is taken out of the microphone with the hot window on, on what he says over it whatever its length (see "His follow-up while she speaks"). After TTS finishes, the hot window's paths take over.
 
 **Stop detection:**
 - Text-based: Check for "stop", "quiet", "shut up", etc., while she speaks and while a reply is on its way (prepared, or waiting its turn); while she only thinks, in an utterance of at most three words
@@ -469,6 +471,60 @@ While TTS is playing, echo rejection and stop commands are handled with fast tex
   open and close it are out (see "Her sentences at the edges of what he
   said"), so his words between two sentences of hers are weighed alone.
 
+**His follow-up while she speaks needs no wake word once her reply is taken
+out of the microphone.** With the hot window on (`hot_window_enabled`) and an
+intent judge, while the echo canceller takes her reply out
+(`EchoCanceller.taking_her_reply_out`: on, and, while the reply plays, at
+least `MIN_REMOVED_DB` out of the frames of it heard so far, at least
+`MIN_FRAMES_MEASURED` of them; once it has finished, its figure, see
+"Acoustic Echo Cancellation"), an utterance is a follow-up to her reply when
+it is heard in her time (`_in_her_time`), its voice went on after her reply
+began (the utterance's end, its trailing silence taken off, after the echo
+detector's `_tts_start_time`, `_said_over_her_reply`), and no question of his
+is being collected. The judge is asked on it whatever its length, and is told
+the hot window's mode; the console names the mode
+`🧠 Intent (while she speaks)`. A stop is read first: the text check's, and a
+stop the judge reads, whatever its confidence. Then the judge decides it when
+it is sure (`high`):
+
+- A directed verdict is collected and answered without a wake word, once her
+  voice has stopped, through the hot window's paths: her reply coming back
+  whole, and words that could be hers (shown "(during TTS)") the judge
+  extracts nothing from, are set aside as there, with `🔇 Heard (echo)`;
+  with nothing extracted from other words, what he said is the question.
+- A noise verdict is not speech: `🔇 Heard (not speech)`, and the segment is
+  no context for later calls (see "Text Whisper Makes Out of Silence").
+- Any other rejection stands: none of the hot window's overrides takes it, an
+  aside included. It is set aside with a debug line only, the verdict's own
+  console line saying why.
+- Her name is his call all the same. A rejection of words carrying a wake
+  word that can only be his (`_carries_his_wake_word`), her reply coming back
+  whole aside, goes to the wake-word check, which answers what follows her
+  name. Her name with nothing after it, in what he said and in the judge's
+  query, decides nothing whatever the verdict: the wake-word check waits for
+  his question, as for her name heard anywhere else.
+
+A verdict below high confidence leaves it to the wake word, as outside the hot
+window, and the console says so: `🧠 Not sure it was said to her: her name
+decides`. So does no verdict. What he adds to a question still being collected
+is not judged this way: it completes the question, as anything heard while it
+is collected does, and a rejection given to it without his question before it
+is judged again with it (see "Wake Word Mode", Priority 5). What was said
+before her reply began, its voice ending before hers started, was not said
+over her reply and needs her name. So does everything he says while she speaks
+with the hot window off, or without the canceller's figure (the canceller off
+or failed, a reply played by Chatterbox, a capture it does not clean, a reply
+it takes less out of, the first moments of a reply before its frames make a
+figure). Field trace: with her reply taken out, "Je peux m'indiquer la météo
+pour aujourd'hui, s'il te plaît." and "d'accord et pour demain" were heard word
+for word over her reply and left unanswered for want of her name. The cost,
+accepted: whatever is said near her while she speaks, a guest or the
+television, reaches the judge in the hot window's mode, and is answered after
+her reply when the judge is sure it was said to her. A judge on a hosted
+provider reads those words as it reads every utterance it judges (see
+`docs/llm_contexts.md`, Intent Judge). Switching off the hot window or the echo
+canceller makes her name needed again.
+
 ## Rolling Transcript Buffer
 
 ### Design
@@ -549,8 +605,9 @@ The judge's verdict carries `noise`: true when the current segment is such an in
   - A stop cancels the question, as a stop word does.
   - Not directed and `noise`, the segment is marked processed, `🔇 Heard (not speech)` is printed and it is left out. The thinking tune of his question plays on, and the collection's silence is still counted from the end of his last words, so a phantom never holds his question back.
   - Any other verdict, or none, completes the question. With none, the judge's unavailability is printed.
-  - Utterances of three words or fewer are judged here even while she speaks, though the judge skips them in her speech otherwise: Whisper's inventions are that short.
+  - Utterances of three words or fewer are judged here even while she speaks, though the judge skips them in her speech otherwise, unless her reply is taken out of the microphone (see "During TTS"): Whisper's inventions are that short.
   - It costs a judge call for each utterance that gets this far while a question is collected, and a second one when the first was given in wake-word mode.
+- **Over her reply a sure one is final too.** What he says over her reply taken out of the microphone is judged in hot-window mode (see "His follow-up while she speaks"), and a not-directed `noise` verdict given with high confidence is treated as in the hot window: marked processed, `🔇 Heard (not speech)`. Below high confidence it leaves the decision to the wake word, as any verdict there does.
 - **Elsewhere the verdict changes nothing.** The judge only runs there on a wake word or while she speaks, and Whisper does not invent her name, so a doubtful verdict still falls through to the text wake-word check as any other.
 - **His side wins a contradiction.** A verdict that says both `noise` and directed is treated as directed.
 - **The window stays open.** Like an echo, a noise verdict does not touch the hot window, so his real follow-up after it is still a follow-up.
@@ -573,7 +630,7 @@ The judge's verdict carries `aside`: true when the current segment is plainly sa
 - **It stays in the transcript.** The segment is not marked processed, so when he then asks her about what was said the judge has it to resolve his question. Not everything called an aside is his: the judge also calls her own sign-off, misheard by Whisper as words she never said and shown unmarked, an aside (`docs/llm_contexts.md`), and that segment stays as context too.
 - **The window is left as it is.** It is neither closed nor extended: a follow-up he begins before it expires is still a follow-up.
 - **His side wins a contradiction.** A verdict that says both `aside` and directed is treated as directed.
-- **Elsewhere the verdict changes nothing.** Outside the hot window nothing is answered without her name, whatever the verdict says of an aside.
+- **Elsewhere the verdict changes nothing.** Outside the hot window an aside is not answered without her name, as no rejection is: there only a directed verdict the judge is sure of, on what he says over her reply taken out of the microphone, is answered without it (see "His follow-up while she speaks").
 - **Fails open.** With no verdict, or a model that never sets `aside`, his words in the hot window are answered as without this rule.
 
 How well it works is the judge model's, and both of its mistakes cost him something: an aside it misses is answered, and a follow-up it takes for an aside is left unanswered. `evals/test_intent_judge.py` measures both on words to someone else and on the follow-ups that look most like them, the ones that name another person, ask her to pass something on, or open on the word an aside opens on (`-k a_remark_to_her`), and `docs/llm_contexts.md` holds the measurement.
@@ -617,7 +674,7 @@ Echo detection uses a layered approach for reliability:
 
 The fuzzy check acts as a fast, reliable safety net. The intent judge provides deeper understanding but may be unreliable with smaller models (e.g. gemma4).
 
-3. **Overriding an echo verdict takes positive evidence.** When the judge says an utterance is her own echo, that verdict stands unless the utterance carries words she did not say: the share of heard words with no close match in her reply must exceed 40%. Her reply is the one the judge was shown: a reply that starts while the judge is thinking does not change what its verdict is weighed against. The override exists for barge-in, and barge-in is what that measures. His answer to the question she asked before acting is not barge-in: it is made of its question's words, and one word with no close match is enough for it when its voice went on after hers, or a few of her words picked out of her order that do not name what she is about to do (see "During TTS").
+3. **Overriding an echo verdict takes positive evidence.** When the judge says an utterance is her own echo, that verdict stands unless the utterance carries words she did not say: the share of heard words with no close match in her reply must exceed 40%. A word of one letter is not counted, unless the utterance holds nothing else: an elided article or preposition ("d'accord", "l'heure"), and English "I" and "a", match one in her reply whatever was said, and "d'accord et pour demain" read 2 of 5 against her "d'un", her "et" and her "pour". A digit is a number, and counts. Her reply is the one the judge was shown: a reply that starts while the judge is thinking does not change what its verdict is weighed against. The override exists for barge-in, and barge-in is what that measures. His answer to the question she asked before acting is not barge-in: it is made of its question's words, and one word with no close match is enough for it when its voice went on after hers, or a few of her words picked out of her order that do not name what she is about to do (see "During TTS").
 
    Absence of a fuzzy match is not evidence of speech. `partial_ratio` looks for a contiguous window, so an echo Whisper decimated — words dropped from the middle, others corrupted — stops matching and used to read as new content, which had her run a full turn on her own voice. Per word nothing separates the two: `même` against `semaine` scores what a genuinely new word scores. Over the whole utterance it separates cleanly, and stably — measured on real transcripts, the two echoes sat at 0% and 18% and barge-in at 62% and 100%, unchanged whether the per-word bar is 70, 80 or 90.
 
@@ -722,6 +779,8 @@ To minimise perceived latency, audio and visual feedback starts **immediately af
 If the intent judge later rejects the query (and no hot window override applies), the beep is stopped and the state reverts to IDLE, unless a reply of hers is on its way: the tune is then that reply's, and it plays on. Her name followed by nothing ends as "Wake Word Mode" describes. This brief false-positive beep is acceptable — users prefer immediate acknowledgement over delayed but perfect accuracy.
 
 **LISTENING is not published early during TTS** — the beep is suppressed while TTS is playing to avoid self-triggering.
+
+**A question taken while she speaks is answered by a chime.** Each utterance collected while her voice plays, her name or a follow-up her reply's removal lets through (see "His follow-up while she speaks"), and each addition to a question being collected then, plays a short chime (`play_heard_chime`, two soft notes rising), over her voice, on a stream of its own, when `tune_enabled` is on: the thinking tune never plays over her voice, and without a sign he takes his question for unheard and asks again. Collecting it publishes LISTENING, as any collection does (`state.spec.md`). No chime plays while the reply she is saying ends on the question she asks before acting and he has not heard it yet: words said then come before her question, and are set aside when their turn comes (see "Her spoken question is answered by what he says to it"), so a chime would promise an answer that does not come. The chime's stream is written whole and is not handed to the echo canceller: only a stream that plays through a callback is handed over, and two streams handed over at once would be read one after the other, her voice's timing in the canceller with them. Its start, stop and close run under `portaudio_lock`, which is not held while it plays; without an audio output it says so in the debug log and plays nothing. What the microphone hears of it can open an utterance, and comes out of Whisper empty while `whisper_vad` is on: the listener's frame detector (WebRTC's) takes its frames for speech at every aggressiveness, Whisper's (Silero) finds none in it, at full level and 20 dB down. Field trace: asked over her reply with her name, his question waited for her voice to stop with no sign, and he asked again.
 
 ## Timing Marks (Latency Journal)
 
@@ -944,7 +1003,7 @@ Her voice reaches the microphone through the room, on a desk microphone near des
 
 **What it is.** WebRTC's echo canceller (AEC3), through the `livekit` package's `AudioProcessingModule`, held by `jarvis.utils.echo_cancellation` (`ECHO_CANCELLER`, one per process). It runs on the machine and nothing it is given leaves it. Echo cancellation only: noise suppression, gain control and the high-pass filter stay off. Whisper is trained on speech as microphones capture it, a gain that moved between utterances would move the room's level (see "The floor is the room, never her nor him"), and the high-pass filter, measured, took out nothing more.
 
-**The reference is what she plays, as it is played.** Each output stream opened through `open_output_stream` with a callback hands every block the callback fills to the canceller before PortAudio plays it (`tts.spec.md`, "Audio output"): her voice from Piper, Kokoro and Kyutai, and the thinking tune. The hand-over is a copy of the block put in the canceller's inbox, nothing more. Each stream says whether it plays her voice: the tune is taken out like her voice, and says nothing of her reply's figure. Chatterbox, played by the pygame mixer, is not seen: with that engine the canceller has no reference and takes nothing out.
+**The reference is what she plays, as it is played.** Each output stream opened through `open_output_stream` with a callback hands every block the callback fills to the canceller before PortAudio plays it (`tts.spec.md`, "Audio output"): her voice from Piper, Kokoro and Kyutai, and the thinking tune. The hand-over is a copy of the block put in the canceller's inbox, nothing more. Each stream says whether it plays her voice: the tune is taken out like her voice, and says nothing of her reply's figure. Chatterbox, played by the pygame mixer, is not seen: with that engine the canceller has no reference and takes nothing out. The chime played over her voice is not seen either: its stream is written whole, with no callback (see "Early Feedback").
 
 **Its work is done on its own thread.** The capture callback (`_on_audio`) stamps each block with the time it was captured and hands it over (`hear`), as her streams hand theirs. A thread of the canceller's own takes the blocks in the order they came: it brings her sound to one channel at the capture rate and gives it to WebRTC, takes her sound out of each microphone block, and queues the block with its capture time, in the order heard, for the voice detector, the room's level, the energy tests and Whisper. No callback waits on WebRTC: each call into it crosses into native code and gives up the interpreter's lock, and done in the callbacks behind one busy Python thread, measured, a 20 ms microphone block took 32 ms and a 46 ms block of her voice 95 ms, so both streams fell behind. The order of the inbox is what pairs what was heard with what was played around the same moment; the listening loop, which falls behind while Whisper or the judge holds it, is not where that happens. The canceller works in 10 ms frames: it cleans a capture in one channel at 8, 16, 32 or 48 kHz, whose blocks of 10, 20 or 30 ms are whole frames. Any other capture (a format fallback, see "Capture format and health") is read as captured, and while the canceller is on the console says so once per format: `⚠️  Echo cancellation: this microphone (R Hz, C channel(s)) is read as captured`. The canceller's own changes (turned on or off, a capture opened at another rate) take their place in the same inbox, so every frame reaches WebRTC at the length its rate expects.
 
@@ -952,11 +1011,11 @@ Her voice reaches the microphone through the room, on a desk microphone near des
 
 **The delay is found, not set.** Between a block handed over and its sound in the microphone lie the output stream's latency, the air and the input stream's latency, about 300 ms on the desk set-up it was measured on. AEC3 estimates it; told the measured value, it took out 1.4 dB more than it did alone, so no delay is configured.
 
-**How much of her reply it took out.** Each 10 ms frame the microphone delivers while her voice plays (a block of her voice handed over in the last `PLAYING_FOR_SECONDS`, 0.3 s) is weighed: its level heard against its level cleaned. The frames are counted afresh as her reply starts (`reply_started`, from `track_tts_start`) and, as it finishes playing (`reply_finished`, beside the echo detector's `track_tts_finish`), ranked by how much came out of each and read three quarters of the way up (`REMOVAL_PERCENTILE`). Her pauses, the canceller's first second and his voice over part of hers sit low in that ranking, so his question over her last words leaves the figure where her voice put it: on a simulated room, his voice over the last 4.5 s of a 6 s reply left 24 dB, against 29 dB with none. Fewer than `MIN_FRAMES_MEASURED` (20) frames make no figure. The figure stands until her next reply starts; it is what "During TTS" reads, at least `MIN_REMOVED_DB` (10 dB) counting as taken out. The debug log gives it: `🧹 Echo cancelled: N dB of her reply (F frames)`, or `her reply not measured`.
+**How much of her reply it took out.** Each 10 ms frame the microphone delivers while her voice plays (a block of her voice handed over in the last `PLAYING_FOR_SECONDS`, 0.3 s) is weighed: its level heard against its level cleaned. The frames are counted afresh as her reply starts (`reply_started`, from `track_tts_start`) and, as it finishes playing (`reply_finished`, beside the echo detector's `track_tts_finish`), ranked by how much came out of each and read three quarters of the way up (`REMOVAL_PERCENTILE`). Her pauses, the canceller's first second and his voice over part of hers sit low in that ranking, so his question over her last words leaves the figure where her voice put it: on a simulated room, his voice over the last 4.5 s of a 6 s reply left 24 dB, against 29 dB with none. Fewer than `MIN_FRAMES_MEASURED` (20) frames make no figure. The figure stands until her next reply starts; it is what "During TTS" reads, at least `MIN_REMOVED_DB` (10 dB) counting as taken out. While her reply plays, the frames heard so far are read the same way (`taking_her_reply_out`), for what he says over it (see "During TTS", "His follow-up while she speaks"). The debug log gives it: `🧹 Echo cancelled: N dB of her reply (F frames)`, or `her reply not measured`.
 
 **It fails open.** Without the package, or when the canceller cannot be created, the microphone is read as captured and start-up says `⚠️  Echo cancellation unavailable: <reason>`. An error while it runs, on either side, or a canceller it cannot create at a capture's rate, turns it off for the rest of the session with the same line: a canceller that has failed once is not trusted with his voice. From then on its thread queues the microphone as captured, in the order heard. Her voice never waits on it: the hand-over only copies a block and never raises into the callback. One failure is beyond it: a panic in WebRTC's native code ends the process. The one known to be reachable, a frame of another length than its rate's 10 ms, cannot happen, since frames are cut on the canceller's thread at the rate of the processor that takes them.
 
-**What it does not do.** When he talks over her it takes out her voice and keeps his, though not whole: while both voices are in a frame, its suppression lowers his words too, the more the louder she plays. The transcript-level checks above run on every utterance; they see far less of her, and still catch what gets through, a reply played by Chatterbox included. One reading changes with it: a voice ending with hers does not make an utterance hers once her reply was taken out (see "During TTS"). Dictation reads its own capture, which the canceller does not clean (`dictation.spec.md`).
+**What it does not do.** When he talks over her it takes out her voice and keeps his, though not whole: while both voices are in a frame, its suppression lowers his words too, the more the louder she plays. The transcript-level checks above run on every utterance; they see far less of her, and still catch what gets through, a reply played by Chatterbox included. Two readings change with it: a voice ending with hers does not make an utterance hers once her reply was taken out, and what he says while she speaks needs no wake word while it is taken out (see "During TTS"). Dictation reads its own capture, which the canceller does not clean (`dictation.spec.md`).
 
 `voice_echo_cancellation` (default `true`) turns it on at start-up, with `🧹 Echo cancellation: her voice is taken out of the microphone`; off, the microphone is read as captured and nothing is said.
 

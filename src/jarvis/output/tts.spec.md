@@ -309,6 +309,18 @@ through the same `sounddevice` API and under the same process-wide
 `portaudio_lock` as the engines, so stopping it releases the device in
 milliseconds and the voice can open it straight away.
 
+## The chime
+
+When the listener takes his question while she speaks, it plays a short
+chime over her voice (`play_heard_chime`, `listening.spec.md`, "Early
+Feedback"), when `tune_enabled` is on: two soft notes rising, about a
+quarter of a second, peaking at a third of full scale. It is not an engine
+either. It plays on a thread of its own, on a stream opened through
+`open_output_stream` with no callback and written whole, so nothing of it
+is handed to the echo canceller. Its start, stop and close run under
+`portaudio_lock`, which is not held while it plays. A chime that cannot
+play says so in the debug log and raises nothing.
+
 ## Audio output
 
 Piper, Kokoro and Chatterbox synthesise each item whole, then play it;
@@ -319,7 +331,7 @@ blocks of 1024 frames so an abort lands quickly. Chatterbox writes a temporary W
 and plays it through the pygame mixer. Opening, starting, aborting and
 closing a stream all happen under `portaudio_lock`
 (`listening.spec.md`, "Serialised PortAudio Lifecycle"). Each output stream,
-the thinking tune's included, is opened through `open_output_stream`
+the thinking tune's and the chime's included, is opened through `open_output_stream`
 (`jarvis.utils.audio_stream`), which constructs it and tracks it in one hold
 of the lock, and counted open until it is closed, so the device list is
 never read afresh while she speaks or the tune plays: reading it terminates

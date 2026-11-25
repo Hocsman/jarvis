@@ -38,7 +38,12 @@ not-directed `aside` verdict given with high confidence sets aside,
 Whisper's inventions, her own warm sign-off misheard as words she never
 said, unmarked, and a lone "Thank you." after an English reply
 (`-k a_remark_to_her` runs it alone, with its check that needs no model
-and its per-case reading on the eval model).
+and its per-case reading on the eval model). A sixth reads what he says
+over her reply once her voice is taken out of the microphone, in the hot
+window's mode, where only a directed verdict given with high confidence,
+and not a stop, is answered: his follow-ups, and a guest, the television,
+Whisper's inventions and a little of her own reply that got past the
+canceller, marked "(during TTS)" (`-k over_her_reply` runs it alone).
 `EVAL_INTENT_JUDGE_PROMPT_REF` names a git ref: each model then also runs
 with the system prompt at that ref, as an arm of its own interleaved with
 the others, so a prompt change is measured against the prompt it replaces
@@ -2387,3 +2392,133 @@ class TestProcessedSegmentFiltering:
         )
 
         print(f"\n✅ Correctly extracted new query: '{result.query}'")
+
+
+# =============================================================================
+# Over her reply, her voice taken out of the microphone
+# =============================================================================
+#
+# While the echo canceller takes her reply out of the microphone, what he says
+# over it is judged in the hot window's mode, and only a directed verdict
+# given with high confidence is answered: no override takes a rejection, a
+# stop cuts her reply and answers nothing, and an unsure verdict leaves it to
+# the wake word, which none of these cases carries. The judge is shown the
+# reply she is saying as her last words, and the little of it that gets past
+# the canceller marked "(during TTS)". Field trace 2026-11-25: two follow-ups
+# heard word for word over her weather reply were left unanswered for want of
+# her name.
+
+_FR_SAYING = ("À Lyon, il fait 4,6 degrés avec une légère pluie, et une ressentie de 2,1 "
+              "degrés à cause d'un vent de 6 kilomètres par heure, donc un temps idéal pour "
+              "rester au chaud.")
+_EN_SAYING = ("In Leeds it's 7 degrees with light rain, feeling like 4 because of a 20 "
+              "kilometre an hour wind, so a good evening to stay in.")
+
+
+@dataclass
+class OverHerReplyCase:
+    """What is heard over her reply, *current*, judged with the reply she is
+    saying as her last words, and marked "(during TTS)" when *hers* (a little
+    of her own reply that got past the canceller)."""
+    name: str
+    last_tts_text: str
+    current: str
+    hers: bool = False
+    in_hot_window: bool = True
+    wake_timestamp: Optional[float] = None
+    aliases: Optional[List[str]] = None
+
+    @property
+    def segments(self) -> list:
+        return [(self.current, self.hers)]
+
+
+def _over(reply: str, current: str, name: str, *, hers: bool = False) -> OverHerReplyCase:
+    return OverHerReplyCase(name, reply, current, hers=hers)
+
+
+OVER_HER_REPLY_GROUPS = {
+    "his_follow_ups": ([
+        _over(_FR_SAYING, "d'accord et pour demain", "french_and_tomorrow"),
+        _over(_FR_SAYING, "Tu peux m'indiquer la météo pour aujourd'hui, s'il te plaît ?",
+              "french_today_instead"),
+        _over(_FR_SAYING, "Et demain ?", "french_short_and_tomorrow"),
+        _over(_FR_SAYING, "Attends, et à Grenoble ?", "french_another_town"),
+        _over(_EN_SAYING, "and what about tomorrow?", "english_and_tomorrow"),
+        _over(_EN_SAYING, "just tell me if I need an umbrella", "english_cut_short"),
+    ], "answered"),
+    "not_for_her": ([
+        _over(_FR_SAYING, "Camille, tu peux fermer la fenêtre ?", "french_to_someone_else"),
+        _over(_EN_SAYING, "Sam, dinner's ready, come down.", "english_to_someone_else"),
+        _over(_FR_SAYING, "Et tout de suite, les titres du journal de vingt heures.",
+              "french_television"),
+        _over(_EN_SAYING, "Coming up after the break, the latest from Westminster.",
+              "english_television"),
+        _over(_FR_SAYING, "Sous-titres réalisés par la communauté d'Amara.org",
+              "french_invention"),
+        _over(_EN_SAYING, "Thanks for watching!", "english_invention"),
+        _over(_FR_SAYING, "une ressentie de 2,1 degrés à cause du vent", "french_her_words_back",
+              hers=True),
+        _over(_EN_SAYING, "feeling like four because of the wind", "english_her_words_back",
+              hers=True),
+    ], "left alone"),
+}
+OVER_HER_REPLY_CASES = [case for cases, _ in OVER_HER_REPLY_GROUPS.values() for case in cases]
+_OVER_HER_REPLY_GROUP_OF = {case.name: group for group, (cases, _) in OVER_HER_REPLY_GROUPS.items()
+                            for case in cases}
+
+
+def _answered_over_her_reply(verdict) -> bool:
+    """What the listener does with a verdict on what he says over her reply
+    taken out of the microphone: it answers a directed one given with high
+    confidence, and nothing else (the cases carry no wake word). A stop
+    cuts her reply and answers nothing."""
+    return bool(verdict.directed and verdict.confidence == "high" and not verdict.stop)
+
+
+@pytest.mark.skipif(not JUDGE_MODELS, reason="name one or more judge models in EVAL_INTENT_JUDGE_ARMS")
+class TestIntentJudgeOverHerReply:
+    """His follow-up over her reply is answered, and the words of a guest,
+    the television and Whisper's inventions are not, every case on every
+    arm, interleaved call by call (`-k over_her_reply` runs it alone)."""
+
+    def test_over_her_reply_call_by_call(self, capsys):
+        judges = _warm_judges()
+        # right, answered, directed, sure, calls, no verdict, stop
+        tally = {(arm, group): [0, 0, 0, 0, 0, 0, 0] for arm in JUDGE_ARMS
+                 for group in OVER_HER_REPLY_GROUPS}
+        misses = {}   # (arm, case) -> wrong verdicts
+        for case, arm in _interleaved(JUDGE_ARMS, OVER_HER_REPLY_CASES):
+            judges[arm]._last_error_time = 0.0
+            verdict = run_intent_judge_multi_segment(case, judge=judges[arm],
+                                                     current_text=case.current)
+            group = _OVER_HER_REPLY_GROUP_OF[case.name]
+            row = tally[(arm, group)]
+            row[4] += 1
+            if verdict is None:
+                row[5] += 1
+                continue
+            answered = _answered_over_her_reply(verdict)
+            right = answered == (OVER_HER_REPLY_GROUPS[group][1] == "answered")
+            row[0] += int(right)
+            row[1] += int(answered)
+            row[2] += int(verdict.directed)
+            row[3] += int(verdict.confidence == "high")
+            row[6] += int(verdict.stop)
+            if not right:
+                misses[(arm, case.name)] = misses.get((arm, case.name), 0) + 1
+
+        lines = [""]
+        for (arm, group), (right, answered, directed, sure, calls, silent, stops) in tally.items():
+            scored = calls - silent
+            lines.append(f"🧪 {arm:{_ARM_WIDTH}} {group:15}  right {rate(right, scored)}, "
+                         f"answered {answered}/{scored}, directed {directed}/{scored}, "
+                         f"high confidence {sure}/{scored}, stop {stops}/{scored}, "
+                         f"no verdict {silent}")
+        for (arm, name), count in sorted(misses.items()):
+            lines.append(f"   ↳ {arm}: {name} wrong {count}/{NOT_SPEECH_ROUNDS}")
+        to_terminal(capsys, lines)
+
+        mute = [arm for arm in JUDGE_ARMS
+                if all(row[4] == row[5] for (who, _), row in tally.items() if who == arm)]
+        assert not mute, f"no answer at all from {mute}: check the model names and the provider"
