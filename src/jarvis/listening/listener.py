@@ -2434,8 +2434,10 @@ class VoiceListener(threading.Thread):
     def _hand_over(self, query: str) -> None:
         """Give a complete query to the reply thread. Returns at once: a
         query asked while another is being answered waits its turn."""
-        # The utterance just closed is consumed; what he says next is read
-        # from the audio queue as it comes.
+        # What the voice detector holds is let go: the utterance just closed
+        # has been read, and one still open, which his silence did not wait
+        # for, is dropped. What he says next is read from the audio queue as
+        # it comes.
         self._clear_audio_buffers()
         dropped = None
         with self._speech_lock:
@@ -3132,15 +3134,20 @@ class VoiceListener(threading.Thread):
 
         return False
 
-    def _check_query_timeout(self, now: Optional[float] = None) -> None:
+    def _check_query_timeout(self, now: Optional[float] = None,
+                             voice_going_on: bool = False) -> None:
         """Check if there's a pending query that has timed out, and check hot
         window expiry. ``now`` is when the audio being read was captured: the
         collection's silence is counted in that time, so audio the loop
         reads late, after a stall, still has his next words in time to
-        complete the question. With no audio to read, the wall clock, and
-        no voice of his goes on (`_his_voice_goes_on`)."""
-        voice_going_on = now is not None and self._his_voice_goes_on()
+        complete the question. With no audio to read, the wall clock.
+        ``voice_going_on``: an utterance is open that his silence may wait
+        for (`_his_silence_waits_for_an_utterance`)."""
         if self.state_manager.check_collection_timeout(now, voice_going_on=voice_going_on):
+            if self.is_speech_active:
+                debug_log("his question goes while an utterance is open, which is "
+                          f"dropped: {self._why_the_open_utterance_is_not_waited_for(now, voice_going_on)}",
+                          "voice")
             query = self.state_manager.clear_collection()
             # No letter or digit, in any script, is nothing to answer: her
             # name alone, and at most the punctuation Whisper made out of the
@@ -3154,18 +3161,38 @@ class VoiceListener(threading.Thread):
         # even when there's no audio being processed
         self.state_manager.check_hot_window_expiry(self.cfg.voice_debug)
 
-    def _his_voice_goes_on(self) -> bool:
+    def _his_silence_waits_for_an_utterance(self, captured_at: float) -> bool:
         """Whether the voice detector holds an utterance open that his
-        silence waits for (listening.spec.md, "A sentence heard while a
-        question is still being collected completes it"): one is open, no
-        longer yet than an utterance may be, and what she plays is taken
-        out of the microphone. Without that, the thinking tune reaches the
-        voice detector and would keep an utterance open after nearly every
-        question. Read on each frame, so an utterance open when his silence
-        runs out began before it did."""
+        silence may wait for (listening.spec.md, "His silence is not over
+        while an utterance is open"): one is open, it has not lasted, in
+        captured time, as long as an utterance may, and what she plays is
+        taken out of the microphone. Without that, the thinking tune
+        reaches the voice detector and would keep an utterance open after
+        nearly every question. Read on each frame, so an utterance open when
+        his silence runs out began before it did."""
         return (self.is_speech_active
-                and len(self._utterance_frames) < self._longest_utterance_frames()
+                and not self._utterance_has_lasted_its_longest(captured_at)
                 and ECHO_CANCELLER.cleans_the_microphone())
+
+    def _utterance_has_lasted_its_longest(self, captured_at: float) -> bool:
+        """Whether the open utterance has lasted, from its onset to this
+        frame's capture, as long as an utterance may: silent gaps shorter
+        than the endpoint count, as the frames the detector keeps do not."""
+        opened_at = self.echo_detector._utterance_start_time
+        longest = self._longest_utterance_frames() * self._frame_ms / 1000.0
+        return captured_at - opened_at >= longest
+
+    def _why_the_open_utterance_is_not_waited_for(self, now: Optional[float],
+                                                  voice_going_on: bool) -> str:
+        """The reason, for the log, an utterance open when his question goes
+        is not waited for."""
+        if voice_going_on:
+            return "his silence was waited for once in this question, or the longest collection is reached"
+        if now is None:
+            return "no audio is arriving"
+        if not ECHO_CANCELLER.cleans_the_microphone():
+            return "what she plays is not taken out of the microphone"
+        return "it has lasted as long as an utterance may"
 
     def _nothing_after_the_wake_word(self) -> None:
         """His silence ran out on a question with nothing in it: her name
@@ -4455,8 +4482,19 @@ class VoiceListener(threading.Thread):
                     self._finalize_utterance()
                     self._pre_roll.clear()
 
+        # The utterance his silence is held for, once it has lasted as long
+        # as an utterance may, is closed and read rather than dropped.
+        if (self.is_speech_active and self.state_manager.is_held()
+                and self._utterance_has_lasted_its_longest(captured_at)):
+            debug_log("the utterance his silence is held for has lasted as long as "
+                      "an utterance may: closed and read", "voice")
+            self._finalize_utterance()
+            self._pre_roll.clear()
+
         # Check for query timeouts, in the time this frame was captured
-        self._check_query_timeout(captured_at)
+        self._check_query_timeout(
+            captured_at,
+            voice_going_on=self._his_silence_waits_for_an_utterance(captured_at))
 
     def _longest_utterance_frames(self) -> int:
         """The most frames an utterance may hold: `max_utterance_ms`, or the

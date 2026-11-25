@@ -107,19 +107,45 @@ class TestQueryCollection:
 
         assert sm.check_collection_timeout() is True
 
-    def test_his_silence_is_not_over_while_his_voice_goes_on(self):
+    def test_his_silence_is_not_over_while_an_utterance_is_open(self):
         sm = StateManager(voice_collect_seconds=1.0)
         sm.start_collection("test", heard_at=100.0)
 
         assert sm.check_collection_timeout(101.5, voice_going_on=True) is False
         assert sm.check_collection_timeout(101.6) is True
 
-    def test_the_longest_collection_ends_while_his_voice_goes_on(self):
+    def test_the_longest_collection_ends_while_an_utterance_is_open(self):
         sm = StateManager(voice_collect_seconds=1.0, max_collect_seconds=5.0)
         sm.start_collection("test", heard_at=100.0)
-        sm.add_to_collection("more", heard_at=104.5)
+        sm.add_to_collection("more", heard_at=103.0)
 
         assert sm.check_collection_timeout(105.0, voice_going_on=True) is True
+
+    def test_his_silence_is_held_once_per_question(self):
+        sm = StateManager(voice_collect_seconds=1.0)
+        sm.start_collection("test", heard_at=100.0)
+        assert sm.check_collection_timeout(101.5, voice_going_on=True) is False
+        sm.add_to_collection("more", heard_at=102.0)
+
+        assert sm.check_collection_timeout(103.5, voice_going_on=True) is True
+
+    def test_a_hold_lasts_while_the_utterance_is_open(self):
+        sm = StateManager(voice_collect_seconds=1.0)
+        sm.start_collection("test", heard_at=100.0)
+
+        assert sm.check_collection_timeout(101.5, voice_going_on=True) is False
+        assert sm.check_collection_timeout(104.0, voice_going_on=True) is False
+        assert sm.check_collection_timeout(104.1) is True
+
+    def test_the_next_question_is_held_again(self):
+        sm = StateManager(voice_collect_seconds=1.0)
+        sm.start_collection("test", heard_at=100.0)
+        assert sm.check_collection_timeout(101.5, voice_going_on=True) is False
+        assert sm.check_collection_timeout(101.6) is True
+        sm.clear_collection()
+        sm.start_collection("next", heard_at=200.0)
+
+        assert sm.check_collection_timeout(201.5, voice_going_on=True) is False
 
 
 class TestHotWindowActivation:
