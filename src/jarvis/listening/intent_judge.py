@@ -23,6 +23,15 @@ from .transcript_buffer import TranscriptSegment
 DEFAULT_OLLAMA_KEEP_ALIVE = "30m"
 LOW_POWER_OLLAMA_KEEP_ALIVE = "1m"
 
+# How much of her reply the judge is shown, wherever it is shown.
+HER_REPLY_SHOWN_CHARS = 200
+
+
+def her_reply_as_shown(text: str) -> str:
+    """Her reply as the judge is shown it: its first `HER_REPLY_SHOWN_CHARS`
+    characters, with an ellipsis when there is more."""
+    return text[:HER_REPLY_SHOWN_CHARS] + ("..." if len(text) > HER_REPLY_SHOWN_CHARS else "")
+
 
 def _is_low_power_mode_enabled(cfg: Any) -> bool:
     """Return True only when Settings.low_power_mode is explicitly enabled."""
@@ -415,7 +424,7 @@ Examples:
         if last_tts_text:
             from datetime import datetime
             tts_ts_str = datetime.fromtimestamp(last_tts_finish_time).strftime('%H:%M:%S') if last_tts_finish_time > 0 else "unknown"
-            lines.append(f'Last TTS output: "{last_tts_text[:200]}{"..." if len(last_tts_text) > 200 else ""}"')
+            lines.append(f'Last TTS output: "{her_reply_as_shown(last_tts_text)}"')
             lines.append(f"TTS finished at: {tts_ts_str}")
         else:
             lines.append("Last TTS: None")

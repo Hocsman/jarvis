@@ -2892,6 +2892,158 @@ class TestHisFollowUpWhileSheSpeaks:
         listener.state_manager.stop()
 
 
+def _transcript_lines(prompt: str) -> list:
+    """The transcript lines of a judge prompt, in the order it shows them."""
+    return [line for line in prompt.splitlines() if line.startswith("[")]
+
+
+def _quoted(line: str) -> str:
+    """What a prompt line holds between its first and last double quote."""
+    return line[line.index('"') + 1:line.rindex('"')]
+
+
+def _her_reply_lines(prompt: str) -> list:
+    """The transcript lines that hold her reply as the judge is shown it,
+    the text of its "Last TTS output" line."""
+    last_tts = next(line for line in prompt.splitlines() if line.startswith("Last TTS output"))
+    return [line for line in _transcript_lines(prompt) if _quoted(line) == _quoted(last_tts)]
+
+
+def _judge_rejecting(listener, *talk):
+    """A judge that takes what he says for words not said to her when it is
+    one of *talk*, and for his follow-up otherwise, reading the prompt the
+    real judge builds."""
+
+    def decide(prompt, current, kwargs):
+        if kwargs["current_text"] in [line.lower() for line in talk]:
+            return _make_judgment(directed=False, confidence="high",
+                                  reasoning="not addressed to the assistant")
+        return _make_judgment(directed=True, query=kwargs["current_text"],
+                              reasoning="his follow-up")
+
+    return _judge_reading_its_prompt(listener, decide)
+
+
+_HIS_TALK_OVER_HER = "Le voisin du dessus a encore passé l'aspirateur à six heures."
+
+
+def _she_has_been_speaking_for(listener, seconds: float) -> None:
+    """Returns once her reply has been playing for *seconds*."""
+    while time.time() < listener.echo_detector._tts_start_time + seconds:
+        time.sleep(0.005)
+
+
+@pytest.mark.unit
+class TestTheJudgeReadsHerReplyAsATurn:
+    """With her reply taken out of the microphone, nothing of it is in the
+    transcript, and the judge, asked in the hot window's mode, reads his
+    words one after the other as if no one answered them. It is shown her
+    reply as a turn of the transcript, marked "(during TTS)" at the moment
+    her voice began, as it reads her reply heard by the microphone. Field
+    trace: his request over her reply, after talk of his nothing answered,
+    taken for words to someone in the room."""
+
+    @patch("builtins.print")
+    def test_over_her_reply_her_reply_comes_before_his_words(self, _print, canceller):
+        listener, _ = _create_listener()
+        _she_speaks_past_the_canceller(listener, canceller)
+        judge = _judge_rejecting(listener, _HIS_TALK_OVER_HER)
+        _she_has_been_speaking_for(listener, 0.4)
+
+        _he_says_over_her(listener, _HIS_TALK_OVER_HER, started_ago=0.3)
+        _he_says_over_her(listener, _HIS_LONG_FOLLOW_UP, started_ago=0.1)
+
+        prompt = _prompt_shown_to(judge)
+        lines = _transcript_lines(prompt)
+        hers = _her_reply_lines(prompt)
+        assert len(hers) == 1, lines
+        assert "during TTS" in hers[0] and "CURRENT" not in hers[0]
+        talk = next(i for i, line in enumerate(lines) if _HIS_TALK_OVER_HER.lower() in line.lower())
+        current = next(i for i, line in enumerate(lines) if "CURRENT - JUDGE THIS" in line)
+        assert lines.index(hers[0]) < talk < current, lines
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_right_after_her_reply_it_comes_before_his_follow_up(self, _print, canceller):
+        listener, _ = _create_listener(echo_tolerance=0.1, hot_window_seconds=3.0)
+        last_word = _she_says_past_the_canceller(listener, canceller, _HER_WEATHER_REPLY)
+        assert _wait_for_hot_window_active(listener)
+        judge = _judge_that_reads_the_mode(listener)
+
+        _whisper_hears(listener, _HIS_LONG_FOLLOW_UP, started=last_word + 0.3,
+                       level=_level(listener, _HIS_VOICE))
+
+        prompt = _prompt_shown_to(judge)
+        lines = _transcript_lines(prompt)
+        hers = _her_reply_lines(prompt)
+        assert len(hers) == 1 and "during TTS" in hers[0], lines
+        assert lines.index(hers[0]) < next(
+            i for i, line in enumerate(lines) if "CURRENT - JUDGE THIS" in line)
+        assert _accepted_query(listener) == _HIS_LONG_FOLLOW_UP.lower()
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_it_is_shown_once_however_often_he_speaks_over_it(self, _print, canceller):
+        listener, _ = _create_listener()
+        _she_speaks_past_the_canceller(listener, canceller)
+        judge = _judge_rejecting(listener, _HIS_TALK_OVER_HER)
+        _she_has_been_speaking_for(listener, 0.4)
+
+        _he_says_over_her(listener, _HIS_TALK_OVER_HER, started_ago=0.3)
+        _he_says_over_her(listener, _HIS_LONG_FOLLOW_UP, started_ago=0.1)
+
+        assert [len(_her_reply_lines(_prompt_shown_to(judge, call)))
+                for call in range(judge.judge.call_count)] == [1] * judge.judge.call_count
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_a_long_reply_is_shown_as_her_last_words_are(self, _print, canceller):
+        """No more of her reply reaches the judge than it was already shown
+        as her last words."""
+        long_reply = " ".join([_HER_WEATHER_REPLY] * 3)
+        listener, _ = _create_listener()
+        _she_speaks_past_the_canceller(listener, canceller, long_reply)
+        judge = _judge_that_reads_the_mode(listener)
+
+        _he_says_over_her(listener, _HIS_LONG_FOLLOW_UP)
+
+        prompt = _prompt_shown_to(judge)
+        assert len(_her_reply_lines(prompt)) == 1, _transcript_lines(prompt)
+        assert long_reply.lower() not in prompt
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_her_reply_heard_by_the_microphone_is_not_shown_again(self, _print, canceller):
+        """Her voice not taken out reaches the transcript as Whisper heard
+        it, and the judge reads that."""
+        listener, _ = _create_listener(echo_tolerance=0.1, hot_window_seconds=3.0)
+        last_word = _she_says_past_the_canceller(listener, canceller, _HER_WEATHER_REPLY,
+                                                 taken_out=3.0)
+        assert not canceller.took_her_reply_out()
+        assert _wait_for_hot_window_active(listener)
+        judge = _judge_that_reads_the_mode(listener)
+
+        _whisper_hears(listener, _HIS_LONG_FOLLOW_UP, started=last_word + 0.3,
+                       level=_level(listener, _HIS_VOICE))
+
+        assert _her_reply_lines(_prompt_shown_to(judge)) == []
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_called_by_her_name_the_judge_reads_the_transcript_as_heard(self, _print, canceller):
+        listener, _ = _create_listener()
+        listener.cfg.hot_window_enabled = False
+        _she_speaks_past_the_canceller(listener, canceller)
+        judge = _install_intent_judge(listener, _make_judgment(
+            directed=True, query="et pour demain"))
+
+        _he_says_over_her(listener, "jarvis et pour demain")
+
+        assert judge.judge.called
+        assert _her_reply_lines(_prompt_shown_to(judge)) == []
+        listener.state_manager.stop()
+
+
 @pytest.mark.unit
 class TestAChimeWhenSheTakesHisQuestionWhileSheSpeaks:
     """The thinking tune never plays over her voice; a question taken while

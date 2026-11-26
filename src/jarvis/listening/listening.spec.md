@@ -641,7 +641,21 @@ The judge's verdict carries `aside`: true when the current segment is plainly sa
 - **Elsewhere the verdict changes nothing.** Outside the hot window an aside is not answered without her name, as no rejection is: there only a directed verdict the judge is sure of, on what he says over her reply taken out of the microphone, is answered without it (see "His follow-up while she speaks").
 - **Fails open.** With no verdict, or a model that never sets `aside`, his words in the hot window are answered as without this rule.
 
-How well it works is the judge model's, and both of its mistakes cost him something: an aside it misses is answered, and a follow-up it takes for an aside is left unanswered. `evals/test_intent_judge.py` measures both on words to someone else and on the follow-ups that look most like them, the ones that name another person, ask her to pass something on, or open on the word an aside opens on (`-k a_remark_to_her`), and `docs/llm_contexts.md` holds the measurement.
+How well it works is the judge model's, and both of its mistakes cost him something: an aside it misses is answered, and a follow-up it takes for an aside is left unanswered. What the judge is shown of her reply weighs on it too (see "Her Reply Is a Turn of the Transcript"). `evals/test_intent_judge.py` measures both on words to someone else and on the follow-ups that look most like them, the ones that name another person, ask her to pass something on, or open on the word an aside opens on (`-k a_remark_to_her`), and `docs/llm_contexts.md` holds the measurement.
+
+### Her Reply Is a Turn of the Transcript
+
+The judge reads the transcript as a conversation: her voice heard in it is marked "(during TTS)", and his words after it are read as said after her reply. Her reply taken out of the microphone (see "Acoustic Echo Cancellation") leaves nothing of it there, and the judge then reads his words one after the other as if nobody had answered them: his request after talk of his that nothing answered reads as words to someone in the room. Field trace, 2026-11-26: a request said three times over her reply, after talk of his, left unanswered each time.
+
+So when the judge is asked in the hot window's mode, in the window or over her reply, while her reply is being or was taken out of the microphone (`EchoCanceller.taking_her_reply_out`), the transcript it is shown holds her reply as a segment of its own:
+
+- **What it holds** is her reply as "Last TTS" shows it (`her_reply_as_shown`, its first 200 characters): no more of her reply reaches the judge than it was already shown.
+- **Where it sits** is the moment her voice began: what he said over her reply comes after it, what he said before she began comes before it.
+- **It is marked "(during TTS)"**, as her voice heard by the microphone is, so the judge never extracts from it.
+- **It is shown, not kept.** The transcript buffer is left as it was heard: the turn is added to what the judge reads, once, at each call.
+- **Elsewhere the transcript is shown as heard.** Her voice the canceller did not take out reaches the transcript as Whisper heard it, and a judgement in wake-word mode, her name called, reads the transcript as heard.
+
+The cost, accepted: a judge that answers nearly everything right after her reply (`gemma4:e2b`) reads what follows her turn over her reply the same way, and answers more of what is not for her there, a guest called by name or a request to someone in the room. A judge that tells them apart (Claude Haiku 5.5) answers none of it more. How much it changes is in `docs/llm_contexts.md`, measured by `evals/test_intent_judge.py` (`-k after_his_talk`).
 
 ### Input Format
 
