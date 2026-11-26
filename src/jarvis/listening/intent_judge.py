@@ -28,8 +28,11 @@ HER_REPLY_SHOWN_CHARS = 200
 
 
 def her_reply_as_shown(text: str) -> str:
-    """Her reply as the judge is shown it: its first `HER_REPLY_SHOWN_CHARS`
-    characters, with an ellipsis when there is more."""
+    """Her reply as the judge is shown it, on one line: its first
+    `HER_REPLY_SHOWN_CHARS` characters once each run of spaces and line
+    breaks is one space, with an ellipsis when there is more. A line break
+    of hers would otherwise open a line of the transcript she did not say."""
+    text = " ".join(text.split())
     return text[:HER_REPLY_SHOWN_CHARS] + ("..." if len(text) > HER_REPLY_SHOWN_CHARS else "")
 
 

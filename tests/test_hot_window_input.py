@@ -2983,6 +2983,55 @@ class TestTheJudgeReadsHerReplyAsATurn:
         listener.state_manager.stop()
 
     @patch("builtins.print")
+    def test_what_he_said_before_she_began_comes_before_it(self, _print, canceller):
+        listener, _ = _create_listener()
+        _whisper_hears(listener, _HIS_TALK_OVER_HER, started=time.time() - 2.0,
+                       level=_level(listener, _HIS_VOICE))
+        _she_speaks_past_the_canceller(listener, canceller)
+        judge = _judge_that_reads_the_mode(listener)
+        _she_has_been_speaking_for(listener, 0.2)
+
+        _he_says_over_her(listener, _HIS_LONG_FOLLOW_UP, started_ago=0.1)
+
+        prompt = _prompt_shown_to(judge)
+        lines = _transcript_lines(prompt)
+        talk = next(i for i, line in enumerate(lines) if _HIS_TALK_OVER_HER.lower() in line.lower())
+        current = next(i for i, line in enumerate(lines) if "CURRENT - JUDGE THIS" in line)
+        assert talk < lines.index(_her_reply_lines(prompt)[0]) < current, lines
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_his_words_begun_before_her_voice_and_going_on_over_it_come_after_it(
+            self, _print, canceller):
+        listener, _ = _create_listener()
+        _she_speaks_past_the_canceller(listener, canceller)
+        judge = _judge_that_reads_the_mode(listener)
+
+        _he_says_over_her(listener, _HIS_LONG_FOLLOW_UP, started_ago=1.5)
+
+        prompt = _prompt_shown_to(judge)
+        lines = _transcript_lines(prompt)
+        assert lines.index(_her_reply_lines(prompt)[0]) < next(
+            i for i, line in enumerate(lines) if "CURRENT - JUDGE THIS" in line), lines
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
+    def test_a_reply_spoken_sentence_by_sentence_is_one_turn(self, _print, canceller):
+        first, second = _HER_WEATHER_REPLY.split(", donc ")
+        listener, _ = _create_listener()
+        _she_speaks_past_the_canceller(listener, canceller, first)
+        listener.track_tts_start("donc " + second, continues=True)
+        judge = _judge_that_reads_the_mode(listener)
+
+        _he_says_over_her(listener, _HIS_LONG_FOLLOW_UP)
+
+        prompt = _prompt_shown_to(judge)
+        hers = _her_reply_lines(prompt)
+        assert len(hers) == 1, _transcript_lines(prompt)
+        assert second.lower() in hers[0].lower()
+        listener.state_manager.stop()
+
+    @patch("builtins.print")
     def test_it_is_shown_once_however_often_he_speaks_over_it(self, _print, canceller):
         listener, _ = _create_listener()
         _she_speaks_past_the_canceller(listener, canceller)
@@ -3030,7 +3079,9 @@ class TestTheJudgeReadsHerReplyAsATurn:
         listener.state_manager.stop()
 
     @patch("builtins.print")
-    def test_called_by_her_name_the_judge_reads_the_transcript_as_heard(self, _print, canceller):
+    def test_judged_in_wake_word_mode_the_transcript_is_shown_as_heard(self, _print, canceller):
+        """With the hot window off, her name over her reply is judged in
+        wake-word mode."""
         listener, _ = _create_listener()
         listener.cfg.hot_window_enabled = False
         _she_speaks_past_the_canceller(listener, canceller)

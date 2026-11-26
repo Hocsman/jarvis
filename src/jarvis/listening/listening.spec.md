@@ -490,7 +490,8 @@ it is heard in her time (`_in_her_time`), its voice went on after her reply
 began (the utterance's end, its trailing silence taken off, after the echo
 detector's `_tts_start_time`, `_said_over_her_reply`), and no question of his
 is being collected. The judge is asked on it whatever its length, and is told
-the hot window's mode; the console names the mode
+the hot window's mode, her reply shown to it as a turn where it began (see
+"Her Reply Is a Turn of the Transcript"); the console names the mode
 `🧠 Intent (while she speaks)`. A stop is read first: the text check's, and a
 stop the judge reads, whatever its confidence. Then the judge decides it when
 it is sure (`high`):
@@ -544,7 +545,9 @@ class TranscriptSegment:
     start_time: float      # Unix timestamp when speech started
     end_time: float        # Unix timestamp when speech ended
     energy: float          # Audio energy level
-    is_during_tts: bool    # Could be her own voice coming back (see "Echo handling")
+    is_during_tts: bool    # Could be her own voice coming back (see "Echo handling"),
+                           # or is her reply shown to the judge as a turn
+                           # (see "Her Reply Is a Turn of the Transcript")
 
 class TranscriptBuffer:
     max_duration_sec: float = 120.0  # Ambient speech context for intent judging
@@ -649,13 +652,13 @@ The judge reads the transcript as a conversation: her voice heard in it is marke
 
 So when the judge is asked in the hot window's mode, in the window or over her reply, while her reply is being or was taken out of the microphone (`EchoCanceller.taking_her_reply_out`), the transcript it is shown holds her reply as a segment of its own:
 
-- **What it holds** is her reply as "Last TTS" shows it (`her_reply_as_shown`, its first 200 characters): no more of her reply reaches the judge than it was already shown.
-- **Where it sits** is the moment her voice began: what he said over her reply comes after it, what he said before she began comes before it.
+- **What it holds** is her reply as "Last TTS" shows it (`her_reply_as_shown`: its first `HER_REPLY_SHOWN_CHARS` (200) characters, each run of spaces and line breaks one space, so a line break of hers opens no line of the transcript): no more of her reply reaches the judge than it was already shown.
+- **Where it sits** is the moment her voice began (the echo detector's `_tts_start_time`): what ended before then comes before it, and what went on past it comes after it, his words over her reply and words he began before her voice and was still saying when it began.
 - **It is marked "(during TTS)"**, as her voice heard by the microphone is, so the judge never extracts from it.
 - **It is shown, not kept.** The transcript buffer is left as it was heard: the turn is added to what the judge reads, once, at each call.
-- **Elsewhere the transcript is shown as heard.** Her voice the canceller did not take out reaches the transcript as Whisper heard it, and a judgement in wake-word mode, her name called, reads the transcript as heard.
+- **Elsewhere the transcript is shown as heard.** Her voice the canceller did not take out reaches the transcript as Whisper heard it; a judgement in wake-word mode, her name called, reads the transcript as heard; and so does the judgement of what he adds to a question being collected (see "Wake Word Mode", Priority 5), which reads only a stop and noise.
 
-The cost, accepted: a judge that answers nearly everything right after her reply (`gemma4:e2b`) reads what follows her turn over her reply the same way, and answers more of what is not for her there, a guest called by name or a request to someone in the room. A judge that tells them apart (Claude Haiku 5.5) answers none of it more. How much it changes is in `docs/llm_contexts.md`, measured by `evals/test_intent_judge.py` (`-k after_his_talk`).
+The cost, accepted: a judge that answers nearly everything right after her reply (`gemma4:e2b`) reads what follows her turn over her reply the same way, and answers more of what is not for her there, a guest called by name or a request to someone in the room. A judge that tells them apart (Claude Haiku 5.5) answers none of it more. How much it changes is in `docs/llm_contexts.md`, measured by `evals/test_intent_judge.py`, which reads each case with her turn shown and with the transcript as heard, call by call (`-k her_turn`).
 
 ### Input Format
 
@@ -1038,11 +1041,11 @@ Her voice reaches the microphone through the room, on a desk microphone near des
 
 **The delay is found, not set.** Between a block handed over and its sound in the microphone lie the output stream's latency, the air and the input stream's latency, about 300 ms on the desk set-up it was measured on. AEC3 estimates it; told the measured value, it took out 1.4 dB more than it did alone, so no delay is configured.
 
-**How much of her reply it took out.** Each 10 ms frame the microphone delivers while her voice plays (a block of her voice handed over in the last `PLAYING_FOR_SECONDS`, 0.3 s) is weighed: its level heard against its level cleaned. The frames are counted afresh as her reply starts (`reply_started`, from `track_tts_start`) and, as it finishes playing (`reply_finished`, beside the echo detector's `track_tts_finish`), ranked by how much came out of each and read three quarters of the way up (`REMOVAL_PERCENTILE`). Her pauses, the canceller's first second and his voice over part of hers sit low in that ranking, so his question over her last words leaves the figure where her voice put it: on a simulated room, his voice over the last 4.5 s of a 6 s reply left 24 dB, against 29 dB with none. Fewer than `MIN_FRAMES_MEASURED` (20) frames make no figure. The figure stands until her next reply starts; it is what "During TTS" reads, at least `MIN_REMOVED_DB` (10 dB) counting as taken out. While her reply plays, the frames heard so far are read the same way (`taking_her_reply_out`), for what he says over it (see "During TTS", "His follow-up while she speaks"). The debug log gives it: `🧹 Echo cancelled: N dB of her reply (F frames)`, or `her reply not measured`.
+**How much of her reply it took out.** Each 10 ms frame the microphone delivers while her voice plays (a block of her voice handed over in the last `PLAYING_FOR_SECONDS`, 0.3 s) is weighed: its level heard against its level cleaned. The frames are counted afresh as her reply starts (`reply_started`, from `track_tts_start`) and, as it finishes playing (`reply_finished`, beside the echo detector's `track_tts_finish`), ranked by how much came out of each and read three quarters of the way up (`REMOVAL_PERCENTILE`). Her pauses, the canceller's first second and his voice over part of hers sit low in that ranking, so his question over her last words leaves the figure where her voice put it: on a simulated room, his voice over the last 4.5 s of a 6 s reply left 24 dB, against 29 dB with none. Fewer than `MIN_FRAMES_MEASURED` (20) frames make no figure. The figure stands until her next reply starts; it is what "During TTS" reads, at least `MIN_REMOVED_DB` (10 dB) counting as taken out. While her reply plays, the frames heard so far are read the same way (`taking_her_reply_out`), and once it has finished, its figure: for what he says over it, and for her reply shown to the judge as a turn (see "During TTS", "His follow-up while she speaks", "Her Reply Is a Turn of the Transcript"). The debug log gives it: `🧹 Echo cancelled: N dB of her reply (F frames)`, or `her reply not measured`.
 
 **It fails open.** Without the package, or when the canceller cannot be created, the microphone is read as captured and start-up says `⚠️  Echo cancellation unavailable: <reason>`. An error while it runs, on either side, or a canceller it cannot create at a capture's rate, turns it off for the rest of the session with the same line: a canceller that has failed once is not trusted with his voice. From then on its thread queues the microphone as captured, in the order heard. Her voice never waits on it: the hand-over only copies a block and never raises into the callback. One failure is beyond it: a panic in WebRTC's native code ends the process. The one known to be reachable, a frame of another length than its rate's 10 ms, cannot happen, since frames are cut on the canceller's thread at the rate of the processor that takes them.
 
-**What it does not do.** When he talks over her it takes out her voice and keeps his, though not whole: while both voices are in a frame, its suppression lowers his words too, the more the louder she plays. The transcript-level checks above run on every utterance; they see far less of her, and still catch what gets through, a reply played by Chatterbox included. Three readings change with it: a voice ending with hers does not make an utterance hers once her reply was taken out, what he says while she speaks needs no wake word while it is taken out (see "During TTS"), and while it cleans the microphone his silence waits, once per question, for an utterance still open when it runs out (see "His silence is not over while an utterance is open"). Dictation reads its own capture, which the canceller does not clean (`dictation.spec.md`).
+**What it does not do.** When he talks over her it takes out her voice and keeps his, though not whole: while both voices are in a frame, its suppression lowers his words too, the more the louder she plays. The transcript-level checks above run on every utterance; they see far less of her, and still catch what gets through, a reply played by Chatterbox included. Four readings change with it: a voice ending with hers does not make an utterance hers once her reply was taken out, what he says while she speaks needs no wake word while it is taken out (see "During TTS"), the judge in the hot window's mode is shown her reply as a turn of the transcript (see "Her Reply Is a Turn of the Transcript"), and while it cleans the microphone his silence waits, once per question, for an utterance still open when it runs out (see "His silence is not over while an utterance is open"). Dictation reads its own capture, which the canceller does not clean (`dictation.spec.md`).
 
 `voice_echo_cancellation` (default `true`) turns it on at start-up, with `🧹 Echo cancellation: her voice is taken out of the microphone`; off, the microphone is read as captured and nothing is said.
 

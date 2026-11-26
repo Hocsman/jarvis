@@ -41,23 +41,27 @@ said, unmarked, and a lone "Thank you." after an English reply
 and its per-case reading on the eval model). A sixth reads what he says
 over her reply once her voice is taken out of the microphone, in the hot
 window's mode and with her reply shown as a turn where it began, as the
-listener shows it then, where only a directed verdict given with high confidence,
-and not a stop, is answered: his follow-ups, and a guest, the television,
-Whisper's inventions and a little of her own reply that got past the
-canceller, marked "(during TTS)" (`-k over_her_reply` runs it alone).
-A seventh reads his request after talk of his that nothing answered, with
-that talk shown before it, said over her reply and right after it, her
-reply shown as a turn in both, and
-what is not for her heard at the same moment, among it his words in a
+listener shows it then, where only a directed verdict given with high
+confidence, and not a stop, is answered: his follow-ups, and a guest, the
+television, Whisper's inventions and a little of her own reply that got
+past the canceller, marked "(during TTS)" (`-k over_her_reply` runs it
+alone). A seventh reads his request after talk of his that nothing
+answered, that talk said over her reply and said before she began, her
+reply shown as a turn where it began, and weighs each verdict as the
+listener does when he speaks over her reply and right after it, with what
+is not for her heard at the same moment, among it his words in a
 conversation in the room that name nobody (`-k after_his_talk` runs it
-alone).
+alone). An eighth reads the cases of the sixth and the seventh with her
+turn shown and with the transcript as heard, her reply on the Last TTS
+line only, the two alternating call by call, and prints a Fisher test per
+arm and row (`-k her_turn` runs it alone).
 `EVAL_INTENT_JUDGE_PROMPT_REF` names a git ref: each model then also runs
 with the system prompt at that ref, as an arm of its own interleaved with
 the others, so a prompt change is measured against the prompt it replaces
 in the same window; the fifth test then prints a Fisher test per model and
 group, on what the listener answers and on what the judge calls directed,
-and the seventh one per model, setting and group, on what the listener
-answers and on the asides the judge is sure of.
+and the seventh one per model and row (layout, moment and group), on what
+the listener answers and on the asides the judge is sure of.
 Arms go through `MockConfig`, so a cloud model
 goes to the provider the `EVAL_LLM_*` variables name and is billed there,
 and a bare local tag runs on the local Ollama. Only these synthetic
@@ -2413,10 +2417,10 @@ class TestProcessedSegmentFiltering:
 # given with high confidence is answered: no override takes a rejection, a
 # stop cuts her reply and answers nothing, and an unsure verdict leaves it to
 # the wake word, which none of these cases carries. The judge is shown the
-# reply she is saying as her last words, and the little of it that gets past
-# the canceller marked "(during TTS)". Field trace 2026-11-25: two follow-ups
-# heard word for word over her weather reply were left unanswered for want of
-# her name.
+# reply she is saying as her last words and as a turn marked "(during TTS)"
+# where it began, and the little of it that gets past the canceller marked
+# "(during TTS)" too. Field trace 2026-11-25: two follow-ups heard word for
+# word over her weather reply were left unanswered for want of her name.
 
 _FR_SAYING = ("À Lyon, il fait 4,6 degrés avec une légère pluie, et une ressentie de 2,1 "
               "degrés à cause d'un vent de 6 kilomètres par heure, donc un temps idéal pour "
@@ -2425,14 +2429,19 @@ _EN_SAYING = ("In Leeds it's 7 degrees with light rain, feeling like 4 because o
               "kilometre an hour wind, so a good evening to stay in.")
 
 
+def _her_turn(reply: str) -> tuple:
+    """Her reply as the turn the listener shows the judge for a reply taken
+    out of the microphone."""
+    return (her_reply_as_shown(reply), True)
+
+
 @dataclass
 class OverHerReplyCase:
     """What is heard over her reply, *current*, judged with the reply she is
-    saying as her last words and, as the listener shows her reply taken out
-    of the microphone, as a turn marked "(during TTS)" where it began, and
-    marked "(during TTS)" itself when *hers* (a little of her own reply that
-    got past the canceller). *before* is what he said over her reply that
-    nothing answered, shown after her reply's turn."""
+    saying as her last words and, while *her_turn*, as the turn marked
+    "(during TTS)" the listener shows for her reply taken out of the
+    microphone, and marked "(during TTS)" itself when *hers* (a little of
+    her own reply that got past the canceller)."""
     name: str
     last_tts_text: str
     current: str
@@ -2440,12 +2449,12 @@ class OverHerReplyCase:
     in_hot_window: bool = True
     wake_timestamp: Optional[float] = None
     aliases: Optional[List[str]] = None
-    before: tuple = ()
+    her_turn: bool = True
 
     @property
     def segments(self) -> list:
-        return ([(her_reply_as_shown(self.last_tts_text), True)]
-                + [(text, False) for text in self.before] + [(self.current, self.hers)])
+        turn = [_her_turn(self.last_tts_text)] if self.her_turn else []
+        return turn + [(self.current, self.hers)]
 
 
 def _over(reply: str, current: str, name: str, *, hers: bool = False) -> OverHerReplyCase:
@@ -2539,91 +2548,243 @@ class TestIntentJudgeOverHerReply:
         assert not mute, f"no answer at all from {mute}: check the model names and the provider"
 
 
-# After his unanswered talk: what he said earlier that nothing answered stays
-# in the transcript, unprocessed, and the judge reads it before the words it
-# judges. Each request and each control below is judged on the same context
-# said over her reply (taken out of the microphone) and, unless it is her own
-# words back, said in the hot window right after it. A repeat carries his
-# first try, said over her reply and left unanswered.
+# =============================================================================
+# After his unanswered talk
+# =============================================================================
+#
+# What he said earlier that nothing answered stays in the transcript,
+# unprocessed, and the judge reads it before the words it judges. Each entry
+# is laid out twice against the turn the listener shows for her reply taken
+# out of the microphone: his talk said over her reply comes after her turn,
+# said before she began it comes before. A repeat carries his first try,
+# said once she had begun and left unanswered. Each verdict is weighed as
+# the listener weighs it when he speaks over her reply and when he speaks
+# right after it, in the hot window; her own words back, marked as hers, are
+# weighed over her reply only, other paths weighing them in the hot window.
+# Field trace 2026-11-26: her reply taken out of the microphone, the judge
+# read his request right after his talk with no turn of hers between them,
+# and called it an aside it was sure of.
 
 _FR_RECIPE = ("Pour une pâte brisée, il faut deux cent cinquante grammes de farine, cent "
               "vingt-cinq grammes de beurre froid, une pincée de sel et un peu d'eau.")
 _EN_RECIPE = ("For shortcrust pastry you need two hundred and fifty grams of flour, a hundred "
               "and twenty-five grams of cold butter, a pinch of salt and a little water.")
+_RECIPE = {"fr": _FR_RECIPE, "en": _EN_RECIPE}
 _HIS_TALK = {
     "fr": ("Le voisin du dessus a encore passé l'aspirateur à six heures du matin.",
            "Franchement, je ne sais pas comment il fait pour se lever si tôt."),
     "en": ("The man upstairs was hoovering at six again this morning.",
            "Honestly, I don't know how he gets up that early."),
 }
-_RECIPE = {"fr": _FR_RECIPE, "en": _EN_RECIPE}
 
-# (name, language, what he says, his first try or "", hers)
+
+@dataclass(frozen=True)
+class AfterHisTalk:
+    """What is heard, *current*, after *talk* that nothing answered, with
+    his *first_try* at it when it is a repeat. *hers* is a little of her own
+    reply that got past the canceller, marked "(during TTS)"; *noise* is
+    text Whisper made of silence, which carries no voice."""
+    name: str
+    language: str
+    current: str
+    talk: tuple
+    first_try: str = ""
+    hers: bool = False
+    noise: bool = False
+
+
+def _after_his(name: str, language: str, current: str, **kwargs) -> AfterHisTalk:
+    """An entry heard after his own talk, which nobody answers."""
+    return AfterHisTalk(name, language, current, _HIS_TALK[language], **kwargs)
+
+
 AFTER_HIS_TALK_GROUPS = {
     "his_requests": ([
-        ("fr_timer", "fr", "Bon, tu peux me mettre un minuteur de dix minutes pour les pâtes ?",
-         "", False),
-        ("fr_timer_again", "fr", "Non, je te disais : un minuteur de dix minutes, s'il te plaît.",
-         "Tu peux me mettre un minuteur de dix minutes ?", False),
-        ("fr_rain_weekend", "fr", "Et dis-moi s'il va pleuvoir ce week-end.", "", False),
-        ("fr_misheard", "fr", "Quel temps fera-t-il deux mains ?", "", False),
-        ("en_timer", "en", "Right, can you set a timer for ten minutes for the pasta?", "", False),
-        ("en_timer_again", "en", "No, I said a ten minute timer, please.",
-         "Can you set a timer for ten minutes?", False),
-        ("en_rain_weekend", "en", "And is it going to rain this weekend?", "", False),
+        _after_his("fr_timer", "fr",
+                   "Bon, tu peux me mettre un minuteur de dix minutes pour les pâtes ?"),
+        _after_his("fr_timer_again", "fr",
+                   "Non, je te disais : un minuteur de dix minutes, s'il te plaît.",
+                   first_try="Tu peux me mettre un minuteur de dix minutes ?"),
+        _after_his("fr_rain_weekend", "fr", "Et dis-moi s'il va pleuvoir ce week-end."),
+        _after_his("fr_misheard", "fr", "Quel temps fera-t-il deux mains ?"),
+        _after_his("en_timer", "en", "Right, can you set a timer for ten minutes for the pasta?"),
+        _after_his("en_timer_again", "en", "No, I said a ten minute timer, please.",
+                   first_try="Can you set a timer for ten minutes?"),
+        _after_his("en_rain_weekend", "en", "And is it going to rain this weekend?"),
     ], "answered"),
     "not_for_her": ([
-        ("fr_guest", "fr", "Léa, tu peux sortir le pain du four ?", "", False),
-        ("en_guest", "en", "Tom, can you take the bread out of the oven?", "", False),
-        ("fr_television", "fr", "Retrouvez-nous demain à la même heure pour un nouveau numéro.",
-         "", False),
-        ("en_television", "en", "Stay with us, after the break the weekend's football results.",
-         "", False),
-        ("fr_invention", "fr", "Merci d'avoir regardé cette vidéo !", "", False),
-        ("en_invention", "en", "Subtitles by the Amara.org community", "", False),
-        ("fr_her_words_back", "fr", "cent vingt-cinq grammes de beurre froid", "", True),
-        ("en_her_words_back", "en", "a hundred and twenty-five grams of cold butter", "", True),
+        _after_his("fr_guest", "fr", "Léa, tu peux sortir le pain du four ?"),
+        _after_his("en_guest", "en", "Tom, can you take the bread out of the oven?"),
+        _after_his("fr_television", "fr",
+                   "Retrouvez-nous demain à la même heure pour un nouveau numéro."),
+        _after_his("en_television", "en",
+                   "Stay with us, after the break the weekend's football results."),
+        _after_his("fr_invention", "fr", "Merci d'avoir regardé cette vidéo !", noise=True),
+        _after_his("en_invention", "en", "Subtitles by the Amara.org community", noise=True),
+        _after_his("fr_her_words_back", "fr", "cent vingt-cinq grammes de beurre froid",
+                   hers=True),
+        _after_his("en_her_words_back", "en", "a hundred and twenty-five grams of cold butter",
+                   hers=True),
     ], "left alone"),
     # A conversation in the room instead of his talk: he answers what was
     # asked there, or asks for something in reply, naming nobody.
     "in_the_room": ([
-        ("fr_where_the_sugar_is", "fr", "Dans le placard, à gauche de l'évier.", "", False),
-        ("en_where_the_sugar_is", "en", "In the cupboard, left of the sink.", "", False),
-        ("fr_lay_the_table", "fr", "Prends les verres et les serviettes, s'il te plaît.", "", False),
-        ("en_lay_the_table", "en", "Grab the glasses and the napkins, please.", "", False),
+        AfterHisTalk("fr_where_the_sugar_is", "fr", "Dans le placard, à gauche de l'évier.",
+                     ("Tu veux un café ?", "Oui, volontiers. Il est où, le sucre ?")),
+        AfterHisTalk("en_where_the_sugar_is", "en", "In the cupboard, left of the sink.",
+                     ("Do you want a coffee?", "Yes please. Where do you keep the sugar?")),
+        AfterHisTalk("fr_lay_the_table", "fr",
+                     "Prends les verres et les serviettes, s'il te plaît.",
+                     ("Tu peux m'aider à mettre la table ?", "Oui, bien sûr. Je prends quoi ?")),
+        AfterHisTalk("en_lay_the_table", "en", "Grab the glasses and the napkins, please.",
+                     ("Can you help me lay the table?", "Sure. What shall I take?")),
     ], "left alone"),
 }
-_ROOM_TALK = {
-    "fr_where_the_sugar_is": ("Tu veux un café ?", "Oui, volontiers. Il est où, le sucre ?"),
-    "en_where_the_sugar_is": ("Do you want a coffee?", "Yes please. Where do you keep the sugar?"),
-    "fr_lay_the_table": ("Tu peux m'aider à mettre la table ?", "Oui, bien sûr. Je prends quoi ?"),
-    "en_lay_the_table": ("Can you help me lay the table?", "Sure. What shall I take?"),
+
+# Where what was said before sits against her reply's turn.
+_LAYOUTS = {
+    "talk over her reply": lambda turn, talk: [turn, *talk],
+    "talk before her reply": lambda turn, talk: [*talk, turn],
+}
+
+# When he says it, and how the listener then weighs the judge's verdict.
+_WHEN_HE_SPEAKS = {
+    "over her reply": lambda case, verdict: _answered_over_her_reply(verdict),
+    "right after it": _answered_in_the_hot_window,
 }
 
 
-def _after_his_talk_cases() -> list:
-    """Each entry as said over her reply and, unless it is her own words back
-    (marked, and weighed by other paths), as said in the hot window:
-    (setting, group, case)."""
-    cases = []
+@dataclass(frozen=True)
+class _Placed:
+    """Where a case sits: what was said before it against her turn
+    (*layout*), when he can say it (*whens*, keys of `_WHEN_HE_SPEAKS`), its
+    group, and whether the listener should answer it."""
+    layout: str
+    whens: tuple
+    group: str
+    answered: bool
+
+
+def _after_his_talk_cases() -> tuple:
+    """Each entry in each layout as a case, and where each case sits, by
+    name."""
+    cases, placed = [], {}
     for group, (entries, needs) in AFTER_HIS_TALK_GROUPS.items():
-        for name, language, current, first_try, hers in entries:
-            talk = _ROOM_TALK.get(name) or _HIS_TALK[language]
-            reply = _RECIPE[language]
-            cases.append(("over her reply", group, OverHerReplyCase(
-                f"over_{name}", reply, current, hers=hers,
-                before=talk + ((first_try,) if first_try else ()))))
-            if hers:
+        for entry in entries:
+            reply = _RECIPE[entry.language]
+            talk = [(line, False) for line in entry.talk]
+            heard = ([(entry.first_try, False)] if entry.first_try else []) + [
+                (entry.current, entry.hers)]
+            for layout, lay_out in _LAYOUTS.items():
+                case = NotSpeechCase(f"{entry.name}, {layout}",
+                                     lay_out(_her_turn(reply), talk) + heard, reply,
+                                     expected_noise=entry.noise)
+                cases.append(case)
+                placed[case.name] = _Placed(
+                    layout, ("over her reply",) if entry.hers else tuple(_WHEN_HE_SPEAKS),
+                    group, needs == "answered")
+    return cases, placed
+
+
+AFTER_HIS_TALK_CASES, _AFTER_HIS_TALK_PLACED = _after_his_talk_cases()
+_PLACED = {
+    **{case.name: _Placed("nothing said before", ("over her reply",), group, needs == "answered")
+       for group, (cases, needs) in OVER_HER_REPLY_GROUPS.items() for case in cases},
+    **_AFTER_HIS_TALK_PLACED,
+}
+
+
+def _as_heard(case):
+    """*case* as the judge would read it if the listener did not show her
+    reply as a turn: the transcript as heard, her reply taken out of the
+    microphone on the Last TTS line only."""
+    if isinstance(case, OverHerReplyCase):
+        return dataclasses.replace(case, her_turn=False)
+    turn = _her_turn(case.last_tts_text)
+    return dataclasses.replace(case, segments=[segment for segment in case.segments
+                                               if segment != turn])
+
+
+_HER_REPLY_VARIANTS = {"turn shown": lambda case: case, "as heard": _as_heard}
+
+
+def _weigh_after_her_reply(arms: list, cases: list):
+    """Every case to every (judge, variant) arm, interleaved call by call,
+    each verdict weighed as the listener weighs it whenever the case can be
+    said. Returns the tally keyed (arm, layout, when, group): right,
+    answered, directed, aside, sure aside, noise, calls, no verdict; and
+    the wrong verdicts keyed (arm, case, when)."""
+    judges = _warm_judges()
+    tally = {}
+    for arm in arms:
+        for case in cases:
+            placed = _PLACED[case.name]
+            for when in placed.whens:
+                tally.setdefault((arm, placed.layout, when, placed.group), [0] * 8)
+    misses = {}
+    for case, arm in _interleaved(arms, cases):
+        judge_arm, variant = arm
+        judges[judge_arm]._last_error_time = 0.0
+        read = _HER_REPLY_VARIANTS[variant](case)
+        verdict = run_intent_judge_multi_segment(read, judge=judges[judge_arm],
+                                                 current_text=read.segments[-1][0])
+        placed = _PLACED[case.name]
+        for when in placed.whens:
+            row = tally[(arm, placed.layout, when, placed.group)]
+            row[6] += 1
+            if verdict is None:
+                row[7] += 1
                 continue
-            cases.append(("in the hot window", group, NotSpeechCase(
-                f"after_{name}",
-                [(line, False) for line in talk] + [(reply, True)]
-                + ([(first_try, False)] if first_try else []) + [(current, False)],
-                reply, expected_noise=needs != "answered")))
-    return cases
+            answered = _WHEN_HE_SPEAKS[when](read, verdict)
+            row[0] += int(answered == placed.answered)
+            row[1] += int(answered)
+            row[2] += int(verdict.directed)
+            row[3] += int(verdict.aside)
+            row[4] += int(verdict.aside and verdict.confidence == "high")
+            row[5] += int(verdict.noise)
+            if answered != placed.answered:
+                misses[(arm, case.name, when)] = misses.get((arm, case.name, when), 0) + 1
+    return tally, misses
 
 
-AFTER_HIS_TALK_CASES = _after_his_talk_cases()
+def _after_her_reply_lines(tally: dict, misses: dict) -> list:
+    lines = [""]
+    for ((judge_arm, variant), layout, when, group), row in tally.items():
+        right, answered, directed, aside, sure_aside, noise, calls, silent = row
+        scored = calls - silent
+        lines.append(f"🧪 {judge_arm:{_ARM_WIDTH}} {variant:10} {layout:21} {when:14} "
+                     f"{group:14} right {rate(right, scored)}, answered {answered}/{scored}, "
+                     f"directed {directed}/{scored}, aside {aside}/{scored} "
+                     f"(sure {sure_aside}), noise {noise}/{scored}, no verdict {silent}")
+    for ((judge_arm, variant), name, when), count in sorted(misses.items()):
+        lines.append(f"   ↳ {judge_arm} {variant}, {when}: {name} wrong "
+                     f"{count}/{NOT_SPEECH_ROUNDS}")
+    return lines
+
+
+def _after_her_reply_compared(tally: dict, here: tuple, there: tuple, labels: tuple) -> list:
+    """Fisher lines comparing arm *here* with arm *there*, row by row, on
+    what is answered and on the asides the judge was sure of."""
+    lines = [""]
+    for (arm, layout, when, group), mine in tally.items():
+        if arm != here:
+            continue
+        theirs = tally[(there, layout, when, group)]
+        n_mine, n_theirs = mine[6] - mine[7], theirs[6] - theirs[7]
+        for measure, column in (("answered", 1), ("sure aside", 4)):
+            p = fisher_two_sided(mine[column], n_mine - mine[column],
+                                 theirs[column], n_theirs - theirs[column])
+            lines.append(f"📊 {here[0]:{_ARM_WIDTH}} {layout:21} {when:14} {group:14} "
+                         f"{measure:10} {mine[column]}/{n_mine} {labels[0]}, "
+                         f"{theirs[column]}/{n_theirs} {labels[1]}, Fisher p = {p:.2g}")
+    return lines
+
+
+def _assert_no_arm_is_mute(tally: dict):
+    arms = dict.fromkeys(arm for arm, *_ in tally)
+    mute = [arm for arm in arms
+            if all(row[6] == row[7] for (who, *_), row in tally.items() if who == arm)]
+    assert not mute, f"no answer at all from {mute}: check the model names and the provider"
 
 
 @pytest.mark.skipif(not JUDGE_MODELS, reason="name one or more judge models in EVAL_INTENT_JUDGE_ARMS")
@@ -2631,68 +2792,41 @@ class TestIntentJudgeAfterHisTalk:
     """His request after his own unanswered talk is answered, over her reply
     and right after it, and a guest, the television, Whisper's inventions,
     her own words back and his words in a conversation in the room are not,
-    every case on every arm, interleaved
-    call by call (`-k after_his_talk` runs it alone). Each line counts the
-    asides the judge was sure of, the verdict that leaves his request
-    unanswered in both settings; with `EVAL_INTENT_JUDGE_PROMPT_REF` set,
-    each model's two prompts are compared on what is answered and on those
-    asides, setting by setting and group by group."""
+    every case on every arm, interleaved call by call (`-k after_his_talk`
+    runs it alone). Each line counts the asides the judge was sure of, the
+    verdict that leaves his request unanswered whenever he says it; with
+    `EVAL_INTENT_JUDGE_PROMPT_REF` set, each model's two prompts are
+    compared on what is answered and on those asides, row by row."""
 
     def test_after_his_talk_call_by_call(self, capsys):
-        judges = _warm_judges()
-        where = {case.name: (setting, group) for setting, group, case in AFTER_HIS_TALK_CASES}
-        # right, answered, directed, aside, sure aside, noise, calls, no verdict
-        tally = {(arm, setting, group): [0] * 8 for arm in JUDGE_ARMS
-                 for setting, group in dict.fromkeys(where.values())}
-        misses = {}   # (arm, case) -> wrong verdicts
-        for case, arm in _interleaved(JUDGE_ARMS, [case for _, _, case in AFTER_HIS_TALK_CASES]):
-            judges[arm]._last_error_time = 0.0
-            verdict = run_intent_judge_multi_segment(case, judge=judges[arm],
-                                                     current_text=case.segments[-1][0])
-            setting, group = where[case.name]
-            row = tally[(arm, setting, group)]
-            row[6] += 1
-            if verdict is None:
-                row[7] += 1
-                continue
-            answered = (_answered_over_her_reply(verdict) if isinstance(case, OverHerReplyCase)
-                        else _answered_in_the_hot_window(case, verdict))
-            right = answered == (AFTER_HIS_TALK_GROUPS[group][1] == "answered")
-            row[0] += int(right)
-            row[1] += int(answered)
-            row[2] += int(verdict.directed)
-            row[3] += int(verdict.aside)
-            row[4] += int(verdict.aside and verdict.confidence == "high")
-            row[5] += int(verdict.noise)
-            if not right:
-                misses[(arm, case.name)] = misses.get((arm, case.name), 0) + 1
-
-        lines = [""]
-        for ((arm, setting, group),
-             (right, answered, directed, aside, sure_aside, noise, calls, silent)) in tally.items():
-            scored = calls - silent
-            lines.append(f"🧪 {arm:{_ARM_WIDTH}} {setting:17} {group:12}  right "
-                         f"{rate(right, scored)}, answered {answered}/{scored}, "
-                         f"directed {directed}/{scored}, aside {aside}/{scored} "
-                         f"(sure {sure_aside}), noise {noise}/{scored}, no verdict {silent}")
-        for (arm, name), count in sorted(misses.items()):
-            lines.append(f"   ↳ {arm}: {name} wrong {count}/{NOT_SPEECH_ROUNDS}")
+        arms = [(arm, "turn shown") for arm in JUDGE_ARMS]
+        tally, misses = _weigh_after_her_reply(arms, AFTER_HIS_TALK_CASES)
+        lines = _after_her_reply_lines(tally, misses)
         if PROMPT_REF:
-            lines.append("")
             for model in JUDGE_MODELS:
-                for setting, group in dict.fromkeys(where.values()):
-                    here = tally[(model, setting, group)]
-                    there = tally[(_arm_at_ref(model), setting, group)]
-                    n_here, n_there = here[6] - here[7], there[6] - there[7]
-                    for measure, column in (("answered", 1), ("sure aside", 4)):
-                        got_here, got_there = here[column], there[column]
-                        p = fisher_two_sided(got_here, n_here - got_here,
-                                             got_there, n_there - got_there)
-                        lines.append(f"📊 {model:24} {setting:17} {group:12}  {measure:10} "
-                                     f"{got_here}/{n_here} here, {got_there}/{n_there} "
-                                     f"@{PROMPT_REF}, Fisher p = {p:.2g}")
+                lines += _after_her_reply_compared(
+                    tally, (model, "turn shown"), (_arm_at_ref(model), "turn shown"),
+                    ("here", f"@{PROMPT_REF}"))
         to_terminal(capsys, lines)
+        _assert_no_arm_is_mute(tally)
 
-        mute = [arm for arm in JUDGE_ARMS
-                if all(row[6] == row[7] for (who, _, _), row in tally.items() if who == arm)]
-        assert not mute, f"no answer at all from {mute}: check the model names and the provider"
+
+@pytest.mark.skipif(not JUDGE_MODELS, reason="name one or more judge models in EVAL_INTENT_JUDGE_ARMS")
+class TestIntentJudgeHerReplyAsATurn:
+    """The listener shows the judge her reply taken out of the microphone as
+    a turn where it began (`-k her_turn` runs it alone)."""
+
+    def test_her_turn_against_as_heard_call_by_call(self, capsys):
+        """Each arm reads every case over her reply and after his talk with
+        her turn shown and with the transcript as heard, her reply on the
+        Last TTS line only, the two alternating call by call; each arm's
+        two readings are compared on what is answered and on the asides the
+        judge was sure of, row by row."""
+        arms = [(arm, variant) for arm in JUDGE_ARMS for variant in _HER_REPLY_VARIANTS]
+        tally, misses = _weigh_after_her_reply(arms, OVER_HER_REPLY_CASES + AFTER_HIS_TALK_CASES)
+        lines = _after_her_reply_lines(tally, misses)
+        for arm in JUDGE_ARMS:
+            lines += _after_her_reply_compared(tally, (arm, "turn shown"), (arm, "as heard"),
+                                               ("shown", "as heard"))
+        to_terminal(capsys, lines)
+        _assert_no_arm_is_mute(tally)
