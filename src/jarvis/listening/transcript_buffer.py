@@ -23,7 +23,8 @@ class TranscriptSegment:
     start_time: float                  # Unix timestamp when speech started
     end_time: float                    # Unix timestamp when speech ended
     energy: float = 0.0                # Audio energy level
-    is_during_tts: bool = False        # Could be her own voice coming back (listening.spec.md, "Echo handling")
+    is_during_tts: bool = False        # Could be her own voice coming back (listening.spec.md, "Echo handling"),
+                                       # or is her reply shown to the judge as a turn ("Her Reply Is a Turn of the Transcript")
     processed: bool = False            # Whether a query was already extracted from this segment
 
     def __post_init__(self):

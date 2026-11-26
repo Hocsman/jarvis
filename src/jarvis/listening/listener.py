@@ -41,6 +41,7 @@ from .intent_judge import (
     _is_low_power_mode_enabled,
     _ollama_keep_alive_for_power_mode,
     create_intent_judge,
+    her_reply_as_shown,
     warm_up_chat_model,
 )
 from ..debug import debug_log
@@ -1403,6 +1404,18 @@ class VoiceListener(threading.Thread):
             said = self.echo_detector.her_reply_as_said
             last_tts_finish_time = self.echo_detector._last_tts_finish_time or 0.0
 
+            # Her reply taken out of the microphone left nothing of it in
+            # the transcript, where the judge, asked in the hot window's
+            # mode, would read his words one after the other as if nobody
+            # had answered them: it is shown her reply as a turn of it
+            # (listening.spec.md, "Her Reply Is a Turn of the Transcript").
+            # Over her reply the canceller was read for `follows_her_reply`,
+            # and that reading decides.
+            if follows_her_reply or (could_be_hot_window
+                                     and ECHO_CANCELLER.taking_her_reply_out()):
+                context_segments = self._with_her_reply_as_a_turn(context_segments,
+                                                                  last_tts_text)
+
             # Words that could be her own voice coming back, as the "(during
             # TTS)" mark has it, read on the text as it stands once a
             # stripped echo prefix is gone. No hot-window override takes
@@ -2090,6 +2103,19 @@ class VoiceListener(threading.Thread):
         print(f"  ✂️ Left out her own words, kept: \"{kept[:60]}"
               f"{'...' if len(kept) > 60 else ''}\"", flush=True)
         return kept
+
+    def _with_her_reply_as_a_turn(self, segments: list, her_reply: str) -> list:
+        """*segments* with her reply among them, as the judge is shown her
+        last words and marked as hers, stamped when her voice began: after
+        what ended before then, before what went on past it, even begun
+        earlier. The transcript itself is left as it was heard."""
+        began = self.echo_detector._tts_start_time
+        turn = TranscriptSegment(text=her_reply_as_shown(her_reply), start_time=began,
+                                 end_time=began, is_during_tts=True)
+        debug_log(f"🗣️ her reply, taken out of the microphone, shown to the judge as a turn: "
+                  f"\"{turn.text[:60]}\"", "voice")
+        before = [segment for segment in segments if segment.end_time <= began]
+        return before + [turn] + [segment for segment in segments if segment.end_time > began]
 
     def _in_her_time(self, utterance_start_time: float, *, waiting) -> bool:
         """Whether an utterance can hold her own voice coming back: she is
